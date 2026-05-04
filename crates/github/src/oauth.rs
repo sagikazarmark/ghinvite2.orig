@@ -175,7 +175,6 @@ mod exchange_tests {
     use crate::mocks::{Expectation, MockTransport};
     use crate::transport::{Method, Response};
     use std::collections::BTreeMap;
-    use std::sync::Arc;
 
     fn cfg() -> OAuthConfig {
         OAuthConfig {
@@ -194,6 +193,7 @@ mod exchange_tests {
                 let mut h = BTreeMap::new();
                 h.insert("accept".into(), "application/json".into());
                 h.insert("content-type".into(), "application/json".into());
+                h.insert("user-agent".into(), "ghinvite".into());
                 h
             },
             expected_body: None,
@@ -230,6 +230,7 @@ mod exchange_tests {
             }
             other => panic!("expected OAuth error, got {other:?}"),
         }
+        mock.assert_exhausted();
     }
 
     #[tokio::test]
@@ -241,10 +242,42 @@ mod exchange_tests {
         )]);
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
         assert_eq!(err.status(), Some(502));
+        mock.assert_exhausted();
     }
 
-    // Suppress unused-warning for Arc in case the rustc version doesn't see
-    // the test-only borrow above.
-    #[allow(dead_code)]
-    fn _hint_arc(_: Arc<dyn HttpTransport>) {}
+    #[tokio::test]
+    async fn malformed_json_body_surfaces_as_decode_error() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: b"not-json".to_vec(),
+            },
+        }]);
+        let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
+        assert!(matches!(err, Error::Decode(_)), "expected Decode, got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn unexpected_json_shape_surfaces_as_decode_error() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{"foo":"bar"}"#.to_vec(),
+            },
+        }]);
+        let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
+        assert!(matches!(err, Error::Decode(_)), "expected Decode, got {err:?}");
+        mock.assert_exhausted();
+    }
 }
