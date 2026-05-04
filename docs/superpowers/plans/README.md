@@ -10,7 +10,7 @@ The decomposition was agreed during brainstorming on 2026-05-04. Order is fixed:
 |---|------|----------|--------|----------|------------|
 | 1 | **Foundations** | `2026-05-04-ghinvite-foundations.md` | Implemented | `crates/domain` (types, IDs, slug, state machines), `crates/audit` (event types), `crates/storage` (trait + sqlx impl), migrations, parameterized test suite | none |
 | 2 | **GitHub clients** | `2026-05-04-ghinvite-github-clients.md` | Implemented | `crates/github` — user-OAuth client (oauth2 crate), installation-token client (JWT signing + token cache), HMAC verification helper, mock transport for tests | 1 |
-| 3 | **Restate handlers** | _not yet written_ | Pending | `crates/restate-svc` — `Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile` services with full workflows + tests | 1, 2 |
+| 3 | **Restate handlers** | `2026-05-04-ghinvite-restate-handlers.md` | Written (no autoplan yet) | `crates/restate-svc` — `Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile` services with full workflows + tests | 1, 2 |
 | 4 | **Web binary core** | _not yet written_ | Pending | `crates/web` skeleton — axum app, tower-sessions, OAuth login + install flow, three Dioxus layouts (Home / Dashboard / Invitation), Tailwind+DaisyUI build, home page | 1, 2 |
 | 5 | **Dashboard** | _not yet written_ | Pending | Account dashboard + link CRUD form + revoke + approval queue + settings page; server functions for state changes routed to Restate | 4, 3 |
 | 6 | **Recipient flow** | _not yet written_ | Pending | `/i/:slug` landing + request submission + pending page + webhook receiver wiring | 4, 3 |
