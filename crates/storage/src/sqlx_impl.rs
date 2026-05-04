@@ -201,11 +201,34 @@ impl Storage for SqlxStorage {
     }
 
     // --- stubs for the rest of the trait, filled in by later tasks ---
-    async fn upsert_user(&self, _user: &User) -> Result<()> {
-        unimplemented!("Task 17")
+    async fn upsert_user(&self, user: &User) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO users (user_id, login, avatar_url, last_seen_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(user_id) DO UPDATE SET
+                login = excluded.login,
+                avatar_url = excluded.avatar_url,
+                last_seen_at = excluded.last_seen_at
+            "#,
+        )
+        .bind(u64_to_i64(user.user_id))
+        .bind(&user.login)
+        .bind(user.avatar_url.as_deref())
+        .bind(user.last_seen_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_user(&self, _user_id: u64) -> Result<Option<User>> {
-        unimplemented!("Task 17")
+
+    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
+        let row: Option<crate::records::UserRow> = sqlx::query_as(
+            r#"SELECT user_id, login, avatar_url, last_seen_at FROM users WHERE user_id = ?1"#,
+        )
+        .bind(u64_to_i64(user_id))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.into_domain()))
     }
     async fn insert_share_link(&self, _link: &ShareLink) -> Result<()> {
         unimplemented!("Task 18")
@@ -434,6 +457,34 @@ mod tests {
 
         let got = s.get_installation(1).await.unwrap().unwrap();
         assert_eq!(got.selected_repos, SelectedRepos::Subset(vec![1, 2, 3]));
+    }
+
+    pub(crate) fn sample_user(user_id: u64, login: &str) -> User {
+        User {
+            user_id,
+            login: login.into(),
+            avatar_url: Some(format!("https://example.test/{login}.png")),
+            last_seen_at: dt("2026-05-04T12:00:00Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_user_inserts_then_updates() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let mut u = sample_user(7, "octocat");
+        s.upsert_user(&u).await.unwrap();
+        assert_eq!(s.get_user(7).await.unwrap().unwrap(), u);
+
+        u.login = "octorenamed".into();
+        u.last_seen_at = dt("2026-05-05T12:00:00Z");
+        s.upsert_user(&u).await.unwrap();
+        assert_eq!(s.get_user(7).await.unwrap().unwrap(), u);
+    }
+
+    #[tokio::test]
+    async fn get_user_missing_returns_none() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        assert!(s.get_user(123).await.unwrap().is_none());
     }
 
     #[tokio::test]
