@@ -1,9 +1,11 @@
 //! App-installation client: holds the App-JWT signer + a token cache, and
 //! exposes the v1 installation-side endpoints.
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::jwt::AppJwtSigner;
-use crate::payloads::{GhInstallationRepos, GhInstallationToken, GhRepo};
+use crate::payloads::{
+    GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhRepo,
+};
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
 use chrono::Utc;
@@ -130,6 +132,71 @@ impl InstallationClient {
             .auth_request(installation_id, Method::Get, &path)
             .await?;
         self.transport.send(req).await?.ensure_success()?.json()
+    }
+
+    /// `PUT /repos/{owner}/{repo}/collaborators/{username}`. Returns:
+    /// - `Ok(Some(invitation_id))` on 201 — recipient now has a pending invitation.
+    /// - `Ok(None)` on 204 — recipient was already a collaborator (no invitation
+    ///   created). Caller should treat as immediate-accept.
+    /// - `Err(Error::Status)` on any other status.
+    pub async fn add_collaborator(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+        username: &str,
+        permission: domain::Permission,
+    ) -> Result<Option<u64>> {
+        let path = format!(
+            "/repos/{}/{}/collaborators/{}",
+            path_seg(owner),
+            path_seg(repo),
+            path_seg(username)
+        );
+        let req = self
+            .auth_request(installation_id, Method::Put, &path)
+            .await?
+            .json_body(&serde_json::json!({"permission": permission.to_string()}))?;
+        let resp = self.transport.send(req).await?;
+        match resp.status {
+            201 => {
+                let inv: GhCollaboratorInvite = resp.json()?;
+                Ok(Some(inv.id))
+            }
+            204 => Ok(None),
+            other => {
+                let body = String::from_utf8_lossy(&resp.body).to_string();
+                Err(Error::Status {
+                    status: other,
+                    body,
+                })
+            }
+        }
+    }
+
+    /// `DELETE /repos/{owner}/{repo}/invitations/{invitation_id}` — used to
+    /// cancel a pending invitation.
+    ///
+    /// **Errors:** `Error::Status { status: 404 }` if the invitation no longer
+    /// exists (already accepted/declined/cancelled).
+    pub async fn delete_invitation(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+        invitation_id: u64,
+    ) -> Result<()> {
+        let path = format!(
+            "/repos/{}/{}/invitations/{}",
+            path_seg(owner),
+            path_seg(repo),
+            invitation_id
+        );
+        let req = self
+            .auth_request(installation_id, Method::Delete, &path)
+            .await?;
+        self.transport.send(req).await?.ensure_success()?;
+        Ok(())
     }
 }
 
@@ -281,5 +348,130 @@ mod read_tests {
             .with_base("https://api.github.test");
         let err = client.get_repo(9, "acme", "gone").await.unwrap_err();
         assert_eq!(err.status(), Some(404));
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::Response;
+    use domain::Permission;
+    use std::collections::BTreeMap;
+
+    /// Same static test key, same fast signer.
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
+
+    fn signer() -> AppJwtSigner {
+        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+    }
+
+    fn token_mint_expectation() -> Expectation {
+        Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_returns_invitation_id_on_201() {
+        let body = serde_json::to_vec(&serde_json::json!({"permission": "push"})).unwrap();
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Put,
+                url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: Some(body),
+                response: Response {
+                    status: 201,
+                    headers: BTreeMap::new(),
+                    body: br#"{"id": 9988, "invitee":{"id":42,"login":"octocat"}}"#.to_vec(),
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let id = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await
+            .unwrap();
+        assert_eq!(id, Some(9988));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_returns_none_on_204() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Put,
+                url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 204,
+                    headers: BTreeMap::new(),
+                    body: vec![],
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let id = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await
+            .unwrap();
+        assert_eq!(id, None);
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_propagates_422() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::status(
+                Method::Put,
+                "https://api.github.test/repos/acme/api/collaborators/baduser",
+                422,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client
+            .add_collaborator(9, "acme", "api", "baduser", Permission::Push)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status(), Some(422));
+    }
+
+    #[tokio::test]
+    async fn delete_invitation_succeeds_on_204() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Delete,
+                url: "https://api.github.test/repos/acme/api/invitations/777".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 204,
+                    headers: BTreeMap::new(),
+                    body: vec![],
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        client
+            .delete_invitation(9, "acme", "api", 777)
+            .await
+            .unwrap();
     }
 }
