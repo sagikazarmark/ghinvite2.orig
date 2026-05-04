@@ -1222,14 +1222,19 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
         .json_body(&body)?;
     let resp = transport.send(req).await?.ensure_success()?;
 
-    // GitHub returns 200 even on `error` payloads; sniff that first.
-    if let Ok(err) = resp.json::<serde_json::Value>() {
-        if let Some(error_code) = err.get("error").and_then(|v| v.as_str()) {
-            let desc = err.get("error_description").and_then(|v| v.as_str()).unwrap_or("");
-            return Err(Error::OAuth(format!("{error_code}: {desc}")));
-        }
+    // GitHub returns 200 with an `error`/`error_description` payload on
+    // failure (rather than a 4xx). Parse the body once as an opaque value,
+    // sniff for `error`, and only then attempt the success-shape decode.
+    let value: serde_json::Value = resp.json()?;
+    if let Some(error_code) = value.get("error").and_then(|v| v.as_str()) {
+        let desc = value
+            .get("error_description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(Error::OAuth(format!("{error_code}: {desc}")));
     }
-    resp.json::<GhTokenResponse>()
+    serde_json::from_value(value)
+        .map_err(|e| Error::Decode(format!("oauth token response: {e}")))
 }
 
 /// User-token API client. Constructed per signed-in session (the access token
