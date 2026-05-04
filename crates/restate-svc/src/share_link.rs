@@ -1,8 +1,5 @@
 //! `ShareLink` Virtual Object: create, revoke, tick_expiration.
 
-// Tasks 8–10 fill in the methods that use these.
-#![allow(unused_imports)]
-
 use crate::audit::{Actor, Target};
 use crate::error::HandlerError;
 use crate::impl_restate_json_payload;
@@ -13,7 +10,6 @@ use chrono::{DateTime, Utc};
 // `#[restate_sdk::object]` below.
 use domain::ShareLink as DomainShareLink;
 use domain::{Permission, ShareLinkId, ShareLinkRepo, Slug};
-use rand::SeedableRng;
 use rand::rngs::OsRng;
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
@@ -71,10 +67,17 @@ pub struct ShareLinkImpl {
 impl ShareLink for ShareLinkImpl {
     async fn create(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: CreateLinkInput,
+        ctx: ObjectContext<'_>,
+        input: CreateLinkInput,
     ) -> std::result::Result<CreateLinkOutput, TerminalError> {
-        unimplemented!("Task 8")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            create_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("create")
+        .await
     }
 
     async fn revoke(
@@ -91,5 +94,158 @@ impl ShareLink for ShareLinkImpl {
         _input: TickExpirationInput,
     ) -> std::result::Result<(), TerminalError> {
         unimplemented!("Task 10")
+    }
+}
+
+/// Pure logic: generate a slug, write the link + repos rows, emit audit.
+pub async fn create_logic(
+    state: &AppState,
+    input: &CreateLinkInput,
+    request_id: Option<String>,
+) -> crate::error::Result<CreateLinkOutput> {
+    let mut rng = OsRng;
+    let slug = Slug::generate(&mut rng);
+    let link_id = ShareLinkId::new();
+
+    let link = DomainShareLink {
+        id: link_id,
+        slug: slug.clone(),
+        installation_id: input.installation_id,
+        account_id: input.account_id,
+        created_by: input.created_by,
+        created_at: input.created_at,
+        expires_at: input.expires_at,
+        max_uses: input.max_uses,
+        uses_count: 0,
+        permission: input.permission,
+        approval_required: input.approval_required,
+        internal_note: input.internal_note.clone(),
+        revoked_at: None,
+        revoked_by: None,
+        repos: input.repos.clone(),
+    };
+
+    state.storage.insert_share_link(&link).await?;
+
+    crate::audit::emit(
+        state,
+        input.account_id,
+        EventType::ShareLinkCreated,
+        Actor::User(input.created_by),
+        Target::share_link(link_id),
+        serde_json::json!({
+            "permission": input.permission.to_string(),
+            "approval_required": input.approval_required,
+            "max_uses": input.max_uses,
+            "repo_count": input.repos.len(),
+        }),
+        request_id,
+    )
+    .await?;
+
+    Ok(CreateLinkOutput {
+        link_id,
+        slug: slug.as_str().to_string(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{dt, fixture_state};
+    use domain::{AccountType, SelectedRepos};
+
+    async fn seed_installation_and_user(state: &AppState) {
+        let acct = domain::Account {
+            installation_id: 1,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        };
+        state.storage.insert_installation(&acct).await.unwrap();
+        let user = domain::User {
+            user_id: 7,
+            login: "creator".into(),
+            avatar_url: None,
+            last_seen_at: dt("2026-05-04T12:00:00Z"),
+        };
+        state.storage.upsert_user(&user).await.unwrap();
+    }
+
+    fn sample_input() -> CreateLinkInput {
+        CreateLinkInput {
+            installation_id: 1,
+            account_id: 100,
+            created_by: 7,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: Some(dt("2026-06-03T12:00:00Z")),
+            max_uses: Some(5),
+            permission: Permission::Pull,
+            approval_required: true,
+            internal_note: Some("test".into()),
+            repos: vec![ShareLinkRepo {
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn create_inserts_link_with_generated_slug() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        assert_eq!(out.slug.len(), 16);
+
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.slug.as_str(), out.slug);
+        assert_eq!(link.repos.len(), 1);
+        assert_eq!(link.repos[0].repo_full_name, "acme/api");
+        assert_eq!(link.uses_count, 0);
+        assert_eq!(link.permission, Permission::Pull);
+        assert!(link.approval_required);
+    }
+
+    #[tokio::test]
+    async fn create_unknown_installation_errors() {
+        let state = fixture_state().await;
+        // No seed — installation 1 doesn't exist; the insert must fail on FK.
+        let mut input = sample_input();
+        input.installation_id = 999;
+        let err = create_logic(&state, &input, None).await.unwrap_err();
+        // FK violations surface as `storage::Error::Database` today, which is
+        // classified as transient by `HandlerError::is_terminal`. Refining the
+        // storage layer to map FK breaches to a terminal `Conflict`/`NotFound`
+        // is tracked separately; for now, just assert the operation errored.
+        match &err {
+            HandlerError::Storage(_) => (),
+            other => panic!("expected Storage error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_no_repos_is_allowed() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+
+        let mut input = sample_input();
+        input.repos.clear();
+        let out = create_logic(&state, &input, None).await.unwrap();
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(link.repos.is_empty());
     }
 }
