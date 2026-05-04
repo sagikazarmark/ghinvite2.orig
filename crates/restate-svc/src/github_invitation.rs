@@ -365,13 +365,19 @@ pub async fn on_webhook_logic(
             storage::Error::NotFound,
         ))?;
 
+    let metadata = serde_json::json!({
+        "action": match input.action {
+            WebhookAction::Accepted => "accepted",
+            WebhookAction::Declined => "declined",
+        },
+    });
     crate::audit::emit(
         state,
         link.account_id,
         event_type,
         Actor::Github,
         Target::github_invitation(input.invitation_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await
@@ -463,13 +469,16 @@ pub async fn cancel_logic(
         Some(uid) => Actor::User(uid),
         None => Actor::System,
     };
+    let metadata = serde_json::json!({
+        "by_user": input.by_user,
+    });
     crate::audit::emit(
         state,
         link.account_id,
         EventType::InvitationCancelled,
         actor,
         Target::github_invitation(input.invitation_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await
@@ -546,13 +555,14 @@ pub async fn tick_expire_logic(
         })
         .await?;
 
+    let metadata = serde_json::json!({"reason": "tick_expire_no_longer_pending"});
     crate::audit::emit(
         state,
         link.account_id,
         EventType::InvitationExpired,
         Actor::System,
         Target::github_invitation(input.invitation_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await

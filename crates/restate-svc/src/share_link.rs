@@ -188,13 +188,14 @@ pub async fn revoke_logic(
             storage::Error::NotFound,
         ))?;
 
+    let metadata = serde_json::json!({"by_user": input.by_user});
     crate::audit::emit(
         state,
         link.account_id,
         EventType::ShareLinkRevoked,
         Actor::User(input.by_user),
         Target::share_link(input.link_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await
@@ -231,13 +232,14 @@ pub async fn tick_expiration_logic(
         return Ok(());
     }
 
+    let metadata = serde_json::json!({"expired_at": input.at.to_rfc3339()});
     crate::audit::emit(
         state,
         link.account_id,
         EventType::ShareLinkExpired,
         Actor::System,
         Target::share_link(input.link_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await

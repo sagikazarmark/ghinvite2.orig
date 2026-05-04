@@ -418,10 +418,18 @@ pub async fn apply_decision_logic(
         Err(e) => return Err(e.into()),
     }
 
-    let actor = match decision {
+    let actor = match &decision {
         AppliedDecision::Approve { decided_by, .. }
-        | AppliedDecision::Decline { decided_by, .. } => Actor::User(decided_by),
+        | AppliedDecision::Decline { decided_by, .. } => Actor::User(*decided_by),
         AppliedDecision::AutoApprove { .. } | AppliedDecision::Expire { .. } => Actor::System,
+    };
+    let metadata = match &decision {
+        AppliedDecision::AutoApprove { .. } => serde_json::json!({"reason": "auto_approve"}),
+        AppliedDecision::Approve { .. } => serde_json::json!({}),
+        AppliedDecision::Decline { reason, .. } => serde_json::json!({
+            "decline_reason_present": reason.is_some(),
+        }),
+        AppliedDecision::Expire { .. } => serde_json::json!({"reason": "timeout"}),
     };
     crate::audit::emit(
         state,
@@ -429,7 +437,7 @@ pub async fn apply_decision_logic(
         event,
         actor,
         Target::request(request_id),
-        serde_json::json!({}),
+        metadata,
         request_id_for_audit,
     )
     .await?;

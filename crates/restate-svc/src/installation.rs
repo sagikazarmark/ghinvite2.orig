@@ -160,13 +160,19 @@ pub async fn repos_changed_logic(
             ))
         })?;
 
+    let metadata = serde_json::json!({
+        "selected_repos_kind": match &input.selected_repos {
+            SelectedRepos::All => "all",
+            SelectedRepos::Subset(_) => "subset",
+        },
+    });
     crate::audit::emit(
         state,
         acct.account_id,
         EventType::InstallationReposChanged,
         Actor::Github,
         Target::installation(input.installation_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await
@@ -203,13 +209,16 @@ pub async fn uninstall_logic(
             ))
         })?;
 
+    let metadata = serde_json::json!({
+        "uninstalled_at": input.uninstalled_at.to_rfc3339(),
+    });
     crate::audit::emit(
         state,
         acct.account_id,
         EventType::InstallationUninstalled,
         Actor::Github,
         Target::installation(input.installation_id),
-        serde_json::json!({}),
+        metadata,
         request_id,
     )
     .await
