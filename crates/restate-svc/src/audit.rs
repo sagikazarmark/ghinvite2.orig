@@ -93,3 +93,47 @@ pub async fn emit(
     state.storage.audit(&event).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::fixture_state;
+
+    #[tokio::test]
+    async fn emit_writes_event_to_storage() {
+        let state = fixture_state().await;
+        let result = emit(
+            &state,
+            42,
+            EventType::ShareLinkCreated,
+            Actor::User(7),
+            Target::share_link(domain::ShareLinkId::new()),
+            serde_json::json!({"slug": "abcdef"}),
+            Some("inv-1".into()),
+        )
+        .await;
+        assert!(result.is_ok(), "emit should succeed: {result:?}");
+    }
+
+    #[test]
+    fn actor_split_user_carries_id() {
+        let (k, id) = Actor::User(7).split();
+        assert_eq!(k, ActorKind::User);
+        assert_eq!(id, Some(7));
+    }
+
+    #[test]
+    fn actor_split_system_carries_no_id() {
+        let (k, id) = Actor::System.split();
+        assert_eq!(k, ActorKind::System);
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn target_share_link_uses_ulid_string() {
+        let id = domain::ShareLinkId::new();
+        let t = Target::share_link(id);
+        assert_eq!(t.kind, TargetKind::ShareLink);
+        assert_eq!(t.id, id.to_string());
+    }
+}
