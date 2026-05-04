@@ -17,8 +17,7 @@ pub mod sqlx_impl;
 #[cfg(any(test, feature = "test-suite"))]
 pub mod tests;
 
-// Re-enabled in Task 15 once `SqlxStorage` exists:
-// pub use sqlx_impl::SqlxStorage;
+pub use sqlx_impl::SqlxStorage;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
