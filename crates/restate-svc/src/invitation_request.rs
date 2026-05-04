@@ -116,11 +116,17 @@ impl InvitationRequest for InvitationRequestImpl {
         // Phase 2: pick the AppliedDecision that the apply step will record.
         // - AutoApprove: skip the awakeable race; stamp `at = input.created_at`.
         // - PendingDecision: race admin awakeable against the deadline timer.
+        let account_id = match &outcome {
+            PreDecisionOutcome::AutoApprove { account_id } => *account_id,
+            PreDecisionOutcome::PendingDecision { account_id, .. } => *account_id,
+        };
         let applied: AppliedDecision = match outcome {
-            PreDecisionOutcome::AutoApprove => AppliedDecision::AutoApprove {
+            PreDecisionOutcome::AutoApprove { .. } => AppliedDecision::AutoApprove {
                 at: input.created_at,
             },
-            PreDecisionOutcome::PendingDecision { decision_deadline } => {
+            PreDecisionOutcome::PendingDecision {
+                decision_deadline, ..
+            } => {
                 // The awakeable id is durably journaled the first time we hit
                 // it; subsequent replays see the same id. Plan 5's admin
                 // server function resolves it via Restate's HTTP API
@@ -180,7 +186,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 let request_id_inner = request_id_inner.clone();
                 let decision = decision.clone();
                 async move {
-                    apply_decision_logic(&state, req_id, decision, request_id_inner)
+                    apply_decision_logic(&state, req_id, account_id, decision, request_id_inner)
                         .await
                         .map(SubmitOutput)
                         .map_err(crate::error::to_sdk_handler_error)
@@ -247,10 +253,14 @@ impl InvitationRequest for InvitationRequestImpl {
 /// below let this be journaled as the result of `ctx.run("pre_decision")`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PreDecisionOutcome {
-    /// Link auto-approves; no awakeable race needed.
-    AutoApprove,
+    /// Link auto-approves; no awakeable race needed. Carries `account_id` so
+    /// `apply_decision_logic` can audit without re-reading the link.
+    AutoApprove { account_id: u64 },
     /// Pending admin decision; workflow must race awakeable vs. timeout.
-    PendingDecision { decision_deadline: DateTime<Utc> },
+    PendingDecision {
+        account_id: u64,
+        decision_deadline: DateTime<Utc>,
+    },
 }
 
 /// Concrete decision the workflow has resolved on. Distinct from
@@ -324,7 +334,9 @@ pub async fn pre_decision_logic(
     .await?;
 
     if !link.approval_required {
-        return Ok(PreDecisionOutcome::AutoApprove);
+        return Ok(PreDecisionOutcome::AutoApprove {
+            account_id: link.account_id,
+        });
     }
 
     let deadline = match link.expires_at {
@@ -332,6 +344,7 @@ pub async fn pre_decision_logic(
         None => now + MAX_DECISION_WAIT,
     };
     Ok(PreDecisionOutcome::PendingDecision {
+        account_id: link.account_id,
         decision_deadline: deadline,
     })
 }
@@ -341,6 +354,7 @@ pub async fn pre_decision_logic(
 pub async fn apply_decision_logic(
     state: &AppState,
     request_id: RequestId,
+    account_id: u64,
     decision: AppliedDecision,
     request_id_for_audit: Option<String>,
 ) -> crate::error::Result<RequestState> {
@@ -404,12 +418,6 @@ pub async fn apply_decision_logic(
         Err(e) => return Err(e.into()),
     }
 
-    let link = state
-        .storage
-        .get_share_link_by_id(req.share_link_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-
     let actor = match decision {
         AppliedDecision::Approve { decided_by, .. }
         | AppliedDecision::Decline { decided_by, .. } => Actor::User(decided_by),
@@ -417,7 +425,7 @@ pub async fn apply_decision_logic(
     };
     crate::audit::emit(
         state,
-        link.account_id,
+        account_id,
         event,
         actor,
         Target::request(request_id),
@@ -555,7 +563,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, PreDecisionOutcome::AutoApprove));
+        assert!(matches!(outcome, PreDecisionOutcome::AutoApprove { .. }));
 
         let req = state
             .storage
@@ -587,7 +595,9 @@ mod tests {
         .unwrap();
 
         match outcome {
-            PreDecisionOutcome::PendingDecision { decision_deadline } => {
+            PreDecisionOutcome::PendingDecision {
+                decision_deadline, ..
+            } => {
                 assert_eq!(
                     decision_deadline,
                     dt("2026-05-04T12:30:00Z") + Duration::days(7)
@@ -618,7 +628,9 @@ mod tests {
         .unwrap();
 
         match outcome {
-            PreDecisionOutcome::PendingDecision { decision_deadline } => {
+            PreDecisionOutcome::PendingDecision {
+                decision_deadline, ..
+            } => {
                 assert_eq!(decision_deadline, dt("2026-05-06T12:00:00Z"));
             }
             other => panic!("expected PendingDecision, got {other:?}"),
@@ -670,6 +682,7 @@ mod tests {
         let final_state = apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::Approve {
                 decided_by: 7,
                 at: dt("2026-05-04T13:00:00Z"),
@@ -713,6 +726,7 @@ mod tests {
         let final_state = apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::Decline {
                 decided_by: 7,
                 at: dt("2026-05-04T13:00:00Z"),
@@ -819,11 +833,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(outcome, PreDecisionOutcome::AutoApprove));
+        assert!(matches!(outcome, PreDecisionOutcome::AutoApprove { .. }));
 
         apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::AutoApprove { at: now },
             None,
         )
@@ -873,6 +888,7 @@ mod tests {
         let final_state = apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::AutoApprove { at: now },
             None,
         )
@@ -915,6 +931,7 @@ mod tests {
         apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::Approve {
                 decided_by: 7,
                 at: dt("2026-05-04T13:00:00Z"),
@@ -928,6 +945,7 @@ mod tests {
         let result = apply_decision_logic(
             &state,
             req_id,
+            100,
             AppliedDecision::Decline {
                 decided_by: 7,
                 at: dt("2026-05-04T14:00:00Z"),
