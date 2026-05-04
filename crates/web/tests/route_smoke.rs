@@ -152,3 +152,19 @@ async fn invitation_routes_return_501() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }
+
+#[tokio::test]
+async fn webhook_route_returns_501() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/github")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
