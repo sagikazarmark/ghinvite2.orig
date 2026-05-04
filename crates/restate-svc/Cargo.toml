@@ -23,4 +23,5 @@ tracing.workspace = true
 github = { workspace = true, features = ["test-mock"] }
 storage = { workspace = true, features = ["test-suite"] }
 rand_chacha.workspace = true
+sqlx.workspace = true
 tokio.workspace = true

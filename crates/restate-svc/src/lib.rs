@@ -22,5 +22,5 @@ pub mod state;
 pub(crate) mod test_support;
 
 // Re-exports filled in as each module gains its public types:
-// pub use error::{HandlerError, Result};
+pub use error::{HandlerError, Result};
 // pub use state::AppState;
