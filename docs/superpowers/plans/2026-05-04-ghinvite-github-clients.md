@@ -756,7 +756,7 @@ Plan 3's Restate handler tests will instantiate `InstallationClient::new(MockTra
 //! Behind the `test-mock` feature so it ships in dev-dependencies of consumers
 //! without polluting production builds.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::transport::{HttpTransport, Method, Request, Response};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -899,7 +899,6 @@ impl HttpTransport for MockTransport {
         // Return the canned response. We deliberately do not let the test
         // observe transport-level errors via the script — return Status
         // responses to model HTTP failures.
-        let _ = Error::Transport; // suppress unused-variant lint when no callers
         Ok(next.response)
     }
 }
