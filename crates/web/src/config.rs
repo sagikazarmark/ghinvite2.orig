@@ -1,7 +1,6 @@
 //! Web binary runtime configuration.
 
 use github::oauth::OAuthConfig;
-use serde::{Deserialize, Serialize};
 
 /// Configuration parsed at server boot. Production sources fields from
 /// Workers secrets (Plan 7); local dev uses [`WebConfig::for_local_dev`].
