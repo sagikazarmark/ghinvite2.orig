@@ -114,18 +114,32 @@ impl GithubInvitation for GithubInvitationImpl {
 
     async fn cancel(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: CancelInvitationInput,
+        ctx: ObjectContext<'_>,
+        input: CancelInvitationInput,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 14")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            cancel_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("cancel")
+        .await
     }
 
     async fn tick_expire(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: TickExpireInput,
+        ctx: ObjectContext<'_>,
+        input: TickExpireInput,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 14")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            tick_expire_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("tick_expire")
+        .await
     }
 }
 
@@ -346,6 +360,175 @@ pub async fn on_webhook_logic(
         link.account_id,
         event_type,
         Actor::Github,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({}),
+        request_id,
+    )
+    .await
+}
+
+/// Pure logic: cancel a pending GitHub invitation. Calls
+/// `DELETE /repos/.../invitations/{github_id}`; marks row cancelled; emits
+/// `invitation.cancelled`. Idempotent: if the row is already terminal
+/// or the GitHub invitation is gone (404), proceeds to mark cancelled
+/// without re-deleting.
+pub async fn cancel_logic(
+    state: &AppState,
+    input: &CancelInvitationInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    let row = state
+        .storage
+        .get_github_invitation(input.invitation_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    if row.state.is_terminal() {
+        return Ok(());
+    }
+
+    // Look up the repo full name from the invitation_request → share_link.repos chain.
+    let request = state
+        .storage
+        .get_invitation_request(row.invitation_request_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+    let link = state
+        .storage
+        .get_share_link_by_id(request.share_link_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+    let repo = link
+        .repos
+        .iter()
+        .find(|r| r.repo_id == row.repo_id)
+        .ok_or_else(|| {
+            crate::error::HandlerError::Invariant(format!(
+                "github_invitation {} references repo_id {} not in link.repos",
+                input.invitation_id, row.repo_id
+            ))
+        })?;
+    let (owner, repo_name) = split_full_name(&repo.repo_full_name)?;
+
+    // Call GitHub if we know the upstream id; otherwise skip (row was Sending
+    // and never got a 201, so nothing to delete).
+    if let Some(github_id) = row.github_invitation_id {
+        match state
+            .github
+            .delete_invitation(input.installation_id, owner, repo_name, github_id)
+            .await
+        {
+            Ok(()) => (),
+            Err(github::Error::Status { status: 404, .. }) => {
+                // Already cancelled / accepted / declined upstream; proceed.
+            }
+            Err(e) => {
+                let h: crate::error::HandlerError = e.into();
+                if !h.is_terminal() {
+                    return Err(h);
+                }
+                // Other 4xx — proceed to mark cancelled, audit reason.
+            }
+        }
+    }
+
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: InvitationState::Cancelled,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: input.at,
+        })
+        .await?;
+
+    let actor = match input.by_user {
+        Some(uid) => Actor::User(uid),
+        None => Actor::System,
+    };
+    crate::audit::emit(
+        state,
+        link.account_id,
+        EventType::InvitationCancelled,
+        actor,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({}),
+        request_id,
+    )
+    .await
+}
+
+/// Pure logic: at expiration time, confirm via GitHub list_invitations that
+/// the row is still pending; if so, mark expired + audit.
+pub async fn tick_expire_logic(
+    state: &AppState,
+    input: &TickExpireInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    let row = state
+        .storage
+        .get_github_invitation(input.invitation_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    if row.state.is_terminal() {
+        return Ok(());
+    }
+
+    let request = state
+        .storage
+        .get_invitation_request(row.invitation_request_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+    let link = state
+        .storage
+        .get_share_link_by_id(request.share_link_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+    let repo = link
+        .repos
+        .iter()
+        .find(|r| r.repo_id == row.repo_id)
+        .ok_or_else(|| {
+            crate::error::HandlerError::Invariant(format!(
+                "github_invitation {} references repo_id {} not in link.repos",
+                input.invitation_id, row.repo_id
+            ))
+        })?;
+    let (owner, repo_name) = split_full_name(&repo.repo_full_name)?;
+
+    let pending = state
+        .github
+        .list_invitations(input.installation_id, owner, repo_name)
+        .await?;
+    let still_pending = row
+        .github_invitation_id
+        .map(|id| pending.iter().any(|p| p.id == id))
+        .unwrap_or(false);
+
+    if !still_pending {
+        // Either accepted/declined upstream (webhook missed) or cancelled.
+        // Don't fight: leave to webhook reconciliation. Plan 6 / Reconcile.
+        return Ok(());
+    }
+
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: InvitationState::Expired,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: input.at,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        link.account_id,
+        EventType::InvitationExpired,
+        Actor::System,
         Target::github_invitation(input.invitation_id),
         serde_json::json!({}),
         request_id,
@@ -748,5 +931,237 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.is_terminal());
+    }
+
+    /// Like `seed_to_sent` but with link.repos populated so cancel/expire can
+    /// resolve the repo full name from the chain.
+    async fn seed_chain_with_repos(state: &AppState) -> (RequestId, GithubInvitationId) {
+        state
+            .storage
+            .insert_installation(&domain::Account {
+                installation_id: 9,
+                account_id: 100,
+                account_login: "acme".into(),
+                account_type: AccountType::Organization,
+                installed_at: dt("2026-05-04T12:00:00Z"),
+                uninstalled_at: None,
+                selected_repos: SelectedRepos::All,
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_user(&domain::User {
+                user_id: 7,
+                login: "creator".into(),
+                avatar_url: None,
+                last_seen_at: dt("2026-05-04T12:00:00Z"),
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_user(&domain::User {
+                user_id: 8,
+                login: "alice".into(),
+                avatar_url: None,
+                last_seen_at: dt("2026-05-04T12:00:00Z"),
+            })
+            .await
+            .unwrap();
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
+        let link = domain::ShareLink {
+            id: ShareLinkId::new(),
+            slug: Slug::generate(&mut rng),
+            installation_id: 9,
+            account_id: 100,
+            created_by: 7,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: None,
+            max_uses: None,
+            uses_count: 0,
+            permission: Permission::Push,
+            approval_required: false,
+            internal_note: None,
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![domain::ShareLinkRepo {
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+            }],
+        };
+        state.storage.insert_share_link(&link).await.unwrap();
+        let req_id = RequestId::new();
+        let req = domain::InvitationRequest {
+            id: req_id,
+            share_link_id: link.id,
+            requester_id: 8,
+            justification: None,
+            state: domain::RequestState::Approved,
+            decided_by: Some(7),
+            decided_at: Some(dt("2026-05-04T13:00:00Z")),
+            decline_reason: None,
+            created_at: dt("2026-05-04T12:30:00Z"),
+        };
+        state
+            .storage
+            .insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap();
+        let inv_id = GithubInvitationId::new();
+        state
+            .storage
+            .insert_github_invitation(&DomainGithubInvitation {
+                id: inv_id,
+                invitation_request_id: req_id,
+                repo_id: 10,
+                github_invitation_id: Some(9988),
+                state: InvitationState::Sent,
+                error_message: None,
+                created_at: dt("2026-05-04T13:00:00Z"),
+                updated_at: dt("2026-05-04T13:00:00Z"),
+            })
+            .await
+            .unwrap();
+        (req_id, inv_id)
+    }
+
+    #[tokio::test]
+    async fn cancel_calls_delete_and_marks_cancelled() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation {
+                method: Method::Delete,
+                url: "https://api.github.test/repos/acme/api/invitations/9988".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 204,
+                    headers: BTreeMap::new(),
+                    body: vec![],
+                },
+            },
+        ]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        cancel_logic(
+            &state,
+            &CancelInvitationInput {
+                invitation_id: inv_id,
+                installation_id: 9,
+                by_user: Some(7),
+                at: dt("2026-05-04T15:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_404_proceeds_to_mark_cancelled() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(
+                Method::Delete,
+                "https://api.github.test/repos/acme/api/invitations/9988",
+                404,
+            ),
+        ]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        cancel_logic(
+            &state,
+            &CancelInvitationInput {
+                invitation_id: inv_id,
+                installation_id: 9,
+                by_user: None,
+                at: dt("2026-05-04T15:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn tick_expire_marks_expired_when_still_pending() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([
+                    {
+                        "id": 9988,
+                        "invitee": {"id": 42, "login": "alice"},
+                        "permissions": "write",
+                        "created_at": "2026-05-04T13:00:00Z"
+                    }
+                ]),
+            ),
+        ]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        tick_expire_logic(
+            &state,
+            &TickExpireInput {
+                invitation_id: inv_id,
+                installation_id: 9,
+                at: dt("2026-05-11T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Expired);
+    }
+
+    #[tokio::test]
+    async fn tick_expire_skips_when_no_longer_pending() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([]),
+            ),
+        ]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        tick_expire_logic(
+            &state,
+            &TickExpireInput {
+                invitation_id: inv_id,
+                installation_id: 9,
+                at: dt("2026-05-11T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Sent, "row left for webhook to settle");
     }
 }
