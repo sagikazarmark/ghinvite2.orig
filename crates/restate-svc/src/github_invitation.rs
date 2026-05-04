@@ -99,10 +99,17 @@ impl GithubInvitation for GithubInvitationImpl {
 
     async fn on_webhook(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: OnWebhookInput,
+        ctx: ObjectContext<'_>,
+        input: OnWebhookInput,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 13")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            on_webhook_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("on_webhook")
+        .await
     }
 
     async fn cancel(
@@ -282,6 +289,68 @@ async fn lookup_account_id_for_installation(
         .await?
         .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
     Ok(acct.account_id)
+}
+
+/// Pure logic: transition the github_invitation row based on a webhook
+/// signal. Idempotent: if the row is already in a terminal state, no-op.
+pub async fn on_webhook_logic(
+    state: &AppState,
+    input: &OnWebhookInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    let row = state
+        .storage
+        .get_github_invitation(input.invitation_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    if row.state.is_terminal() {
+        return Ok(()); // already settled; webhook is just confirming.
+    }
+
+    let new_state = match input.action {
+        WebhookAction::Accepted => InvitationState::Accepted,
+        WebhookAction::Declined => InvitationState::Declined,
+    };
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: new_state,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: input.at,
+        })
+        .await?;
+
+    let event_type = match new_state {
+        InvitationState::Accepted => EventType::InvitationAccepted,
+        InvitationState::Declined => EventType::InvitationDeclined,
+        _ => unreachable!("WebhookAction maps to Accepted/Declined"),
+    };
+
+    // Resolve account_id by walking row -> request -> link.
+    let request = state
+        .storage
+        .get_invitation_request(row.invitation_request_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+    let link = state
+        .storage
+        .get_share_link_by_id(request.share_link_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    crate::audit::emit(
+        state,
+        link.account_id,
+        event_type,
+        Actor::Github,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({}),
+        request_id,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -551,5 +620,133 @@ mod tests {
         input.repo_full_name = "no-slash".into();
         let err = create_logic(&state, &input, None).await.unwrap_err();
         assert!(matches!(err, HandlerError::Invariant(_)));
+    }
+
+    /// Helper: from a fresh state, get to "row in Sent state". Returns the
+    /// invitation_id that subsequent webhook tests can reference.
+    async fn seed_to_sent(state: &AppState, req_id: RequestId) -> GithubInvitationId {
+        let inv_id = GithubInvitationId::new();
+        let row = DomainGithubInvitation {
+            id: inv_id,
+            invitation_request_id: req_id,
+            repo_id: 10,
+            github_invitation_id: Some(9988),
+            state: InvitationState::Sent,
+            error_message: None,
+            created_at: dt("2026-05-04T13:00:00Z"),
+            updated_at: dt("2026-05-04T13:00:00Z"),
+        };
+        state.storage.insert_github_invitation(&row).await.unwrap();
+        inv_id
+    }
+
+    #[tokio::test]
+    async fn webhook_accepted_transitions_and_audits() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![]); // no GitHub calls in this path
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let req_id = seed_chain(&state).await;
+        let inv_id = seed_to_sent(&state, req_id).await;
+
+        on_webhook_logic(
+            &state,
+            &OnWebhookInput {
+                invitation_id: inv_id,
+                action: WebhookAction::Accepted,
+                at: dt("2026-05-04T14:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Accepted);
+    }
+
+    #[tokio::test]
+    async fn webhook_declined_transitions_and_audits() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let req_id = seed_chain(&state).await;
+        let inv_id = seed_to_sent(&state, req_id).await;
+
+        on_webhook_logic(
+            &state,
+            &OnWebhookInput {
+                invitation_id: inv_id,
+                action: WebhookAction::Declined,
+                at: dt("2026-05-04T14:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Declined);
+    }
+
+    #[tokio::test]
+    async fn webhook_on_terminal_row_is_idempotent() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let req_id = seed_chain(&state).await;
+        let inv_id = seed_to_sent(&state, req_id).await;
+
+        // First webhook -> Accepted (terminal).
+        on_webhook_logic(
+            &state,
+            &OnWebhookInput {
+                invitation_id: inv_id,
+                action: WebhookAction::Accepted,
+                at: dt("2026-05-04T14:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Second webhook on the same row - should be a no-op, not an error.
+        on_webhook_logic(
+            &state,
+            &OnWebhookInput {
+                invitation_id: inv_id,
+                action: WebhookAction::Declined,
+                at: dt("2026-05-04T15:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        assert_eq!(row.state, InvitationState::Accepted, "terminal state preserved");
+    }
+
+    #[tokio::test]
+    async fn webhook_unknown_invitation_is_terminal() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+
+        let err = on_webhook_logic(
+            &state,
+            &OnWebhookInput {
+                invitation_id: GithubInvitationId::new(),
+                action: WebhookAction::Accepted,
+                at: dt("2026-05-04T14:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_terminal());
     }
 }
