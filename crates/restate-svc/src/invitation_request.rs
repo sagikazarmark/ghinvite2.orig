@@ -14,7 +14,7 @@ use chrono::{DateTime, Duration, Utc};
 use domain::InvitationRequest as DomainInvitationRequest;
 use domain::{RequestId, RequestState};
 use restate_sdk::context::{
-    ContextAwakeables, ContextClient, ContextSideEffects, ContextTimers, RunFuture,
+    ContextClient, ContextPromises, ContextSideEffects, ContextTimers, RunFuture,
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::errors::TerminalError;
@@ -127,11 +127,10 @@ impl InvitationRequest for InvitationRequestImpl {
             PreDecisionOutcome::PendingDecision {
                 decision_deadline, ..
             } => {
-                // The awakeable id is durably journaled the first time we hit
-                // it; subsequent replays see the same id. Plan 5's admin
-                // server function resolves it via Restate's HTTP API
-                // (`/restate/awakeables/{id}/resolve`).
-                let (_awakeable_id, promise) = ctx.awakeable::<Decision>();
+                // The durable promise name "decision" is deterministically derived
+                // from the workflow id, making the resolve target deterministic.
+                // Plan 5's admin server function resolves it via Restate's SDK.
+                let promise = ctx.promise::<Decision>("decision");
 
                 // ctx.sleep takes a Duration; our deadline is absolute. The
                 // workflow handler runs at `created_at` (or replay time);
@@ -235,14 +234,14 @@ impl InvitationRequest for InvitationRequestImpl {
 
     async fn decide(
         &self,
-        _ctx: SharedWorkflowContext<'_>,
-        _decision: Decision,
+        ctx: SharedWorkflowContext<'_>,
+        decision: Decision,
     ) -> std::result::Result<(), TerminalError> {
-        // Plan 5's admin server function resolves the awakeable directly via
-        // Restate's HTTP API (`POST /restate/awakeables/{id}/resolve`), so
-        // this shared handler is intentionally a no-op stub. Kept on the
-        // trait so external callers that prefer the SDK shape compile; we
-        // can wire it through `ctx.resolve_awakeable` later if needed.
+        // Resolve the workflow's "decision" durable promise. The web binary's
+        // approve/decline handlers invoke this via Restate ingress; the
+        // workflow's `submit` handler is racing this promise against the
+        // `decision_deadline` sleep.
+        ctx.resolve_promise("decision", decision);
         Ok(())
     }
 }
