@@ -17,4 +17,4 @@ pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
 // pub use permission::Permission;
 // pub use share_link::{ShareLink, ShareLinkRepo};
 pub use slug::Slug;
-// pub use user::User;
+pub use user::User;
