@@ -8,7 +8,7 @@
 //!    `/user/memberships/orgs/{login}`).
 
 use crate::error::{Error, Result};
-use crate::payloads::{GhMembership, GhTokenResponse, GhUser};
+use crate::payloads::GhTokenResponse;
 use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
@@ -99,6 +99,7 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
 /// is encrypted at rest in the session cookie; the web binary decrypts it
 /// before instantiating this client per request).
 #[derive(Clone)]
+#[allow(dead_code)] // fields are read by methods added in Task 9
 pub struct UserApiClient {
     transport: Arc<dyn HttpTransport>,
     user_token: String,
@@ -122,6 +123,7 @@ impl UserApiClient {
         }
     }
 
+    #[allow(dead_code)] // used by methods added in Task 9
     fn auth_request(&self, method: Method, path: &str) -> Request {
         Request::new(method, format!("{}{}", self.base_url, path))
             .header("accept", "application/vnd.github+json")
