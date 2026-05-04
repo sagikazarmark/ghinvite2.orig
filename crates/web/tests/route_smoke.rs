@@ -68,3 +68,15 @@ async fn logout_clears_session_and_redirects_home() {
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(location, "/");
 }
+
+#[tokio::test]
+async fn static_styles_returns_css() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(Request::builder().uri("/static/styles.css").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/css"));
+}
