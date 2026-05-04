@@ -4,7 +4,7 @@
 use crate::error::{Error, Result};
 use crate::jwt::AppJwtSigner;
 use crate::payloads::{
-    GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhRepo,
+    GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhInvitationListItem, GhRepo,
 };
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
@@ -197,6 +197,59 @@ impl InstallationClient {
             .await?;
         self.transport.send(req).await?.ensure_success()?;
         Ok(())
+    }
+
+    /// `GET /repos/{owner}/{repo}/invitations` — list pending invitations on a
+    /// repo. Used by the reconciler to check that our `github_invitations` rows
+    /// in `sent` state still exist upstream.
+    pub async fn list_invitations(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<GhInvitationListItem>> {
+        let path = format!(
+            "/repos/{}/{}/invitations?per_page=100",
+            path_seg(owner),
+            path_seg(repo)
+        );
+        let req = self
+            .auth_request(installation_id, Method::Get, &path)
+            .await?;
+        self.transport.send(req).await?.ensure_success()?.json()
+    }
+
+    /// `GET /repos/{owner}/{repo}/collaborators/{username}` — confirm membership.
+    /// GitHub returns 204 if the user *is* a collaborator and 404 otherwise.
+    /// Used to confirm an invitation acceptance when the webhook is missed.
+    pub async fn is_collaborator(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+        username: &str,
+    ) -> Result<bool> {
+        let path = format!(
+            "/repos/{}/{}/collaborators/{}",
+            path_seg(owner),
+            path_seg(repo),
+            path_seg(username)
+        );
+        let req = self
+            .auth_request(installation_id, Method::Get, &path)
+            .await?;
+        let resp = self.transport.send(req).await?;
+        match resp.status {
+            204 => Ok(true),
+            404 => Ok(false),
+            other => {
+                let body = String::from_utf8_lossy(&resp.body).to_string();
+                Err(Error::Status {
+                    status: other,
+                    body,
+                })
+            }
+        }
     }
 }
 
@@ -473,5 +526,100 @@ mod write_tests {
             .delete_invitation(9, "acme", "api", 777)
             .await
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::Response;
+    use std::collections::BTreeMap;
+
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
+
+    fn signer() -> AppJwtSigner {
+        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+    }
+
+    fn token_mint_expectation() -> Expectation {
+        Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn list_invitations_decodes_array() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([
+                    {
+                        "id": 1,
+                        "invitee": {"id": 42, "login": "octocat"},
+                        "permissions": "write",
+                        "created_at": "2026-05-04T12:00:00Z"
+                    }
+                ]),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let l = client.list_invitations(9, "acme", "api").await.unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].id, 1);
+        assert_eq!(l[0].invitee.login, "octocat");
+    }
+
+    #[tokio::test]
+    async fn is_collaborator_true_on_204() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Get,
+                url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 204,
+                    headers: BTreeMap::new(),
+                    body: vec![],
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert!(client
+            .is_collaborator(9, "acme", "api", "octocat")
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_collaborator_false_on_404() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/notamember",
+                404,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert!(!client
+            .is_collaborator(9, "acme", "api", "notamember")
+            .await
+            .unwrap());
     }
 }
