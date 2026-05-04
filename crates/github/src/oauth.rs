@@ -8,7 +8,7 @@
 //!    `/user/memberships/orgs/{login}`).
 
 use crate::error::{Error, Result};
-use crate::payloads::{GhMembership, GhTokenResponse, GhUser};
+use crate::payloads::{GhInstallationRepos, GhMembership, GhTokenResponse, GhUser};
 use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
@@ -52,7 +52,7 @@ impl AuthorizeUrl {
             let mut q = url.query_pairs_mut();
             q.append_pair("client_id", &cfg.client_id);
             q.append_pair("redirect_uri", &cfg.redirect_uri);
-            q.append_pair("scope", "read:user");
+            q.append_pair("scope", "read:user read:org");
             q.append_pair("state", &state);
             for (k, v) in extra_params {
                 q.append_pair(k, v);
@@ -196,6 +196,29 @@ impl UserApiClient {
         }
         resp.ensure_success()?.json()
     }
+
+    /// `GET /user/installations/{installation_id}/repositories` — repos the
+    /// signed-in user can see through this app installation. Used by the
+    /// dashboard's link-create form to render a repo-picker.
+    ///
+    /// Paginates with `?per_page=100` (v1 simplification; installations with
+    /// >100 repos need paging in v1.1).
+    #[tracing::instrument(skip(self), fields(method = "list_user_installation_repos", installation_id))]
+    pub async fn list_user_installation_repos(
+        &self,
+        installation_id: u64,
+    ) -> Result<GhInstallationRepos> {
+        let path = format!("/user/installations/{installation_id}/repositories?per_page=100");
+        let req = self.auth_request(Method::Get, &path);
+        let resp = self.transport.send(req).await?;
+        if !(200..300).contains(&resp.status) {
+            tracing::warn!(
+                status = resp.status,
+                "github GET /user/installations/{installation_id}/repositories returned non-2xx"
+            );
+        }
+        resp.ensure_success()?.json()
+    }
 }
 
 #[cfg(test)]
@@ -218,7 +241,7 @@ mod url_tests {
                 .starts_with("https://github.com/login/oauth/authorize?")
         );
         assert!(a.url.contains("client_id=Iv1.abc"));
-        assert!(a.url.contains("scope=read%3Auser"));
+        assert!(a.url.contains("scope=read%3Auser+read%3Aorg"));
         assert!(a.url.contains("state=csrf-token-123"));
         assert!(
             a.url
@@ -423,5 +446,34 @@ mod user_api_tests {
             .await
             .unwrap_err();
         assert_eq!(err.status(), Some(404));
+    }
+
+    #[tokio::test]
+    async fn list_user_installation_repos_decodes_response() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Get,
+            url: "https://api.github.test/user/installations/77/repositories?per_page=100".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "total_count": 2,
+                    "repositories": [
+                        {"id": 10, "full_name": "acme/api", "private": false},
+                        {"id": 11, "full_name": "acme/web", "private": true}
+                    ]
+                }"#
+                .to_vec(),
+            },
+        }]);
+        let resp = client_with(mock)
+            .list_user_installation_repos(77)
+            .await
+            .unwrap();
+        assert_eq!(resp.total_count, 2);
+        assert_eq!(resp.repositories.len(), 2);
+        assert_eq!(resp.repositories[0].full_name, "acme/api");
     }
 }
