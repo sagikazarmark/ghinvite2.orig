@@ -3971,3 +3971,492 @@ If there's nothing to commit, skip this step.
 **Type consistency check:** `ShareLinkId`, `RequestId`, `GithubInvitationId`, `AuditEventId` are defined identically in Task 3 and used identically across tasks. `Permission`, `RequestState`, `InvitationState`, `AccountType`, `ActorKind`, `TargetKind` all use lowercase `to_string()`/`FromStr` round-trips and the SQL stores those exact strings. The `Storage` trait method signatures in Task 13 match the impls in Tasks 16–21 (and the `tests::run_suite` calls in Task 22).
 
 **Placeholder check:** No `TBD`, `TODO`, `// implement later`, or "similar to Task N" references. Every code step shows complete code. Every `unimplemented!` in the trait scaffolding is explicitly tracked to the task that fills it in (16, 17, 18, 19, 20, 21).
+
+---
+
+## Post-/autoplan amendments (apply during execution)
+
+These amendments override the corresponding code/text in earlier tasks. They were produced by /autoplan review on 2026-05-04. The original tasks are kept for context; when an amendment conflicts with a task's code block, **the amendment wins**.
+
+### A1. `ShareLink.slug` is `Slug`, not `String` (Task 8)
+
+In `crates/domain/src/share_link.rs`, change the `ShareLink` struct's `slug` field type from `String` to `crate::slug::Slug`. Update all callers that build a `ShareLink` literal: pass `slug: Slug::generate(&mut rng)` from a creation site, and `slug: Slug::from_string(row.slug)?` from the storage record converter. The plan's "Slug stored as String here so the type can travel without rng-tied checks" comment is incorrect — `Slug::from_string` doesn't need an RNG.
+
+In `crates/storage/src/records.rs`, update `ShareLinkRow::try_into_domain` to parse the slug:
+
+```rust
+slug: domain::Slug::from_string(self.slug)
+    .map_err(|e| crate::Error::Corrupt(format!("slug: {e}")))?,
+```
+
+In tests that build a `ShareLink` literal (Task 18, Task 22), generate a slug from a seeded RNG instead of using a fixed string. Pattern:
+
+```rust
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
+let mut rng = ChaCha8Rng::seed_from_u64(/* unique per test */);
+let slug = domain::Slug::generate(&mut rng);
+```
+
+### A2. Drop `NewShareLink` and `NewInvitationRequest` wrapper structs (Task 13)
+
+In `crates/storage/src/lib.rs`, remove these struct definitions. Update the trait methods to take the inner type directly:
+
+```rust
+async fn insert_share_link(&self, link: &ShareLink) -> Result<()>;
+async fn insert_invitation_request_and_increment_uses(
+    &self,
+    request: &InvitationRequest,
+) -> Result<()>;
+```
+
+Update all `crate::NewShareLink { link: ... }` and `crate::NewInvitationRequest { request: ... }` constructions in Tasks 18, 19, 20, 22, 23 to pass the inner reference directly. **Keep** `RequestDecision` and `GithubInvitationUpdate` — they reshape the data, not just box it.
+
+### A3. Audit `EVENT_TYPES` becomes a typed enum (Task 11)
+
+In `crates/audit/src/lib.rs`, replace the `EVENT_TYPES: &[&str]` constant and `is_known_event_type()` function with a typed enum and let `AuditEvent::event_type` use it:
+
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventType {
+    InstallationCreated,
+    InstallationReposChanged,
+    InstallationUninstalled,
+    ShareLinkCreated,
+    ShareLinkRevoked,
+    ShareLinkExpired,
+    ShareLinkExhausted,
+    RequestCreated,
+    RequestApproved,
+    RequestDeclined,
+    RequestExpired,
+    InvitationSent,
+    InvitationAccepted,
+    InvitationDeclined,
+    InvitationExpired,
+    InvitationCancelled,
+    InvitationSendFailed,
+}
+
+impl EventType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::InstallationCreated => "installation.created",
+            Self::InstallationReposChanged => "installation.repos_changed",
+            Self::InstallationUninstalled => "installation.uninstalled",
+            Self::ShareLinkCreated => "share_link.created",
+            Self::ShareLinkRevoked => "share_link.revoked",
+            Self::ShareLinkExpired => "share_link.expired",
+            Self::ShareLinkExhausted => "share_link.exhausted",
+            Self::RequestCreated => "request.created",
+            Self::RequestApproved => "request.approved",
+            Self::RequestDeclined => "request.declined",
+            Self::RequestExpired => "request.expired",
+            Self::InvitationSent => "invitation.sent",
+            Self::InvitationAccepted => "invitation.accepted",
+            Self::InvitationDeclined => "invitation.declined",
+            Self::InvitationExpired => "invitation.expired",
+            Self::InvitationCancelled => "invitation.cancelled",
+            Self::InvitationSendFailed => "invitation.send_failed",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq)]
+#[error("unknown event type: {0}")]
+pub struct UnknownEventType(pub String);
+
+impl std::str::FromStr for EventType {
+    type Err = UnknownEventType;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "installation.created" => Self::InstallationCreated,
+            "installation.repos_changed" => Self::InstallationReposChanged,
+            "installation.uninstalled" => Self::InstallationUninstalled,
+            "share_link.created" => Self::ShareLinkCreated,
+            "share_link.revoked" => Self::ShareLinkRevoked,
+            "share_link.expired" => Self::ShareLinkExpired,
+            "share_link.exhausted" => Self::ShareLinkExhausted,
+            "request.created" => Self::RequestCreated,
+            "request.approved" => Self::RequestApproved,
+            "request.declined" => Self::RequestDeclined,
+            "request.expired" => Self::RequestExpired,
+            "invitation.sent" => Self::InvitationSent,
+            "invitation.accepted" => Self::InvitationAccepted,
+            "invitation.declined" => Self::InvitationDeclined,
+            "invitation.expired" => Self::InvitationExpired,
+            "invitation.cancelled" => Self::InvitationCancelled,
+            "invitation.send_failed" => Self::InvitationSendFailed,
+            other => return Err(UnknownEventType(other.to_string())),
+        })
+    }
+}
+```
+
+Change `AuditEvent::event_type` from `String` to `EventType`. Update `AuditEventRow::try_into_domain` (Task 14) to call `EventType::from_str(&self.event_type)` and surface parse errors as `Error::Corrupt`. Update `SqlxStorage::audit` (Task 21) to bind `event.event_type.as_str()`.
+
+Drop the `is_known_event_type` test; replace with a `from_str` round-trip test for every variant.
+
+### A4. `SelectedRepos` serde alignment (Task 5)
+
+In `crates/domain/src/account.rs`, remove `#[serde(untagged)]` from `SelectedRepos`. Hand-roll `Serialize`/`Deserialize` so JSON output matches `encode_selected_repos` from `crates/storage/src/records.rs` (i.e., the string `"all"` for `All`, a JSON array of integers for `Subset`):
+
+```rust
+impl Serialize for SelectedRepos {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::All => s.serialize_str("all"),
+            Self::Subset(v) => v.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SelectedRepos {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            S(String),
+            V(Vec<u64>),
+        }
+        match Repr::deserialize(d)? {
+            Repr::S(s) if s == "all" => Ok(Self::All),
+            Repr::S(other) => Err(D::Error::custom(format!(
+                "selected_repos string must be \"all\", got {other:?}"
+            ))),
+            Repr::V(v) => Ok(Self::Subset(v)),
+        }
+    }
+}
+```
+
+Add a unit test asserting JSON round-trip matches `encode_selected_repos` output for both variants.
+
+### A5. Fix N+1 reads in share-link queries (Task 18)
+
+Rewrite `get_share_link_by_id`, `get_share_link_by_slug`, and `list_share_links_for_account` to issue a single query with a `LEFT JOIN share_link_repos`, then group rows in Rust. Pattern for `list_share_links_for_account`:
+
+```rust
+async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
+    use std::collections::BTreeMap;
+
+    let rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)> =
+        sqlx::query_as(
+            r#"
+            SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
+                   l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
+                   l.internal_note, l.revoked_at, l.revoked_by,
+                   r.repo_id, r.repo_full_name
+            FROM share_links l
+            LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+            WHERE l.account_id = ?1
+            ORDER BY l.created_at DESC, l.id, r.repo_id
+            "#,
+        )
+        .bind(account_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+    let mut by_link: BTreeMap<String, (crate::records::ShareLinkRow, Vec<domain::ShareLinkRepo>)> =
+        BTreeMap::new();
+    for (link_row, repo_id, repo_full_name) in rows {
+        let entry = by_link.entry(link_row.id.clone()).or_insert((link_row, Vec::new()));
+        if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
+            entry.1.push(domain::ShareLinkRepo {
+                repo_id: rid as u64,
+                repo_full_name: name,
+            });
+        }
+    }
+
+    by_link
+        .into_values()
+        .map(|(row, repos)| row.try_into_domain(repos))
+        .collect()
+}
+```
+
+Apply the same `LEFT JOIN` pattern to the `_by_id` and `_by_slug` variants (return `Option`, group at most one link). Drop the private `list_repos_for_link` helper — no longer needed. Add a test asserting that listing a link with zero repos returns an empty `repos` vec (verifies `LEFT JOIN` correctness).
+
+### A6. Add foreign-key violation tests (Task 16, 18, 19, 20)
+
+Add at least two tests in `crates/storage/tests/sqlx_suite.rs` (or as a new scenario in `run_suite`) that verify FK enforcement:
+
+```rust
+#[tokio::test]
+async fn share_link_with_unknown_installation_fails() {
+    let s = SqlxStorage::in_memory().await.unwrap();
+    s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+    let mut link = sample_link(100, /* installation_id */ 999, 7);
+    let err = s.insert_share_link(&link).await.unwrap_err();
+    assert!(matches!(err, crate::Error::Database(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn invitation_request_with_unknown_link_fails() {
+    let s = SqlxStorage::in_memory().await.unwrap();
+    s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+    let req = sample_request(domain::ShareLinkId::new(), 8); // bogus link id
+    let err = s.insert_invitation_request_and_increment_uses(&req).await.unwrap_err();
+    assert!(matches!(err, crate::Error::Database(_)) || matches!(err, crate::Error::NotFound), "got {err:?}");
+}
+```
+
+Reuse the existing `sample_*` helpers from Task 16's test module (export them via `pub(crate)` if needed, or move into a `test_fixtures` module).
+
+### A7. `run_suite` takes a factory (Task 22, 23)
+
+Change `run_suite` to take a factory so each scenario gets a fresh storage instance:
+
+```rust
+pub async fn run_suite<S, F, Fut>(make_storage: F)
+where
+    S: Storage,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = S>,
+{
+    scenario_install_uninstall_reinstall(make_storage().await).await;
+    scenario_share_link_lifecycle(make_storage().await).await;
+    scenario_request_uses_and_uniqueness(make_storage().await).await;
+    scenario_request_decision(make_storage().await).await;
+    scenario_github_invitation_lifecycle(make_storage().await).await;
+    scenario_audit_appends(make_storage().await).await;
+}
+```
+
+Each scenario takes `S` by value (already does). Update `crates/storage/tests/sqlx_suite.rs`:
+
+```rust
+#[tokio::test]
+async fn sqlx_storage_passes_full_suite() {
+    run_suite(|| async { SqlxStorage::in_memory().await.unwrap() }).await;
+}
+```
+
+Drop the disjoint-ID convention (1001/2001/...); each scenario can use simple IDs (1, 2, ...) since each runs against a fresh DB.
+
+### A8. Storage method docstrings (Task 13)
+
+Add a `///` paragraph to every method on the `Storage` trait. Each docstring covers (1) what the method does, (2) preconditions the caller must enforce (especially `is_active(now)` for `insert_invitation_request_and_increment_uses`), (3) which `Error` variants are possible and what each means, (4) idempotency guarantees if any. Sample for the trickiest method:
+
+```rust
+/// Insert a new `InvitationRequest` row and atomically increment
+/// `share_links.uses_count` for the link this request was filed against.
+///
+/// **Precondition:** the caller must have just verified that the share link is
+/// `ShareLink::is_active(now)`. This method does *not* re-check active status —
+/// the partial unique index on `(share_link_id, requester_id) WHERE state = 'pending'`
+/// only defends against duplicate pending requests, not against exhaustion or expiry.
+///
+/// **Errors:**
+/// - `Error::Conflict` if a pending request already exists for this `(link, requester)`,
+///   or if `request.id` collides with an existing row.
+/// - `Error::NotFound` if `share_link_id` doesn't reference an existing link.
+/// - `Error::Database` for any other SQLite/D1 failure.
+///
+/// **Idempotency:** safe to retry on `Error::Database` (timeout etc.) — the unique
+/// constraints will surface a `Conflict` if the prior attempt actually succeeded.
+async fn insert_invitation_request_and_increment_uses(
+    &self,
+    request: &InvitationRequest,
+) -> Result<()>;
+```
+
+Apply the same depth to every method.
+
+### A9. `Conflict` becomes a typed enum (Task 13)
+
+Replace `Conflict(String)` with a structured variant:
+
+```rust
+#[derive(Debug, Error, PartialEq)]
+pub enum ConflictKind {
+    #[error("share_link slug already in use")]
+    DuplicateSlug,
+    #[error("a pending request already exists for this (link, requester)")]
+    DuplicatePendingRequest,
+    #[error("primary key already exists")]
+    DuplicateId,
+    #[error("active installation already exists for this account")]
+    DuplicateActiveInstallation,
+}
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("database error: {0}")]
+    Database(#[from] sqlx::Error),
+    #[error("not found")]
+    NotFound,
+    #[error("conflict: {0}")]
+    Conflict(ConflictKind),
+    #[error("data corruption: {0}")]
+    Corrupt(String),
+}
+```
+
+In each impl method that previously raised `Conflict("...")`, classify the unique-violation by which constraint it hit. For SQLite this means inspecting the `sqlx::Error` extended code or message. Pattern:
+
+```rust
+fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
+    match db.message() {
+        m if m.contains("share_links.slug") => ConflictKind::DuplicateSlug,
+        m if m.contains("idx_one_pending_per_link_per_user") => ConflictKind::DuplicatePendingRequest,
+        m if m.contains("idx_installations_active_account") => ConflictKind::DuplicateActiveInstallation,
+        _ => default,
+    }
+}
+```
+
+Pass the appropriate `default: ConflictKind` per call site (e.g., `DuplicateId` for raw `INSERT` on a primary key).
+
+### A10. `u64 → i64` cast helper (Task 14)
+
+Add to `crates/storage/src/records.rs`:
+
+```rust
+#[inline]
+pub(crate) fn u64_to_i64(v: u64) -> i64 {
+    debug_assert!(v <= i64::MAX as u64, "u64 value {v} exceeds i64::MAX");
+    v as i64
+}
+```
+
+Replace every inline `as i64` in Tasks 16-21 (~30 sites) with `crate::records::u64_to_i64(...)`.
+
+### A11. Migration tooling docs (Task 12)
+
+Replace `migrations/README.md` with:
+
+```markdown
+# ghinvite migrations
+
+Plain SQL files, one schema-change per file, applied in lexicographic order.
+
+The same files are applied by:
+- **Local dev (sqlx):** `sqlx migrate run --source migrations/ --database-url sqlite:./dev.sqlite`
+  - sqlx tracks applied migrations in a table called `_sqlx_migrations`.
+- **Production (Cloudflare D1):** `wrangler d1 migrations apply ghinvite --remote`
+  - wrangler tracks applied migrations in a table called `d1_migrations`.
+
+**These are different tables.** Migrations applied via one tool are invisible to the other.
+Treat the migration history as advisory only across backends; the schema itself is the source of truth.
+
+## Foreign keys
+
+SQLite (and therefore D1) requires `PRAGMA foreign_keys = ON` per-connection to actually
+enforce `REFERENCES` constraints. The crate sets this in `SqliteConnectOptions::foreign_keys(true)`
+for sqlx, but **D1 connections set `foreign_keys = OFF` by default**. Plan 7 (D1 implementation)
+must issue `PRAGMA foreign_keys = ON;` as the first statement on every connection.
+
+Without this PRAGMA, FK violations silently succeed and orphan rows accumulate.
+
+## Conventions
+
+- Files named `NNNN_short_description.sql` where `NNNN` is a zero-padded sequence number starting at `0001`.
+- SQLite-portable SQL only: no Postgres-isms, no `WITHOUT ROWID`, no `STRICT`.
+- No `CHECK (col IN (...))` on enum-shaped columns (see spec §7.2). Domain enums in `crates/domain` validate values before write.
+- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format.
+
+## Adding a new migration
+
+1. Choose the next `NNNN`.
+2. Write `NNNN_purpose.sql` containing only `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, and `DROP INDEX` statements that are SQLite-portable.
+3. **Avoid altering existing CHECK constraints** — SQLite cannot do this without a 12-step `ALTER TABLE` recreate. If unavoidable, write the recreate dance in plain SQL inside the migration file.
+4. Run `cargo test -p storage` locally to verify migrations apply cleanly to a fresh in-memory DB.
+5. In Plan 7 (D1 deployment), `wrangler d1 migrations apply ghinvite --local` first; never go straight to `--remote`.
+```
+
+### A12. Test suite module visibility (Task 13, 22)
+
+Move `crates/storage/src/tests.rs` behind a feature flag so the helpers don't ship in production binaries:
+
+In `crates/storage/Cargo.toml`:
+
+```toml
+[features]
+test-suite = []
+```
+
+In `crates/storage/src/lib.rs`:
+
+```rust
+#[cfg(any(test, feature = "test-suite"))]
+pub mod tests;
+```
+
+In `crates/storage/Cargo.toml` (dev-deps):
+
+```toml
+[dev-dependencies]
+storage = { path = ".", features = ["test-suite"] }
+# ... other dev deps
+```
+
+(The self-referential dev-dep with the feature is the standard idiom for re-enabling pub-test-helpers in integration tests.)
+
+Update `crates/storage/tests/sqlx_suite.rs` to depend on the `test-suite` feature implicitly (via the dev-dep self-reference).
+
+When Plan 7 ships `D1Storage`, its parameterized test wiring file enables the same feature.
+
+### A13. Timestamp precision round-trip test (Task 22 or new)
+
+Add one scenario to `run_suite`:
+
+```rust
+async fn scenario_timestamp_precision<S: Storage>(s: S) {
+    use chrono::TimeZone;
+    s.insert_installation(&sample_account(7001, 9007, "acme7")).await.unwrap();
+    s.upsert_user(&sample_user(707, "creator")).await.unwrap();
+    let mut link = sample_link(9007, 7001, 707, "AAAATIMEPRECISION");
+    // 123_456 microseconds = 123_456_000 nanoseconds
+    link.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()
+        + chrono::Duration::microseconds(123_456);
+    s.insert_share_link(&link).await.unwrap();
+    let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    assert_eq!(got.created_at, link.created_at, "microsecond precision lost in round-trip");
+}
+```
+
+Include in the `run_suite` body.
+
+### A14. Soften "TDD-style" framing
+
+This plan's header reads "24 TDD-style tasks." Most tasks (3-10) write the implementation and the test in the same edit and never observe a failing test. Update the plan's header sentence (front matter) and Section "Task ordering" prose to read "test-first where meaningful" or "test-checkpointed":
+
+> Tasks 1–2 establish the workspace. Tasks 3–11 build the domain crate (no I/O, fast tests). Task 12 is the audit crate. Tasks 13–24 are the storage crate, structured **test-first**, with the parameterized suite running incrementally.
+
+This is purely a wording fix; no code changes.
+
+### A15. Remove forward-looking auto-fixes from Plan 1 scope
+
+The /autoplan review surfaced several recommendations that affect later plans (web binary form defaults, recipient wrong-account warnings, admin recheck cache duration). Those are documented in **the spec** (already amended) and become Plan 4-6 work. **No Plan 1 code changes** are required for items A13/A14/A15 from the autoplan auto-decided list — they live in the spec.
+
+---
+
+## Audit trail
+
+| # | Phase | Decision | Class | Principle |
+|---|-------|----------|-------|-----------|
+| 1 | CEO | Reject "drop Restate" challenge | User Challenge — rejected | User direction holds |
+| 2 | CEO | Reject "audit UI in v1" challenge | User Challenge — rejected | User direction holds |
+| 3 | CEO | Reject "notifications in v1" challenge | User Challenge — rejected | User direction holds |
+| 4 | Eng/DX | Drop `NewShareLink`/`NewInvitationRequest` wrappers | Taste — accepted | P5 explicit-over-clever |
+| 5 | Eng/DX | `ShareLink.slug` typed `Slug` | Taste — accepted | P5 + safety |
+| 6 | Audit | `EventType` becomes typed enum | Taste — accepted | P5 + completeness |
+| 7 | Eng | Fix `SelectedRepos` serde inconsistency | Auto | P5 explicit |
+| 8 | Eng | Fix N+1 reads (single LEFT JOIN) | Auto | P3 pragmatic |
+| 9 | Eng | Add FK violation tests | Auto | P1 completeness |
+| 10 | Eng | `run_suite` takes factory; fresh DB per scenario | Auto | P1 + P5 |
+| 11 | Eng | Storage method docstrings | Auto | P1 completeness |
+| 12 | Eng | Document FK-default mismatch + migration tooling differences | Auto | P5 explicit |
+| 13 | Eng | Soften "TDD-style" framing | Auto | P5 explicit |
+| 14 | Eng | Microsecond timestamp round-trip test | Auto | P1 completeness |
+| 15 | Eng | `u64_to_i64` helper with debug assert | Auto | P5 explicit |
+| 16 | Eng | `Conflict(ConflictKind)` typed enum | Auto | P5 explicit |
+| 17 | Eng | `tests` module gated behind `test-suite` feature | Auto | P5 explicit |
+| 18 | DX | Recipient form: signed-in identity + sign-out link (spec) | Auto | P1 completeness |
+| 19 | DX | Link create form defaults: pull / 30 days (spec) | Auto | P1 + P5 |
+| 20 | CEO/DX | Admin recheck cache 5min → 60s (spec) | Auto | P1 + P5 |
+| 21 | CEO | Rename "revoke" UI label → "stop accepting new requests" (spec) | Taste — accepted | P5 explicit |
+| 22 | DX | Cascade revoke deferred to v2 (current lock holds) | Taste — accepted | matches user direction |

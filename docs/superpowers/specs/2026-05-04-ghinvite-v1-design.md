@@ -109,7 +109,7 @@ The tenancy boundary is the GitHub installation, keyed by `account_id` (numeric,
 
 App-admin authority is derived from GitHub authority. There is no app-internal role assignment in v1.
 
-- **For organization installations:** anyone whose GitHub identity is currently an org *owner* of the installed account is an app-admin for that account's dashboard. Determined by `GET /user/memberships/orgs/{login}` returning `role == 'admin'` and `state == 'active'`. Cached for 5 minutes per session.
+- **For organization installations:** anyone whose GitHub identity is currently an org *owner* of the installed account is an app-admin for that account's dashboard. Determined by `GET /user/memberships/orgs/{login}` returning `role == 'admin'` and `state == 'active'`. Cached for **60 seconds** per session (was 5 minutes — shortened per /autoplan finding: a demoted owner had a 5-minute window to act on stale authority, both a security hole and a retroactive-failure UX problem).
 - **For personal-account installations:** the account holder themselves (and only that user) is the admin. Determined by `session.user_id == installation.account_id`.
 
 **Re-checked at every state-changing action**, so a demoted org owner cannot continue to act through a stale session.
@@ -370,7 +370,7 @@ Every server function:
 2. Resolves `account_login → account_id` from `installations`.
 3. Re-checks admin status:
    - User account: `session.user_id == account_id`.
-   - Org account: `GET /user/memberships/orgs/{login}` returns `role=admin, state=active`. Cached 5 min in session.
+   - Org account: `GET /user/memberships/orgs/{login}` returns `role=admin, state=active`. Cached 60 sec in session.
 4. Loads the relevant DB row (link, request, etc.).
 5. Calls Restate (one-way `send`) with explicit IDs.
 6. Returns optimistic UI response.
@@ -394,7 +394,7 @@ The web binary **never writes domain state directly** (except OAuth/session tabl
 | `/install` | Redirect to GitHub App install URL | Public |
 | `/accounts/:login` | Account dashboard | Account admin |
 | `/accounts/:login/links/new` | Create link form | Account admin |
-| `/accounts/:login/links/:link_id` | Link detail (settings + request history + revoke) | Account admin |
+| `/accounts/:login/links/:link_id` | Link detail (settings + request history + "stop accepting new requests" action) | Account admin |
 | `/accounts/:login/requests` | Pending approval queue (across all links for the account) | Account admin |
 | `/accounts/:login/audit` | (v1.1) Audit log + CSV export | Account admin |
 | `/accounts/:login/settings` | Installation status, repo selection, GitHub-uninstall link | Account admin |
@@ -418,6 +418,12 @@ Three Dioxus layouts, each with its own DaisyUI theme zone:
 **Account switcher** lists all installations the current user is admin of (orgs where they're an owner + their personal account if installed); footer link "Install on another account" → `/install`. Last-used account stored in cookie; URL is canonical.
 
 **Recipient pending page** in v1: manual refresh. (Auto-refresh deferred to v1.1.)
+
+**Recipient request page (`/i/:slug/request`)** must display the currently signed-in GitHub identity ("Signed in as @{login}") with a "not you? sign out and sign in again" link before the submit button. Defends against the wrong-account failure mode where the link recipient is logged into a different GitHub account than they intend to grant access to.
+
+**Link create form (`/accounts/:login/links/new`)** defaults: `permission = pull` (least privilege), `expires_at = now + 30 days`, `max_uses = unlimited`, `approval_required = false`. Admins must consciously opt out of these defaults. Justification: a never-expiring `admin`-level link is exactly the misuse this product is positioned against; defaults should make that the harder path.
+
+**Action label.** A revoked share link is described to admins as "stop accepting new requests" rather than "revoke." In v1 link revocation does *not* cascade to pending downstream invitations (that's a v2 feature); calling the action "revoke" would mislead admins into thinking it does. The internal terminology in code (`revoked_at`, `mark_share_link_revoked`) is unchanged — only the UI label is adjusted.
 
 **Server functions** (`#[server]`) are used for every state-changing action. Server-side errors return `Result` via Dioxus's standard pattern; client renders inline error states.
 
