@@ -8,7 +8,11 @@ const ALPHABET: &[u8; 62] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// 16-character base62 secret used in share-link URLs.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq`/`Eq` are derived for struct equality (e.g. test assertions on
+/// records that contain a `Slug`); use [`Slug::ct_eq`] when comparing a
+/// user-supplied slug against a stored one to avoid timing-based enumeration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Slug(String);
 
