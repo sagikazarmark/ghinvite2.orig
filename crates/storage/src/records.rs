@@ -131,6 +131,53 @@ impl ShareLinkRow {
     }
 }
 
+/// Flat row shape for `share_links LEFT JOIN share_link_repos` queries.
+/// Splits into a `ShareLinkRow` plus optional repo fields via [`Self::split`].
+#[derive(FromRow, Debug)]
+pub struct ShareLinkJoinRow {
+    pub id: String,
+    pub slug: String,
+    pub installation_id: i64,
+    pub account_id: i64,
+    pub created_by: i64,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub max_uses: Option<i64>,
+    pub uses_count: i64,
+    pub permission: String,
+    pub approval_required: i64,
+    pub internal_note: Option<String>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_by: Option<i64>,
+    pub repo_id: Option<i64>,
+    pub repo_full_name: Option<String>,
+}
+
+impl ShareLinkJoinRow {
+    pub fn split(self) -> (ShareLinkRow, Option<i64>, Option<String>) {
+        (
+            ShareLinkRow {
+                id: self.id,
+                slug: self.slug,
+                installation_id: self.installation_id,
+                account_id: self.account_id,
+                created_by: self.created_by,
+                created_at: self.created_at,
+                expires_at: self.expires_at,
+                max_uses: self.max_uses,
+                uses_count: self.uses_count,
+                permission: self.permission,
+                approval_required: self.approval_required,
+                internal_note: self.internal_note,
+                revoked_at: self.revoked_at,
+                revoked_by: self.revoked_by,
+            },
+            self.repo_id,
+            self.repo_full_name,
+        )
+    }
+}
+
 #[derive(FromRow, Debug)]
 pub struct ShareLinkRepoRow {
     pub share_link_id: String,

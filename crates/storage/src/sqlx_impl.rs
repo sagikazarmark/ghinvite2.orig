@@ -72,6 +72,33 @@ impl SqlxStorage {
 /// using the underlying *column*, not the index name. We pattern-match on
 /// table.column pairs to identify which constraint fired and fall back to
 /// `default` for primary-key collisions and other unique violations.
+/// Collapse a `LEFT JOIN share_links × share_link_repos` result set into at most
+/// one [`ShareLink`]. Returns `None` if the join produced zero rows.
+fn group_one_share_link(
+    rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)>,
+) -> Result<Option<ShareLink>> {
+    let mut iter = rows.into_iter();
+    let Some((row, first_repo_id, first_repo_name)) = iter.next() else {
+        return Ok(None);
+    };
+    let mut repos = Vec::new();
+    if let (Some(rid), Some(name)) = (first_repo_id, first_repo_name) {
+        repos.push(domain::ShareLinkRepo {
+            repo_id: rid as u64,
+            repo_full_name: name,
+        });
+    }
+    for (_, repo_id, repo_full_name) in iter {
+        if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
+            repos.push(domain::ShareLinkRepo {
+                repo_id: rid as u64,
+                repo_full_name: name,
+            });
+        }
+    }
+    Ok(Some(row.try_into_domain(repos)?))
+}
+
 fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
     let m = db.message();
     if m.contains("share_links.slug") {
@@ -230,25 +257,162 @@ impl Storage for SqlxStorage {
         .await?;
         Ok(row.map(|r| r.into_domain()))
     }
-    async fn insert_share_link(&self, _link: &ShareLink) -> Result<()> {
-        unimplemented!("Task 18")
+    async fn insert_share_link(&self, link: &ShareLink) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r#"
+            INSERT INTO share_links
+              (id, slug, installation_id, account_id, created_by, created_at, expires_at,
+               max_uses, uses_count, permission, approval_required, internal_note,
+               revoked_at, revoked_by)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+        )
+        .bind(link.id.to_string())
+        .bind(link.slug.as_str())
+        .bind(u64_to_i64(link.installation_id))
+        .bind(u64_to_i64(link.account_id))
+        .bind(u64_to_i64(link.created_by))
+        .bind(link.created_at)
+        .bind(link.expires_at)
+        .bind(link.max_uses.map(i64::from))
+        .bind(i64::from(link.uses_count))
+        .bind(link.permission.to_string())
+        .bind(if link.approval_required { 1_i64 } else { 0 })
+        .bind(link.internal_note.as_deref())
+        .bind(link.revoked_at)
+        .bind(link.revoked_by.map(u64_to_i64))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => {
+                Error::Conflict(classify_unique(&*db, ConflictKind::DuplicateId))
+            }
+            other => Error::Database(other),
+        })?;
+
+        for repo in &link.repos {
+            sqlx::query(
+                r#"INSERT INTO share_link_repos (share_link_id, repo_id, repo_full_name)
+                   VALUES (?1, ?2, ?3)"#,
+            )
+            .bind(link.id.to_string())
+            .bind(u64_to_i64(repo.repo_id))
+            .bind(&repo.repo_full_name)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
+
     async fn mark_share_link_revoked(
         &self,
-        _id: ShareLinkId,
-        _by_user: u64,
-        _when: DateTime<Utc>,
+        id: ShareLinkId,
+        by_user: u64,
+        when: DateTime<Utc>,
     ) -> Result<()> {
-        unimplemented!("Task 18")
+        let res = sqlx::query(
+            r#"UPDATE share_links SET revoked_at = ?1, revoked_by = ?2
+               WHERE id = ?3 AND revoked_at IS NULL"#,
+        )
+        .bind(when)
+        .bind(u64_to_i64(by_user))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
-    async fn get_share_link_by_id(&self, _id: ShareLinkId) -> Result<Option<ShareLink>> {
-        unimplemented!("Task 18")
+
+    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>> {
+        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+            r#"
+                SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
+                       l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
+                       l.internal_note, l.revoked_at, l.revoked_by,
+                       r.repo_id, r.repo_full_name
+                FROM share_links l
+                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                WHERE l.id = ?1
+                ORDER BY r.repo_id
+                "#,
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
     }
-    async fn get_share_link_by_slug(&self, _slug: &str) -> Result<Option<ShareLink>> {
-        unimplemented!("Task 18")
+
+    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>> {
+        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+            r#"
+                SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
+                       l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
+                       l.internal_note, l.revoked_at, l.revoked_by,
+                       r.repo_id, r.repo_full_name
+                FROM share_links l
+                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                WHERE l.slug = ?1
+                ORDER BY r.repo_id
+                "#,
+        )
+        .bind(slug)
+        .fetch_all(&self.pool)
+        .await?;
+        group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
     }
-    async fn list_share_links_for_account(&self, _account_id: u64) -> Result<Vec<ShareLink>> {
-        unimplemented!("Task 18")
+
+    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
+        use std::collections::BTreeMap;
+
+        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+            r#"
+                SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
+                       l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
+                       l.internal_note, l.revoked_at, l.revoked_by,
+                       r.repo_id, r.repo_full_name
+                FROM share_links l
+                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                WHERE l.account_id = ?1
+                ORDER BY l.created_at DESC, l.id, r.repo_id
+                "#,
+        )
+        .bind(u64_to_i64(account_id))
+        .fetch_all(&self.pool)
+        .await?;
+        let rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)> =
+            rows.into_iter().map(|j| j.split()).collect();
+
+        // Preserve the SQL ordering (created_at DESC, id) by tracking insertion order.
+        let mut order: Vec<String> = Vec::new();
+        let mut by_link: BTreeMap<
+            String,
+            (crate::records::ShareLinkRow, Vec<domain::ShareLinkRepo>),
+        > = BTreeMap::new();
+        for (link_row, repo_id, repo_full_name) in rows {
+            let key = link_row.id.clone();
+            let entry = by_link.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                (link_row, Vec::new())
+            });
+            if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
+                entry.1.push(domain::ShareLinkRepo {
+                    repo_id: rid as u64,
+                    repo_full_name: name,
+                });
+            }
+        }
+
+        order
+            .into_iter()
+            .map(|k| {
+                let (row, repos) = by_link.remove(&k).expect("inserted above");
+                row.try_into_domain(repos)
+            })
+            .collect()
     }
     async fn insert_invitation_request_and_increment_uses(
         &self,
@@ -466,6 +630,167 @@ mod tests {
             avatar_url: Some(format!("https://example.test/{login}.png")),
             last_seen_at: dt("2026-05-04T12:00:00Z"),
         }
+    }
+
+    pub(crate) fn slug_with_seed(seed: u64) -> domain::Slug {
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
+        domain::Slug::generate(&mut rng)
+    }
+
+    pub(crate) fn sample_link(
+        account_id: u64,
+        installation_id: u64,
+        created_by: u64,
+        slug_seed: u64,
+    ) -> ShareLink {
+        use domain::{Permission, ShareLinkRepo};
+        ShareLink {
+            id: ShareLinkId::new(),
+            slug: slug_with_seed(slug_seed),
+            installation_id,
+            account_id,
+            created_by,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: None,
+            max_uses: Some(5),
+            uses_count: 0,
+            permission: Permission::Push,
+            approval_required: true,
+            internal_note: Some("for the contractor".into()),
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![
+                ShareLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                },
+                ShareLinkRepo {
+                    repo_id: 11,
+                    repo_full_name: "acme/web".into(),
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_and_get_share_link_round_trips_with_repos() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+
+        let link = sample_link(100, 1, 7, 1);
+        s.insert_share_link(&link).await.unwrap();
+
+        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        assert_eq!(got, link);
+
+        let by_slug = s
+            .get_share_link_by_slug(link.slug.as_str())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_slug.id, link.id);
+    }
+
+    #[tokio::test]
+    async fn share_link_slug_is_unique() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+
+        let a = sample_link(100, 1, 7, 1);
+        let mut b = sample_link(100, 1, 7, 1); // same seed → same slug
+        b.id = ShareLinkId::new();
+        s.insert_share_link(&a).await.unwrap();
+        let err = s.insert_share_link(&b).await.unwrap_err();
+        assert!(
+            matches!(err, Error::Conflict(ConflictKind::DuplicateSlug)),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoke_marks_revoked_at_and_by() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        let link = sample_link(100, 1, 7, 2);
+        s.insert_share_link(&link).await.unwrap();
+
+        s.mark_share_link_revoked(link.id, 7, dt("2026-05-04T13:00:00Z"))
+            .await
+            .unwrap();
+
+        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        assert_eq!(got.revoked_by, Some(7));
+        assert_eq!(got.revoked_at, Some(dt("2026-05-04T13:00:00Z")));
+
+        // Idempotent revoke returns NotFound second time:
+        let err = s
+            .mark_share_link_revoked(link.id, 7, dt("2026-05-04T14:00:00Z"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[tokio::test]
+    async fn list_share_links_for_account_returns_in_descending_created_at() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+
+        let mut older = sample_link(100, 1, 7, 3);
+        older.created_at = dt("2026-05-01T00:00:00Z");
+
+        let mut newer = sample_link(100, 1, 7, 4);
+        newer.created_at = dt("2026-05-04T00:00:00Z");
+
+        s.insert_share_link(&older).await.unwrap();
+        s.insert_share_link(&newer).await.unwrap();
+
+        let list = s.list_share_links_for_account(100).await.unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, newer.id);
+        assert_eq!(list[1].id, older.id);
+    }
+
+    #[tokio::test]
+    async fn list_returns_link_with_no_repos_as_empty_vec() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+
+        let mut link = sample_link(100, 1, 7, 5);
+        link.repos.clear();
+        s.insert_share_link(&link).await.unwrap();
+
+        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        assert!(got.repos.is_empty());
+
+        let list = s.list_share_links_for_account(100).await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].repos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn share_link_with_unknown_installation_fails() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        // installation_id 999 does not exist → FK violation
+        let link = sample_link(100, 999, 7, 6);
+        let err = s.insert_share_link(&link).await.unwrap_err();
+        assert!(matches!(err, Error::Database(_)), "got {err:?}");
     }
 
     #[tokio::test]
