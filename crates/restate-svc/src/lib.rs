@@ -25,3 +25,23 @@ pub(crate) mod test_support;
 // Re-exports filled in as each module gains its public types:
 pub use error::{HandlerError, Result};
 pub use state::AppState;
+
+use restate_sdk::endpoint::Endpoint;
+
+/// Build a fully-bound Restate endpoint with all five ghinvite services.
+/// Plan 7's Workers `#[event(fetch)]` calls this once per cold start.
+pub fn build_endpoint(state: AppState) -> Endpoint {
+    use github_invitation::GithubInvitation as _;
+    use installation::Installation as _;
+    use invitation_request::InvitationRequest as _;
+    use reconcile::Reconcile as _;
+    use share_link::ShareLink as _;
+
+    Endpoint::builder()
+        .bind(installation::InstallationImpl { state: state.clone() }.serve())
+        .bind(share_link::ShareLinkImpl { state: state.clone() }.serve())
+        .bind(invitation_request::InvitationRequestImpl { state: state.clone() }.serve())
+        .bind(github_invitation::GithubInvitationImpl { state: state.clone() }.serve())
+        .bind(reconcile::ReconcileImpl { state }.serve())
+        .build()
+}
