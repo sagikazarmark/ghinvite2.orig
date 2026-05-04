@@ -530,29 +530,102 @@ impl Storage for SqlxStorage {
         .await?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
-    async fn insert_github_invitation(&self, _invitation: &GithubInvitation) -> Result<()> {
-        unimplemented!("Task 20")
+    async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO github_invitations
+              (id, invitation_request_id, repo_id, github_invitation_id, state, error_message, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+        )
+        .bind(invitation.id.to_string())
+        .bind(invitation.invitation_request_id.to_string())
+        .bind(u64_to_i64(invitation.repo_id))
+        .bind(invitation.github_invitation_id.map(u64_to_i64))
+        .bind(invitation.state.to_string())
+        .bind(invitation.error_message.as_deref())
+        .bind(invitation.created_at)
+        .bind(invitation.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.is_unique_violation() => {
+                Error::Conflict(classify_unique(&*db, ConflictKind::DuplicateId))
+            }
+            other => Error::Database(other),
+        })?;
+        Ok(())
     }
-    async fn update_github_invitation(&self, _update: &GithubInvitationUpdate) -> Result<()> {
-        unimplemented!("Task 20")
+
+    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
+        let res = sqlx::query(
+            r#"UPDATE github_invitations
+               SET state = ?1, github_invitation_id = COALESCE(?2, github_invitation_id),
+                   error_message = ?3, updated_at = ?4
+               WHERE id = ?5"#,
+        )
+        .bind(update.state.to_string())
+        .bind(update.github_invitation_id.map(u64_to_i64))
+        .bind(update.error_message.as_deref())
+        .bind(update.updated_at)
+        .bind(update.id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
+
     async fn get_github_invitation(
         &self,
-        _id: GithubInvitationId,
+        id: GithubInvitationId,
     ) -> Result<Option<GithubInvitation>> {
-        unimplemented!("Task 20")
+        let row: Option<crate::records::GithubInvitationRow> = sqlx::query_as(
+            r#"SELECT id, invitation_request_id, repo_id, github_invitation_id, state,
+                      error_message, created_at, updated_at
+               FROM github_invitations WHERE id = ?1"#,
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| r.try_into_domain()).transpose()
     }
+
     async fn get_github_invitation_by_github_id(
         &self,
-        _github_id: u64,
+        github_id: u64,
     ) -> Result<Option<GithubInvitation>> {
-        unimplemented!("Task 20")
+        let row: Option<crate::records::GithubInvitationRow> = sqlx::query_as(
+            r#"SELECT id, invitation_request_id, repo_id, github_invitation_id, state,
+                      error_message, created_at, updated_at
+               FROM github_invitations WHERE github_invitation_id = ?1"#,
+        )
+        .bind(u64_to_i64(github_id))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| r.try_into_domain()).transpose()
     }
+
     async fn list_pending_github_invitations_for_installation(
         &self,
-        _installation_id: u64,
+        installation_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        unimplemented!("Task 20")
+        // Cross-join via the request → link → installation_id chain.
+        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
+            r#"SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id, g.state,
+                      g.error_message, g.created_at, g.updated_at
+               FROM github_invitations g
+               JOIN invitation_requests r ON r.id = g.invitation_request_id
+               JOIN share_links l ON l.id = r.share_link_id
+               WHERE l.installation_id = ?1
+                 AND g.state IN ('sending', 'sent')
+               ORDER BY g.created_at"#,
+        )
+        .bind(u64_to_i64(installation_id))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
     async fn audit(&self, _event: &AuditEvent) -> Result<()> {
         unimplemented!("Task 21")
@@ -1055,6 +1128,122 @@ mod tests {
         let pending_b = s.list_pending_requests_for_account(200).await.unwrap();
         assert_eq!(pending_b.len(), 1);
         assert_eq!(pending_b[0].id, r_b.id);
+    }
+
+    pub(crate) fn sample_ginv(req_id: RequestId, repo_id: u64) -> GithubInvitation {
+        use domain::InvitationState;
+        GithubInvitation {
+            id: GithubInvitationId::new(),
+            invitation_request_id: req_id,
+            repo_id,
+            github_invitation_id: None,
+            state: InvitationState::Sending,
+            error_message: None,
+            created_at: dt("2026-05-04T13:00:00Z"),
+            updated_at: dt("2026-05-04T13:00:00Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_and_update_github_invitation() {
+        use domain::InvitationState;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7, 20);
+        s.insert_share_link(&link).await.unwrap();
+        let req = sample_request(link.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap();
+
+        let g = sample_ginv(req.id, 10);
+        s.insert_github_invitation(&g).await.unwrap();
+
+        s.update_github_invitation(&GithubInvitationUpdate {
+            id: g.id,
+            state: InvitationState::Sent,
+            github_invitation_id: Some(99999),
+            error_message: None,
+            updated_at: dt("2026-05-04T13:01:00Z"),
+        })
+        .await
+        .unwrap();
+
+        let got = s.get_github_invitation(g.id).await.unwrap().unwrap();
+        assert_eq!(got.state, InvitationState::Sent);
+        assert_eq!(got.github_invitation_id, Some(99999));
+        assert_eq!(got.updated_at, dt("2026-05-04T13:01:00Z"));
+
+        let by_gid = s
+            .get_github_invitation_by_github_id(99999)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_gid.id, g.id);
+    }
+
+    #[tokio::test]
+    async fn list_pending_for_installation_filters_state_and_installation() {
+        use domain::InvitationState;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.insert_installation(&sample_account(2, 200, "other"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+
+        let link_a = sample_link(100, 1, 7, 21);
+        s.insert_share_link(&link_a).await.unwrap();
+        let link_b = sample_link(200, 2, 7, 22);
+        s.insert_share_link(&link_b).await.unwrap();
+
+        let req_a = sample_request(link_a.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req_a)
+            .await
+            .unwrap();
+        let req_b = sample_request(link_b.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req_b)
+            .await
+            .unwrap();
+
+        let g_a_pending = sample_ginv(req_a.id, 10);
+        let mut g_a_done = sample_ginv(req_a.id, 11);
+        g_a_done.state = InvitationState::Accepted;
+        let g_b_pending = sample_ginv(req_b.id, 12);
+
+        s.insert_github_invitation(&g_a_pending).await.unwrap();
+        s.insert_github_invitation(&g_a_done).await.unwrap();
+        s.insert_github_invitation(&g_b_pending).await.unwrap();
+
+        let pending_inst_1 = s
+            .list_pending_github_invitations_for_installation(1)
+            .await
+            .unwrap();
+        assert_eq!(pending_inst_1.len(), 1);
+        assert_eq!(pending_inst_1[0].id, g_a_pending.id);
+
+        let pending_inst_2 = s
+            .list_pending_github_invitations_for_installation(2)
+            .await
+            .unwrap();
+        assert_eq!(pending_inst_2.len(), 1);
+        assert_eq!(pending_inst_2[0].id, g_b_pending.id);
+    }
+
+    #[tokio::test]
+    async fn github_invitation_with_unknown_request_fails() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        // No request exists → FK violation
+        let g = sample_ginv(RequestId::new(), 10);
+        let err = s.insert_github_invitation(&g).await.unwrap_err();
+        assert!(matches!(err, Error::Database(_)), "got {err:?}");
     }
 
     #[tokio::test]
