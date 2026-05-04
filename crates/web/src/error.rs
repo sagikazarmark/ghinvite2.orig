@@ -50,18 +50,26 @@ pub enum WebError {
 impl IntoResponse for WebError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
-            WebError::NotFound | WebError::Forbidden => (StatusCode::NOT_FOUND, "Not Found".to_string()),
+            WebError::NotFound | WebError::Forbidden => {
+                (StatusCode::NOT_FOUND, "Not Found".to_string())
+            }
             WebError::Unauthenticated => {
                 // Redirect to /login. axum's redirect helper makes this clean.
                 return axum::response::Redirect::to("/login").into_response();
             }
             WebError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             WebError::OAuth(msg) => (StatusCode::BAD_REQUEST, format!("OAuth error: {msg}")),
-            WebError::Session(msg) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Session error: {msg}")),
+            WebError::Session(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Session error: {msg}"),
+            ),
             WebError::Restate(msg) => (StatusCode::BAD_GATEWAY, format!("Restate error: {msg}")),
             WebError::Storage(_) | WebError::Github(_) | WebError::Internal(_) => {
                 tracing::error!(error = ?self, "internal error rendering response");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal Server Error".to_string(),
+                )
             }
         };
         (status, body).into_response()

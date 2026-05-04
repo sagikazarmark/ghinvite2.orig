@@ -14,8 +14,8 @@
 
 use crate::error::{Result, WebError};
 use reqwest::Client;
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
 /// Cloneable. The inner `Client` is itself cheap to clone (Arc internally).
@@ -53,10 +53,7 @@ impl RestateClient {
         let url = if key.is_empty() {
             format!("{}/{}/send/{}", self.ingress_base, service, method)
         } else {
-            format!(
-                "{}/{}/{}/{}/send",
-                self.ingress_base, service, key, method
-            )
+            format!("{}/{}/{}/{}/send", self.ingress_base, service, key, method)
         };
         let resp = self
             .client

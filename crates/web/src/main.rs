@@ -13,8 +13,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = WebConfig::for_local_dev();
 
     // Storage: in-memory sqlite (per-process). Plan 7 swaps in D1.
-    let storage: Arc<dyn storage::Storage> =
-        Arc::new(storage::SqlxStorage::in_memory().await?);
+    let storage: Arc<dyn storage::Storage> = Arc::new(storage::SqlxStorage::in_memory().await?);
 
     // GitHub transport: real reqwest. Local-dev OAuth only works if you
     // configure GHINVITE_GITHUB_CLIENT_ID / SECRET to point at a real GitHub
@@ -27,7 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restate = Arc::new(RestateClient::new(&config.restate_ingress)?);
 
     // Session store: a local sqlite database.
-    let session_pool = tower_sessions_sqlx_store::sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    let session_pool =
+        tower_sessions_sqlx_store::sqlx::SqlitePool::connect("sqlite::memory:").await?;
     let session_store = SqliteStore::new(session_pool);
     session_store.migrate().await?;
 

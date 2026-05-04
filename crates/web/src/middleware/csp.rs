@@ -9,8 +9,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Strict CSP for dashboard pages. Adjust if Plan 5 introduces external
 /// dependencies (CDN scripts, third-party fonts).
-pub const DASHBOARD_CSP: &str =
-    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+pub const DASHBOARD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
      img-src 'self' https://avatars.githubusercontent.com data:; \
      connect-src 'self'; \
      font-src 'self'; \

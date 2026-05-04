@@ -8,7 +8,7 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::get;
 use chrono::Utc;
-use github::oauth::{AuthorizeUrl, exchange_code, UserApiClient};
+use github::oauth::{AuthorizeUrl, UserApiClient, exchange_code};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::Deserialize;
@@ -24,10 +24,7 @@ pub fn router() -> Router<AppState> {
 
 /// Generate a CSRF state, stash it in the session, redirect to GitHub's
 /// authorize endpoint.
-async fn login(
-    State(state): State<AppState>,
-    tower: TowerSession,
-) -> Result<impl IntoResponse> {
+async fn login(State(state): State<AppState>, tower: TowerSession) -> Result<impl IntoResponse> {
     let csrf = generate_csrf_token();
     let mut session = session::load(&tower)
         .await
@@ -37,8 +34,8 @@ async fn login(
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
 
-    let authorize = AuthorizeUrl::build(&state.config.oauth, csrf, &[])
-        .map_err(WebError::Github)?;
+    let authorize =
+        AuthorizeUrl::build(&state.config.oauth, csrf, &[]).map_err(WebError::Github)?;
 
     Ok(Redirect::to(&authorize.url))
 }
@@ -82,8 +79,12 @@ async fn oauth_callback(
         return Err(WebError::OAuth(format!("{err}: {desc}")));
     }
 
-    let code = q.code.ok_or_else(|| WebError::BadRequest("missing 'code'".into()))?;
-    let supplied_state = q.state.ok_or_else(|| WebError::BadRequest("missing 'state'".into()))?;
+    let code = q
+        .code
+        .ok_or_else(|| WebError::BadRequest("missing 'code'".into()))?;
+    let supplied_state = q
+        .state
+        .ok_or_else(|| WebError::BadRequest("missing 'state'".into()))?;
 
     let mut session = session::load(&tower)
         .await

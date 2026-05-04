@@ -2,10 +2,10 @@
 //! Plan 6 fills in the recipient flow.
 
 use crate::state::AppState;
+use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
 
 pub fn router() -> Router<AppState> {
     Router::new()

@@ -45,10 +45,7 @@ where
         .merge(routes::dashboard::router())
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
-        .route(
-            "/static/styles.css",
-            axum::routing::get(serve_styles_css),
-        )
+        .route("/static/styles.css", axum::routing::get(serve_styles_css))
         .layer(session_layer)
         .with_state(state)
 }
@@ -57,9 +54,5 @@ async fn serve_styles_css() -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::response::IntoResponse;
     let css = include_str!("../assets/styles.built.css");
-    (
-        [(header::CONTENT_TYPE, "text/css")],
-        css,
-    )
-        .into_response()
+    ([(header::CONTENT_TYPE, "text/css")], css).into_response()
 }

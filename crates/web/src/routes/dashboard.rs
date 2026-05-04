@@ -2,10 +2,10 @@
 //! Plan 5 fills in the dashboard, link CRUD, approval queue, and settings.
 
 use crate::state::AppState;
+use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 
 pub fn router() -> Router<AppState> {
     Router::new()

@@ -4,10 +4,10 @@ use crate::session;
 use crate::state::AppState;
 use crate::views::home::HomePage;
 use crate::views::render::render;
+use axum::Router;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
-use axum::Router;
 use dioxus::prelude::*;
 use tower_sessions::Session as TowerSession;
 

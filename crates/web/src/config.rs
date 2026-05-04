@@ -53,8 +53,9 @@ impl WebConfig {
                         .unwrap_or_else(|_| "http://127.0.0.1:8787".into())
                 ),
             },
-            github_install_url: std::env::var("GHINVITE_GITHUB_INSTALL_URL")
-                .unwrap_or_else(|_| "https://github.com/apps/ghinvite-local/installations/new".into()),
+            github_install_url: std::env::var("GHINVITE_GITHUB_INSTALL_URL").unwrap_or_else(|_| {
+                "https://github.com/apps/ghinvite-local/installations/new".into()
+            }),
             cookie_secure: false,
         }
     }

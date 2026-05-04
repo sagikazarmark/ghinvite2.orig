@@ -12,7 +12,8 @@ use tower::ServiceExt;
 use web::{AppState, RestateClient, WebConfig, build_app};
 
 async fn build_app_with_mock(mock: MockTransport) -> axum::Router {
-    let storage: Arc<dyn storage::Storage> = Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
+    let storage: Arc<dyn storage::Storage> =
+        Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
     let transport: Arc<dyn github::HttpTransport> = Arc::new(mock);
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let state = AppState::new(storage, transport, restate, WebConfig::for_local_dev());
@@ -31,7 +32,8 @@ async fn signin_happy_path() {
             response: Response {
                 status: 200,
                 headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#.to_vec(),
+                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
+                    .to_vec(),
             },
         },
         Expectation::ok_json(
@@ -45,7 +47,12 @@ async fn signin_happy_path() {
     // Step 1: hit /login, capture the cookie + state.
     let resp1 = app
         .clone()
-        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
@@ -73,7 +80,9 @@ async fn signin_happy_path() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state_param}"))
+                .uri(format!(
+                    "/oauth/callback?code=test-code&state={state_param}"
+                ))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -92,7 +101,12 @@ async fn callback_csrf_mismatch_rejects() {
     // Hit /login first to create a session with a real CSRF.
     let resp1 = app
         .clone()
-        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let cookie = resp1
@@ -133,7 +147,8 @@ async fn signin_with_installation_id_logs_and_proceeds() {
             response: Response {
                 status: 200,
                 headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#.to_vec(),
+                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
+                    .to_vec(),
             },
         },
         Expectation::ok_json(
@@ -146,7 +161,12 @@ async fn signin_with_installation_id_logs_and_proceeds() {
 
     let resp1 = app
         .clone()
-        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     let cookie = resp1

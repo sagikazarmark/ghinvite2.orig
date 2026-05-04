@@ -11,7 +11,8 @@ use web::{AppState, RestateClient, WebConfig, build_app};
 
 async fn build_test_app() -> axum::Router {
     use github::mocks::MockTransport;
-    let storage: Arc<dyn storage::Storage> = Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
+    let storage: Arc<dyn storage::Storage> =
+        Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
     let transport: Arc<dyn github::HttpTransport> = Arc::new(MockTransport::scripted(vec![]));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let state = AppState::new(storage, transport, restate, WebConfig::for_local_dev());
@@ -23,7 +24,12 @@ async fn build_test_app() -> axum::Router {
 async fn health_returns_ok() {
     let app = build_test_app().await;
     let resp = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -35,7 +41,12 @@ async fn health_returns_ok() {
 async fn login_redirects_to_github_authorize() {
     let app = build_test_app().await;
     let resp = app
-        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -49,7 +60,12 @@ async fn login_redirects_to_github_authorize() {
 async fn install_redirects_to_install_url() {
     let app = build_test_app().await;
     let resp = app
-        .oneshot(Request::builder().uri("/install").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/install")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -61,7 +77,12 @@ async fn install_redirects_to_install_url() {
 async fn logout_clears_session_and_redirects_home() {
     let app = build_test_app().await;
     let resp = app
-        .oneshot(Request::builder().uri("/logout").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/logout")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
@@ -73,11 +94,21 @@ async fn logout_clears_session_and_redirects_home() {
 async fn static_styles_returns_css() {
     let app = build_test_app().await;
     let resp = app
-        .oneshot(Request::builder().uri("/static/styles.css").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/static/styles.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/css"));
 }
 
@@ -89,7 +120,12 @@ async fn home_returns_html() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(ct.contains("text/html"));
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
@@ -136,7 +172,11 @@ async fn invitation_routes_return_501() {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {path}");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "{method} {path}"
+        );
     }
 
     // Test the POST separately.

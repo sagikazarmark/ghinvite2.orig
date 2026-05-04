@@ -44,10 +44,10 @@ pub async fn check_admin(
     session: &mut Session,
     account_login: &str,
 ) -> Result<bool, WebError> {
-    if let Some(cached) = session.admin_checks.get(account_login) {
-        if Utc::now() - cached.checked_at < Duration::seconds(ADMIN_CACHE_TTL_SECS) {
-            return Ok(cached.is_admin);
-        }
+    if let Some(cached) = session.admin_checks.get(account_login)
+        && Utc::now() - cached.checked_at < Duration::seconds(ADMIN_CACHE_TTL_SECS)
+    {
+        return Ok(cached.is_admin);
     }
     let user_api = UserApiClient::new(state.github_transport.clone(), session.access_token.clone());
     let is_admin = match user_api.get_org_membership(account_login).await {

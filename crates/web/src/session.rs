@@ -43,7 +43,10 @@ pub async fn load(tower: &TowerSession) -> Result<Session, tower_sessions::sessi
 }
 
 /// Persist the session.
-pub async fn save(tower: &TowerSession, session: &Session) -> Result<(), tower_sessions::session::Error> {
+pub async fn save(
+    tower: &TowerSession,
+    session: &Session,
+) -> Result<(), tower_sessions::session::Error> {
     tower.insert(SESSION_KEY, session).await
 }
 
