@@ -21,6 +21,10 @@ pub struct WebConfig {
     /// Whether to set the `Secure` attribute on session cookies.
     /// Off for local-dev http; on for production https.
     pub cookie_secure: bool,
+    /// Raw bytes of the GitHub App webhook secret. Used by the webhook handler
+    /// to verify `X-Hub-Signature-256`. Loaded from Workers secrets in production;
+    /// empty in local dev (webhook delivery not expected locally without ngrok).
+    pub webhook_secret: Vec<u8>,
 }
 
 impl WebConfig {
@@ -57,6 +61,9 @@ impl WebConfig {
                 "https://github.com/apps/ghinvite-local/installations/new".into()
             }),
             cookie_secure: false,
+            webhook_secret: std::env::var("GHINVITE_WEBHOOK_SECRET")
+                .map(|s| s.into_bytes())
+                .unwrap_or_default(),
         }
     }
 }
