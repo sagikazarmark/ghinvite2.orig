@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/audit",
     "crates/storage",
+    "crates/storage-d1",
     "crates/github",
     "crates/restate-svc",
     "crates/web",
@@ -54,6 +55,7 @@ wiremock = "0.6"
 domain = { path = "crates/domain" }
 audit = { path = "crates/audit" }
 storage = { path = "crates/storage" }
+storage-d1 = { path = "crates/storage-d1" }
 github = { path = "crates/github" }
 restate-svc = { path = "crates/restate-svc" }
 web = { path = "crates/web" }
