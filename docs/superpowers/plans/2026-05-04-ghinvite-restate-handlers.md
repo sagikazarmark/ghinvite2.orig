@@ -164,14 +164,14 @@ For now, comment out the `pub use` re-exports at the bottom of `lib.rs`:
 // pub use state::AppState;
 ```
 
-- [ ] **Step 5: Create `crates/restate-svc/README.md`** (placeholder; filled by Task 22)
+- [ ] **Step 5: Create `crates/restate-svc/README.md`** (placeholder; filled by Task 20)
 
 ```markdown
 # crates/restate-svc
 
 Restate handler services for ghinvite. See Plan 3 in `docs/superpowers/plans/`.
 
-Local-dev guide will be filled in by Task 22.
+Local-dev guide will be filled in by Task 20.
 ```
 
 - [ ] **Step 6: Verify the crate compiles**

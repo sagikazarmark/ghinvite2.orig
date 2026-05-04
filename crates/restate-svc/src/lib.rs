@@ -18,7 +18,7 @@ pub mod reconcile;
 pub mod share_link;
 pub mod state;
 
-#[cfg(any(test))]
+#[cfg(test)]
 pub(crate) mod test_support;
 
 // Re-exports filled in as each module gains its public types:
