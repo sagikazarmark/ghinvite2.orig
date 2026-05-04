@@ -15,5 +15,9 @@
     rust = {
       enable = true;
     };
+    javascript = {
+      enable = true;
+      package = pkgs.nodejs_20;
+    };
   };
 }
