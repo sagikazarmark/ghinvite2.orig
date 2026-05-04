@@ -27,7 +27,7 @@ impl Method {
 #[derive(Clone, Debug)]
 pub struct Request {
     pub method: Method,
-    /// Absolute URL. Use [`Request::with_path`] to build relative to a base.
+    /// Absolute URL.
     pub url: String,
     /// Sorted by key for deterministic equality in tests.
     pub headers: BTreeMap<String, String>,
@@ -83,12 +83,12 @@ impl Response {
         if (200..300).contains(&self.status) {
             Ok(self)
         } else {
-            let body = String::from_utf8_lossy(&self.body).to_string();
-            // Truncate to keep error logs sane.
-            let truncated = if body.len() > 4096 {
-                format!("{}…", &body[..4096])
+            // Truncate to keep error logs sane. Slicing bytes (not the lossy String)
+            // avoids any chance of mid-codepoint panic.
+            let truncated = if self.body.len() > 4096 {
+                format!("{}…", String::from_utf8_lossy(&self.body[..4096]))
             } else {
-                body
+                String::from_utf8_lossy(&self.body).to_string()
             };
             Err(Error::Status {
                 status: self.status,
@@ -117,6 +117,7 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
     pub fn new() -> Result<Self> {
         let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| Error::Transport(format!("building reqwest client: {e}")))?;
         Ok(Self { client })
@@ -237,5 +238,27 @@ mod tests {
         };
         let err = r.json::<serde_json::Value>().unwrap_err();
         assert!(matches!(err, Error::Decode(_)));
+    }
+
+    #[test]
+    fn response_ensure_success_truncates_safely_across_utf8_boundary() {
+        // Construct a body where byte 4096 sits in the middle of a multi-byte UTF-8 codepoint.
+        // 'a' is 1 byte; '€' (U+20AC) encodes as 3 bytes (E2 82 AC).
+        // 4095 'a's + '€' puts byte indexes 4095, 4096, 4097 inside the euro sign;
+        // the byte slice [..4096] therefore lands mid-codepoint and the OLD code panicked.
+        let mut body = vec![b'a'; 4095];
+        body.extend_from_slice("€".as_bytes()); // bytes 4095..4098
+        body.extend_from_slice(b"trailing"); // bytes 4098..
+        let r = Response { status: 500, headers: BTreeMap::new(), body };
+        // Must NOT panic. Must produce an Error::Status with body length <= 4096 chars
+        // of input plus the ellipsis marker.
+        let err = r.ensure_success().unwrap_err();
+        match err {
+            Error::Status { status, body } => {
+                assert_eq!(status, 500);
+                assert!(body.ends_with('…'), "expected ellipsis suffix, got {body:?}");
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
     }
 }
