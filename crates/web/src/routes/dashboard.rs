@@ -218,7 +218,7 @@ async fn create_link(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: format!("Failed to create link: {e}"),
+                    message: "Failed to create link. Please try again.".into(),
                 },
             )
             .await;
@@ -322,7 +322,7 @@ async fn revoke_link(
             &admin.tower,
             session::Flash {
                 level: session::FlashLevel::Error,
-                message: format!("Failed to revoke link: {e}"),
+                message: "Failed to revoke link. Please try again.".into(),
             },
         )
         .await;
@@ -450,7 +450,7 @@ async fn approve_request(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: format!("Failed to approve request: {e}"),
+                    message: "Failed to approve request. Please try again.".into(),
                 },
             )
             .await;
@@ -482,6 +482,7 @@ async fn decline_request(
     };
     let _ = link;
 
+    // v1: no reason field in the form; v1.1 will add a textarea.
     let input = serde_json::json!({
         "Decline": {
             "decided_by": admin.session.user_id,
@@ -515,7 +516,7 @@ async fn decline_request(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: format!("Failed to decline request: {e}"),
+                    message: "Failed to decline request. Please try again.".into(),
                 },
             )
             .await;
@@ -545,6 +546,6 @@ async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
 async fn stub() -> impl IntoResponse {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "Plan 5 will fill in the rest of the dashboard routes.",
+        "Audit log is not yet implemented.",
     )
 }
