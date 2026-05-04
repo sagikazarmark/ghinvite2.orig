@@ -5,7 +5,7 @@ use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;
-use axum::response::{Html, IntoResponse};
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
@@ -49,11 +49,44 @@ async fn landing(
 }
 
 async fn request_form(
-    State(_state): State<AppState>,
-    _tower: TowerSession,
-    axum::extract::Path(_slug): axum::extract::Path<String>,
+    State(state): State<AppState>,
+    tower: TowerSession,
+    axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    (axum::http::StatusCode::NOT_IMPLEMENTED, "TODO Task 6")
+    let session = session::load(&tower).await.unwrap_or_default();
+    if !session.is_authenticated() {
+        return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
+    }
+    let now = Utc::now();
+    let link = match state.storage.get_share_link_by_slug(&slug).await {
+        Ok(Some(l)) if l.is_active(now) => l,
+        _ => return crate::error::WebError::NotFound.into_response(),
+    };
+
+    // Redirect to pending if requester already has a pending request (prevents duplicate Restate workflows).
+    if let Ok(requests) = state.storage.list_requests_for_link(link.id).await {
+        if let Some(existing) = requests
+            .iter()
+            .find(|r| r.requester_id == session.user_id && r.state == domain::RequestState::Pending)
+        {
+            return Redirect::to(&format!("/i/{slug}/pending/{}", existing.id)).into_response();
+        }
+    }
+
+    let request_id = domain::RequestId::new();
+    let flash = session::take_flash(&tower).await.unwrap_or(None);
+    let signed_in_login = session.login.clone();
+    let request_id_str = request_id.to_string();
+    let html = render(move || rsx! {
+        crate::views::invitation::RequestFormPage {
+            slug: slug.clone(),
+            link: link.clone(),
+            signed_in_login: signed_in_login.clone(),
+            flash: flash.clone(),
+            request_id: request_id_str.clone(),
+        }
+    });
+    Html(html).into_response()
 }
 
 async fn submit_request(
