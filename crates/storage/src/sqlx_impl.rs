@@ -49,6 +49,21 @@ impl SqlxStorage {
         Ok(s)
     }
 
+    /// Test/debug-only: read all audit events for an account in occurrence order.
+    /// Not on the `Storage` trait because audit reads are a v1.1 feature.
+    #[cfg(any(test, feature = "test-suite"))]
+    pub async fn debug_list_audit(&self, account_id: u64) -> Result<Vec<AuditEvent>> {
+        let rows: Vec<crate::records::AuditEventRow> = sqlx::query_as(
+            r#"SELECT id, account_id, occurred_at, event_type, actor_kind, actor_id,
+                      target_kind, target_id, metadata, request_id
+               FROM audit_events WHERE account_id = ?1 ORDER BY occurred_at, id"#,
+        )
+        .bind(u64_to_i64(account_id))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
+    }
+
     /// Run the embedded migrations.
     pub async fn run_migrations(&self) -> Result<()> {
         // sqlx::migrate! is a proc-macro that requires a string LITERAL — not a const.
@@ -627,8 +642,34 @@ impl Storage for SqlxStorage {
         .await?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
-    async fn audit(&self, _event: &AuditEvent) -> Result<()> {
-        unimplemented!("Task 21")
+    async fn audit(&self, event: &AuditEvent) -> Result<()> {
+        let metadata_json = if event.metadata.is_null() {
+            None
+        } else {
+            Some(serde_json::to_string(&event.metadata).expect("audit metadata serializes"))
+        };
+
+        sqlx::query(
+            r#"
+            INSERT INTO audit_events
+              (id, account_id, occurred_at, event_type, actor_kind, actor_id,
+               target_kind, target_id, metadata, request_id)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+        )
+        .bind(event.id.to_string())
+        .bind(u64_to_i64(event.account_id))
+        .bind(event.occurred_at)
+        .bind(event.event_type.as_str())
+        .bind(event.actor_kind.to_string())
+        .bind(event.actor_id.map(u64_to_i64))
+        .bind(event.target_kind.to_string())
+        .bind(&event.target_id)
+        .bind(metadata_json)
+        .bind(event.request_id.as_deref())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
@@ -1244,6 +1285,69 @@ mod tests {
         let g = sample_ginv(RequestId::new(), 10);
         let err = s.insert_github_invitation(&g).await.unwrap_err();
         assert!(matches!(err, Error::Database(_)), "got {err:?}");
+    }
+
+    pub(crate) fn sample_audit(account_id: u64, event_type: audit::EventType, target: &str) -> AuditEvent {
+        use audit::{ActorKind, TargetKind};
+        use domain::AuditEventId;
+        AuditEvent {
+            id: AuditEventId::new(),
+            account_id,
+            occurred_at: dt("2026-05-04T13:00:00Z"),
+            event_type,
+            actor_kind: ActorKind::User,
+            actor_id: Some(7),
+            target_kind: TargetKind::ShareLink,
+            target_id: target.into(),
+            metadata: serde_json::json!({"k": "v"}),
+            request_id: Some("inv-abc".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_append_then_read_back() {
+        use audit::EventType;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let e1 = sample_audit(100, EventType::ShareLinkCreated, "01HFLINK1");
+        let e2 = AuditEvent {
+            occurred_at: dt("2026-05-04T13:01:00Z"),
+            ..sample_audit(100, EventType::ShareLinkRevoked, "01HFLINK1")
+        };
+        s.audit(&e1).await.unwrap();
+        s.audit(&e2).await.unwrap();
+
+        let got = s.debug_list_audit(100).await.unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], e1);
+        assert_eq!(got[1], e2);
+    }
+
+    #[tokio::test]
+    async fn audit_scoped_per_account() {
+        use audit::EventType;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.audit(&sample_audit(100, EventType::ShareLinkCreated, "x"))
+            .await
+            .unwrap();
+        s.audit(&sample_audit(200, EventType::ShareLinkCreated, "y"))
+            .await
+            .unwrap();
+
+        let a = s.debug_list_audit(100).await.unwrap();
+        let b = s.debug_list_audit(200).await.unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn audit_metadata_null_is_preserved() {
+        use audit::EventType;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let mut e = sample_audit(100, EventType::ShareLinkCreated, "x");
+        e.metadata = serde_json::Value::Null;
+        s.audit(&e).await.unwrap();
+        let got = s.debug_list_audit(100).await.unwrap();
+        assert_eq!(got[0].metadata, serde_json::Value::Null);
     }
 
     #[tokio::test]
