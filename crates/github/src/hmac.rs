@@ -31,8 +31,7 @@ pub fn verify_signature_256(secret: &[u8], raw_body: &[u8], header_value: &str) 
         return false;
     }
 
-    let mut mac = HmacSha256::new_from_slice(secret)
-        .expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(raw_body);
     let computed = mac.finalize().into_bytes();
 
@@ -43,7 +42,7 @@ pub fn verify_signature_256(secret: &[u8], raw_body: &[u8], header_value: &str) 
 /// any non-hex character. Implemented locally so we don't drag in `hex` for one
 /// callsite.
 fn decode_lowercase_hex(s: &str) -> Result<Vec<u8>, ()> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(());
     }
     let bytes = s.as_bytes();
@@ -91,7 +90,11 @@ mod tests {
     fn wrong_secret_fails() {
         let secret = b"webhook-secret";
         let body = br#"{"action":"created"}"#;
-        assert!(!verify_signature_256(b"other-secret", body, &sign(secret, body)));
+        assert!(!verify_signature_256(
+            b"other-secret",
+            body,
+            &sign(secret, body)
+        ));
     }
 
     #[test]

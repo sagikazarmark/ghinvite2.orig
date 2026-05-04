@@ -96,8 +96,7 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
             .unwrap_or("");
         return Err(Error::OAuth(format!("{error_code}: {desc}")));
     }
-    serde_json::from_value(value)
-        .map_err(|e| Error::Decode(format!("oauth token response: {e}")))
+    serde_json::from_value(value).map_err(|e| Error::Decode(format!("oauth token response: {e}")))
 }
 
 /// User-token API client. Constructed per signed-in session (the access token
@@ -121,7 +120,11 @@ impl UserApiClient {
 
     /// Construct against an alternate base URL (used by `MockTransport` /
     /// `wiremock` tests). Path is appended verbatim — no trailing slash.
-    pub fn with_base(transport: Arc<dyn HttpTransport>, user_token: String, base_url: String) -> Self {
+    pub fn with_base(
+        transport: Arc<dyn HttpTransport>,
+        user_token: String,
+        base_url: String,
+    ) -> Self {
         Self {
             transport,
             user_token,
@@ -193,11 +196,17 @@ mod url_tests {
     #[test]
     fn authorize_url_includes_required_params() {
         let a = AuthorizeUrl::build(&cfg(), "csrf-token-123", &[]).unwrap();
-        assert!(a.url.starts_with("https://github.com/login/oauth/authorize?"));
+        assert!(
+            a.url
+                .starts_with("https://github.com/login/oauth/authorize?")
+        );
         assert!(a.url.contains("client_id=Iv1.abc"));
         assert!(a.url.contains("scope=read%3Auser"));
         assert!(a.url.contains("state=csrf-token-123"));
-        assert!(a.url.contains("redirect_uri=https%3A%2F%2Fexample.test%2Foauth%2Fcallback"));
+        assert!(
+            a.url
+                .contains("redirect_uri=https%3A%2F%2Fexample.test%2Foauth%2Fcallback")
+        );
         assert_eq!(a.state, "csrf-token-123");
     }
 
@@ -240,7 +249,8 @@ mod exchange_tests {
             response: Response {
                 status: 200,
                 headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#.to_vec(),
+                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
+                    .to_vec(),
             },
         }]);
         let token = exchange_code(&mock, &cfg(), "auth-code-1").await.unwrap();
@@ -299,7 +309,10 @@ mod exchange_tests {
             },
         }]);
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
-        assert!(matches!(err, Error::Decode(_)), "expected Decode, got {err:?}");
+        assert!(
+            matches!(err, Error::Decode(_)),
+            "expected Decode, got {err:?}"
+        );
         mock.assert_exhausted();
     }
 
@@ -317,7 +330,10 @@ mod exchange_tests {
             },
         }]);
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
-        assert!(matches!(err, Error::Decode(_)), "expected Decode, got {err:?}");
+        assert!(
+            matches!(err, Error::Decode(_)),
+            "expected Decode, got {err:?}"
+        );
         mock.assert_exhausted();
     }
 }
@@ -370,7 +386,10 @@ mod user_api_tests {
             "https://api.github.test/user/memberships/orgs/acme%20corp",
             serde_json::json!({"role": "admin", "state": "active"}),
         )]);
-        let m = client_with(mock).get_org_membership("acme corp").await.unwrap();
+        let m = client_with(mock)
+            .get_org_membership("acme corp")
+            .await
+            .unwrap();
         assert_eq!(m.role, "admin");
         assert_eq!(m.state, "active");
     }
@@ -382,7 +401,10 @@ mod user_api_tests {
             "https://api.github.test/user/memberships/orgs/private",
             404,
         )]);
-        let err = client_with(mock).get_org_membership("private").await.unwrap_err();
+        let err = client_with(mock)
+            .get_org_membership("private")
+            .await
+            .unwrap_err();
         assert_eq!(err.status(), Some(404));
     }
 }

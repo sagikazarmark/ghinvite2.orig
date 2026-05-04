@@ -108,7 +108,8 @@ mod tests {
 
     #[test]
     fn collaborator_invite_decodes_id_only() {
-        let raw = br#"{"id":98765,"invitee":{"id":42,"login":"x"},"repository":{"full_name":"a/b"}}"#;
+        let raw =
+            br#"{"id":98765,"invitee":{"id":42,"login":"x"},"repository":{"full_name":"a/b"}}"#;
         let inv: GhCollaboratorInvite = serde_json::from_slice(raw).unwrap();
         assert_eq!(inv.id, 98765);
     }

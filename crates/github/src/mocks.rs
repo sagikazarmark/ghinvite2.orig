@@ -98,18 +98,19 @@ impl MockTransport {
     /// Asserts that the script has been fully consumed.
     pub fn assert_exhausted(&self) {
         let n = self.remaining();
-        assert_eq!(n, 0, "MockTransport script not exhausted: {n} expectations remaining");
+        assert_eq!(
+            n, 0,
+            "MockTransport script not exhausted: {n} expectations remaining"
+        );
     }
 }
 
 #[async_trait]
 impl HttpTransport for MockTransport {
     async fn send(&self, request: Request) -> Result<Response> {
-        let next = self
-            .inner
-            .lock()
-            .pop()
-            .unwrap_or_else(|| panic!("MockTransport: script exhausted, got unexpected request {request:?}"));
+        let next = self.inner.lock().pop().unwrap_or_else(|| {
+            panic!("MockTransport: script exhausted, got unexpected request {request:?}")
+        });
 
         if next.method != request.method {
             panic!(
@@ -174,8 +175,12 @@ mod tests {
     #[should_panic(expected = "missing required header")]
     async fn fails_when_required_header_absent() {
         let mock = MockTransport::scripted(vec![
-            Expectation::ok_json(Method::Get, "https://api.github.test/", serde_json::json!({}))
-                .require_header("authorization", "Bearer xyz"),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/",
+                serde_json::json!({}),
+            )
+            .require_header("authorization", "Bearer xyz"),
         ]);
         let _ = mock
             .send(Request::new(Method::Get, "https://api.github.test/"))

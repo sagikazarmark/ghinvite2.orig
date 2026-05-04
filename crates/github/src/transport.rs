@@ -83,17 +83,25 @@ impl Response {
         if (200..300).contains(&self.status) {
             Ok(self)
         } else {
-            // Truncate to keep error logs sane. Slicing bytes (not the lossy String)
-            // avoids any chance of mid-codepoint panic.
-            let truncated = if self.body.len() > 4096 {
-                format!("{}…", String::from_utf8_lossy(&self.body[..4096]))
-            } else {
-                String::from_utf8_lossy(&self.body).to_string()
-            };
-            Err(Error::Status {
-                status: self.status,
-                body: truncated,
-            })
+            Err(self.status_error())
+        }
+    }
+
+    /// Build an `Error::Status` from this response, applying the same body
+    /// truncation as [`ensure_success`]. Callers that match on status manually
+    /// (e.g. to special-case 201 vs 204) use this for the unexpected-status arm
+    /// so error logs stay consistent across the crate.
+    pub fn status_error(&self) -> Error {
+        // Truncate to keep error logs sane. Slicing bytes (not the lossy String)
+        // avoids any chance of mid-codepoint panic.
+        let truncated = if self.body.len() > 4096 {
+            format!("{}…", String::from_utf8_lossy(&self.body[..4096]))
+        } else {
+            String::from_utf8_lossy(&self.body).to_string()
+        };
+        Error::Status {
+            status: self.status,
+            body: truncated,
         }
     }
 }
@@ -164,10 +172,7 @@ impl HttpTransport for ReqwestTransport {
         for (name, value) in resp.headers() {
             headers.insert(
                 name.as_str().to_ascii_lowercase(),
-                value
-                    .to_str()
-                    .unwrap_or("<non-ascii header>")
-                    .to_string(),
+                value.to_str().unwrap_or("<non-ascii header>").to_string(),
             );
         }
         let body = resp
@@ -192,7 +197,10 @@ mod tests {
         let r = Request::new(Method::Get, "https://example.test/")
             .header("Authorization", "Bearer xyz")
             .header("X-Custom", "v");
-        assert_eq!(r.headers.get("authorization").map(String::as_str), Some("Bearer xyz"));
+        assert_eq!(
+            r.headers.get("authorization").map(String::as_str),
+            Some("Bearer xyz")
+        );
         assert_eq!(r.headers.get("x-custom").map(String::as_str), Some("v"));
     }
 
@@ -201,13 +209,20 @@ mod tests {
         let r = Request::new(Method::Post, "https://example.test/")
             .json_body(&serde_json::json!({"k": 1}))
             .unwrap();
-        assert_eq!(r.headers.get("content-type").map(String::as_str), Some("application/json"));
+        assert_eq!(
+            r.headers.get("content-type").map(String::as_str),
+            Some("application/json")
+        );
         assert_eq!(r.body.as_deref(), Some(b"{\"k\":1}".as_slice()));
     }
 
     #[test]
     fn response_ensure_success_passes_2xx() {
-        let r = Response { status: 201, headers: BTreeMap::new(), body: vec![] };
+        let r = Response {
+            status: 201,
+            headers: BTreeMap::new(),
+            body: vec![],
+        };
         assert_eq!(r.clone().ensure_success().unwrap().status, 201);
     }
 
@@ -258,14 +273,21 @@ mod tests {
         let mut body = vec![b'a'; 4095];
         body.extend_from_slice("€".as_bytes()); // bytes 4095..4098
         body.extend_from_slice(b"trailing"); // bytes 4098..
-        let r = Response { status: 500, headers: BTreeMap::new(), body };
+        let r = Response {
+            status: 500,
+            headers: BTreeMap::new(),
+            body,
+        };
         // Must NOT panic. Must produce an Error::Status with body length <= 4096 chars
         // of input plus the ellipsis marker.
         let err = r.ensure_success().unwrap_err();
         match err {
             Error::Status { status, body } => {
                 assert_eq!(status, 500);
-                assert!(body.ends_with('…'), "expected ellipsis suffix, got {body:?}");
+                assert!(
+                    body.ends_with('…'),
+                    "expected ellipsis suffix, got {body:?}"
+                );
             }
             other => panic!("expected Status, got {other:?}"),
         }

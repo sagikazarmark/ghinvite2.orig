@@ -1,7 +1,7 @@
 //! App-installation client: holds the App-JWT signer + a token cache, and
 //! exposes the v1 installation-side endpoints.
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::jwt::AppJwtSigner;
 use crate::payloads::{
     GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhInvitationListItem, GhRepo,
@@ -111,7 +111,11 @@ impl InstallationClient {
         installation_id: u64,
     ) -> Result<GhInstallationRepos> {
         let req = self
-            .auth_request(installation_id, Method::Get, "/installation/repositories?per_page=100")
+            .auth_request(
+                installation_id,
+                Method::Get,
+                "/installation/repositories?per_page=100",
+            )
             .await?;
         self.transport.send(req).await?.ensure_success()?.json()
     }
@@ -121,12 +125,7 @@ impl InstallationClient {
     ///
     /// **Errors:** `Error::Status { status: 404, .. }` if the App lost access
     /// to the repo (caller should treat that as `selected_repos` drift).
-    pub async fn get_repo(
-        &self,
-        installation_id: u64,
-        owner: &str,
-        repo: &str,
-    ) -> Result<GhRepo> {
+    pub async fn get_repo(&self, installation_id: u64, owner: &str, repo: &str) -> Result<GhRepo> {
         let path = format!("/repos/{}/{}", path_seg(owner), path_seg(repo));
         let req = self
             .auth_request(installation_id, Method::Get, &path)
@@ -164,13 +163,7 @@ impl InstallationClient {
                 Ok(Some(inv.id))
             }
             204 => Ok(None),
-            other => {
-                let body = String::from_utf8_lossy(&resp.body).to_string();
-                Err(Error::Status {
-                    status: other,
-                    body,
-                })
-            }
+            _ => Err(resp.status_error()),
         }
     }
 
@@ -242,13 +235,7 @@ impl InstallationClient {
         match resp.status {
             204 => Ok(true),
             404 => Ok(false),
-            other => {
-                let body = String::from_utf8_lossy(&resp.body).to_string();
-                Err(Error::Status {
-                    status: other,
-                    body,
-                })
-            }
+            _ => Err(resp.status_error()),
         }
     }
 }
@@ -391,11 +378,7 @@ mod read_tests {
     async fn get_repo_404_surfaces_status() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
-            Expectation::status(
-                Method::Get,
-                "https://api.github.test/repos/acme/gone",
-                404,
-            ),
+            Expectation::status(Method::Get, "https://api.github.test/repos/acme/gone", 404),
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
@@ -599,10 +582,12 @@ mod reconcile_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        assert!(client
-            .is_collaborator(9, "acme", "api", "octocat")
-            .await
-            .unwrap());
+        assert!(
+            client
+                .is_collaborator(9, "acme", "api", "octocat")
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -617,9 +602,11 @@ mod reconcile_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        assert!(!client
-            .is_collaborator(9, "acme", "api", "notamember")
-            .await
-            .unwrap());
+        assert!(
+            !client
+                .is_collaborator(9, "acme", "api", "notamember")
+                .await
+                .unwrap()
+        );
     }
 }

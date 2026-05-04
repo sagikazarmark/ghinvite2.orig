@@ -73,13 +73,19 @@ mod tests {
         let c = TokenCache::new();
         c.insert(1, "tok".into(), at("2026-05-04T12:00:30Z")); // 30s out
         let now = at("2026-05-04T12:00:00Z");
-        assert!(c.get_fresh(1, now).is_none(), "30s remaining should be stale");
+        assert!(
+            c.get_fresh(1, now).is_none(),
+            "30s remaining should be stale"
+        );
     }
 
     #[test]
     fn missing_installation_is_none() {
         let c = TokenCache::new();
-        assert!(c.get_fresh(99, Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()).is_none());
+        assert!(
+            c.get_fresh(99, Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap())
+                .is_none()
+        );
     }
 
     #[test]

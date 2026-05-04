@@ -12,6 +12,9 @@ fn authorize_url_is_crate_public() {
         redirect_uri: "https://example.test/oauth/callback".into(),
     };
     let a = AuthorizeUrl::build(&cfg, "csrf", &[]).unwrap();
-    assert!(a.url.starts_with("https://github.com/login/oauth/authorize?"));
+    assert!(
+        a.url
+            .starts_with("https://github.com/login/oauth/authorize?")
+    );
     assert_eq!(a.state, "csrf");
 }

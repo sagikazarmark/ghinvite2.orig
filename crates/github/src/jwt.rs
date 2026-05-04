@@ -5,13 +5,13 @@
 //! 30 lines; doing it by hand keeps the wasm story simple.
 
 use crate::error::{Error, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
+use rsa::RsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer as _};
-use rsa::RsaPrivateKey;
 use serde::Serialize;
 use sha2::Sha256;
 
@@ -52,8 +52,8 @@ impl AppJwtSigner {
             exp: now.timestamp() + (9 * 60),
             iss: self.app_id,
         };
-        let claims_bytes = serde_json::to_vec(&claims)
-            .map_err(|e| Error::Jwt(format!("encoding claims: {e}")))?;
+        let claims_bytes =
+            serde_json::to_vec(&claims).map_err(|e| Error::Jwt(format!("encoding claims: {e}")))?;
         let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_bytes);
 
         let signing_input = format!("{header_b64}.{claims_b64}");
@@ -70,9 +70,9 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+    use rsa::RsaPublicKey;
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::pkcs8::EncodePublicKey;
-    use rsa::RsaPublicKey;
 
     /// Test-only RSA-2048 key in PKCS#8 PEM. NOT a secret — generated solely
     /// for unit tests to avoid the ~20s `RsaPrivateKey::new` cost on every
