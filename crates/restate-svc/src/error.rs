@@ -58,6 +58,33 @@ impl HandlerError {
     }
 }
 
+/// Map our `HandlerError` to the SDK's `HandlerError`, honoring
+/// `is_terminal()` classification:
+///
+/// - **Terminal** errors (4xx GitHub, conflicts, NotFound, invariant
+///   violations, corruption) become `restate_sdk::errors::TerminalError`,
+///   which Restate will NOT retry.
+/// - **Transient** errors (5xx, rate-limit, transport, DB connectivity)
+///   become a non-terminal `restate_sdk::errors::HandlerError`, which
+///   Restate WILL retry with exponential backoff.
+///
+/// Implemented as a free function rather than `impl From<HandlerError>`
+/// because the SDK provides a blanket
+/// `impl<E: Into<Box<dyn StdError + Send + Sync>>> From<E> for HandlerError`
+/// that conflicts with any user-provided `From` impl. Use as
+/// `.map_err(crate::error::to_sdk_handler_error)`.
+pub fn to_sdk_handler_error(e: HandlerError) -> ::restate_sdk::errors::HandlerError {
+    if e.is_terminal() {
+        // Terminal: Restate will NOT retry.
+        e.to_terminal().into()
+    } else {
+        // Transient: the SDK's blanket `From<E: Into<Box<dyn StdError ...>>>`
+        // produces a `HandlerErrorInner::Retryable`, which Restate retries.
+        let boxed: Box<dyn std::error::Error + Send + Sync> = e.to_string().into();
+        ::restate_sdk::errors::HandlerError::from(boxed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

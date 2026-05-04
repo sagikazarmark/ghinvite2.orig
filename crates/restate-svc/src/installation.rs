@@ -7,7 +7,7 @@ use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
 use domain::{Account, AccountType, SelectedRepos};
-use restate_sdk::context::{ContextSideEffects, ObjectContext};
+use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
 use serde::{Deserialize, Serialize};
 
@@ -55,11 +55,13 @@ impl Installation for InstallationImpl {
         ctx: ObjectContext<'_>,
         input: OnboardInput,
     ) -> std::result::Result<(), TerminalError> {
+        let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
-            onboard_logic(&self.state, &input, None)
+            onboard_logic(&self.state, &input, request_id.clone())
                 .await
-                .map_err(|e| -> restate_sdk::errors::HandlerError { e.to_terminal().into() })
+                .map_err(crate::error::to_sdk_handler_error)
         })
+        .name("onboard")
         .await
     }
 
@@ -68,11 +70,13 @@ impl Installation for InstallationImpl {
         ctx: ObjectContext<'_>,
         input: ReposChangedInput,
     ) -> std::result::Result<(), TerminalError> {
+        let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
-            repos_changed_logic(&self.state, &input, None)
+            repos_changed_logic(&self.state, &input, request_id.clone())
                 .await
-                .map_err(|e| -> restate_sdk::errors::HandlerError { e.to_terminal().into() })
+                .map_err(crate::error::to_sdk_handler_error)
         })
+        .name("repos_changed")
         .await
     }
 
@@ -81,11 +85,13 @@ impl Installation for InstallationImpl {
         ctx: ObjectContext<'_>,
         input: UninstallInput,
     ) -> std::result::Result<(), TerminalError> {
+        let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
-            uninstall_logic(&self.state, &input, None)
+            uninstall_logic(&self.state, &input, request_id.clone())
                 .await
-                .map_err(|e| -> restate_sdk::errors::HandlerError { e.to_terminal().into() })
+                .map_err(crate::error::to_sdk_handler_error)
         })
+        .name("uninstall")
         .await
     }
 }
