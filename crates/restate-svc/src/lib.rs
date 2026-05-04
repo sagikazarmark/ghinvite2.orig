@@ -15,6 +15,7 @@ pub mod github_invitation;
 pub mod installation;
 pub mod invitation_request;
 pub mod reconcile;
+pub(crate) mod restate_payload;
 pub mod share_link;
 pub mod state;
 

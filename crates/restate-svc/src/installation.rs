@@ -2,17 +2,13 @@
 
 use crate::audit::{Actor, Target};
 use crate::error::HandlerError;
+use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
-use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use domain::{Account, AccountType, SelectedRepos};
 use restate_sdk::context::{ContextSideEffects, ObjectContext};
 use restate_sdk::errors::TerminalError;
-use restate_sdk::serde::{
-    Deserialize as RestateDeserialize, InputMetadata, OutputMetadata, PayloadMetadata,
-    Serialize as RestateSerialize,
-};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -36,38 +32,6 @@ pub struct ReposChangedInput {
 pub struct UninstallInput {
     pub installation_id: u64,
     pub uninstalled_at: DateTime<Utc>,
-}
-
-/// Implement Restate's framing traits for our handler input types so they can
-/// flow through the Restate journal as `application/json` without going via the
-/// `Json<T>` newtype wrapper (which would require a `schemars::JsonSchema`
-/// derive that we don't carry as a dep here).
-macro_rules! impl_restate_json_payload {
-    ($t:ty) => {
-        impl RestateSerialize for $t {
-            type Error = serde_json::Error;
-            fn serialize(&self) -> Result<Bytes, Self::Error> {
-                serde_json::to_vec(self).map(Bytes::from)
-            }
-        }
-        impl RestateDeserialize for $t {
-            type Error = serde_json::Error;
-            fn deserialize(bytes: &mut Bytes) -> Result<Self, Self::Error> {
-                serde_json::from_slice(bytes)
-            }
-        }
-        impl PayloadMetadata for $t {
-            fn json_schema() -> Option<serde_json::Value> {
-                Some(serde_json::json!({}))
-            }
-            fn input_metadata() -> InputMetadata {
-                InputMetadata::default()
-            }
-            fn output_metadata() -> OutputMetadata {
-                OutputMetadata::default()
-            }
-        }
-    };
 }
 
 impl_restate_json_payload!(OnboardInput);
