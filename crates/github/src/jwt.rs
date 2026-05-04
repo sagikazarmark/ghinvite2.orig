@@ -76,40 +76,13 @@ mod tests {
 
     /// Test-only RSA-2048 key in PKCS#8 PEM. NOT a secret — generated solely
     /// for unit tests to avoid the ~20s `RsaPrivateKey::new` cost on every
-    /// `cargo test` invocation.
+    /// `cargo test` invocation. Shared with `installation.rs`'s test module
+    /// via the sibling `jwt_test_key.pem` file.
     ///
     /// Regenerate with:
     ///   openssl genpkey -algorithm RSA -pkcs8 \
     ///     -pkeyopt rsa_keygen_bits:2048
-    const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCc3pg/HqNy636+
-jYcJJQ0PWqIWNiospFvVrodEv9mylhstB3phBbF98ESYNIOrKP9jzTxL0aMadwp2
-Ln0/Rjg9iU41B9/U4GFjgtS+wky066j7lUHQdj8dPcuFHIRsQlOjvOBJgovMXzse
-tcX0XzjLKOJtiWG7mWsVLLu5+8x9u+LXI5mCA2JnGw1A5tiv88sAeHSc0oTK230z
-c78BG9YmZj/ZoIv0IWQE6iGO9/R2XAULS0z0OZuzuzStdDyimnXvgMwBQMIiQVki
-cKqv3vuHOXUUkaJk3XaWHbOgV7fELjbOeNtH57aFL32Ftzer0eIma13aNDThpMUn
-tLzj+rN5AgMBAAECggEAAYCN4YXaz688X5k1zRmkTdlpKOOkJMw+ny9WI+tr5RTg
-2TFDnV5hw2iLrM/AICFkf6/JXbPNJAQP9Wi1m5RhyVbeIqEeJjjvVpwvPhpL3bKN
-6jnU/2JqF8IENJSjNBewmuZRP51byholdAJbQGWxVfWz/foVSOFiJOawotCfCTTh
-n1Z0WoLywjtyym3zr37Kzs2Vj4mGiK4vfUrwIIW1h2uVP6udYNbK53vfNul1uaoi
-1/aDkKHv2Wok03XfhGvZbk10sqDcH0IXEDlPmBegXEUTnnvTRXFVReU4K8Jg3Sck
-inxKzGFYr8JIvr4q+AcRr0sM5IjOPvE3L41bVSAZwQKBgQDR9zn7TQH7nZH7FxDI
-v7jSD2JeHB2nAJsjFpnVDNAU5YMiMglhSBn+iQFyw0OnL9Fa/J2DkbTICZIlaXeH
-fups3t+9lOA0GD8a1aNc4U3JyGQUQCHqBCVC5HfCl9ZnZNCQwfxewujKW29rvdGi
-Oo7L9hW9YXuON6ED1F+dJtF6uQKBgQC/QzrecAfZPKrzEY7K6M4bkNnkzzdZ5afX
-33f0RTuXL1y1eH2fDMIqQOckwI7kAx4/BQnnY4R6L9vYJMq3SIQXZw1hEwJV4bOM
-A13Xw5C7+ww1BnhTRyGKaopuUF7gSK7L5wFfal74cHRjeeCAGZMTGqEJV/nqfeS9
-7B8sNUeewQKBgAkgpzueeGSYz/zLXuZrNzyigJM4w6074IKg++UAHpeZ9p5o8HFz
-MfYXvKFhjbJZ6M78xlgu4F4F1H2d3R1dzhEXi0BxlWGOYEfpW6WxAbGw7XDX7OGA
-dqI2zmH+Ocra3ho85Jy1+mq5mNllMhTMWOLS+tT1xOpEztIczF9Hjbm5AoGBAIH3
-t2ssCclO9oOR7MxpgpUsy0Q2o1BNRM7mpeaxnRrRLliKdiK8UrzPucI5r1+11rnQ
-PLil4YH+P5ATAEWn20rj1i2e8zlU0+NS7lQOKq3ynIrzyJQeg+ZBG6x2pOIXweAB
-K+egqsR79jsauLmTp2OV9tQYmlUEE4oTh+NMmUyBAoGBAJbLNHFGG3q4XdpNhCRH
-fv2Aay3hQt1u6Az8QA7gbJFGhEl68z0iUw/cpoQaXuh2wnn7gOgR3biuPqgYV+rT
-h82eR6l5FaOWjeKzCcMkdYq+hOuE/yyj/28NQyyWrxrazDyg1UfRPDqsP0orEHHi
-E/Rvxrz5RdBcyXC8vdrkMc7m
------END PRIVATE KEY-----
-"#;
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
 
     #[test]
     fn signs_a_jwt_that_jsonwebtoken_can_verify() {
