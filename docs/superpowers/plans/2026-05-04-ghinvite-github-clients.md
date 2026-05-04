@@ -4,7 +4,7 @@
 
 **Goal:** Build the `crates/github` crate that ships every GitHub-touching surface ghinvite v1 needs: a user-OAuth client (sign-in flow + `/user` + `/user/memberships`), an installation-token client (RS256 App-JWT mint + token cache + the seven `crates/github`-side endpoints in spec §14), an HMAC helper for webhook verification, and a mock HTTP transport so Plan 3's Restate handlers can be tested hermetically.
 
-**Architecture:** One crate, one trait at the seam (`HttpTransport`). Two HTTP impls: `ReqwestTransport` (production, native + wasm) and `MockTransport` (script-driven, behind a `test-mock` feature). Two facade clients sit on top of the transport: `UserApiClient` (user-token) and `InstallationClient` (App-JWT → installation token, cached). The HMAC helper is independent of the transport — pure bytes-in / bool-out. RS256 JWTs are minted manually with `rsa` + `sha2` + `base64` to keep wasm32-unknown-unknown deployable without `ring`.
+**Architecture:** One crate, one trait at the seam (`HttpTransport`). Two HTTP impls: `ReqwestTransport` (production, native — see Task 17 for the wasm carve-out) and `MockTransport` (script-driven, behind a `test-mock` feature). The Workers-side transport (`WorkerFetchTransport`) is **deferred to Plan 3** because reqwest's wasm response future is `!Send`, which the `HttpTransport: Send + Sync + 'static` bound forbids; Plan 3 will provide a `worker::Fetch`-backed alternative. Two facade clients sit on top of the transport: `UserApiClient` (user-token) and `InstallationClient` (App-JWT → installation token, cached). The HMAC helper is independent of the transport — pure bytes-in / bool-out. RS256 JWTs are minted manually with `rsa` + `sha2` + `base64` to keep wasm32-unknown-unknown deployable without `ring`.
 
 **Tech Stack:** Rust 2024 (workspace), `reqwest 0.12` (`rustls-tls`, `json`, optional `wasm-client` for the wasm target) behind an `async-trait` HTTP seam, `oauth2 5` for authorize-URL + state-token discipline, `rsa 0.9` + `sha2 0.10` + `base64 0.22` for manual RS256 JWT signing (wasm-portable, avoids `ring`), `hmac 0.12` + `sha2 0.10` + `subtle 2` for constant-time webhook HMAC, `url 2` for URL building, `parking_lot 0.12` for cache locks (async-safe because we never await while holding a lock), `serde` + `serde_json` for payload (de)serialization. Test stack: `tokio 1` (`macros`, `rt`), `wiremock 0.6` (only behind a `wiremock-tests` feature for the optional integration smoke), `domain` from Plan 1 for type-safe interop.
 
@@ -2857,6 +2857,24 @@ git commit -m "chore: apply rustfmt and clippy fixes; mark Plan 2 done"
 **Placeholder check:** No `TBD`, `TODO`, `// implement later`. Every code step shows complete, runnable code. Task 12 deliberately commits-with-Task-13 because the cache types are defined in 13; that's flagged in Task 12 Step 3.
 
 **Wasm caveat (Task 17):** The plan's exact `reqwest` and `getrandom` feature lines may need tweaking once we hit the wasm32-unknown-unknown reality. Step 3 lists three concrete failure modes and how to fix each. Step 5 explicitly hands off to the user if all three fail — that's the spec §20 deployment fallback.
+
+---
+
+## Post-execution amendments
+
+These are findings from executing the plan that override or extend the original task text. Listed in execution order.
+
+### A1. `ReqwestTransport` is native-only (Task 17)
+
+The plan's Step 2 of Task 17 anticipated wasm support via reqwest's `wasm-client` feature. In practice this fails the `HttpTransport: Send + Sync + 'static` bound: reqwest's wasm response future wraps `js_sys::JsFuture`, which is not `Send`. The trait itself remains wasm-portable; only the concrete `ReqwestTransport` impl is gated to non-wasm targets.
+
+**Plan 3 implication:** the Restate Service Worker (and the web binary in Plan 4) need a Workers-native `HttpTransport` impl backed by `worker::Fetch` (or `gloo-net`, or `web_sys::Fetch`). The trait, all value types, and `MockTransport` are already wasm-portable and shippable to Workers.
+
+### A2. Dual `getrandom` versions on wasm (Task 17)
+
+The `wasm32-unknown-unknown` dependency tree pulls in BOTH `getrandom 0.2` (via `rsa`/`oauth2`) and `getrandom 0.3` (via `ulid` → `rand 0.9` → `rand_core 0.9`). Both versions need their respective wasm backends enabled separately: 0.2 via the `js` feature, 0.3 via `wasm_js` feature **AND** an `RUSTFLAGS=--cfg getrandom_backend="wasm_js"` rustflag (target-scoped via `.cargo/config.toml`). Both are now configured in `crates/github/Cargo.toml`'s wasm target dep block + the workspace-root `.cargo/config.toml`.
+
+Future ulid/rand version bumps should re-validate this dual-pin via `cargo tree -p github -i getrandom@0.2` and `cargo tree -p github -i getrandom@0.3`.
 
 ---
 

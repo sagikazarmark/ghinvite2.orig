@@ -111,8 +111,10 @@ pub struct UserApiClient {
 }
 
 impl UserApiClient {
-    /// `transport` typically wraps `ReqwestTransport`. `user_token` is the
-    /// `access_token` from [`exchange_code`].
+    /// `transport` typically wraps `ReqwestTransport` on native; on wasm /
+    /// Cloudflare Workers it wraps Plan 3's Workers-side transport
+    /// (`WorkerFetchTransport`), since reqwest's wasm response future is
+    /// `!Send`. `user_token` is the `access_token` from [`exchange_code`].
     pub fn new(transport: Arc<dyn HttpTransport>, user_token: String) -> Self {
         Self::with_base(transport, user_token, "https://api.github.com".into())
     }

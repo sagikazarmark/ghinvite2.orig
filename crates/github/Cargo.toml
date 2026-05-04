@@ -43,6 +43,14 @@ wiremock.workspace = true
 # `getrandom`'s `js` / `wasm_js` features are required on wasm32-unknown-unknown
 # so `rsa` key-gen / `oauth2` state tokens can pull from
 # `crypto.getRandomValues()`. We pin both major versions because both appear
-# transitively (e.g. `rand_core@0.9` pulls 0.3, while `rsa` etc. still pull 0.2).
+# transitively:
+#   * `getrandom 0.2` ← `oauth2 5`, `rsa 0.9`, and `rand_core 0.6` (via
+#     `rand 0.8` → `domain`/`rsa`/`oauth2`)
+#   * `getrandom 0.3` ← `rand_core 0.9` (via `rand 0.9` → `ulid 1.2` →
+#     `domain`)
+# The 0.3 line additionally needs `--cfg getrandom_backend="wasm_js"` (set in
+# the workspace-root `.cargo/config.toml`).
+# Re-validate after `ulid` / `rand` bumps: `cargo tree -p github -i
+# getrandom@0.2` and `cargo tree -p github -i getrandom@0.3`.
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }

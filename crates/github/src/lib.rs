@@ -5,8 +5,11 @@
 //! helper for the webhook receiver; it does not consume the transport.
 //!
 //! Every HTTP call funnels through [`transport::HttpTransport`] so impls can be
-//! swapped (production: [`transport::ReqwestTransport`]; tests:
-//! [`mocks::MockTransport`] behind the `test-mock` feature).
+//! swapped (production native: [`transport::ReqwestTransport`]; tests:
+//! [`mocks::MockTransport`] behind the `test-mock` feature). The wasm32 /
+//! Cloudflare Workers production transport (`WorkerFetchTransport`) is owned
+//! by Plan 3 — reqwest's wasm response future is `!Send` and so cannot satisfy
+//! the [`transport::HttpTransport`] `Send + Sync + 'static` bound.
 
 pub mod error;
 pub mod hmac;
