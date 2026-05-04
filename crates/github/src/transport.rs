@@ -109,11 +109,19 @@ pub trait HttpTransport: Send + Sync + 'static {
 
 /// Production reqwest impl. Lives behind a thin wrapper so the rest of the
 /// crate doesn't have to deal with reqwest types directly.
+///
+/// Native-only: on `wasm32-unknown-unknown`, reqwest's response future is
+/// `!Send` (it wraps `js-sys::futures::JsFuture`), which conflicts with the
+/// `HttpTransport: Send + Sync + 'static` bound that Restate handlers need on
+/// native. Workers builds plug in a different `HttpTransport` impl (e.g. one
+/// backed by `worker::Fetch`) — added in Plan 3.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ReqwestTransport {
     pub fn new() -> Result<Self> {
         let client = reqwest::Client::builder()
@@ -129,6 +137,7 @@ impl ReqwestTransport {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
 impl HttpTransport for ReqwestTransport {
     async fn send(&self, request: Request) -> Result<Response> {

@@ -38,3 +38,11 @@ github = { path = ".", features = ["test-mock"] }
 jsonwebtoken = { workspace = true, features = ["use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
 tokio.workspace = true
 wiremock.workspace = true
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `getrandom`'s `js` / `wasm_js` features are required on wasm32-unknown-unknown
+# so `rsa` key-gen / `oauth2` state tokens can pull from
+# `crypto.getRandomValues()`. We pin both major versions because both appear
+# transitively (e.g. `rand_core@0.9` pulls 0.3, while `rsa` etc. still pull 0.2).
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
