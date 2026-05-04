@@ -41,3 +41,4 @@ github = { workspace = true, features = ["test-mock"] }
 storage = { workspace = true, features = ["test-suite"] }
 http-body-util = "0.1"
 sqlx.workspace = true
+tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }

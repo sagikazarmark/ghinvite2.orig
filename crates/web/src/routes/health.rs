@@ -1,6 +1,13 @@
-use axum::Router;
+//! `GET /health` — uptime check.
+
 use crate::state::AppState;
+use axum::routing::get;
+use axum::Router;
 
 pub fn router() -> Router<AppState> {
-    Router::new() // populated by Tasks 8–13 + 19–22 + 23–25
+    Router::new().route("/health", get(health))
+}
+
+async fn health() -> &'static str {
+    "ok"
 }
