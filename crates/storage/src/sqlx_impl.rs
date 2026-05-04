@@ -416,27 +416,119 @@ impl Storage for SqlxStorage {
     }
     async fn insert_invitation_request_and_increment_uses(
         &self,
-        _request: &InvitationRequest,
+        request: &InvitationRequest,
     ) -> Result<()> {
-        unimplemented!("Task 19")
+        let mut tx = self.pool.begin().await?;
+
+        let res = sqlx::query(
+            r#"
+            INSERT INTO invitation_requests
+              (id, share_link_id, requester_id, justification, state,
+               decided_by, decided_at, decline_reason, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+        )
+        .bind(request.id.to_string())
+        .bind(request.share_link_id.to_string())
+        .bind(u64_to_i64(request.requester_id))
+        .bind(request.justification.as_deref())
+        .bind(request.state.to_string())
+        .bind(request.decided_by.map(u64_to_i64))
+        .bind(request.decided_at)
+        .bind(request.decline_reason.as_deref())
+        .bind(request.created_at)
+        .execute(&mut *tx)
+        .await;
+
+        match res {
+            Ok(_) => (),
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                return Err(Error::Conflict(classify_unique(
+                    &*db,
+                    ConflictKind::DuplicateId,
+                )));
+            }
+            Err(e) => return Err(Error::Database(e)),
+        }
+
+        // Increment uses_count atomically. Caller has already verified is_active(now);
+        // here we trust that and do the bump.
+        let updated =
+            sqlx::query(r#"UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1"#)
+                .bind(request.share_link_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        if updated.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+
+        tx.commit().await?;
+        Ok(())
     }
-    async fn record_request_decision(&self, _decision: &RequestDecision) -> Result<()> {
-        unimplemented!("Task 19")
+
+    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()> {
+        let res = sqlx::query(
+            r#"UPDATE invitation_requests
+               SET state = ?1, decided_by = ?2, decided_at = ?3, decline_reason = ?4
+               WHERE id = ?5 AND state = 'pending'"#,
+        )
+        .bind(decision.state.to_string())
+        .bind(u64_to_i64(decision.decided_by))
+        .bind(decision.decided_at)
+        .bind(decision.decline_reason.as_deref())
+        .bind(decision.request_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+        Ok(())
     }
-    async fn get_invitation_request(&self, _id: RequestId) -> Result<Option<InvitationRequest>> {
-        unimplemented!("Task 19")
+
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
+        let row: Option<crate::records::InvitationRequestRow> = sqlx::query_as(
+            r#"SELECT id, share_link_id, requester_id, justification, state,
+                      decided_by, decided_at, decline_reason, created_at
+               FROM invitation_requests WHERE id = ?1"#,
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|r| r.try_into_domain()).transpose()
     }
+
     async fn list_pending_requests_for_account(
         &self,
-        _account_id: u64,
+        account_id: u64,
     ) -> Result<Vec<InvitationRequest>> {
-        unimplemented!("Task 19")
+        let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
+            r#"SELECT r.id, r.share_link_id, r.requester_id, r.justification, r.state,
+                      r.decided_by, r.decided_at, r.decline_reason, r.created_at
+               FROM invitation_requests r
+               JOIN share_links l ON l.id = r.share_link_id
+               WHERE l.account_id = ?1 AND r.state = 'pending'
+               ORDER BY r.created_at"#,
+        )
+        .bind(u64_to_i64(account_id))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
+
     async fn list_requests_for_link(
         &self,
-        _link_id: ShareLinkId,
+        link_id: ShareLinkId,
     ) -> Result<Vec<InvitationRequest>> {
-        unimplemented!("Task 19")
+        let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
+            r#"SELECT id, share_link_id, requester_id, justification, state,
+                      decided_by, decided_at, decline_reason, created_at
+               FROM invitation_requests WHERE share_link_id = ?1
+               ORDER BY created_at DESC"#,
+        )
+        .bind(link_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
     async fn insert_github_invitation(&self, _invitation: &GithubInvitation) -> Result<()> {
         unimplemented!("Task 20")
@@ -791,6 +883,194 @@ mod tests {
         let link = sample_link(100, 999, 7, 6);
         let err = s.insert_share_link(&link).await.unwrap_err();
         assert!(matches!(err, Error::Database(_)), "got {err:?}");
+    }
+
+    pub(crate) fn sample_request(link_id: ShareLinkId, requester: u64) -> InvitationRequest {
+        use domain::RequestState;
+        InvitationRequest {
+            id: RequestId::new(),
+            share_link_id: link_id,
+            requester_id: requester,
+            justification: Some("contractor for q2".into()),
+            state: RequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            decline_reason: None,
+            created_at: dt("2026-05-04T12:30:00Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_request_increments_uses_count() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7, 10);
+        s.insert_share_link(&link).await.unwrap();
+
+        let req = sample_request(link.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap();
+
+        let got = s.get_invitation_request(req.id).await.unwrap().unwrap();
+        assert_eq!(got, req);
+
+        let updated_link = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        assert_eq!(updated_link.uses_count, 1);
+    }
+
+    #[tokio::test]
+    async fn second_pending_request_for_same_user_conflicts() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7, 11);
+        s.insert_share_link(&link).await.unwrap();
+
+        let req_a = sample_request(link.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req_a)
+            .await
+            .unwrap();
+
+        let req_b = sample_request(link.id, 8); // same requester, distinct id
+        let err = s
+            .insert_invitation_request_and_increment_uses(&req_b)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Conflict(ConflictKind::DuplicatePendingRequest)),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_decision_to_approved() {
+        use domain::RequestState;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7, 12);
+        s.insert_share_link(&link).await.unwrap();
+
+        let req = sample_request(link.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap();
+
+        s.record_request_decision(&RequestDecision {
+            request_id: req.id,
+            state: RequestState::Approved,
+            decided_by: 7,
+            decided_at: dt("2026-05-04T13:00:00Z"),
+            decline_reason: None,
+        })
+        .await
+        .unwrap();
+
+        let got = s.get_invitation_request(req.id).await.unwrap().unwrap();
+        assert_eq!(got.state, RequestState::Approved);
+        assert_eq!(got.decided_by, Some(7));
+        assert_eq!(got.decided_at, Some(dt("2026-05-04T13:00:00Z")));
+    }
+
+    #[tokio::test]
+    async fn second_decision_returns_not_found() {
+        use domain::RequestState;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7, 13);
+        s.insert_share_link(&link).await.unwrap();
+        let req = sample_request(link.id, 8);
+        s.insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap();
+        s.record_request_decision(&RequestDecision {
+            request_id: req.id,
+            state: RequestState::Approved,
+            decided_by: 7,
+            decided_at: dt("2026-05-04T13:00:00Z"),
+            decline_reason: None,
+        })
+        .await
+        .unwrap();
+
+        let err = s
+            .record_request_decision(&RequestDecision {
+                request_id: req.id,
+                state: RequestState::Declined,
+                decided_by: 7,
+                decided_at: dt("2026-05-04T14:00:00Z"),
+                decline_reason: Some("wrong person".into()),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::NotFound));
+    }
+
+    #[tokio::test]
+    async fn list_pending_for_account_filters_by_account() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 100, "acme"))
+            .await
+            .unwrap();
+        s.insert_installation(&sample_account(2, 200, "other"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+
+        let link_a = sample_link(100, 1, 7, 14);
+        let link_b = sample_link(200, 2, 7, 15);
+
+        s.insert_share_link(&link_a).await.unwrap();
+        s.insert_share_link(&link_b).await.unwrap();
+
+        let r_a = sample_request(link_a.id, 8);
+        let r_b = sample_request(link_b.id, 8);
+        s.insert_invitation_request_and_increment_uses(&r_a)
+            .await
+            .unwrap();
+        s.insert_invitation_request_and_increment_uses(&r_b)
+            .await
+            .unwrap();
+
+        let pending_a = s.list_pending_requests_for_account(100).await.unwrap();
+        assert_eq!(pending_a.len(), 1);
+        assert_eq!(pending_a[0].id, r_a.id);
+
+        let pending_b = s.list_pending_requests_for_account(200).await.unwrap();
+        assert_eq!(pending_b.len(), 1);
+        assert_eq!(pending_b[0].id, r_b.id);
+    }
+
+    #[tokio::test]
+    async fn invitation_request_with_unknown_link_fails() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        // bogus share_link_id (no row in share_links) → FK violation
+        let req = sample_request(ShareLinkId::new(), 8);
+        let err = s
+            .insert_invitation_request_and_increment_uses(&req)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Database(_) | Error::NotFound),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
