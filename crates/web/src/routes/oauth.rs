@@ -3,11 +3,10 @@
 use crate::error::{Result, WebError};
 use crate::session;
 use crate::state::AppState;
+use axum::Router;
 use axum::extract::State;
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::get;
-use axum::Extension;
-use axum::Router;
 use github::oauth::AuthorizeUrl;
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -25,7 +24,7 @@ pub fn router() -> Router<AppState> {
 /// authorize endpoint.
 async fn login(
     State(state): State<AppState>,
-    Extension(tower): Extension<TowerSession>,
+    tower: TowerSession,
 ) -> Result<impl IntoResponse> {
     let csrf = generate_csrf_token();
     let mut session = session::load(&tower)
@@ -42,7 +41,7 @@ async fn login(
     Ok(Redirect::to(&authorize.url))
 }
 
-async fn logout(Extension(tower): Extension<TowerSession>) -> impl IntoResponse {
+async fn logout(tower: TowerSession) -> impl IntoResponse {
     session::clear(&tower).await;
     Redirect::to("/")
 }
