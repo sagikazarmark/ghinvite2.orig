@@ -96,3 +96,23 @@ async fn home_returns_html() {
     assert!(text.contains("ghinvite"));
     assert!(text.contains("Sign in with GitHub"));
 }
+
+#[tokio::test]
+async fn dashboard_routes_return_501() {
+    let app = build_test_app().await;
+    for path in [
+        "/accounts/acme",
+        "/accounts/acme/links/new",
+        "/accounts/acme/links/01HFOOBAR",
+        "/accounts/acme/requests",
+        "/accounts/acme/audit",
+        "/accounts/acme/settings",
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "path = {path}");
+    }
+}
