@@ -167,3 +167,84 @@ mod url_tests {
         assert!(a.url.contains("allow_signup=false"));
     }
 }
+
+#[cfg(test)]
+mod exchange_tests {
+    use super::*;
+    use crate::error::Error;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::{Method, Response};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn cfg() -> OAuthConfig {
+        OAuthConfig {
+            client_id: "Iv1.abc".into(),
+            client_secret: "secret".into(),
+            redirect_uri: "https://example.test/oauth/callback".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_path_returns_token() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: {
+                let mut h = BTreeMap::new();
+                h.insert("accept".into(), "application/json".into());
+                h.insert("content-type".into(), "application/json".into());
+                h
+            },
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#.to_vec(),
+            },
+        }]);
+        let token = exchange_code(&mock, &cfg(), "auth-code-1").await.unwrap();
+        assert_eq!(token.access_token, "u_xxx");
+        assert_eq!(token.scope, "read:user");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn github_error_payload_surfaces_as_oauth_error() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200, // GitHub uses 200 + error payload, not a 4xx.
+                headers: BTreeMap::new(),
+                body: br#"{"error":"bad_verification_code","error_description":"The code passed is incorrect or expired."}"#.to_vec(),
+            },
+        }]);
+        let err = exchange_code(&mock, &cfg(), "expired").await.unwrap_err();
+        match err {
+            Error::OAuth(msg) => {
+                assert!(msg.contains("bad_verification_code"));
+                assert!(msg.contains("expired"));
+            }
+            other => panic!("expected OAuth error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_5xx_surfaces_as_status_error() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Post,
+            "https://github.com/login/oauth/access_token",
+            502,
+        )]);
+        let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
+        assert_eq!(err.status(), Some(502));
+    }
+
+    // Suppress unused-warning for Arc in case the rustc version doesn't see
+    // the test-only borrow above.
+    #[allow(dead_code)]
+    fn _hint_arc(_: Arc<dyn HttpTransport>) {}
+}
