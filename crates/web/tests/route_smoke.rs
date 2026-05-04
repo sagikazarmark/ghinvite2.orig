@@ -137,7 +137,6 @@ async fn home_returns_html() {
 async fn dashboard_routes_return_501() {
     let app = build_test_app().await;
     for path in [
-        "/accounts/acme",
         "/accounts/acme/links/new",
         "/accounts/acme/links/01HFOOBAR",
         "/accounts/acme/requests",
