@@ -194,7 +194,8 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
 }
 
 #[tokio::test]
-async fn webhook_route_returns_501() {
+async fn webhook_route_rejects_missing_signature() {
+    // A POST without an X-Hub-Signature-256 header must be rejected with 401.
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -206,5 +207,5 @@ async fn webhook_route_returns_501() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
