@@ -119,7 +119,7 @@ wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 github = { path = ".", features = ["test-mock"] }
-jsonwebtoken.workspace = true   # used to *verify* the JWTs we mint, not to sign them
+jsonwebtoken = { workspace = true, features = ["use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
 tokio.workspace = true
 wiremock.workspace = true
 ```
@@ -1711,31 +1711,40 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
-    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::pkcs8::EncodePublicKey;
     use rsa::RsaPublicKey;
 
-    /// Generate a deterministic 1024-bit key for tests. (1024 bits is fine
-    /// for unit tests; production keys are 2048+.)
-    fn test_keypair() -> (RsaPrivateKey, RsaPublicKey) {
-        // `rand` 0.8 + ChaCha8 for determinism — same seeded RNG style as the
-        // domain crate.
-        use rand::SeedableRng;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-        let priv_key = RsaPrivateKey::new(&mut rng, 1024).unwrap();
-        let pub_key = RsaPublicKey::from(&priv_key);
-        (priv_key, pub_key)
-    }
+    /// Test-only RSA-2048 key in PKCS#8 PEM. NOT a secret — generated solely
+    /// for unit tests to avoid the ~20s `RsaPrivateKey::new` cost on every
+    /// `cargo test` invocation. 2048 bits is required: the verifier
+    /// (`jsonwebtoken` backed by `ring`) refuses RSA keys below 2048 bits for
+    /// RS256, so we cannot drop to 1024 even though it would be faster to
+    /// generate.
+    ///
+    /// Regenerate with:
+    ///   openssl genpkey -algorithm RSA -pkcs8 \
+    ///     -pkeyopt rsa_keygen_bits:2048
+    const TEST_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
+<<<paste 2048-bit PKCS#8 PEM body here, including BEGIN/END lines>>>
+-----END PRIVATE KEY-----
+"#;
 
     #[test]
     fn signs_a_jwt_that_jsonwebtoken_can_verify() {
-        let (priv_key, pub_key) = test_keypair();
-        let pem = priv_key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
-        let signer = AppJwtSigner::from_pkcs8_pem(99, pem.as_str()).unwrap();
-        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap();
+        let signer = AppJwtSigner::from_pkcs8_pem(99, TEST_KEY_PEM).unwrap();
 
+        // Re-derive the public key from the same PEM so the test stays
+        // self-contained (no separate public-key fixture).
+        let priv_key = RsaPrivateKey::from_pkcs8_pem(TEST_KEY_PEM).unwrap();
+        let pub_key = RsaPublicKey::from(&priv_key);
+        let pub_pem = pub_key
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap();
         let jwt = signer.sign(now).unwrap();
 
-        let pub_pem = pub_key.to_public_key_pem(rsa::pkcs8::LineEnding::LF).unwrap();
         let key = DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap();
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&["99"]);
@@ -1745,7 +1754,8 @@ mod tests {
         // jsonwebtoken's `validate_exp` uses system time; pin via `validation.set_current_time`
         // (added in 9.x). Use the same instant as `now` so the JWT is "current".
         validation.required_spec_claims = std::collections::HashSet::new();
-        let token_data = jsonwebtoken::decode::<serde_json::Value>(&jwt, &key, &validation).unwrap();
+        let token_data =
+            jsonwebtoken::decode::<serde_json::Value>(&jwt, &key, &validation).unwrap();
         assert_eq!(token_data.claims["iss"], 99);
         assert!(token_data.claims["iat"].as_i64().unwrap() <= now.timestamp());
         assert!(token_data.claims["exp"].as_i64().unwrap() > now.timestamp());
@@ -1753,30 +1763,33 @@ mod tests {
 
     #[test]
     fn rejects_garbage_pem() {
-        let err = AppJwtSigner::from_pkcs8_pem(1, "not a pem").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)));
+        match AppJwtSigner::from_pkcs8_pem(1, "not a pem") {
+            Err(Error::InvalidInput(_)) => (),
+            Err(other) => panic!("expected InvalidInput, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
     }
 }
 ```
 
-- [ ] **Step 2: Add `rand` and `rand_chacha` and `jsonwebtoken` to `[dev-dependencies]`**
+- [ ] **Step 2: Add `jsonwebtoken` to `[dev-dependencies]`**
 
 In `crates/github/Cargo.toml`, ensure dev-deps include:
 
 ```toml
 [dev-dependencies]
 github = { path = ".", features = ["test-mock"] }
-jsonwebtoken.workspace = true
-rand.workspace = true
-rand_chacha.workspace = true
+jsonwebtoken = { workspace = true, features = ["use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
 tokio.workspace = true
 wiremock.workspace = true
 ```
 
+The `use_pem` feature is required for `DecodingKey::from_rsa_pem` to be available. We do NOT need `rand` or `rand_chacha` here — the test embeds a pre-generated PEM rather than generating a key at test time.
+
 - [ ] **Step 3: Run the tests**
 
 Run: `cargo test -p github --lib jwt`
-Expected: 2 tests pass. The first test takes ~1-2 seconds because RSA key generation is slow at debug-opt levels.
+Expected: 2 tests pass in well under 1 second total. (Earlier drafts of this plan generated a fresh 2048-bit RSA key in the test, which cost ~20s per `cargo test` run; the static PEM avoids that entirely.)
 
 If `jsonwebtoken::decode` complains about "expired" tokens despite our timestamps, set `validation.validate_exp = false` for the test only — the production GitHub side does its own expiry validation; we just want shape verification here.
 
