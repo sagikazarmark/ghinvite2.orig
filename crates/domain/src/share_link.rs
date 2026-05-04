@@ -35,15 +35,15 @@ impl ShareLink {
         if self.revoked_at.is_some() {
             return false;
         }
-        if let Some(expires) = self.expires_at {
-            if now >= expires {
-                return false;
-            }
+        if let Some(expires) = self.expires_at
+            && now >= expires
+        {
+            return false;
         }
-        if let Some(max) = self.max_uses {
-            if self.uses_count >= max {
-                return false;
-            }
+        if let Some(max) = self.max_uses
+            && self.uses_count >= max
+        {
+            return false;
         }
         true
     }
@@ -61,7 +61,7 @@ mod tests {
     }
 
     fn base_link() -> ShareLink {
-        let mut rng = ChaCha8Rng::seed_from_u64(2026_05_04);
+        let mut rng = ChaCha8Rng::seed_from_u64(20_260_504);
         ShareLink {
             id: ShareLinkId::new(),
             slug: Slug::generate(&mut rng),

@@ -77,16 +77,6 @@ impl SqlxStorage {
     }
 }
 
-/// Map a SQLite UNIQUE-violation error to our typed [`ConflictKind`] by
-/// inspecting the error message for the constraint name. Falls back to
-/// `default` when no specific constraint is matched.
-/// Map a SQLite UNIQUE-violation error message to our typed [`ConflictKind`].
-///
-/// SQLite formats its UNIQUE constraint violations as
-/// `"UNIQUE constraint failed: <table>.<column>[, <table>.<column>...]"`,
-/// using the underlying *column*, not the index name. We pattern-match on
-/// table.column pairs to identify which constraint fired and fall back to
-/// `default` for primary-key collisions and other unique violations.
 /// Collapse a `LEFT JOIN share_links × share_link_repos` result set into at most
 /// one [`ShareLink`]. Returns `None` if the join produced zero rows.
 fn group_one_share_link(
@@ -114,6 +104,13 @@ fn group_one_share_link(
     Ok(Some(row.try_into_domain(repos)?))
 }
 
+/// Map a SQLite UNIQUE-violation error message to our typed [`ConflictKind`].
+///
+/// SQLite formats its UNIQUE constraint violations as
+/// `"UNIQUE constraint failed: <table>.<column>[, <table>.<column>...]"`,
+/// using the underlying *column*, not the index name. We pattern-match on
+/// table.column pairs to identify which constraint fired and fall back to
+/// `default` for primary-key collisions and other unique violations.
 fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
     let m = db.message();
     if m.contains("share_links.slug") {
@@ -530,10 +527,7 @@ impl Storage for SqlxStorage {
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
-    async fn list_requests_for_link(
-        &self,
-        link_id: ShareLinkId,
-    ) -> Result<Vec<InvitationRequest>> {
+    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
             r#"SELECT id, share_link_id, requester_id, justification, state,
                       decided_by, decided_at, decline_reason, created_at
@@ -775,7 +769,10 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, Error::Conflict(ConflictKind::DuplicateActiveInstallation)),
+            matches!(
+                err,
+                Error::Conflict(ConflictKind::DuplicateActiveInstallation)
+            ),
             "got {err:?}"
         );
     }
@@ -1287,7 +1284,11 @@ mod tests {
         assert!(matches!(err, Error::Database(_)), "got {err:?}");
     }
 
-    pub(crate) fn sample_audit(account_id: u64, event_type: audit::EventType, target: &str) -> AuditEvent {
+    pub(crate) fn sample_audit(
+        account_id: u64,
+        event_type: audit::EventType,
+        target: &str,
+    ) -> AuditEvent {
         use audit::{ActorKind, TargetKind};
         use domain::AuditEventId;
         AuditEvent {

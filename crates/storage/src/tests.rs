@@ -42,7 +42,12 @@ fn sample_user(user_id: u64, login: &str) -> User {
     }
 }
 
-fn sample_link(account_id: u64, installation_id: u64, created_by: u64, slug_seed: u64) -> ShareLink {
+fn sample_link(
+    account_id: u64,
+    installation_id: u64,
+    created_by: u64,
+    slug_seed: u64,
+) -> ShareLink {
     ShareLink {
         id: ShareLinkId::new(),
         slug: slug_with_seed(slug_seed),

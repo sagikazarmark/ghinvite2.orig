@@ -109,8 +109,7 @@ impl ShareLinkRow {
             id: ShareLinkId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
-            slug: Slug::from_string(self.slug)
-                .map_err(|e| Error::Corrupt(format!("slug: {e}")))?,
+            slug: Slug::from_string(self.slug).map_err(|e| Error::Corrupt(format!("slug: {e}")))?,
             installation_id: self.installation_id as u64,
             account_id: self.account_id as u64,
             created_by: self.created_by as u64,
@@ -118,10 +117,9 @@ impl ShareLinkRow {
             expires_at: self.expires_at,
             max_uses: self.max_uses.map(|m| m as u32),
             uses_count: self.uses_count as u32,
-            permission: self
-                .permission
-                .parse()
-                .map_err(|e: domain::permission::UnknownPermission| Error::Corrupt(e.to_string()))?,
+            permission: self.permission.parse().map_err(
+                |e: domain::permission::UnknownPermission| Error::Corrupt(e.to_string()),
+            )?,
             approval_required: self.approval_required != 0,
             internal_note: self.internal_note,
             revoked_at: self.revoked_at,

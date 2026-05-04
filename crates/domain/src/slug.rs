@@ -4,8 +4,7 @@ use std::fmt;
 use subtle::ConstantTimeEq;
 
 const SLUG_LEN: usize = 16;
-const ALPHABET: &[u8; 62] =
-    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// 16-character base62 secret used in share-link URLs.
 ///
@@ -85,7 +84,10 @@ mod tests {
     fn deterministic_under_seeded_rng() {
         let mut a = ChaCha8Rng::seed_from_u64(42);
         let mut b = ChaCha8Rng::seed_from_u64(42);
-        assert_eq!(Slug::generate(&mut a).as_str(), Slug::generate(&mut b).as_str());
+        assert_eq!(
+            Slug::generate(&mut a).as_str(),
+            Slug::generate(&mut b).as_str()
+        );
     }
 
     #[test]
