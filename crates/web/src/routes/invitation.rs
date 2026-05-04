@@ -156,9 +156,40 @@ async fn submit_request(
 }
 
 async fn pending(
-    State(_state): State<AppState>,
-    _tower: TowerSession,
-    axum::extract::Path(_path): axum::extract::Path<(String, String)>,
+    State(state): State<AppState>,
+    tower: TowerSession,
+    axum::extract::Path((slug, request_id_str)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    (axum::http::StatusCode::NOT_IMPLEMENTED, "TODO Task 8")
+    // TODO(test): the requester_id ownership guard is security-critical and should be
+    // covered by an integration test in Plan 8 (tests/invitation_ownership.rs).
+    use std::str::FromStr;
+
+    let session = session::load(&tower).await.unwrap_or_default();
+    if !session.is_authenticated() {
+        return Redirect::to(&format!("/login?return_to=/i/{slug}/pending/{request_id_str}"))
+            .into_response();
+    }
+
+    let request_id = match domain::RequestId::from_str(&request_id_str) {
+        Ok(id) => id,
+        Err(_) => return crate::error::WebError::NotFound.into_response(),
+    };
+
+    // Load request. None = workflow just started, not yet in DB — show "processing" state.
+    let request_state = match state.storage.get_invitation_request(request_id).await {
+        Ok(Some(r)) if r.requester_id == session.user_id => Some(r.state),
+        Ok(Some(_)) => return crate::error::WebError::NotFound.into_response(), // wrong user
+        Ok(None) => None, // not yet committed
+        Err(_) => return crate::error::WebError::NotFound.into_response(),
+    };
+
+    let signed_in_login = Some(session.login.clone());
+    let html = render(move || rsx! {
+        crate::views::invitation::PendingPage {
+            slug: slug.clone(),
+            request_state,
+            signed_in_login: signed_in_login.clone(),
+        }
+    });
+    Html(html).into_response()
 }

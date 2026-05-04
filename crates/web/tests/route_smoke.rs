@@ -147,43 +147,42 @@ async fn dashboard_routes_return_501() {
 }
 
 #[tokio::test]
-async fn invitation_routes_return_501() {
+async fn invitation_landing_unknown_slug_returns_404() {
+    // GET /i/{slug} is now implemented: unknown slug → 404.
     let app = build_test_app().await;
-    for (method, path) in [
-        ("GET", "/i/AAAAAAAAAAAAAAAA"),
-        // /i/{slug}/request is POST; oneshot needs the right method.
-        ("GET", "/i/AAAAAAAAAAAAAAAA/pending/01HFREQ1"),
-    ] {
-        let resp = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::NOT_IMPLEMENTED,
-            "{method} {path}"
-        );
-    }
-
-    // Test the POST separately.
     let resp = app
         .oneshot(
             Request::builder()
-                .method("POST")
-                .uri("/i/AAAAAAAAAAAAAAAA/request")
+                .uri("/i/AAAAAAAAAAAAAAAA")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "GET /i/AAAAAAAAAAAAAAAA");
+}
+
+#[tokio::test]
+async fn invitation_pending_unauthenticated_redirects_to_login() {
+    // GET /i/{slug}/pending/{request_id} is now implemented:
+    // unauthenticated (any ULID, valid or not) → 303 to /login first.
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "GET /i/.../pending/... unauthenticated should redirect to /login"
+    );
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("/login"), "expected redirect to /login, got {location}");
 }
 
 #[tokio::test]
