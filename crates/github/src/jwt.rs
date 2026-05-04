@@ -102,14 +102,22 @@ mod tests {
         let key = DecodingKey::from_rsa_pem(pub_pem.as_bytes()).unwrap();
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&["99"]);
-        validation.validate_exp = true;
-        validation.leeway = 120;
+        // Disable jsonwebtoken's built-in `exp` check: it validates against
+        // `SystemTime::now()` (no clock injection), so any test that signs with
+        // a fixed `now` becomes time-sensitive once `now + 9min + leeway` has
+        // passed in real time. We assert the claim shape ourselves below.
+        validation.validate_exp = false;
         validation.required_spec_claims = std::collections::HashSet::new();
         let token_data =
             jsonwebtoken::decode::<serde_json::Value>(&jwt, &key, &validation).unwrap();
         assert_eq!(token_data.claims["iss"], 99);
         assert!(token_data.claims["iat"].as_i64().unwrap() <= now.timestamp());
         assert!(token_data.claims["exp"].as_i64().unwrap() > now.timestamp());
+        // Sanity: exp is exactly 9 minutes after `now` (per AppJwtSigner::sign).
+        assert_eq!(
+            token_data.claims["exp"].as_i64().unwrap(),
+            now.timestamp() + 9 * 60
+        );
     }
 
     #[test]
