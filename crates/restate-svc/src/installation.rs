@@ -253,7 +253,10 @@ mod tests {
         // Second call — duplicate installation_id (PK collision). Should
         // return Ok(()) without re-auditing.
         let result = onboard_logic(&state, &sample_input(), None).await;
-        assert!(result.is_ok(), "duplicate id should be idempotent: {result:?}");
+        assert!(
+            result.is_ok(),
+            "duplicate id should be idempotent: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -266,7 +269,10 @@ mod tests {
         let mut second = sample_input();
         second.installation_id = 2;
         let err = onboard_logic(&state, &second, None).await.unwrap_err();
-        assert!(err.is_terminal(), "duplicate active should be terminal: {err:?}");
+        assert!(
+            err.is_terminal(),
+            "duplicate active should be terminal: {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -337,6 +343,9 @@ mod tests {
             None,
         )
         .await;
-        assert!(result.is_ok(), "missing installation should be idempotent: {result:?}");
+        assert!(
+            result.is_ok(),
+            "missing installation should be idempotent: {result:?}"
+        );
     }
 }

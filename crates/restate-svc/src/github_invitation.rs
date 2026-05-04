@@ -174,7 +174,9 @@ pub async fn create_logic(
                 .storage
                 .get_github_invitation(input.invitation_id)
                 .await?
-                .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+                .ok_or(crate::error::HandlerError::Storage(
+                    storage::Error::NotFound,
+                ))?;
             if existing.state.is_terminal() {
                 return Ok(());
             }
@@ -301,7 +303,9 @@ async fn lookup_account_id_for_installation(
         .storage
         .get_installation(installation_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     Ok(acct.account_id)
 }
 
@@ -316,7 +320,9 @@ pub async fn on_webhook_logic(
         .storage
         .get_github_invitation(input.invitation_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     if row.state.is_terminal() {
         return Ok(()); // already settled; webhook is just confirming.
@@ -348,12 +354,16 @@ pub async fn on_webhook_logic(
         .storage
         .get_invitation_request(row.invitation_request_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     let link = state
         .storage
         .get_share_link_by_id(request.share_link_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     crate::audit::emit(
         state,
@@ -381,7 +391,9 @@ pub async fn cancel_logic(
         .storage
         .get_github_invitation(input.invitation_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     if row.state.is_terminal() {
         return Ok(());
@@ -392,12 +404,16 @@ pub async fn cancel_logic(
         .storage
         .get_invitation_request(row.invitation_request_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     let link = state
         .storage
         .get_share_link_by_id(request.share_link_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     let repo = link
         .repos
         .iter()
@@ -470,7 +486,9 @@ pub async fn tick_expire_logic(
         .storage
         .get_github_invitation(input.invitation_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     if row.state.is_terminal() {
         return Ok(());
@@ -480,12 +498,16 @@ pub async fn tick_expire_logic(
         .storage
         .get_invitation_request(row.invitation_request_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     let link = state
         .storage
         .get_share_link_by_id(request.share_link_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
     let repo = link
         .repos
         .iter()
@@ -844,7 +866,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Accepted);
     }
 
@@ -869,7 +896,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Declined);
     }
 
@@ -908,8 +940,17 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
-        assert_eq!(row.state, InvitationState::Accepted, "terminal state preserved");
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            InvitationState::Accepted,
+            "terminal state preserved"
+        );
     }
 
     #[tokio::test]
@@ -1060,7 +1101,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Cancelled);
     }
 
@@ -1092,7 +1138,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Cancelled);
     }
 
@@ -1130,7 +1181,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Expired);
     }
 
@@ -1161,7 +1217,16 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
-        assert_eq!(row.state, InvitationState::Sent, "row left for webhook to settle");
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.state,
+            InvitationState::Sent,
+            "row left for webhook to settle"
+        );
     }
 }

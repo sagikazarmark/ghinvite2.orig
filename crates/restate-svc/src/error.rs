@@ -92,9 +92,9 @@ mod tests {
 
     #[test]
     fn storage_database_is_transient() {
-        let e = HandlerError::Storage(storage::Error::Database(
-            sqlx::Error::Configuration("test".into()),
-        ));
+        let e = HandlerError::Storage(storage::Error::Database(sqlx::Error::Configuration(
+            "test".into(),
+        )));
         assert!(!e.is_terminal());
     }
 

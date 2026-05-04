@@ -54,7 +54,8 @@ impl_restate_json_payload!(TickExpirationInput);
 
 #[restate_sdk::object]
 pub trait ShareLink {
-    async fn create(input: CreateLinkInput) -> std::result::Result<CreateLinkOutput, TerminalError>;
+    async fn create(input: CreateLinkInput)
+    -> std::result::Result<CreateLinkOutput, TerminalError>;
     async fn revoke(input: RevokeLinkInput) -> std::result::Result<(), TerminalError>;
     async fn tick_expiration(input: TickExpirationInput) -> std::result::Result<(), TerminalError>;
 }
@@ -183,7 +184,9 @@ pub async fn revoke_logic(
         .storage
         .get_share_link_by_id(input.link_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     crate::audit::emit(
         state,
@@ -209,7 +212,9 @@ pub async fn tick_expiration_logic(
         .storage
         .get_share_link_by_id(input.link_id)
         .await?
-        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+        .ok_or(crate::error::HandlerError::Storage(
+            storage::Error::NotFound,
+        ))?;
 
     // Defensive: an admin may have revoked the link before the timer fired.
     if link.revoked_at.is_some() {
@@ -388,7 +393,10 @@ mod tests {
             None,
         )
         .await;
-        assert!(result.is_ok(), "double-revoke should be idempotent: {result:?}");
+        assert!(
+            result.is_ok(),
+            "double-revoke should be idempotent: {result:?}"
+        );
     }
 
     #[tokio::test]

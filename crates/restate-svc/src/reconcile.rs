@@ -58,8 +58,8 @@ pub async fn daily_run_logic(
             .list_pending_github_invitations_for_installation(acct.installation_id)
             .await?;
         for row in pending {
-            if let Err(e) = reconcile_single(state, &acct, &row, input.at, request_id_for_audit.clone())
-                .await
+            if let Err(e) =
+                reconcile_single(state, &acct, &row, input.at, request_id_for_audit.clone()).await
             {
                 if !e.is_terminal() {
                     // Transient — let Restate retry the whole sweep.
@@ -104,10 +104,9 @@ async fn reconcile_single(
                 row.id, row.repo_id
             ))
         })?;
-    let (owner, repo_name) = repo
-        .repo_full_name
-        .split_once('/')
-        .ok_or_else(|| HandlerError::Invariant(format!("bad repo full name: {}", repo.repo_full_name)))?;
+    let (owner, repo_name) = repo.repo_full_name.split_once('/').ok_or_else(|| {
+        HandlerError::Invariant(format!("bad repo full name: {}", repo.repo_full_name))
+    })?;
 
     let pending = state
         .github
@@ -319,7 +318,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Sent);
     }
 
@@ -359,7 +363,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Accepted);
     }
 
@@ -393,7 +402,12 @@ mod tests {
         .await
         .unwrap();
 
-        let row = state.storage.get_github_invitation(inv_id).await.unwrap().unwrap();
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(row.state, InvitationState::Cancelled);
     }
 }

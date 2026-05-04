@@ -38,10 +38,30 @@ pub fn build_endpoint(state: AppState) -> Endpoint {
     use share_link::ShareLink as _;
 
     Endpoint::builder()
-        .bind(installation::InstallationImpl { state: state.clone() }.serve())
-        .bind(share_link::ShareLinkImpl { state: state.clone() }.serve())
-        .bind(invitation_request::InvitationRequestImpl { state: state.clone() }.serve())
-        .bind(github_invitation::GithubInvitationImpl { state: state.clone() }.serve())
+        .bind(
+            installation::InstallationImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
+        .bind(
+            share_link::ShareLinkImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
+        .bind(
+            invitation_request::InvitationRequestImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
+        .bind(
+            github_invitation::GithubInvitationImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
         .bind(reconcile::ReconcileImpl { state }.serve())
         .build()
 }
