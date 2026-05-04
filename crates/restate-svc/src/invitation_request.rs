@@ -13,7 +13,10 @@ use chrono::{DateTime, Duration, Utc};
 // matches the established pattern (see `share_link.rs` / `github_invitation.rs`).
 use domain::InvitationRequest as DomainInvitationRequest;
 use domain::{RequestId, RequestState};
-use restate_sdk::context::{SharedWorkflowContext, WorkflowContext};
+use restate_sdk::context::{
+    ContextAwakeables, ContextClient, ContextSideEffects, ContextTimers, RunFuture,
+    SharedWorkflowContext, WorkflowContext,
+};
 use restate_sdk::errors::TerminalError;
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +59,17 @@ pub struct SubmitOutput(pub RequestState);
 impl_restate_json_payload!(SubmitRequestInput);
 impl_restate_json_payload!(Decision);
 impl_restate_json_payload!(SubmitOutput);
+impl_restate_json_payload!(PreDecisionOutcome);
+impl_restate_json_payload!(AppliedDecision);
+impl_restate_json_payload!(DispatchInputs);
+
+/// Wrapper around the per-repo `CreateInvitationInput` list so the workflow
+/// can journal the fan-out plan via `ctx.run`. Restate's framing requires a
+/// Sized type implementing its `Serialize`/`Deserialize`; `Vec<T>` from a
+/// foreign-impl point of view doesn't satisfy that without a newtype.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct DispatchInputs(pub Vec<crate::github_invitation::CreateInvitationInput>);
 
 #[restate_sdk::workflow]
 pub trait InvitationRequest {
@@ -75,10 +89,142 @@ pub struct InvitationRequestImpl {
 impl InvitationRequest for InvitationRequestImpl {
     async fn submit(
         &self,
-        _ctx: WorkflowContext<'_>,
-        _input: SubmitRequestInput,
+        ctx: WorkflowContext<'_>,
+        input: SubmitRequestInput,
     ) -> std::result::Result<SubmitOutput, TerminalError> {
-        unimplemented!("Task 17")
+        let request_id = Some(ctx.invocation_id().to_string());
+
+        // Phase 1: insert pending row, emit `request.created`, classify outcome.
+        let outcome = {
+            let state = self.state.clone();
+            let input = input.clone();
+            let request_id = request_id.clone();
+            ctx.run(move || {
+                let state = state.clone();
+                let input = input.clone();
+                let request_id = request_id.clone();
+                async move {
+                    pre_decision_logic(&state, &input, input.created_at, request_id)
+                        .await
+                        .map_err(crate::error::to_sdk_handler_error)
+                }
+            })
+            .name("pre_decision")
+            .await?
+        };
+
+        // Phase 2: pick the AppliedDecision that the apply step will record.
+        // - AutoApprove: skip the awakeable race; stamp `at = input.created_at`.
+        // - PendingDecision: race admin awakeable against the deadline timer.
+        let applied: AppliedDecision = match outcome {
+            PreDecisionOutcome::AutoApprove => AppliedDecision::AutoApprove {
+                at: input.created_at,
+            },
+            PreDecisionOutcome::PendingDecision { decision_deadline } => {
+                // The awakeable id is durably journaled the first time we hit
+                // it; subsequent replays see the same id. Plan 5's admin
+                // server function resolves it via Restate's HTTP API
+                // (`/restate/awakeables/{id}/resolve`).
+                let (_awakeable_id, promise) = ctx.awakeable::<Decision>();
+
+                // ctx.sleep takes a Duration; our deadline is absolute. The
+                // workflow handler runs at `created_at` (or replay time);
+                // `created_at` is the most stable reference we have without
+                // a fresh `ctx.run(|| now())`.
+                let wait = decision_deadline - input.created_at;
+                let wait = if wait <= Duration::zero() {
+                    std::time::Duration::ZERO
+                } else {
+                    // chrono::Duration -> std::time::Duration; safe because we
+                    // just bounded `wait` to >= 0 and `MAX_DECISION_WAIT` is days.
+                    wait.to_std().unwrap_or(std::time::Duration::ZERO)
+                };
+                let sleep = ctx.sleep(wait);
+
+                // The Restate SDK ships its own `select!` (DurableFuture-aware),
+                // semantically the same as tokio's. Either branch yields an
+                // `AppliedDecision` with `at = decision_deadline` (timer) or the
+                // admin's `decided_at` (awakeable).
+                restate_sdk::select! {
+                    res = promise => {
+                        match res? {
+                            Decision::Approve { decided_by, decided_at } => AppliedDecision::Approve {
+                                decided_by,
+                                at: decided_at,
+                            },
+                            Decision::Decline { decided_by, decided_at, reason } => AppliedDecision::Decline {
+                                decided_by,
+                                at: decided_at,
+                                reason,
+                            },
+                        }
+                    },
+                    _ = sleep => AppliedDecision::Expire {
+                        at: decision_deadline,
+                    },
+                }
+            }
+        };
+
+        // Phase 3: durably record the decision and emit the audit row.
+        // Returning `SubmitOutput` (a local newtype) keeps the journal payload
+        // Restate-serializable; `RequestState` lives in `domain` and we can't
+        // implement `restate_sdk::serde::*` for foreign types.
+        let SubmitOutput(final_state) = {
+            let state = self.state.clone();
+            let request_id_inner = request_id.clone();
+            let req_id = input.request_id;
+            let decision = applied.clone();
+            ctx.run(move || {
+                let state = state.clone();
+                let request_id_inner = request_id_inner.clone();
+                let decision = decision.clone();
+                async move {
+                    apply_decision_logic(&state, req_id, decision, request_id_inner)
+                        .await
+                        .map(SubmitOutput)
+                        .map_err(crate::error::to_sdk_handler_error)
+                }
+            })
+            .name("apply_decision")
+            .await?
+        };
+
+        // Phase 4: on approval, fan out per-repo to GithubInvitation::create.
+        if final_state == RequestState::Approved {
+            // Build the per-repo dispatch inputs in a journaled run so each
+            // GithubInvitationId is stable across replays.
+            let DispatchInputs(inputs) = {
+                let state = self.state.clone();
+                let req_id = input.request_id;
+                let now = input.created_at;
+                ctx.run(move || {
+                    let state = state.clone();
+                    async move {
+                        build_dispatch_inputs(&state, req_id, now)
+                            .await
+                            .map(DispatchInputs)
+                            .map_err(crate::error::to_sdk_handler_error)
+                    }
+                })
+                .name("build_dispatch_inputs")
+                .await?
+            };
+
+            for inv_input in inputs {
+                // Best-effort fan-out via the generated `GithubInvitationClient`.
+                // Plan 5 / Task 19's `build_endpoint` will tie the actual
+                // routing together; integration tests against a live Restate
+                // are deferred to Plan 8.
+                ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
+                    inv_input.invitation_id.to_string(),
+                )
+                .create(inv_input)
+                .send();
+            }
+        }
+
+        Ok(SubmitOutput(final_state))
     }
 
     async fn decide(
@@ -86,12 +232,20 @@ impl InvitationRequest for InvitationRequestImpl {
         _ctx: SharedWorkflowContext<'_>,
         _decision: Decision,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 17")
+        // Plan 5's admin server function resolves the awakeable directly via
+        // Restate's HTTP API (`POST /restate/awakeables/{id}/resolve`), so
+        // this shared handler is intentionally a no-op stub. Kept on the
+        // trait so external callers that prefer the SDK shape compile; we
+        // can wire it through `ctx.resolve_awakeable` later if needed.
+        Ok(())
     }
 }
 
 /// Outcome of the pre-decision phase. Drives the workflow handler's branching.
-#[derive(Clone, Debug)]
+///
+/// `Serialize`/`Deserialize` derives + the `impl_restate_json_payload!` macro
+/// below let this be journaled as the result of `ctx.run("pre_decision")`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PreDecisionOutcome {
     /// Link auto-approves; no awakeable race needed.
     AutoApprove,
@@ -102,7 +256,7 @@ pub enum PreDecisionOutcome {
 /// Concrete decision the workflow has resolved on. Distinct from
 /// [`Decision`] (the awakeable payload from admin) because the workflow may
 /// also auto-approve or expire on its own.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum AppliedDecision {
     AutoApprove {
         at: DateTime<Utc>,
@@ -273,6 +427,46 @@ pub async fn apply_decision_logic(
     .await?;
 
     Ok(new_state)
+}
+
+/// Pure logic: read the request's share_link and build CreateInvitationInput
+/// per repo. Emits no audit (each `GithubInvitation::create` is responsible
+/// for its own).
+pub async fn build_dispatch_inputs(
+    state: &AppState,
+    request_id: RequestId,
+    now: DateTime<Utc>,
+) -> crate::error::Result<Vec<crate::github_invitation::CreateInvitationInput>> {
+    let req = state
+        .storage
+        .get_invitation_request(request_id)
+        .await?
+        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
+    let link = state
+        .storage
+        .get_share_link_by_id(req.share_link_id)
+        .await?
+        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
+    let recipient = state
+        .storage
+        .get_user(req.requester_id)
+        .await?
+        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
+
+    Ok(link
+        .repos
+        .into_iter()
+        .map(|r| crate::github_invitation::CreateInvitationInput {
+            invitation_id: domain::GithubInvitationId::new(),
+            invitation_request_id: request_id,
+            installation_id: link.installation_id,
+            repo_id: r.repo_id,
+            repo_full_name: r.repo_full_name,
+            recipient_login: recipient.login.clone(),
+            permission: link.permission,
+            now,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -540,6 +734,119 @@ mod tests {
             req.decline_reason.as_deref(),
             Some("not familiar with this user")
         );
+    }
+
+    #[tokio::test]
+    async fn build_dispatch_inputs_emits_one_per_repo() {
+        let state = fixture_state().await;
+        // Seed installation + users (same fixture chain as `seed_link`).
+        state
+            .storage
+            .insert_installation(&domain::Account {
+                installation_id: 1,
+                account_id: 100,
+                account_login: "acme".into(),
+                account_type: AccountType::Organization,
+                installed_at: dt("2026-05-04T12:00:00Z"),
+                uninstalled_at: None,
+                selected_repos: SelectedRepos::All,
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_user(&domain::User {
+                user_id: 7,
+                login: "creator".into(),
+                avatar_url: None,
+                last_seen_at: dt("2026-05-04T12:00:00Z"),
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .upsert_user(&domain::User {
+                user_id: 8,
+                login: "alice".into(),
+                avatar_url: None,
+                last_seen_at: dt("2026-05-04T12:00:00Z"),
+            })
+            .await
+            .unwrap();
+
+        // Link with two repos so we can assert the fan-out shape.
+        let link = ShareLink {
+            id: ShareLinkId::new(),
+            slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(101)),
+            installation_id: 1,
+            account_id: 100,
+            created_by: 7,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: None,
+            max_uses: None,
+            uses_count: 0,
+            permission: Permission::Push,
+            approval_required: false, // auto-approve so the workflow path is exercised
+            internal_note: None,
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![
+                domain::ShareLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                },
+                domain::ShareLinkRepo {
+                    repo_id: 11,
+                    repo_full_name: "acme/web".into(),
+                },
+            ],
+        };
+        state.storage.insert_share_link(&link).await.unwrap();
+
+        let req_id = RequestId::new();
+        let now = dt("2026-05-04T12:30:00Z");
+        let outcome = pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link.id,
+                requester_id: 8,
+                justification: None,
+                created_at: now,
+            },
+            now,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, PreDecisionOutcome::AutoApprove));
+
+        apply_decision_logic(
+            &state,
+            req_id,
+            AppliedDecision::AutoApprove { at: now },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let inputs = build_dispatch_inputs(&state, req_id, now).await.unwrap();
+        assert_eq!(inputs.len(), 2);
+        // Both inputs should reference the same request, recipient, and
+        // installation; the per-repo fields differ.
+        for inp in &inputs {
+            assert_eq!(inp.invitation_request_id, req_id);
+            assert_eq!(inp.installation_id, 1);
+            assert_eq!(inp.recipient_login, "alice");
+            assert_eq!(inp.permission, Permission::Push);
+            assert_eq!(inp.now, now);
+        }
+        let mut full_names: Vec<&str> = inputs.iter().map(|i| i.repo_full_name.as_str()).collect();
+        full_names.sort();
+        assert_eq!(full_names, vec!["acme/api", "acme/web"]);
+        let mut repo_ids: Vec<u64> = inputs.iter().map(|i| i.repo_id).collect();
+        repo_ids.sort();
+        assert_eq!(repo_ids, vec![10, 11]);
     }
 
     #[tokio::test]
