@@ -151,7 +151,6 @@ pub async fn create_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HandlerError;
     use crate::test_support::{dt, fixture_state};
     use domain::{AccountType, SelectedRepos};
 
@@ -216,20 +215,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_unknown_installation_errors() {
+    async fn create_unknown_installation_is_terminal() {
         let state = fixture_state().await;
-        // No seed — installation 1 doesn't exist; the insert must fail on FK.
         let mut input = sample_input();
         input.installation_id = 999;
         let err = create_logic(&state, &input, None).await.unwrap_err();
-        // FK violations surface as `storage::Error::Database` today, which is
-        // classified as transient by `HandlerError::is_terminal`. Refining the
-        // storage layer to map FK breaches to a terminal `Conflict`/`NotFound`
-        // is tracked separately; for now, just assert the operation errored.
-        match &err {
-            HandlerError::Storage(_) => (),
-            other => panic!("expected Storage error, got {other:?}"),
-        }
+        assert!(err.is_terminal());
     }
 
     #[tokio::test]

@@ -33,6 +33,9 @@ pub enum ConflictKind {
     DuplicateId,
     #[error("active installation already exists for this account")]
     DuplicateActiveInstallation,
+    /// Insert references a parent row that does not exist.
+    #[error("foreign-key violation: referenced row does not exist")]
+    ForeignKey,
 }
 
 #[derive(Debug, Error)]
@@ -161,8 +164,9 @@ pub trait Storage: Send + Sync + 'static {
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateSlug`] if `link.slug`
     ///   collides with an existing link.
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] if `link.id` collides.
-    /// - [`Error::Database`] for any FK violation (unknown installation/user)
-    ///   or other failure.
+    /// - [`Error::Conflict`] with [`ConflictKind::ForeignKey`] if `installation_id`
+    ///   or `created_by` reference rows that do not exist.
+    /// - [`Error::Database`] for any other failure.
     async fn insert_share_link(&self, link: &ShareLink) -> Result<()>;
 
     /// Mark a share link as revoked (idempotent guard: only updates rows where
@@ -258,7 +262,9 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// **Errors:**
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] on `id` collision.
-    /// - [`Error::Database`] for FK violations or other failure.
+    /// - [`Error::Conflict`] with [`ConflictKind::ForeignKey`] if
+    ///   `invitation_request_id` references a row that does not exist.
+    /// - [`Error::Database`] for any other failure.
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
 
     /// Update an existing github_invitations row to a new state. The

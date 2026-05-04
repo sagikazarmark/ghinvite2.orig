@@ -153,6 +153,9 @@ impl Storage for SqlxStorage {
             Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(Error::Conflict(
                 classify_unique(&*db, ConflictKind::DuplicateId),
             )),
+            Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
+                Err(Error::Conflict(ConflictKind::ForeignKey))
+            }
             Err(e) => Err(Error::Database(e)),
         }
     }
@@ -299,6 +302,9 @@ impl Storage for SqlxStorage {
         .map_err(|e| match e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
                 Error::Conflict(classify_unique(&*db, ConflictKind::DuplicateId))
+            }
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                Error::Conflict(ConflictKind::ForeignKey)
             }
             other => Error::Database(other),
         })?;
@@ -460,6 +466,9 @@ impl Storage for SqlxStorage {
                     ConflictKind::DuplicateId,
                 )));
             }
+            Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
+                return Err(Error::Conflict(ConflictKind::ForeignKey));
+            }
             Err(e) => return Err(Error::Database(e)),
         }
 
@@ -560,6 +569,9 @@ impl Storage for SqlxStorage {
         .map_err(|e| match e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
                 Error::Conflict(classify_unique(&*db, ConflictKind::DuplicateId))
+            }
+            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+                Error::Conflict(ConflictKind::ForeignKey)
             }
             other => Error::Database(other),
         })?;
@@ -993,7 +1005,10 @@ mod tests {
         // installation_id 999 does not exist → FK violation
         let link = sample_link(100, 999, 7, 6);
         let err = s.insert_share_link(&link).await.unwrap_err();
-        assert!(matches!(err, Error::Database(_)), "got {err:?}");
+        assert!(
+            matches!(err, Error::Conflict(ConflictKind::ForeignKey)),
+            "got {err:?}"
+        );
     }
 
     pub(crate) fn sample_request(link_id: ShareLinkId, requester: u64) -> InvitationRequest {
@@ -1281,7 +1296,10 @@ mod tests {
         // No request exists → FK violation
         let g = sample_ginv(RequestId::new(), 10);
         let err = s.insert_github_invitation(&g).await.unwrap_err();
-        assert!(matches!(err, Error::Database(_)), "got {err:?}");
+        assert!(
+            matches!(err, Error::Conflict(ConflictKind::ForeignKey)),
+            "got {err:?}"
+        );
     }
 
     pub(crate) fn sample_audit(
@@ -1362,7 +1380,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, Error::Database(_) | Error::NotFound),
+            matches!(err, Error::Conflict(ConflictKind::ForeignKey)),
             "got {err:?}"
         );
     }
