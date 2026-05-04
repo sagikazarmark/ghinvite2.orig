@@ -3,13 +3,29 @@
 
 use crate::error::Result;
 use crate::jwt::AppJwtSigner;
-use crate::payloads::GhInstallationToken;
+use crate::payloads::{GhInstallationRepos, GhInstallationToken, GhRepo};
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
 use chrono::Utc;
 use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
+
+/// Percent-encode a single path segment. Same alphabet as `url_path_segment` in
+/// `oauth.rs`; duplicated locally rather than re-exported because the two call
+/// sites are in different modules and the helper is trivial.
+fn path_seg(s: &str) -> String {
+    const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if SAFE.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
 
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
@@ -71,8 +87,6 @@ impl InstallationClient {
 
     /// Build a request pre-loaded with the auth header for `installation_id`.
     /// Caller adds method/path/body.
-    // Used by methods added in Tasks 14-16.
-    #[allow(dead_code)]
     pub(crate) async fn auth_request(
         &self,
         installation_id: u64,
@@ -85,6 +99,37 @@ impl InstallationClient {
             .header("authorization", format!("Bearer {token}"))
             .header("user-agent", "ghinvite")
             .header("x-github-api-version", "2022-11-28"))
+    }
+
+    /// `GET /installation/repositories` — paginated upstream; v1 only follows
+    /// page 1 (per_page=100). If GitHub ever ships a customer with > 100 repos
+    /// per install, Plan 3's `Reconcile::sweep` adds pagination there.
+    pub async fn list_installation_repos(
+        &self,
+        installation_id: u64,
+    ) -> Result<GhInstallationRepos> {
+        let req = self
+            .auth_request(installation_id, Method::Get, "/installation/repositories?per_page=100")
+            .await?;
+        self.transport.send(req).await?.ensure_success()?.json()
+    }
+
+    /// `GET /repos/{owner}/{repo}` — small surface for display + access
+    /// confirmation.
+    ///
+    /// **Errors:** `Error::Status { status: 404, .. }` if the App lost access
+    /// to the repo (caller should treat that as `selected_repos` drift).
+    pub async fn get_repo(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+    ) -> Result<GhRepo> {
+        let path = format!("/repos/{}/{}", path_seg(owner), path_seg(repo));
+        let req = self
+            .auth_request(installation_id, Method::Get, &path)
+            .await?;
+        self.transport.send(req).await?.ensure_success()?.json()
     }
 }
 
@@ -151,5 +196,90 @@ mod token_mint_tests {
         let t2 = client.installation_token(55).await.unwrap();
         assert_eq!(t2, "ghs_xxx");
         mock.assert_exhausted(); // only ONE network call
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::Response;
+    use std::collections::BTreeMap;
+
+    /// Use the same static test key as the other test modules to keep
+    /// signing fast.
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
+
+    fn signer() -> AppJwtSigner {
+        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+    }
+
+    /// Single mocked token-mint response that all tests below consume first.
+    fn token_mint_expectation() -> Expectation {
+        Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn list_installation_repos_decodes_envelope() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/installation/repositories?per_page=100",
+                serde_json::json!({
+                    "total_count": 1,
+                    "repositories": [{"id": 5, "full_name": "acme/api", "private": true}]
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let r = client.list_installation_repos(9).await.unwrap();
+        assert_eq!(r.total_count, 1);
+        assert_eq!(r.repositories[0].full_name, "acme/api");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn get_repo_uses_path_encoded_segments() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api%20gateway",
+                serde_json::json!({"id": 7, "full_name": "acme/api gateway", "private": false}),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let r = client.get_repo(9, "acme", "api gateway").await.unwrap();
+        assert_eq!(r.id, 7);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn get_repo_404_surfaces_status() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/gone",
+                404,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.get_repo(9, "acme", "gone").await.unwrap_err();
+        assert_eq!(err.status(), Some(404));
     }
 }
