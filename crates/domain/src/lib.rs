@@ -12,7 +12,7 @@ pub mod user;
 // Re-exports filled in as each module gains its public types:
 // pub use account::{Account, AccountType, SelectedRepos};
 // pub use github_invitation::{GithubInvitation, InvitationState};
-// pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
+pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
 // pub use invitation_request::{InvitationRequest, RequestState};
 // pub use permission::Permission;
 // pub use share_link::{ShareLink, ShareLinkRepo};
