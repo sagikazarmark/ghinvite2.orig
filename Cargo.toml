@@ -34,6 +34,7 @@ restate-sdk = { version = "0.10", default-features = false, features = ["hyper",
 rsa = { version = "0.9", default-features = false, features = ["pem", "sha2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_qs = { version = "1", default-features = false, features = ["axum"] }
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono"] }
 subtle = "2"
