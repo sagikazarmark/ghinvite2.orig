@@ -1,7 +1,6 @@
 //! `ShareLink` Virtual Object: create, revoke, tick_expiration.
 
 use crate::audit::{Actor, Target};
-use crate::error::HandlerError;
 use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
@@ -152,6 +151,7 @@ pub async fn create_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HandlerError;
     use crate::test_support::{dt, fixture_state};
     use domain::{AccountType, SelectedRepos};
 
