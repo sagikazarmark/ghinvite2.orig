@@ -20,6 +20,11 @@ pub struct Session {
     /// middleware to throttle GitHub `/user/memberships/orgs/{login}` calls
     /// (60-second cache per spec §10.3).
     pub admin_checks: HashMap<String, AdminCheck>,
+    /// Stored by `GET /login?return_to=<path>` and consumed by the OAuth callback
+    /// to bounce the user back to the share-link request page after sign-in.
+    /// Only `/i/`-prefixed relative paths are stored (open-redirect prevention).
+    #[serde(default)]
+    pub return_to: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,6 +36,20 @@ pub struct AdminCheck {
 impl Session {
     pub fn is_authenticated(&self) -> bool {
         !self.login.is_empty()
+    }
+}
+
+/// Validates a `return_to` query parameter. Only accepts relative paths that
+/// start with `/i/` — prevents open redirect and path-traversal bypasses.
+/// Returns `None` on rejection.
+pub fn validate_return_to(raw: &str) -> Option<String> {
+    // Must be relative (starts with '/'), not protocol-relative ('//'), and
+    // confined to recipient routes. The `..` check prevents traversal like
+    // `/i/../../admin`.
+    if raw.starts_with("/i/") && !raw.starts_with("//") && !raw.contains("..") {
+        Some(raw.to_string())
+    } else {
+        None
     }
 }
 
@@ -110,6 +129,7 @@ mod tests {
             access_token: "u_xxx".into(),
             oauth_csrf: None,
             admin_checks: HashMap::new(),
+            return_to: None,
         };
         assert!(s.is_authenticated());
     }
@@ -140,5 +160,19 @@ mod tests {
         let parsed: Flash = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.message, "link created");
         assert_eq!(parsed.level, FlashLevel::Success);
+    }
+
+    #[test]
+    fn return_to_validation() {
+        use super::validate_return_to;
+        assert_eq!(
+            validate_return_to("/i/AAAAAAAAAAAAAAAA/request"),
+            Some("/i/AAAAAAAAAAAAAAAA/request".to_string())
+        );
+        assert_eq!(validate_return_to("/"), None);
+        assert_eq!(validate_return_to("https://evil.com"), None);
+        assert_eq!(validate_return_to("//evil.com/i/foo"), None);
+        assert_eq!(validate_return_to("/i/../../admin"), None); // path traversal
+        assert_eq!(validate_return_to("/i/../etc/passwd"), None); // path traversal
     }
 }
