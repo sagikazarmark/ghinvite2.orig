@@ -80,3 +80,19 @@ async fn static_styles_returns_css() {
     let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
     assert!(ct.contains("text/css"));
 }
+
+#[tokio::test]
+async fn home_returns_html() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp.headers().get("content-type").unwrap().to_str().unwrap();
+    assert!(ct.contains("text/html"));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("ghinvite"));
+    assert!(text.contains("Sign in with GitHub"));
+}
