@@ -33,8 +33,8 @@ pub struct SubmitRequestInput {
     pub created_at: DateTime<Utc>,
 }
 
-/// Decision payload — admin's approve/decline server function in Plan 5
-/// resolves an awakeable with this.
+/// Decision payload — admin's approve/decline handler in Plan 5
+/// resolves the "decision" durable promise with this.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum Decision {
     Approve {
@@ -76,8 +76,8 @@ pub trait InvitationRequest {
     /// One-shot workflow per `request_id`. Returns the final state.
     async fn submit(input: SubmitRequestInput) -> std::result::Result<SubmitOutput, TerminalError>;
 
-    /// Resolve the awakeable created in `submit` with an Approve/Decline decision.
-    /// Called by the admin's server function (Plan 5).
+    /// Resolve the "decision" durable promise in `submit` with an Approve/Decline decision.
+    /// Called by the admin's approve/decline handler (Plan 5).
     #[shared]
     async fn decide(decision: Decision) -> std::result::Result<(), TerminalError>;
 }
