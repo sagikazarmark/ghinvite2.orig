@@ -116,3 +116,39 @@ async fn dashboard_routes_return_501() {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "path = {path}");
     }
 }
+
+#[tokio::test]
+async fn invitation_routes_return_501() {
+    let app = build_test_app().await;
+    for (method, path) in [
+        ("GET", "/i/AAAAAAAAAAAAAAAA"),
+        // /i/{slug}/request is POST; oneshot needs the right method.
+        ("GET", "/i/AAAAAAAAAAAAAAAA/pending/01HFREQ1"),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "{method} {path}");
+    }
+
+    // Test the POST separately.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/i/AAAAAAAAAAAAAAAA/request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+}
