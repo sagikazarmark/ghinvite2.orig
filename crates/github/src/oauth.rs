@@ -8,7 +8,7 @@
 //!    `/user/memberships/orgs/{login}`).
 
 use crate::error::{Error, Result};
-use crate::payloads::GhTokenResponse;
+use crate::payloads::{GhMembership, GhTokenResponse, GhUser};
 use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
@@ -104,7 +104,6 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
 /// is encrypted at rest in the session cookie; the web binary decrypts it
 /// before instantiating this client per request).
 #[derive(Clone)]
-#[allow(dead_code)] // fields are read by methods added in Task 9
 pub struct UserApiClient {
     transport: Arc<dyn HttpTransport>,
     user_token: String,
@@ -128,7 +127,6 @@ impl UserApiClient {
         }
     }
 
-    #[allow(dead_code)] // used by methods added in Task 9
     fn auth_request(&self, method: Method, path: &str) -> Request {
         Request::new(method, format!("{}{}", self.base_url, path))
             .header("accept", "application/vnd.github+json")
@@ -136,6 +134,46 @@ impl UserApiClient {
             .header("user-agent", "ghinvite")
             .header("x-github-api-version", "2022-11-28")
     }
+
+    /// `GET /user` — returns the signed-in user's basic profile. Used at sign-in
+    /// time to upsert the `users` row (the web binary builds a `domain::User`
+    /// from this plus `last_seen_at = Utc::now()`).
+    ///
+    /// **Errors:** `Error::Status` for non-2xx (401 = expired token, etc.),
+    /// `Error::Decode` for malformed JSON.
+    pub async fn get_user(&self) -> Result<GhUser> {
+        let req = self.auth_request(Method::Get, "/user");
+        self.transport.send(req).await?.ensure_success()?.json()
+    }
+
+    /// `GET /user/memberships/orgs/{login}` — used by the admin recheck path
+    /// (spec §10.3). Returns `Error::Status { status: 404, .. }` if the user is
+    /// not a member of the org; the caller should map that to "not admin".
+    ///
+    /// **Errors:** `Error::Status` for non-2xx, `Error::Decode` for malformed JSON.
+    pub async fn get_org_membership(&self, org_login: &str) -> Result<GhMembership> {
+        // Path-encode the login to defend against odd characters (org renames,
+        // etc.). url::form_urlencoded::byte_serialize would be heavier; we use
+        // url::Url to build the path safely.
+        let path = format!("/user/memberships/orgs/{}", url_path_segment(org_login));
+        let req = self.auth_request(Method::Get, &path);
+        self.transport.send(req).await?.ensure_success()?.json()
+    }
+}
+
+/// Percent-encode a single path segment. We allow only the characters GitHub
+/// uses in logins; everything else is encoded.
+fn url_path_segment(s: &str) -> String {
+    const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if SAFE.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -279,5 +317,70 @@ mod exchange_tests {
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
         assert!(matches!(err, Error::Decode(_)), "expected Decode, got {err:?}");
         mock.assert_exhausted();
+    }
+}
+
+#[cfg(test)]
+mod user_api_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::{Method, Response};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn client_with(mock: MockTransport) -> UserApiClient {
+        UserApiClient::with_base(
+            Arc::new(mock),
+            "u_xxx".into(),
+            "https://api.github.test".into(),
+        )
+    }
+
+    #[tokio::test]
+    async fn get_user_sends_authorization_and_returns_payload() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Get,
+            url: "https://api.github.test/user".into(),
+            required_headers: {
+                let mut h = BTreeMap::new();
+                h.insert("authorization".into(), "Bearer u_xxx".into());
+                h.insert("accept".into(), "application/vnd.github+json".into());
+                h
+            },
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{"id":42,"login":"octocat","avatar_url":"https://a/u/42"}"#.to_vec(),
+            },
+        }]);
+        let mock_clone = mock.clone();
+        let user = client_with(mock).get_user().await.unwrap();
+        assert_eq!(user.id, 42);
+        assert_eq!(user.login, "octocat");
+        mock_clone.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn get_org_membership_path_encodes_login() {
+        let mock = MockTransport::scripted(vec![Expectation::ok_json(
+            Method::Get,
+            "https://api.github.test/user/memberships/orgs/acme%20corp",
+            serde_json::json!({"role": "admin", "state": "active"}),
+        )]);
+        let m = client_with(mock).get_org_membership("acme corp").await.unwrap();
+        assert_eq!(m.role, "admin");
+        assert_eq!(m.state, "active");
+    }
+
+    #[tokio::test]
+    async fn get_org_membership_404_surfaces_status() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/user/memberships/orgs/private",
+            404,
+        )]);
+        let err = client_with(mock).get_org_membership("private").await.unwrap_err();
+        assert_eq!(err.status(), Some(404));
     }
 }
