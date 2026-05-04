@@ -21,3 +21,12 @@ data/
 
 # Local-first env files
 .env
+
+# Rust build artifacts
+/target
+/dist
+/node_modules
+*.sqlite
+*.sqlite-*
+.env.*
+!.env.example
