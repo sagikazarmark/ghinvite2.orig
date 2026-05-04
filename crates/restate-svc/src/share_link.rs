@@ -96,10 +96,17 @@ impl ShareLink for ShareLinkImpl {
 
     async fn tick_expiration(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: TickExpirationInput,
+        ctx: ObjectContext<'_>,
+        input: TickExpirationInput,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 10")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            tick_expiration_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("tick_expiration")
+        .await
     }
 }
 
@@ -190,9 +197,51 @@ pub async fn revoke_logic(
     .await
 }
 
+/// Pure logic: if the link is past its expiry and not already revoked, emit
+/// `share_link.expired`. No state mutation — `is_active(now)` already reflects
+/// the expiry. Idempotent under repeated calls.
+pub async fn tick_expiration_logic(
+    state: &AppState,
+    input: &TickExpirationInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    let link = state
+        .storage
+        .get_share_link_by_id(input.link_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    // Defensive: an admin may have revoked the link before the timer fired.
+    if link.revoked_at.is_some() {
+        return Ok(());
+    }
+    let Some(expires) = link.expires_at else {
+        return Err(crate::error::HandlerError::Invariant(format!(
+            "tick_expiration fired for link {} which has no expires_at",
+            input.link_id
+        )));
+    };
+    if input.at < expires {
+        // Timer fired early; skip.
+        return Ok(());
+    }
+
+    crate::audit::emit(
+        state,
+        link.account_id,
+        EventType::ShareLinkExpired,
+        Actor::System,
+        Target::share_link(input.link_id),
+        serde_json::json!({}),
+        request_id,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::HandlerError;
     use crate::test_support::{dt, fixture_state};
     use domain::{AccountType, SelectedRepos};
 
@@ -340,5 +389,91 @@ mod tests {
         )
         .await;
         assert!(result.is_ok(), "double-revoke should be idempotent: {result:?}");
+    }
+
+    #[tokio::test]
+    async fn tick_expiration_emits_when_past_expiry() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+
+        tick_expiration_logic(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: dt("2026-06-03T12:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tick_expiration_skips_revoked_link() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        revoke_logic(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        tick_expiration_logic(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: dt("2026-06-03T12:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn tick_expiration_unknown_link_is_terminal() {
+        let state = fixture_state().await;
+        let err = tick_expiration_logic(
+            &state,
+            &TickExpirationInput {
+                link_id: ShareLinkId::new(),
+                at: dt("2026-06-03T12:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn tick_expiration_no_expires_at_is_terminal_invariant() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+
+        let mut no_expiry = sample_input();
+        no_expiry.expires_at = None;
+        let out = create_logic(&state, &no_expiry, None).await.unwrap();
+
+        let err = tick_expiration_logic(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: dt("2099-01-01T00:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, HandlerError::Invariant(_)));
+        assert!(err.is_terminal());
     }
 }
