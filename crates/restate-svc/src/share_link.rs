@@ -81,10 +81,17 @@ impl ShareLink for ShareLinkImpl {
 
     async fn revoke(
         &self,
-        _ctx: ObjectContext<'_>,
-        _input: RevokeLinkInput,
+        ctx: ObjectContext<'_>,
+        input: RevokeLinkInput,
     ) -> std::result::Result<(), TerminalError> {
-        unimplemented!("Task 9")
+        let request_id = Some(ctx.invocation_id().to_string());
+        ctx.run(|| async {
+            revoke_logic(&self.state, &input, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("revoke")
+        .await
     }
 
     async fn tick_expiration(
@@ -146,6 +153,41 @@ pub async fn create_logic(
         link_id,
         slug: slug.as_str().to_string(),
     })
+}
+
+/// Pure logic: stamp `revoked_at`/`revoked_by`; emit audit. Idempotent on
+/// double-revoke (storage returns NotFound when no-op; we treat as Ok).
+pub async fn revoke_logic(
+    state: &AppState,
+    input: &RevokeLinkInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    match state
+        .storage
+        .mark_share_link_revoked(input.link_id, input.by_user, input.when)
+        .await
+    {
+        Ok(()) => (),
+        Err(storage::Error::NotFound) => return Ok(()), // idempotent
+        Err(e) => return Err(e.into()),
+    }
+
+    let link = state
+        .storage
+        .get_share_link_by_id(input.link_id)
+        .await?
+        .ok_or(crate::error::HandlerError::Storage(storage::Error::NotFound))?;
+
+    crate::audit::emit(
+        state,
+        link.account_id,
+        EventType::ShareLinkRevoked,
+        Actor::User(input.by_user),
+        Target::share_link(input.link_id),
+        serde_json::json!({}),
+        request_id,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -238,5 +280,65 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(link.repos.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_marks_and_audits() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+
+        revoke_logic(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.revoked_by, Some(7));
+        assert!(link.revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn revoke_already_revoked_is_idempotent() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+
+        revoke_logic(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Second revoke on already-revoked link.
+        let result = revoke_logic(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T14:00:00Z"),
+            },
+            None,
+        )
+        .await;
+        assert!(result.is_ok(), "double-revoke should be idempotent: {result:?}");
     }
 }
