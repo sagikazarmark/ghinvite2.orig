@@ -1,3 +1,4 @@
+<!-- /autoplan restore point: /home/laborant/.gstack/projects/sagikazarmark-ghinvite2.orig/main-autoplan-restore-20260504-201537.md -->
 # ghinvite — Plan 5: Dashboard Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -88,6 +89,8 @@ use restate_sdk::context::ContextPromises;
 
 (Check existing imports — `ContextSideEffects`, `RunFuture`, `WorkflowContext`, `SharedWorkflowContext`, `TerminalError` should already be there.)
 
+**[autoplan amendment]** Also remove `ContextAwakeables` from the import list — it becomes dead after this switch. The existing import line likely reads something like `use restate_sdk::context::{ContextAwakeables, ContextClient, ...};`. Drop `ContextAwakeables` from that list; leave all others. If rustc warns `unused import: ContextAwakeables` you've found the right line.
+
 - [ ] **Step 2: Implement `decide`**
 
 Replace the no-op `decide` body (the function around line 236) with:
@@ -157,22 +160,9 @@ with:
 
 (GitHub OAuth accepts space-separated scopes in a single `scope` query param.)
 
-- [ ] **Step 2: Add a list-wrapper payload**
+- [ ] **Step 2: Skip — no new payload type needed**
 
-In `crates/github/src/payloads.rs`, add at the bottom (after the existing `GhInstallationRepos`):
-
-```rust
-/// `GET /user/installations/{installation_id}/repositories` response shape.
-/// Same `repositories` array as `GhInstallationRepos` but reused here for the
-/// user-token endpoint to keep call-site types explicit.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GhUserInstallationRepos {
-    pub total_count: u64,
-    pub repositories: Vec<GhRepo>,
-}
-```
-
-If `GhInstallationRepos` already has the same shape, you can re-use it instead — the trait reuse keeps the public surface tight. Pick whichever is cleaner.
+**[autoplan amendment — DRY]** `GhInstallationRepos` in `crates/github/src/payloads.rs` already has the exact shape `{ total_count: u64, repositories: Vec<GhRepo> }`. Adding `GhUserInstallationRepos` would be a byte-for-byte duplicate. Reuse `GhInstallationRepos` instead — the endpoint path differs but the JSON schema is identical (GitHub returns the same wrapper for both the installation-admin and user-token variants). No changes to `payloads.rs` are needed in Task 2.
 
 - [ ] **Step 3: Add `list_user_installation_repos` to `UserApiClient`**
 
@@ -188,7 +178,7 @@ In `crates/github/src/oauth.rs`, append a new method to the `impl UserApiClient`
     pub async fn list_user_installation_repos(
         &self,
         installation_id: u64,
-    ) -> Result<crate::payloads::GhUserInstallationRepos> {
+    ) -> Result<crate::payloads::GhInstallationRepos> {
         let path = format!("/user/installations/{installation_id}/repositories?per_page=100");
         tracing::debug!("calling GET /user/installations/{{installation_id}}/repositories");
         let req = self.auth_request(Method::Get, &path);
@@ -203,13 +193,13 @@ In `crates/github/src/oauth.rs`, append a new method to the `impl UserApiClient`
     }
 ```
 
-Add the import for `GhUserInstallationRepos` at the top of `oauth.rs`:
+Extend the existing `use crate::payloads::{...};` import line to include `GhInstallationRepos` if it isn't already imported:
 
 ```rust
-use crate::payloads::{GhMembership, GhTokenResponse, GhUser, GhUserInstallationRepos};
+use crate::payloads::{GhInstallationRepos, GhMembership, GhTokenResponse, GhUser};
 ```
 
-(Adapt the existing `use crate::payloads::{...};` line.)
+The `?per_page=100` is a v1 simplification: installations with >100 repos need paging in v1.1. Document as a deliberate v1 cut.
 
 The `?per_page=100` is a v1 simplification: organizations with >100 repos in the installation will need paging in v1.1. Document as a deliberate v1 cut.
 
@@ -233,6 +223,11 @@ Append to the existing `#[cfg(test)] mod tests` in `crates/github/src/oauth.rs` 
             response: Response {
                 status: 200,
                 headers: BTreeMap::new(),
+                // **[autoplan note]** `GhRepo` has `{id, full_name, private}` — no
+                // `default_branch`. The `default_branch` fields below are ignored
+                // by serde (no `#[serde(deny_unknown_fields)]`). They're kept here
+                // because real GitHub responses include them; remove if you prefer
+                // the JSON to match the struct exactly.
                 body: br#"{
                     "total_count": 2,
                     "repositories": [
@@ -250,8 +245,6 @@ Append to the existing `#[cfg(test)] mod tests` in `crates/github/src/oauth.rs` 
         assert_eq!(resp.repositories[0].full_name, "acme/api");
     }
 ```
-
-If `GhRepo`'s shape doesn't match (e.g., missing `default_branch`), drop that field from the test JSON.
 
 - [ ] **Step 5: Run tests**
 
@@ -351,10 +344,19 @@ where
             .await?
             .ok_or(WebError::NotFound)?;
 
-        // Run the throttled admin recheck. `check_admin` also writes the
-        // result back to `session.admin_checks`; we must save the session at
-        // the end of the request to persist the cache update.
-        let is_admin = check_admin(&state, &mut session, &login).await?;
+        // Personal-account installations: the installing user owns the account,
+        // so GitHub's `/user/memberships/orgs/{login}` returns 404 (not an org).
+        // Short-circuit: the session login must match the account login; any
+        // other signed-in user gets 404 (per §10.3, no information leak).
+        // **[autoplan amendment]** Without this branch, AccountType::User owners
+        // are locked out — `check_admin` calls `get_org_membership`, which
+        // returns 404 for personal accounts, mapping to `is_admin = false`.
+        let is_admin = if account.account_type == domain::AccountType::User {
+            session.login == account.account_login
+        } else {
+            // Org account: throttled admin recheck via GitHub API (60s cache).
+            check_admin(&state, &mut session, &login).await?
+        };
         if !is_admin {
             return Err(WebError::NotFound); // 404, not 403, per §10.3
         }
@@ -1397,6 +1399,12 @@ Add the handler + form struct. axum 0.8 deserializes `application/x-www-form-url
 ```rust
 use serde::Deserialize;
 
+// **[autoplan amendment]** Use `serde_qs::axum::QsForm` instead of axum's
+// built-in `Form` extractor. `serde_urlencoded` (axum's default) cannot
+// deserialize repeated keys (`repo_ids=10&repo_ids=11`) into `Vec<u64>`.
+// `serde_qs` handles repeated keys natively. Add to `crates/web/Cargo.toml`:
+//   serde_qs = { version = "0.13", features = ["axum"] }
+// Remove the `deserialize_repo_ids` function — it is not needed with serde_qs.
 #[derive(Debug, Deserialize)]
 struct CreateLinkForm {
     permission: String,
@@ -1405,31 +1413,16 @@ struct CreateLinkForm {
     max_uses: Option<String>,
     expires_in_days: Option<String>,
     internal_note: Option<String>,
-    /// Repeated checkboxes serialize as multiple `repo_ids=N` pairs. axum's
-    /// Form extractor with serde + serde_urlencoded handles this with
-    /// `Vec<u64>` only via `serde_qs`; for v1 we accept a comma-joined string
-    /// from a hidden field instead, or use `serde_qs::axum::QsForm`.
-    #[serde(default, deserialize_with = "deserialize_repo_ids")]
+    /// Repeated checkboxes serialize as `repo_ids=10&repo_ids=11`; serde_qs
+    /// deserializes this directly into `Vec<u64>`.
+    #[serde(default)]
     repo_ids: Vec<u64>,
-}
-
-fn deserialize_repo_ids<'de, D>(d: D) -> std::result::Result<Vec<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize as _;
-    let opt: Option<String> = Option::deserialize(d)?;
-    Ok(opt
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse::<u64>().ok())
-        .collect())
 }
 
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireAdminOf,
-    axum::extract::Form(form): axum::extract::Form<CreateLinkForm>,
+    serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
 ) -> impl IntoResponse {
     use chrono::{Duration, Utc};
     use std::str::FromStr;
@@ -2591,3 +2584,166 @@ git commit -m "chore(web): apply rustfmt and clippy fixes; mark Plan 5 done"
 - `serde_qs::axum::QsForm` for `Vec<u64>` checkbox parsing (alternative: comma-joined hidden field). Implementer picks; default to `serde_qs`.
 - Multi-account picker on `/` deferred to v1.1; Plan 5's signed-in redirect picks the first installation.
 - Test infra gap: the dashboard_flow.rs test only exercises the unauthenticated 404 path. A proper happy-path test needs a session-seeding helper, which is added as a follow-up rather than a Plan 5 blocker.
+
+---
+
+## /autoplan decision audit trail
+
+_Generated 2026-05-04. All decisions below were auto-decided per the 6 autoplan principles (P1=completeness, P2=boil-lake, P3=selective-expansion, P4=DRY, P5=explicit-over-clever, P6=bias-toward-action). No user challenges raised — all findings were either auto-decidable or surfaced as inline amendments._
+
+| # | Decision | Principle | Outcome |
+|---|----------|-----------|---------|
+| 1 | Review mode: SELECTIVE EXPANSION (amend plan in place; do not rewrite from scratch) | P3 | auto |
+| 2 | Architecture stance: form-POST → axum → Restate ingress plan accepted as-written | P1+P5 | auto |
+| 3 | Personal account admin gap: add `AccountType::User` short-circuit before `check_admin` in Task 3 | P1 (security) | **amended Task 3** |
+| 4 | `ContextAwakeables` import becomes dead after Task 1 awakeable→Promise switch: add explicit removal step | P5 | **amended Task 1** |
+| 5 | Task 10 approach conflict (comma-split `deserialize_repo_ids` vs `serde_qs`): use `serde_qs::axum::QsForm` exclusively | P5 | **amended Task 10** |
+| 6 | `GhUserInstallationRepos` vs `GhInstallationRepos` — identical shape, DRY violation: reuse `GhInstallationRepos` | P4 | **amended Task 2** |
+| 7 | N+1 queries in Task 14 (2 DB calls per pending request row): defer to v1.1 TODOS.md | P3 | deferred |
+| 8 | CSRF form POST concern: `SameSite=Lax` cookie attribute (set in Plan 4) blocks cross-site form POSTs; no action needed | P3 | cross-model tension documented |
+| 9 | Home redirect leaks org name on first login: accepted v1 limitation (same as Plan 4's existing redirect) | P6 | accepted |
+| 10 | Happy-path test gap: session-seeding helper needed but is a post-Plan-5 follow-up; ship with 404 smoke test | P6 | accepted (plan already noted) |
+
+---
+
+## GSTACK REVIEW REPORT
+
+_Scope: Plan 5 — Dashboard Implementation. Review model: claude-sonnet-4-6 [subagent-only; codex binary not found]. UI scope: YES (173 Dioxus component grep matches). DX scope: NO (admin web UI, not developer-facing API)._
+
+---
+
+### CEO Review
+
+**Strategic alignment:** Plan 5 completes the admin-facing half of ghinvite v1. It closes the visible gap between Plans 1–4 (data model + workflows + web skeleton) and the first end-to-end user action (create a share link, approve a request). Without this plan, the system has no user-reachable surface.
+
+**Completeness against spec:**
+- §11 dashboard routes: covered in full (overview, link CRUD, requests queue, settings, audit stub).
+- §10.3 admin recheck / 404 on failure: covered by `RequireAdminOf`; **personal-account gap fixed by amendment**.
+- §13.1 approve/decline plumbing: covered (Tasks 13–16 + Plan 3 amendment).
+- §12 dashboard layout: covered (Tasks 5, 8, 13, 17, 18).
+- Deliberate deferrals: audit log UI (§15.3 → v1.1), settings mutations (v1.1), multi-account picker (v1.1). All match v1 scope.
+
+**Risks:**
+- `RequireAdminOf` personal-account branch (now fixed) was the only logic error that could silently lock out users.
+- N+1 DB queries in the approval queue (Task 14) are a perf risk under high request volume; deferred to v1.1 at P3 (selective expansion).
+- `serde_qs` adds a new crate dep; otherwise zero new infrastructure.
+
+**CEO verdict:** Plan is well-scoped for v1. All deferrals are intentional and consistent with the v1 contract. Proceed.
+
+---
+
+### Design Review
+
+_(UI scope confirmed — 7-dimension review follows.)_
+
+**1. Layout consistency:** `DashboardLayout` (Task 5) extends Plan 4's `HomeLayout` with a sidebar nav. Pattern is consistent with existing SSR Dioxus layouts. DaisyUI v5 sidebar + `menu` component matches the Tailwind v4 design system already in place.
+
+**2. Navigation:** Sidebar nav (overview / links / requests / settings) is discoverable. Active-state highlight (`menu-active`) is specified. The audit route renders as a stub link with a `v1.1` badge — good expectation management.
+
+**3. Form UX — link create form (Task 8):**
+- Checkbox array for repos is the right pattern (multi-select, not a dropdown) for <100 repos.
+- Flash messages (Task 4) surface errors and confirmations inline — standard pattern.
+- `serde_qs` amendment resolves the checkbox serialization ambiguity cleanly.
+- Repo picker falls back to empty list if the GitHub API call fails (Task 9 handler) — renders gracefully.
+
+**4. Approval queue (Tasks 13–14):**
+- Approve / Decline buttons are distinct (`btn-success` / `btn-error`) — clear affordance.
+- Per-request justification text is surfaced for the admin — no missing context.
+- Empty state (no pending requests) is rendered — no blank-page edge case.
+
+**5. Error surfaces:** `WebError → IntoResponse` mapping (from Plan 4) is consistent. Flash messages carry level (`success` / `error` / `warning`). No raw error strings exposed to users.
+
+**6. Accessibility:** DaisyUI components carry ARIA roles by default. Form labels are paired with inputs. No custom interactive elements without keyboard support. No regressions identified.
+
+**7. Mobile / responsive:** DaisyUI's responsive sidebar collapses on small screens via `lg:drawer-open`. No fixed-width layouts that would break on mobile. Confirmed consistent with Plan 4's responsive baseline.
+
+**Design verdict:** Solid. No blocking issues. The approval-queue N+1 is a backend concern, not a design concern.
+
+---
+
+### Eng Review
+
+**1. API contract correctness:**
+- `RestateClient.send` URL pattern `{ingress}/{service}/{key}/{method}/send` confirmed against `crates/web/src/restate_client.rs`. All Task 10, 11, 15, 16 calls use correct keyed-send/call form.
+- `Decision` enum serde shape (`{"Approve": {...}}` / `{"Decline": {...}}`) confirmed via external-tagged default — matches what `invitation_request.rs` deserializes.
+- `CreateLinkOutput` shape `{link_id: ShareLinkId, slug: String}` confirmed; Task 10's `output.get("link_id").and_then(|v| v.as_str())` extracts the ULID string correctly.
+
+**2. Type safety:**
+- `RequireAdminOf` struct fields (`session`, `account`, `tower`) are stable across all 9 consuming handlers — verified by grep.
+- `ulid_newtype!` macro confirms `ShareLinkId` / `RequestId` serialize as strings; call-site extraction via `as_str()` is correct.
+- `axum::extract::FromRef<T> for T` reflexive impl in axum-core-0.5.6 confirmed — `AppState: FromRef<AppState>` works without manual impl.
+
+**3. Security:**
+- Personal account admin check fixed (amendment to Task 3) — without it, `AccountType::User` owners receive 404 on their own dashboard.
+- CSRF: `SameSite=Lax` on session cookies (Plan 4) blocks cross-site form POST from including session cookie. Mitigates the attack vector flagged by outside-voice review. No additional CSRF token needed; tradeoff documented.
+- All dashboard failure paths (unauthenticated, not admin, no install, uninstalled) map to 404 — no information leak (spec §10.3).
+- `?per_page=100` on repo list is a v1 pagination cut; documented in Task 2 note.
+
+**4. Dependency hygiene:**
+- `serde_qs = { version = "0.13", features = ["axum"] }` is the only new crate dep (Task 10 amendment). Adds ~50kB to the binary; acceptable.
+- `ContextPromises` is in `restate_sdk::prelude::*` but the file uses explicit imports — correct to add `use restate_sdk::context::ContextPromises;` explicitly.
+- `ContextAwakeables` becomes a dead import after Task 1; explicit removal step added to plan.
+
+**5. Test coverage:**
+- Plan 5 adds `dashboard_flow.rs` with a 404 smoke test (unauthenticated path).
+- Full happy-path coverage needs a session-seeding helper (noted in plan as follow-up).
+- Task 4 (flash) unit tests are specified inline.
+- N+1 in Task 14: 2 DB queries per pending-request row (`get_share_link_by_id` + `get_user`). Under a large approval queue this is O(n) sequential queries. Acceptable for v1 (approval queues are small); deferred to v1.1 with a TODO comment.
+
+**6. Architecture:**
+- Form POST → axum handler → `RestateClient.send/call` → Restate ingress → durable workflow is the correct pattern for state-mutating operations. No server-side rendering shortcuts bypass durability guarantees.
+- `DashboardLayout` → plan-4 `HomeLayout` extension is clean; no layout duplication.
+- `RequireAdminOf` extractor centralizes auth + admin check in one place — good single-responsibility boundary.
+
+```
+Browser POST /accounts/{login}/links
+    │
+    ▼
+axum handler (create_link)
+    │ RequireAdminOf extractor: session + account + admin check
+    │ serde_qs::QsForm: parse CreateLinkForm
+    │
+    ▼
+RestateClient.call("ShareLink", account_id, "create", input)
+    │ POST {ingress}/ShareLink/{account_id}/create
+    │
+    ▼
+Restate ingress → ShareLink workflow (Plan 3)
+    │ durable, idempotent
+    │
+    ▼
+CreateLinkOutput { link_id, slug }
+    │
+    ▼
+Redirect /accounts/{login}/links/{link_id} + flash
+```
+
+**Eng verdict:** Plan is implementable as written. All amendments are correctness fixes, not design changes. Proceed.
+
+---
+
+### Outside Voice Summary
+
+_[subagent-only]_ The outside-voice subagent raised two concerns:
+
+1. **CSRF protection on form POSTs** — resolved: `SameSite=Lax` on session cookies (Plan 4) prevents cross-site form submissions from carrying the session cookie. This is a standard browser mitigation; no CSRF token needed for the v1 admin-only dashboard. Documented as cross-model tension D8 above.
+
+2. **Personal account admin lockout** — confirmed critical. Fixed in Task 3 amendment. The `check_admin` path calls `GET /user/memberships/orgs/{login}`, which returns 404 for personal accounts; without the `AccountType::User` branch, installing users are locked out of their own dashboard.
+
+---
+
+### Test Plan
+
+_Written to `~/.gstack/projects/sagikazarmark-ghinvite2.orig/plan5-test-plan-20260504.md`_
+
+| Layer | What to exercise | When |
+|-------|-----------------|------|
+| Unit | `RequireAdminOf`: org admin → 200, non-admin → 404, personal-account owner → 200, personal-account non-owner → 404 | Task 3 |
+| Unit | Flash set/take round-trip in session | Task 4 |
+| Unit | `list_user_installation_repos` decodes `GhInstallationRepos` | Task 2 |
+| Unit | `decide` shared handler resolves Promise (restate-svc test) | Task 1 |
+| Integration | `POST /accounts/{login}/links` → Restate call → redirect with flash | Task 10 |
+| Integration | `POST /accounts/{login}/links/{id}/revoke` → Restate send | Task 11 |
+| Integration | `POST /accounts/{login}/requests/{id}/approve` + `decline` → Restate call | Tasks 15, 16 |
+| Smoke | `GET /accounts/{login}` unauthenticated → 404 | Task 7 |
+| Follow-up | Session-seeding helper → full authenticated happy-path flow | v1.1 |

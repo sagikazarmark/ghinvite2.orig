@@ -46,3 +46,6 @@ storage = { workspace = true, features = ["test-suite"] }
 http-body-util = "0.1"
 sqlx.workspace = true
 tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }
+hmac.workspace = true
+sha2.workspace = true
+hex = "0.4"

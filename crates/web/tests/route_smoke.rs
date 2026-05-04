@@ -146,6 +146,10 @@ async fn dashboard_routes_return_501() {
     }
 }
 
+// NOTE: The requester_id ownership guard in the `pending` handler is a security-critical
+// check. It is exercised only at the unit level (handler code review) in Plan 6 and will
+// get an integration test in Plan 8 (tests/invitation_ownership.rs).
+
 #[tokio::test]
 async fn invitation_landing_unknown_slug_returns_404() {
     // GET /i/{slug} is now implemented: unknown slug → 404.
@@ -160,6 +164,30 @@ async fn invitation_landing_unknown_slug_returns_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "GET /i/AAAAAAAAAAAAAAAA");
+}
+
+#[tokio::test]
+async fn invitation_request_form_unauthenticated_redirects_to_login() {
+    // GET /i/{slug}/request is now implemented:
+    // unauthenticated request → 303 to /login with return_to.
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/i/AAAAAAAAAAAAAAAA/request")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "GET /i/.../request unauthenticated should redirect to /login"
+    );
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains("/login"), "expected redirect to /login, got {location}");
+    assert!(location.contains("return_to="), "expected return_to in redirect, got {location}");
 }
 
 #[tokio::test]
@@ -208,4 +236,52 @@ async fn webhook_route_rejects_missing_signature() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn webhook_bad_hmac_returns_401() {
+    // A POST with a malformed/wrong HMAC signature must be rejected with 401.
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/github")
+                .header("x-hub-signature-256", "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                .body(Body::from(r#"{"action":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Verifies that a correctly-signed webhook payload returns 200.
+/// Uses empty secret key — matches `for_local_dev` default where
+/// `GHINVITE_WEBHOOK_SECRET` env var is unset.
+#[tokio::test]
+async fn webhook_valid_hmac_returns_ok() {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let body = r#"{"action":"ping"}"#;
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"").unwrap();
+    mac.update(body.as_bytes());
+    let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/webhooks/github")
+                .header("x-github-event", "ping")
+                .header("x-github-delivery", "test-delivery-id")
+                .header("x-hub-signature-256", &sig)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
