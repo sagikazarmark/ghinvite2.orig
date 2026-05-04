@@ -12,7 +12,7 @@ pub mod state;
 pub mod views;
 
 // Re-exports filled in as types appear:
-// pub use config::WebConfig;
+pub use config::WebConfig;
 // pub use error::{Result, WebError};
 // pub use restate_client::RestateClient;
 // pub use state::AppState;
