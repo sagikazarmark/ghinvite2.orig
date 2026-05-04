@@ -14,6 +14,16 @@ use rand::rngs::OsRng;
 use serde::Deserialize;
 use tower_sessions::Session as TowerSession;
 
+#[derive(Debug, Deserialize)]
+struct LoginQuery {
+    return_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogoutQuery {
+    return_to: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", get(login))
@@ -24,12 +34,17 @@ pub fn router() -> Router<AppState> {
 
 /// Generate a CSRF state, stash it in the session, redirect to GitHub's
 /// authorize endpoint.
-async fn login(State(state): State<AppState>, tower: TowerSession) -> Result<impl IntoResponse> {
+async fn login(
+    State(state): State<AppState>,
+    tower: TowerSession,
+    axum::extract::Query(q): axum::extract::Query<LoginQuery>,
+) -> Result<impl IntoResponse> {
     let csrf = generate_csrf_token();
     let mut session = session::load(&tower)
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
     session.oauth_csrf = Some(csrf.clone());
+    session.return_to = q.return_to.as_deref().and_then(crate::session::validate_return_to);
     session::save(&tower, &session)
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
@@ -40,9 +55,17 @@ async fn login(State(state): State<AppState>, tower: TowerSession) -> Result<imp
     Ok(Redirect::to(&authorize.url))
 }
 
-async fn logout(tower: TowerSession) -> impl IntoResponse {
+async fn logout(
+    tower: TowerSession,
+    axum::extract::Query(q): axum::extract::Query<LogoutQuery>,
+) -> impl IntoResponse {
     session::clear(&tower).await;
-    Redirect::to("/")
+    let destination = q
+        .return_to
+        .as_deref()
+        .and_then(crate::session::validate_return_to)
+        .unwrap_or_else(|| "/".to_string());
+    Redirect::to(&destination)
 }
 
 async fn install(State(state): State<AppState>) -> impl IntoResponse {
@@ -128,6 +151,7 @@ async fn oauth_callback(
     session.user_id = gh_user.id;
     session.login = gh_user.login.clone();
     session.access_token = token.access_token;
+    let destination = session.return_to.take().unwrap_or_else(|| "/".to_string());
     session::save(&tower, &session)
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
@@ -139,5 +163,5 @@ async fn oauth_callback(
         );
     }
 
-    Ok(Redirect::to("/"))
+    Ok(Redirect::to(&destination))
 }
