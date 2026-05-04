@@ -494,7 +494,7 @@ impl Storage for SqlxStorage {
                WHERE id = ?5 AND state = 'pending'"#,
         )
         .bind(decision.state.to_string())
-        .bind(u64_to_i64(decision.decided_by))
+        .bind(decision.decided_by.map(u64_to_i64))
         .bind(decision.decided_at)
         .bind(decision.decline_reason.as_deref())
         .bind(decision.request_id.to_string())
@@ -1096,7 +1096,7 @@ mod tests {
         s.record_request_decision(&RequestDecision {
             request_id: req.id,
             state: RequestState::Approved,
-            decided_by: 7,
+            decided_by: Some(7),
             decided_at: dt("2026-05-04T13:00:00Z"),
             decline_reason: None,
         })
@@ -1127,7 +1127,7 @@ mod tests {
         s.record_request_decision(&RequestDecision {
             request_id: req.id,
             state: RequestState::Approved,
-            decided_by: 7,
+            decided_by: Some(7),
             decided_at: dt("2026-05-04T13:00:00Z"),
             decline_reason: None,
         })
@@ -1138,7 +1138,7 @@ mod tests {
             .record_request_decision(&RequestDecision {
                 request_id: req.id,
                 state: RequestState::Declined,
-                decided_by: 7,
+                decided_by: Some(7),
                 decided_at: dt("2026-05-04T14:00:00Z"),
                 decline_reason: Some("wrong person".into()),
             })

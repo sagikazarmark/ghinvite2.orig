@@ -58,7 +58,7 @@ pub enum Error {
 pub struct RequestDecision {
     pub request_id: RequestId,
     pub state: RequestState,
-    pub decided_by: u64,
+    pub decided_by: Option<u64>,
     pub decided_at: DateTime<Utc>,
     pub decline_reason: Option<String>,
 }

@@ -186,7 +186,7 @@ async fn scenario_request_uses_and_uniqueness<S: Storage>(s: S) {
     s.record_request_decision(&RequestDecision {
         request_id: r1.id,
         state: RequestState::Declined,
-        decided_by: 702,
+        decided_by: Some(702),
         decided_at: dt("2026-05-04T13:00:00Z"),
         decline_reason: Some("not yet".into()),
     })
@@ -224,7 +224,7 @@ async fn scenario_request_decision<S: Storage>(s: S) {
     s.record_request_decision(&RequestDecision {
         request_id: req.id,
         state: RequestState::Approved,
-        decided_by: 703,
+        decided_by: Some(703),
         decided_at: dt("2026-05-04T13:00:00Z"),
         decline_reason: None,
     })
@@ -234,7 +234,7 @@ async fn scenario_request_decision<S: Storage>(s: S) {
         .record_request_decision(&RequestDecision {
             request_id: req.id,
             state: RequestState::Declined,
-            decided_by: 703,
+            decided_by: Some(703),
             decided_at: dt("2026-05-04T13:01:00Z"),
             decline_reason: Some("changed mind".into()),
         })

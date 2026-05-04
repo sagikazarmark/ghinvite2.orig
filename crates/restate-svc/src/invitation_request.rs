@@ -356,14 +356,14 @@ pub async fn apply_decision_logic(
     let (new_state, decided_by, decided_at, decline_reason, event) = match &decision {
         AppliedDecision::Approve { decided_by, at } => (
             RequestState::Approved,
-            *decided_by,
+            Some(*decided_by),
             *at,
             None,
             EventType::RequestApproved,
         ),
         AppliedDecision::AutoApprove { at } => (
             RequestState::Approved,
-            req.requester_id, // auto-approve uses requester as decided_by per audit spec note
+            None, // no human admin; audit Actor is System
             *at,
             None,
             EventType::RequestApproved,
@@ -374,14 +374,14 @@ pub async fn apply_decision_logic(
             reason,
         } => (
             RequestState::Declined,
-            *decided_by,
+            Some(*decided_by),
             *at,
             reason.clone(),
             EventType::RequestDeclined,
         ),
         AppliedDecision::Expire { at } => (
             RequestState::Expired,
-            req.requester_id, // placeholder; system actor used in audit
+            None, // timeout; audit Actor is System
             *at,
             None,
             EventType::RequestExpired,
@@ -847,6 +847,49 @@ mod tests {
         let mut repo_ids: Vec<u64> = inputs.iter().map(|i| i.repo_id).collect();
         repo_ids.sort();
         assert_eq!(repo_ids, vec![10, 11]);
+    }
+
+    #[tokio::test]
+    async fn apply_decision_auto_approve_records_no_decider() {
+        let state = fixture_state().await;
+        let link_id = seed_link(&state, false, None).await;
+        let req_id = RequestId::new();
+        let now = dt("2026-05-04T12:30:00Z");
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: now,
+            },
+            now,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let final_state = apply_decision_logic(
+            &state,
+            req_id,
+            AppliedDecision::AutoApprove { at: now },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(final_state, RequestState::Approved);
+
+        let req = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            req.decided_by.is_none(),
+            "auto-approved request should have no human decider"
+        );
     }
 
     #[tokio::test]
