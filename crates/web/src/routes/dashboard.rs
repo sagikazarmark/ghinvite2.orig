@@ -31,8 +31,8 @@ pub fn router() -> Router<AppState> {
             "/accounts/{login}/requests/{request_id}/decline",
             axum::routing::post(decline_request),
         )
+        .route("/accounts/{login}/settings", get(settings_page))
         .route("/accounts/{login}/audit", get(stub))
-        .route("/accounts/{login}/settings", get(stub))
 }
 
 async fn overview(
@@ -523,6 +523,23 @@ async fn decline_request(
     }
     axum::response::Redirect::to(&format!("/accounts/{}/requests", admin.account.account_login))
         .into_response()
+}
+
+async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
+    let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
+    let signed_in_login = Some(admin.session.login.clone());
+    let account = admin.account.clone();
+
+    let html = render(move || {
+        rsx! {
+            crate::views::settings::SettingsPage {
+                signed_in_login: signed_in_login.clone(),
+                flash: flash.clone(),
+                account: account.clone(),
+            }
+        }
+    });
+    Html(html).into_response()
 }
 
 async fn stub() -> impl IntoResponse {

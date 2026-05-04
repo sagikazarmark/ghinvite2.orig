@@ -136,7 +136,7 @@ async fn home_returns_html() {
 #[tokio::test]
 async fn dashboard_routes_return_501() {
     let app = build_test_app().await;
-    for path in ["/accounts/acme/audit", "/accounts/acme/settings"] {
+    for path in ["/accounts/acme/audit"] {
         let resp = app
             .clone()
             .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
