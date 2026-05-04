@@ -104,6 +104,25 @@ impl Response {
             body: truncated,
         }
     }
+
+    /// GitHub returns the remaining quota in `x-ratelimit-remaining`. Returns
+    /// `None` if absent or unparseable. Plan 3's reconciler should back off
+    /// before this hits zero.
+    pub fn rate_limit_remaining(&self) -> Option<u32> {
+        self.headers
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.parse().ok())
+    }
+
+    /// On 429 / 403-secondary-rate-limit responses, GitHub sends `Retry-After`
+    /// as a non-negative integer of seconds. We don't parse the HTTP-date form
+    /// (rare; GitHub sends seconds in practice).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        self.headers
+            .get("retry-after")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+    }
 }
 
 /// The single HTTP-touching trait this crate exposes.
@@ -262,6 +281,49 @@ mod tests {
         };
         let err = r.json::<serde_json::Value>().unwrap_err();
         assert!(matches!(err, Error::Decode(_)));
+    }
+
+    #[test]
+    fn rate_limit_remaining_parses_header() {
+        let mut headers = BTreeMap::new();
+        headers.insert("x-ratelimit-remaining".into(), "4998".into());
+        let r = Response {
+            status: 200,
+            headers,
+            body: vec![],
+        };
+        assert_eq!(r.rate_limit_remaining(), Some(4998));
+    }
+
+    #[test]
+    fn rate_limit_remaining_absent_or_garbage_is_none() {
+        let r = Response {
+            status: 200,
+            headers: BTreeMap::new(),
+            body: vec![],
+        };
+        assert!(r.rate_limit_remaining().is_none());
+
+        let mut bad = BTreeMap::new();
+        bad.insert("x-ratelimit-remaining".into(), "not a number".into());
+        let r = Response {
+            status: 200,
+            headers: bad,
+            body: vec![],
+        };
+        assert!(r.rate_limit_remaining().is_none());
+    }
+
+    #[test]
+    fn retry_after_parses_seconds() {
+        let mut headers = BTreeMap::new();
+        headers.insert("retry-after".into(), "60".into());
+        let r = Response {
+            status: 429,
+            headers,
+            body: vec![],
+        };
+        assert_eq!(r.retry_after(), Some(std::time::Duration::from_secs(60)));
     }
 
     #[test]

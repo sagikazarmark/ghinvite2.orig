@@ -68,6 +68,7 @@ impl AuthorizeUrl {
 /// Exchange an OAuth authorization code for a user access token. Calls
 /// `POST https://github.com/login/oauth/access_token` with `Accept:
 /// application/json` so GitHub returns JSON instead of `application/x-www-form-urlencoded`.
+#[tracing::instrument(skip(transport, cfg, code))]
 pub async fn exchange_code<T: HttpTransport + ?Sized>(
     transport: &T,
     cfg: &OAuthConfig,
@@ -83,7 +84,17 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
         .header("accept", "application/json")
         .header("user-agent", "ghinvite")
         .json_body(&body)?;
-    let resp = transport.send(req).await?.ensure_success()?;
+    let resp = match transport.send(req).await?.ensure_success() {
+        Ok(r) => r,
+        Err(err) => {
+            if let Some(status) = err.status()
+                && (400..500).contains(&status)
+            {
+                tracing::warn!(status, "oauth token exchange returned 4xx");
+            }
+            return Err(err);
+        }
+    };
 
     // GitHub returns 200 with an `error`/`error_description` payload on
     // failure (rather than a 4xx). Parse the body once as an opaque value,
@@ -94,9 +105,13 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
             .get("error_description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        tracing::warn!(error_code, "oauth token exchange returned error payload");
         return Err(Error::OAuth(format!("{error_code}: {desc}")));
     }
-    serde_json::from_value(value).map_err(|e| Error::Decode(format!("oauth token response: {e}")))
+    let token: GhTokenResponse = serde_json::from_value(value)
+        .map_err(|e| Error::Decode(format!("oauth token response: {e}")))?;
+    tracing::info!(scope = %token.scope, "oauth token exchange succeeded");
+    Ok(token)
 }
 
 /// User-token API client. Constructed per signed-in session (the access token
@@ -146,9 +161,15 @@ impl UserApiClient {
     ///
     /// **Errors:** `Error::Status` for non-2xx (401 = expired token, etc.),
     /// `Error::Decode` for malformed JSON.
+    #[tracing::instrument(skip(self), fields(method = "get_user"))]
     pub async fn get_user(&self) -> Result<GhUser> {
+        tracing::debug!("calling GET /user");
         let req = self.auth_request(Method::Get, "/user");
-        self.transport.send(req).await?.ensure_success()?.json()
+        let resp = self.transport.send(req).await?;
+        if !(200..300).contains(&resp.status) {
+            tracing::warn!(status = resp.status, "github GET /user returned non-2xx");
+        }
+        resp.ensure_success()?.json()
     }
 
     /// `GET /user/memberships/orgs/{login}` — used by the admin recheck path
@@ -156,29 +177,25 @@ impl UserApiClient {
     /// not a member of the org; the caller should map that to "not admin".
     ///
     /// **Errors:** `Error::Status` for non-2xx, `Error::Decode` for malformed JSON.
+    #[tracing::instrument(skip(self), fields(method = "get_org_membership", org_login))]
     pub async fn get_org_membership(&self, org_login: &str) -> Result<GhMembership> {
         // Path-encode the login to defend against odd characters (org renames,
-        // etc.). url::form_urlencoded::byte_serialize would be heavier; we use
-        // url::Url to build the path safely.
-        let path = format!("/user/memberships/orgs/{}", url_path_segment(org_login));
+        // etc.).
+        let path = format!(
+            "/user/memberships/orgs/{}",
+            crate::util::path_segment(org_login)
+        );
+        tracing::debug!("calling GET /user/memberships/orgs/{{org_login}}");
         let req = self.auth_request(Method::Get, &path);
-        self.transport.send(req).await?.ensure_success()?.json()
-    }
-}
-
-/// Percent-encode a single path segment. We allow only the characters GitHub
-/// uses in logins; everything else is encoded.
-fn url_path_segment(s: &str) -> String {
-    const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if SAFE.contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
+        let resp = self.transport.send(req).await?;
+        if !(200..300).contains(&resp.status) {
+            tracing::warn!(
+                status = resp.status,
+                "github GET /user/memberships/orgs returned non-2xx"
+            );
         }
+        resp.ensure_success()?.json()
     }
-    out
 }
 
 #[cfg(test)]

@@ -8,26 +8,11 @@ use crate::payloads::{
 };
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
+use crate::util::path_segment;
 use chrono::Utc;
 use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
-
-/// Percent-encode a single path segment. Same alphabet as `url_path_segment` in
-/// `oauth.rs`; duplicated locally rather than re-exported because the two call
-/// sites are in different modules and the helper is trivial.
-fn path_seg(s: &str) -> String {
-    const SAFE: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~";
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if SAFE.contains(&b) {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
-}
 
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
@@ -58,10 +43,12 @@ impl InstallationClient {
     /// Mint an App-JWT and exchange it for an installation token. Hits the
     /// network; callers should prefer `installation_token` which goes through
     /// the cache.
+    #[tracing::instrument(skip(self), fields(installation_id))]
     pub async fn mint_installation_token(
         &self,
         installation_id: u64,
     ) -> Result<GhInstallationToken> {
+        tracing::info!("minting installation token");
         let jwt = self.signer.sign(Utc::now())?;
         let url = format!(
             "{}/app/installations/{}/access_tokens",
@@ -72,15 +59,24 @@ impl InstallationClient {
             .header("authorization", format!("Bearer {jwt}"))
             .header("user-agent", "ghinvite")
             .header("x-github-api-version", "2022-11-28");
-        self.transport.send(req).await?.ensure_success()?.json()
+        match self.transport.send(req).await?.ensure_success() {
+            Ok(resp) => resp.json(),
+            Err(err) => {
+                tracing::warn!(?err, "installation token mint failed");
+                Err(err)
+            }
+        }
     }
 
     /// Returns a non-expired installation token, refreshing through GitHub if
     /// the cached one is gone or within 60s of expiry.
+    #[tracing::instrument(skip(self), fields(installation_id))]
     pub async fn installation_token(&self, installation_id: u64) -> Result<String> {
         if let Some(t) = self.cache.get_fresh(installation_id, Utc::now()) {
+            tracing::trace!("installation token cache hit");
             return Ok(t);
         }
+        tracing::debug!("installation token cache miss; refreshing from GitHub");
         let minted = self.mint_installation_token(installation_id).await?;
         self.cache
             .insert(installation_id, minted.token.clone(), minted.expires_at);
@@ -106,6 +102,7 @@ impl InstallationClient {
     /// `GET /installation/repositories` — paginated upstream; v1 only follows
     /// page 1 (per_page=100). If GitHub ever ships a customer with > 100 repos
     /// per install, Plan 3's `Reconcile::sweep` adds pagination there.
+    #[tracing::instrument(skip(self), fields(installation_id, owner = tracing::field::Empty, repo = tracing::field::Empty))]
     pub async fn list_installation_repos(
         &self,
         installation_id: u64,
@@ -117,7 +114,13 @@ impl InstallationClient {
                 "/installation/repositories?per_page=100",
             )
             .await?;
-        self.transport.send(req).await?.ensure_success()?.json()
+        match self.transport.send(req).await?.ensure_success() {
+            Ok(resp) => resp.json(),
+            Err(err) => {
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
+        }
     }
 
     /// `GET /repos/{owner}/{repo}` — small surface for display + access
@@ -125,12 +128,19 @@ impl InstallationClient {
     ///
     /// **Errors:** `Error::Status { status: 404, .. }` if the App lost access
     /// to the repo (caller should treat that as `selected_repos` drift).
+    #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn get_repo(&self, installation_id: u64, owner: &str, repo: &str) -> Result<GhRepo> {
-        let path = format!("/repos/{}/{}", path_seg(owner), path_seg(repo));
+        let path = format!("/repos/{}/{}", path_segment(owner), path_segment(repo));
         let req = self
             .auth_request(installation_id, Method::Get, &path)
             .await?;
-        self.transport.send(req).await?.ensure_success()?.json()
+        match self.transport.send(req).await?.ensure_success() {
+            Ok(resp) => resp.json(),
+            Err(err) => {
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
+        }
     }
 
     /// `PUT /repos/{owner}/{repo}/collaborators/{username}`. Returns:
@@ -138,6 +148,13 @@ impl InstallationClient {
     /// - `Ok(None)` on 204 — recipient was already a collaborator (no invitation
     ///   created). Caller should treat as immediate-accept.
     /// - `Err(Error::Status)` on any other status.
+    ///
+    /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
+    /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
+    /// already-declined invitations, etc. Callers wanting to distinguish these
+    /// must currently parse `Error::Status::body` themselves; v1 just surfaces
+    /// the raw body. See spec §16 for the agreed error-handling discipline.
+    #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn add_collaborator(
         &self,
         installation_id: u64,
@@ -148,9 +165,9 @@ impl InstallationClient {
     ) -> Result<Option<u64>> {
         let path = format!(
             "/repos/{}/{}/collaborators/{}",
-            path_seg(owner),
-            path_seg(repo),
-            path_seg(username)
+            path_segment(owner),
+            path_segment(repo),
+            path_segment(username)
         );
         let req = self
             .auth_request(installation_id, Method::Put, &path)
@@ -163,7 +180,11 @@ impl InstallationClient {
                 Ok(Some(inv.id))
             }
             204 => Ok(None),
-            _ => Err(resp.status_error()),
+            _ => {
+                let err = resp.status_error();
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
         }
     }
 
@@ -172,6 +193,7 @@ impl InstallationClient {
     ///
     /// **Errors:** `Error::Status { status: 404 }` if the invitation no longer
     /// exists (already accepted/declined/cancelled).
+    #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn delete_invitation(
         &self,
         installation_id: u64,
@@ -181,20 +203,26 @@ impl InstallationClient {
     ) -> Result<()> {
         let path = format!(
             "/repos/{}/{}/invitations/{}",
-            path_seg(owner),
-            path_seg(repo),
+            path_segment(owner),
+            path_segment(repo),
             invitation_id
         );
         let req = self
             .auth_request(installation_id, Method::Delete, &path)
             .await?;
-        self.transport.send(req).await?.ensure_success()?;
-        Ok(())
+        match self.transport.send(req).await?.ensure_success() {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
+        }
     }
 
     /// `GET /repos/{owner}/{repo}/invitations` — list pending invitations on a
     /// repo. Used by the reconciler to check that our `github_invitations` rows
     /// in `sent` state still exist upstream.
+    #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn list_invitations(
         &self,
         installation_id: u64,
@@ -203,18 +231,25 @@ impl InstallationClient {
     ) -> Result<Vec<GhInvitationListItem>> {
         let path = format!(
             "/repos/{}/{}/invitations?per_page=100",
-            path_seg(owner),
-            path_seg(repo)
+            path_segment(owner),
+            path_segment(repo)
         );
         let req = self
             .auth_request(installation_id, Method::Get, &path)
             .await?;
-        self.transport.send(req).await?.ensure_success()?.json()
+        match self.transport.send(req).await?.ensure_success() {
+            Ok(resp) => resp.json(),
+            Err(err) => {
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
+        }
     }
 
     /// `GET /repos/{owner}/{repo}/collaborators/{username}` — confirm membership.
     /// GitHub returns 204 if the user *is* a collaborator and 404 otherwise.
     /// Used to confirm an invitation acceptance when the webhook is missed.
+    #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn is_collaborator(
         &self,
         installation_id: u64,
@@ -224,9 +259,9 @@ impl InstallationClient {
     ) -> Result<bool> {
         let path = format!(
             "/repos/{}/{}/collaborators/{}",
-            path_seg(owner),
-            path_seg(repo),
-            path_seg(username)
+            path_segment(owner),
+            path_segment(repo),
+            path_segment(username)
         );
         let req = self
             .auth_request(installation_id, Method::Get, &path)
@@ -235,7 +270,11 @@ impl InstallationClient {
         match resp.status {
             204 => Ok(true),
             404 => Ok(false),
-            _ => Err(resp.status_error()),
+            _ => {
+                let err = resp.status_error();
+                tracing::warn!(status = ?err.status(), "github request failed");
+                Err(err)
+            }
         }
     }
 }

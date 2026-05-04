@@ -19,6 +19,7 @@ pub mod oauth;
 pub mod payloads;
 pub mod token_cache;
 pub mod transport;
+mod util;
 
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mocks;
