@@ -16,7 +16,7 @@
 - **Durable-workflow correctness.** Restate gives "exactly-once-effects" on outbound GitHub API calls and a clean model for the "wait up to 7 days for the recipient to act" pattern.
 - **Audit log as system of record.** GitHub's audit log retains 90 days; SOC2 expects ~12 months. Our audit table is append-only and indefinite by default.
 
-**Out-of-scope for v1 (explicit v2 list at §13).** This is not a generic JIT access platform; not an SSO replacement; not a seat-management tool.
+**Out-of-scope for v1 (explicit v2 list at §19).** This is not a generic JIT access platform; not an SSO replacement; not a seat-management tool.
 
 ---
 
@@ -175,7 +175,7 @@ CREATE TABLE share_links (
   expires_at         TEXT,
   max_uses           INTEGER,                          -- NULL = unlimited
   uses_count         INTEGER NOT NULL DEFAULT 0,
-  permission         TEXT    NOT NULL CHECK (permission IN ('pull','triage','push','maintain','admin')),
+  permission         TEXT    NOT NULL,                 -- validated by domain enum; not CHECKed in SQL (see §7.2)
   approval_required  INTEGER NOT NULL,                 -- 0/1
   internal_note      TEXT,
   revoked_at         TEXT,
@@ -195,7 +195,7 @@ CREATE TABLE invitation_requests (
   share_link_id   TEXT NOT NULL REFERENCES share_links(id),
   requester_id    INTEGER NOT NULL REFERENCES users(user_id),
   justification   TEXT,
-  state           TEXT NOT NULL CHECK (state IN ('pending','approved','declined','expired','cancelled')),
+  state           TEXT NOT NULL,                       -- validated by domain enum; not CHECKed in SQL (see §7.2)
   decided_by      INTEGER REFERENCES users(user_id),
   decided_at      TEXT,
   decline_reason  TEXT,
@@ -212,7 +212,7 @@ CREATE TABLE github_invitations (
   invitation_request_id  TEXT NOT NULL REFERENCES invitation_requests(id),
   repo_id                INTEGER NOT NULL,
   github_invitation_id   INTEGER,
-  state                  TEXT NOT NULL CHECK (state IN ('sending','sent','accepted','declined','expired','cancelled','failed')),
+  state                  TEXT NOT NULL,                  -- validated by domain enum; not CHECKed in SQL (see §7.2)
   error_message          TEXT,
   created_at             TEXT NOT NULL,
   updated_at             TEXT NOT NULL
@@ -226,7 +226,7 @@ CREATE TABLE audit_events (
   account_id   INTEGER NOT NULL,
   occurred_at  TEXT    NOT NULL,
   event_type   TEXT    NOT NULL,
-  actor_kind   TEXT    NOT NULL CHECK (actor_kind IN ('user','system','github')),
+  actor_kind   TEXT    NOT NULL,                          -- validated by domain enum; not CHECKed in SQL (see §7.2)
   actor_id     INTEGER,
   target_kind  TEXT    NOT NULL,
   target_id    TEXT    NOT NULL,
@@ -237,7 +237,13 @@ CREATE INDEX idx_audit_account_time ON audit_events(account_id, occurred_at);
 CREATE INDEX idx_audit_target ON audit_events(target_kind, target_id);
 ```
 
-### 7.2 Storage trait
+### 7.2 CHECK constraints
+
+The schema deliberately omits SQL `CHECK (col IN (...))` constraints on enum-shaped columns (`permission`, `*.state`, `actor_kind`). SQLite cannot alter a CHECK constraint without a 12-step `ALTER TABLE` recreate (create new table, copy rows, drop old, rename, recreate indexes), and several of these enums are expected to grow (new GitHub permission levels, the `cancelled` request state in v2, custom org roles in v2). The `installations.account_type` CHECK is kept because its values (`User`, `Organization`) are GitHub-defined and effectively immutable.
+
+Validation lives one level up: the Rust enums in `crates/domain` are the canonical source of legal values; storage methods accept those types and stringify on write. A bad value reaching storage is a code bug, not a data-integrity event.
+
+### 7.3 Storage trait
 
 The storage trait exposes:
 - Read methods returning typed records (`list_share_links`, `get_share_link_by_slug`, `list_pending_requests_for_account`, etc.).
