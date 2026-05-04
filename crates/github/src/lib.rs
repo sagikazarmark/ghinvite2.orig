@@ -27,4 +27,4 @@ pub mod wasm_smoke;
 pub use error::{Error, Result};
 // pub use installation::InstallationClient;
 // pub use oauth::{AuthorizeUrl, UserApiClient};
-// pub use transport::{HttpTransport, Method, Request, Response};
+pub use transport::{HttpTransport, Method, Request, Response};
