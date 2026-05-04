@@ -56,7 +56,7 @@ pub async fn clear(tower: &TowerSession) {
 }
 
 /// One-shot status message shown to the user after a redirect.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Flash {
     pub level: FlashLevel,
     pub message: String,
