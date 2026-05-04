@@ -55,6 +55,42 @@ pub async fn clear(tower: &TowerSession) {
     tower.flush().await.ok();
 }
 
+/// One-shot status message shown to the user after a redirect.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Flash {
+    pub level: FlashLevel,
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum FlashLevel {
+    Success,
+    Error,
+    Info,
+}
+
+const FLASH_KEY: &str = "ghinvite_flash";
+
+/// Store a flash message to be shown on the next request.
+pub async fn set_flash(
+    tower: &TowerSession,
+    flash: Flash,
+) -> Result<(), tower_sessions::session::Error> {
+    tower.insert(FLASH_KEY, flash).await
+}
+
+/// Read + clear the flash. Returns `None` if no flash is present.
+pub async fn take_flash(
+    tower: &TowerSession,
+) -> Result<Option<Flash>, tower_sessions::session::Error> {
+    let flash: Option<Flash> = tower.get(FLASH_KEY).await?;
+    if flash.is_some() {
+        tower.remove::<Flash>(FLASH_KEY).await?;
+    }
+    Ok(flash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +128,17 @@ mod tests {
         let parsed: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.admin_checks.len(), 1);
         assert!(parsed.admin_checks.get("acme").unwrap().is_admin);
+    }
+
+    #[test]
+    fn flash_round_trips_via_serde() {
+        let f = Flash {
+            level: FlashLevel::Success,
+            message: "link created".into(),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let parsed: Flash = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.message, "link created");
+        assert_eq!(parsed.level, FlashLevel::Success);
     }
 }
