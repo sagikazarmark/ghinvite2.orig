@@ -64,6 +64,7 @@ struct CallbackQuery {
     code: Option<String>,
     state: Option<String>,
     installation_id: Option<u64>,
+    #[allow(dead_code)]
     setup_action: Option<String>,
     error: Option<String>,
     error_description: Option<String>,
@@ -130,9 +131,12 @@ async fn oauth_callback(
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
 
-    // Task 11 adds the installation_id branch. For Task 10, ignore it.
-    let _ = q.installation_id;
-    let _ = q.setup_action;
+    if let Some(installation_id) = q.installation_id {
+        tracing::info!(
+            installation_id,
+            "OAuth callback carried installation_id; awaiting webhook onboarding"
+        );
+    }
 
     Ok(Redirect::to("/"))
 }

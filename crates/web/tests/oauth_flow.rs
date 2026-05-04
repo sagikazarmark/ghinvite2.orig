@@ -121,3 +121,64 @@ async fn callback_csrf_mismatch_rejects() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("CSRF"));
 }
+
+#[tokio::test]
+async fn signin_with_installation_id_logs_and_proceeds() {
+    let mock = MockTransport::scripted(vec![
+        Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#.to_vec(),
+            },
+        },
+        Expectation::ok_json(
+            Method::Get,
+            "https://api.github.com/user",
+            serde_json::json!({"id": 42, "login": "octocat"}),
+        ),
+    ]);
+    let app = build_app_with_mock(mock).await;
+
+    let resp1 = app
+        .clone()
+        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let cookie = resp1
+        .headers()
+        .get("set-cookie")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
+    let state_param = location
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+
+    let resp2 = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/oauth/callback?code=test-code&state={state_param}&installation_id=99&setup_action=install"
+                ))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
+}
