@@ -30,3 +30,41 @@ async fn health_returns_ok() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
 }
+
+#[tokio::test]
+async fn login_redirects_to_github_authorize() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(Request::builder().uri("/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
+    assert!(location.contains("client_id="));
+    assert!(location.contains("state="));
+}
+
+#[tokio::test]
+async fn install_redirects_to_install_url() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(Request::builder().uri("/install").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("https://github.com/apps/"));
+}
+
+#[tokio::test]
+async fn logout_clears_session_and_redirects_home() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(Request::builder().uri("/logout").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/");
+}
