@@ -16,3 +16,35 @@ pub use config::WebConfig;
 pub use error::{Result, WebError};
 pub use restate_client::RestateClient;
 pub use state::AppState;
+
+use axum::Router;
+
+/// Build the axum app with all routes registered. The session store is
+/// supplied externally so Plan 7 can swap in a D1-backed store; for native
+/// dev pass `tower_sessions_sqlx_store::SqliteStore`.
+///
+/// `state` carries storage, github transport, restate client, and config.
+pub fn build_app<S>(state: AppState, session_store: S) -> Router
+where
+    S: tower_sessions::SessionStore + Clone + 'static,
+{
+    use tower_sessions::{Expiry, SessionManagerLayer};
+
+    let session_layer = SessionManagerLayer::new(session_store)
+        .with_secure(state.config.cookie_secure)
+        .with_http_only(true)
+        .with_same_site(tower_sessions::cookie::SameSite::Lax)
+        .with_expiry(Expiry::OnInactivity(
+            tower_sessions::cookie::time::Duration::days(30),
+        ));
+
+    Router::new()
+        .merge(routes::health::router())
+        .merge(routes::home::router())
+        .merge(routes::oauth::router())
+        .merge(routes::dashboard::router())
+        .merge(routes::invitation::router())
+        .merge(routes::webhook::router())
+        .layer(session_layer)
+        .with_state(state)
+}
