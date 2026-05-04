@@ -21,7 +21,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 cookie = { version = "0.18", default-features = false }
-dioxus = { version = "0.7", default-features = false, features = ["html"] }
+dioxus = { version = "0.7", default-features = false, features = ["html", "macro", "signals", "hooks"] }
 dioxus-ssr = { version = "0.7" }
 hmac = "0.12"
 jsonwebtoken = { version = "9", default-features = false }   # only used by tests as a verifier
@@ -41,9 +41,10 @@ thiserror = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "set-header"] }
-tower-sessions = { version = "0.15", default-features = false, features = ["axum-core"] }
+tower-sessions = { version = "0.14", default-features = false, features = ["axum-core"] }
 tower-sessions-sqlx-store = { version = "0.15", default-features = false, features = ["sqlite"] }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 ulid = { version = "1", features = ["serde"] }
 url = "2"
 wiremock = "0.6"
