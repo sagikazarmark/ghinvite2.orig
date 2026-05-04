@@ -183,6 +183,14 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.contains("/login"), "expected redirect to /login, got {location}");
+    assert!(
+        location.contains("return_to="),
+        "expected return_to in redirect location, got {location}"
+    );
+    assert!(
+        location.contains("/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"),
+        "expected return_to to point to the pending URL, got {location}"
+    );
 }
 
 #[tokio::test]
