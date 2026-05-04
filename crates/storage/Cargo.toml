@@ -17,9 +17,16 @@ rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
+
+# sqlx is native-only — wasm32 uses D1Storage (crates/storage-d1)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sqlx.workspace = true
+
+# getrandom needs wasm_js backend on wasm32 (pulled in transitively via ulid → rand_core)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
 
 [dev-dependencies]
 storage = { path = ".", features = ["test-suite"] }

@@ -28,7 +28,8 @@ impl SqlxStorage {
         let pool = SqlitePoolOptions::new()
             .max_connections(1) // in-memory shares one connection so all queries see the same DB
             .connect_with(opts)
-            .await?;
+            .await
+            .map_err(crate::to_db_err)?;
         let s = Self { pool };
         s.run_migrations().await?;
         Ok(s)
@@ -43,7 +44,8 @@ impl SqlxStorage {
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
             .connect_with(opts)
-            .await?;
+            .await
+            .map_err(crate::to_db_err)?;
         let s = Self { pool };
         s.run_migrations().await?;
         Ok(s)
@@ -60,7 +62,8 @@ impl SqlxStorage {
         )
         .bind(u64_to_i64(account_id))
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
@@ -72,7 +75,7 @@ impl SqlxStorage {
         sqlx::migrate!("../../migrations")
             .run(&self.pool)
             .await
-            .map_err(|e| crate::Error::Database(sqlx::Error::Migrate(Box::new(e))))?;
+            .map_err(|e| crate::Error::Database(e.to_string()))?;
         Ok(())
     }
 }
@@ -156,7 +159,7 @@ impl Storage for SqlxStorage {
             Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
                 Err(Error::Conflict(ConflictKind::ForeignKey))
             }
-            Err(e) => Err(Error::Database(e)),
+            Err(e) => Err(Error::Database(e.to_string())),
         }
     }
 
@@ -171,7 +174,8 @@ impl Storage for SqlxStorage {
         .bind(when)
         .bind(u64_to_i64(installation_id))
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -189,7 +193,8 @@ impl Storage for SqlxStorage {
         .bind(encode_selected_repos(selected))
         .bind(u64_to_i64(installation_id))
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -203,7 +208,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(installation_id))
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -217,7 +223,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(account_id))
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -228,7 +235,8 @@ impl Storage for SqlxStorage {
         )
         .bind(login)
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -238,7 +246,8 @@ impl Storage for SqlxStorage {
                FROM installations WHERE uninstalled_at IS NULL ORDER BY installed_at"#,
         )
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
@@ -259,7 +268,8 @@ impl Storage for SqlxStorage {
         .bind(user.avatar_url.as_deref())
         .bind(user.last_seen_at)
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         Ok(())
     }
 
@@ -269,11 +279,12 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(user_id))
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         Ok(row.map(|r| r.into_domain()))
     }
     async fn insert_share_link(&self, link: &ShareLink) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         sqlx::query(
             r#"
             INSERT INTO share_links
@@ -306,7 +317,7 @@ impl Storage for SqlxStorage {
             sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
                 Error::Conflict(ConflictKind::ForeignKey)
             }
-            other => Error::Database(other),
+            other => Error::Database(other.to_string()),
         })?;
 
         for repo in &link.repos {
@@ -318,9 +329,10 @@ impl Storage for SqlxStorage {
             .bind(u64_to_i64(repo.repo_id))
             .bind(&repo.repo_full_name)
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(crate::to_db_err)?;
         }
-        tx.commit().await?;
+        tx.commit().await.map_err(crate::to_db_err)?;
         Ok(())
     }
 
@@ -338,7 +350,8 @@ impl Storage for SqlxStorage {
         .bind(u64_to_i64(by_user))
         .bind(id.to_string())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -360,7 +373,8 @@ impl Storage for SqlxStorage {
         )
         .bind(id.to_string())
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
     }
 
@@ -379,7 +393,8 @@ impl Storage for SqlxStorage {
         )
         .bind(slug)
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
     }
 
@@ -400,7 +415,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(account_id))
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         let rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)> =
             rows.into_iter().map(|j| j.split()).collect();
 
@@ -436,7 +452,7 @@ impl Storage for SqlxStorage {
         &self,
         request: &InvitationRequest,
     ) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
 
         let res = sqlx::query(
             r#"
@@ -469,7 +485,7 @@ impl Storage for SqlxStorage {
             Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
                 return Err(Error::Conflict(ConflictKind::ForeignKey));
             }
-            Err(e) => return Err(Error::Database(e)),
+            Err(e) => return Err(Error::Database(e.to_string())),
         }
 
         // Increment uses_count atomically. Caller has already verified is_active(now);
@@ -478,12 +494,13 @@ impl Storage for SqlxStorage {
             sqlx::query(r#"UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1"#)
                 .bind(request.share_link_id.to_string())
                 .execute(&mut *tx)
-                .await?;
+                .await
+                .map_err(crate::to_db_err)?;
         if updated.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
 
-        tx.commit().await?;
+        tx.commit().await.map_err(crate::to_db_err)?;
         Ok(())
     }
 
@@ -499,7 +516,8 @@ impl Storage for SqlxStorage {
         .bind(decision.decline_reason.as_deref())
         .bind(decision.request_id.to_string())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -514,7 +532,8 @@ impl Storage for SqlxStorage {
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -532,7 +551,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(account_id))
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
@@ -545,7 +565,8 @@ impl Storage for SqlxStorage {
         )
         .bind(link_id.to_string())
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
@@ -573,7 +594,7 @@ impl Storage for SqlxStorage {
             sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
                 Error::Conflict(ConflictKind::ForeignKey)
             }
-            other => Error::Database(other),
+            other => Error::Database(other.to_string()),
         })?;
         Ok(())
     }
@@ -591,7 +612,8 @@ impl Storage for SqlxStorage {
         .bind(update.updated_at)
         .bind(update.id.to_string())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -609,7 +631,8 @@ impl Storage for SqlxStorage {
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -624,7 +647,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(github_id))
         .fetch_optional(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         row.map(|r| r.try_into_domain()).transpose()
     }
 
@@ -645,7 +669,8 @@ impl Storage for SqlxStorage {
         )
         .bind(u64_to_i64(installation_id))
         .fetch_all(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
@@ -674,7 +699,8 @@ impl Storage for SqlxStorage {
         .bind(metadata_json)
         .bind(event.request_id.as_deref())
         .execute(&self.pool)
-        .await?;
+        .await
+        .map_err(crate::to_db_err)?;
         Ok(())
     }
 }

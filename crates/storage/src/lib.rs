@@ -11,13 +11,21 @@ use domain::{
 };
 use thiserror::Error;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod records;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sqlx_impl;
 
 #[cfg(any(test, feature = "test-suite"))]
 pub mod tests;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use sqlx_impl::SqlxStorage;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn to_db_err(e: sqlx::Error) -> Error {
+    Error::Database(e.to_string())
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -41,7 +49,7 @@ pub enum ConflictKind {
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(String),
 
     #[error("not found")]
     NotFound,
