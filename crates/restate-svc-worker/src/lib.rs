@@ -24,7 +24,7 @@ fn worker_err(e: impl std::fmt::Display) -> worker::Error {
 /// Build an [`InstallationClient`] from the wrangler-managed env. Two pieces
 /// of secret config are required:
 ///   * `GHINVITE_GITHUB_APP_ID` — the GitHub App's numeric id, as a `var`.
-///   * `GHINVITE_GITHUB_APP_PRIVATE_KEY` — the App's PKCS#8 PEM private key,
+///   * `GHINVITE_GITHUB_APP_PRIVATE_KEY` — the App's PEM private key,
 ///     **base64-encoded** because wrangler secrets are single-line strings.
 ///     Generate with `base64 -w0 private-key.pem | wrangler secret put
 ///     GHINVITE_GITHUB_APP_PRIVATE_KEY`.
@@ -45,7 +45,7 @@ fn github_client_from_env(env: &Env) -> worker::Result<github::InstallationClien
             "GHINVITE_GITHUB_APP_PRIVATE_KEY decoded bytes are not utf-8: {e}"
         ))
     })?;
-    let signer = github::jwt::AppJwtSigner::from_pkcs8_pem(app_id, pem).map_err(worker_err)?;
+    let signer = github::jwt::AppJwtSigner::from_pem(app_id, pem).map_err(worker_err)?;
 
     let transport: Arc<dyn github::HttpTransport> =
         Arc::new(github::transport::ReqwestTransport::new().map_err(worker_err)?);

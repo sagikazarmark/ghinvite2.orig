@@ -20,7 +20,7 @@ database_id = "REPLACE_WITH_SAME_ID_AS_WEB_TOML"
 GHINVITE_GITHUB_APP_ID = "REPLACE_WITH_GITHUB_APP_NUMERIC_ID"
 
 # Secrets (set via `wrangler secret put`):
-# GHINVITE_GITHUB_APP_PRIVATE_KEY - base64-encoded PEM:
+# GHINVITE_GITHUB_APP_PRIVATE_KEY - base64-encoded GitHub App private key PEM:
 #   Linux:  base64 -w0 private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
 #   macOS:  base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
 # RESTATE_IDENTITY_KEY            - from Restate Cloud console (Deployments → Identity key)

@@ -291,7 +291,7 @@ mod token_mint_tests {
     const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
 
     fn signer() -> AppJwtSigner {
-        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
     }
 
     fn token_response_body() -> Vec<u8> {
@@ -357,7 +357,7 @@ mod read_tests {
     const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
 
     fn signer() -> AppJwtSigner {
-        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
     }
 
     /// Single mocked token-mint response that all tests below consume first.
@@ -438,7 +438,7 @@ mod write_tests {
     const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
 
     fn signer() -> AppJwtSigner {
-        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
     }
 
     fn token_mint_expectation() -> Expectation {
@@ -561,7 +561,7 @@ mod reconcile_tests {
     const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
 
     fn signer() -> AppJwtSigner {
-        AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap()
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
     }
 
     fn token_mint_expectation() -> Expectation {

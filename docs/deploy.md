@@ -67,7 +67,7 @@ wrangler secret put GHINVITE_GITHUB_CLIENT_SECRET --config wrangler/web.toml
 # GitHub webhook secret:
 wrangler secret put GHINVITE_WEBHOOK_SECRET --config wrangler/web.toml
 
-# Restate service — GitHub App private key (base64-encoded for safe storage):
+# Restate service — GitHub App private key PEM as downloaded (base64-encoded for safe storage):
 # Linux:
 base64 -w0 private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
 # macOS:

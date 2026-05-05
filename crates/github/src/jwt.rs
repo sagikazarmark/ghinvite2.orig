@@ -9,6 +9,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, Utc};
 use rsa::RsaPrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer as _};
@@ -26,11 +27,19 @@ pub struct AppJwtSigner {
 }
 
 impl AppJwtSigner {
-    /// Parse the App private key from PKCS#8 PEM (the format GitHub gives
-    /// you when downloading the key).
-    pub fn from_pkcs8_pem(app_id: u64, pem: &str) -> Result<Self> {
-        let inner = RsaPrivateKey::from_pkcs8_pem(pem)
-            .map_err(|e| Error::InvalidInput(format!("rsa pkcs8 pem: {e}")))?;
+    /// Parse the App private key from PEM. GitHub App keys may be PKCS#1
+    /// (`BEGIN RSA PRIVATE KEY`) or PKCS#8 (`BEGIN PRIVATE KEY`).
+    pub fn from_pem(app_id: u64, pem: &str) -> Result<Self> {
+        let pem = pem.trim();
+        let inner = RsaPrivateKey::from_pkcs8_pem(pem).or_else(|pkcs8_err| {
+            RsaPrivateKey::from_pkcs1_pem(pem).map_err(|pkcs1_err| {
+                Error::InvalidInput(format!(
+                    "rsa private key pem: expected PKCS#8 (BEGIN PRIVATE KEY) or \
+                     PKCS#1 (BEGIN RSA PRIVATE KEY); PKCS#8 error: {pkcs8_err}; \
+                     PKCS#1 error: {pkcs1_err}"
+                ))
+            })
+        })?;
         Ok(Self { app_id, inner })
     }
 
@@ -71,6 +80,7 @@ mod tests {
     use chrono::TimeZone;
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
     use rsa::RsaPublicKey;
+    use rsa::pkcs1::EncodeRsaPrivateKey;
     use rsa::pkcs8::DecodePrivateKey;
     use rsa::pkcs8::EncodePublicKey;
 
@@ -86,7 +96,7 @@ mod tests {
 
     #[test]
     fn signs_a_jwt_that_jsonwebtoken_can_verify() {
-        let signer = AppJwtSigner::from_pkcs8_pem(99, TEST_KEY_PEM).unwrap();
+        let signer = AppJwtSigner::from_pem(99, TEST_KEY_PEM).unwrap();
 
         // Re-derive the public key from the same PEM so the test stays
         // self-contained (no separate public-key fixture).
@@ -121,8 +131,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_pkcs1_pem() {
+        let priv_key = RsaPrivateKey::from_pkcs8_pem(TEST_KEY_PEM).unwrap();
+        let pkcs1_pem = priv_key.to_pkcs1_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+        assert!(pkcs1_pem.starts_with("-----BEGIN RSA PRIVATE KEY-----"));
+
+        let signer = AppJwtSigner::from_pem(99, pkcs1_pem.as_str()).unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap();
+        assert_eq!(signer.sign(now).unwrap().split('.').count(), 3);
+    }
+
+    #[test]
     fn rejects_garbage_pem() {
-        match AppJwtSigner::from_pkcs8_pem(1, "not a pem") {
+        match AppJwtSigner::from_pem(1, "not a pem") {
             Err(Error::InvalidInput(_)) => (),
             Err(other) => panic!("expected InvalidInput, got {other:?}"),
             Ok(_) => panic!("expected error, got Ok"),

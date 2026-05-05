@@ -74,7 +74,7 @@ GHINVITE_DATABASE_PATH=./dev.sqlite \
 cargo run -p restate-svc
 ```
 
-On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. Without either, the binary starts but GitHub API calls will fail at runtime.
+On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. GitHub App keys work as downloaded, whether they start with `BEGIN RSA PRIVATE KEY` or `BEGIN PRIVATE KEY`. Without either, the binary starts but GitHub API calls will fail at runtime.
 
 After it starts, register it with Restate once:
 

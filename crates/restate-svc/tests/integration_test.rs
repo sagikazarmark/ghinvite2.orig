@@ -27,7 +27,7 @@ const TEST_KEY_PEM: &str = include_str!("../../github/src/jwt_test_key.pem");
 async fn setup_restate() -> SocketAddr {
     let storage = Arc::new(SqlxStorage::in_memory().await.unwrap());
     let transport = Arc::new(ReqwestTransport::new().unwrap());
-    let signer = AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap();
+    let signer = AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap();
     let github_client = Arc::new(
         InstallationClient::new(transport, signer)
             .with_base("http://localhost:3001"),

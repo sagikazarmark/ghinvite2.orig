@@ -5,7 +5,7 @@
 //! Environment variables (all optional — defaults work for `docker compose up`):
 //!
 //! - `GHINVITE_GITHUB_APP_ID`          — GitHub App numeric id (default: 0, disables real API calls)
-//! - `GHINVITE_GITHUB_APP_PRIVATE_KEY`      — PKCS#8 PEM private key as a plain string (not base64)
+//! - `GHINVITE_GITHUB_APP_PRIVATE_KEY`      — PEM private key as a plain string (not base64)
 //! - `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE` — path to the PEM file (alternative to the above)
 //! - `GHINVITE_LISTEN_ADDR`            — bind address (default: 127.0.0.1:9080); use 0.0.0.0:9080
 //!                                       when Restate must reach this binary from inside Docker
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let transport = Arc::new(ReqwestTransport::new()?);
     let github_client = if let Some(pem) = pem {
-        let signer = AppJwtSigner::from_pkcs8_pem(app_id, &pem)?;
+        let signer = AppJwtSigner::from_pem(app_id, &pem)?;
         Arc::new(InstallationClient::new(transport, signer))
     } else {
         tracing::warn!(
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              — GitHub API calls will fail at runtime"
         );
         let dummy_pem = include_str!("../../github/src/jwt_test_key.pem");
-        let signer = AppJwtSigner::from_pkcs8_pem(app_id, dummy_pem)?;
+        let signer = AppJwtSigner::from_pem(app_id, dummy_pem)?;
         Arc::new(InstallationClient::new(transport, signer))
     };
 

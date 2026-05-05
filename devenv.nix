@@ -7,6 +7,7 @@
 }:
 
 {
+  dotenv.enable = true;
   packages = with pkgs; [
     lld
   ];

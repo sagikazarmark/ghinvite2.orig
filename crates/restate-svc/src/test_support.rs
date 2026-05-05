@@ -27,7 +27,7 @@ pub(crate) async fn fixture_storage() -> Arc<dyn storage::Storage> {
 /// App JWT signer. Pointed at `https://api.github.test` so test request URLs
 /// are short and the production github.com host is never hit.
 pub(crate) fn fixture_github_client(transport: Arc<dyn HttpTransport>) -> Arc<InstallationClient> {
-    let signer = AppJwtSigner::from_pkcs8_pem(123, TEST_KEY_PEM).unwrap();
+    let signer = AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap();
     Arc::new(InstallationClient::new(transport, signer).with_base("https://api.github.test"))
 }
 
