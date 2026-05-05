@@ -3,7 +3,14 @@
 pub use wasm_impl::*;
 
 #[cfg(target_arch = "wasm32")]
-mod wasm_impl {
+pub mod wasm_impl {
+    use domain::{
+        Account, AccountType, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
+    };
+    use serde::Deserialize;
+    use std::collections::BTreeMap;
+    use std::str::FromStr;
+    use ulid::Ulid;
     use storage::{ConflictKind, Error};
 
     /// Convert a worker::Error to a storage::Error by inspecting the message string.
@@ -30,5 +37,209 @@ mod wasm_impl {
             return Error::Conflict(ConflictKind::ForeignKey);
         }
         Error::Database(msg)
+    }
+
+    // ── Row types ─────────────────────────────────────────────────────────────
+
+    #[derive(Deserialize)]
+    pub struct InstallationRow {
+        pub installation_id: i64,
+        pub account_id: i64,
+        pub account_login: String,
+        pub account_type: String,
+        pub installed_at: String,
+        pub uninstalled_at: Option<String>,
+        pub selected_repos: String,
+    }
+
+    impl InstallationRow {
+        pub fn try_into_domain(self) -> storage::Result<Account> {
+            Ok(Account {
+                installation_id: self.installation_id as u64,
+                account_id: self.account_id as u64,
+                account_login: self.account_login,
+                account_type: AccountType::from_str(&self.account_type)
+                    .map_err(|e| Error::Corrupt(e.to_string()))?,
+                installed_at: parse_dt(&self.installed_at)?,
+                uninstalled_at: self
+                    .uninstalled_at
+                    .as_deref()
+                    .map(parse_dt)
+                    .transpose()?,
+                selected_repos: parse_selected_repos(&self.selected_repos)?,
+            })
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct UserRow {
+        pub user_id: i64,
+        pub login: String,
+        pub avatar_url: Option<String>,
+        pub last_seen_at: String,
+    }
+
+    impl UserRow {
+        pub fn into_domain(self) -> storage::Result<User> {
+            Ok(User {
+                user_id: self.user_id as u64,
+                login: self.login,
+                avatar_url: self.avatar_url,
+                last_seen_at: parse_dt(&self.last_seen_at)?,
+            })
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct ShareLinkJoinRow {
+        pub id: String,
+        pub slug: String,
+        pub installation_id: i64,
+        pub account_id: i64,
+        pub created_by: i64,
+        pub created_at: String,
+        pub expires_at: Option<String>,
+        pub max_uses: Option<i64>,
+        pub uses_count: i64,
+        pub permission: String,
+        pub approval_required: i64,
+        pub internal_note: Option<String>,
+        pub revoked_at: Option<String>,
+        pub revoked_by: Option<i64>,
+        pub repo_id: Option<i64>,
+        pub repo_full_name: Option<String>,
+    }
+
+    fn row_to_share_link(
+        row: &ShareLinkJoinRow,
+        repos: Vec<ShareLinkRepo>,
+    ) -> storage::Result<ShareLink> {
+        Ok(ShareLink {
+            id: ShareLinkId::from_ulid(
+                Ulid::from_str(&row.id).map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
+            ),
+            slug: Slug::from_string(row.slug.clone())
+                .map_err(|e| Error::Corrupt(format!("slug: {e}")))?,
+            installation_id: row.installation_id as u64,
+            account_id: row.account_id as u64,
+            created_by: row.created_by as u64,
+            created_at: parse_dt(&row.created_at)?,
+            expires_at: row.expires_at.as_deref().map(parse_dt).transpose()?,
+            max_uses: row.max_uses.map(|m| m as u32),
+            uses_count: row.uses_count as u32,
+            permission: row.permission.parse().map_err(
+                |e: domain::permission::UnknownPermission| Error::Corrupt(e.to_string()),
+            )?,
+            approval_required: row.approval_required != 0,
+            internal_note: row.internal_note.clone(),
+            revoked_at: row.revoked_at.as_deref().map(parse_dt).transpose()?,
+            revoked_by: row.revoked_by.map(|r| r as u64),
+            repos,
+        })
+    }
+
+    /// Collapse a flat `LEFT JOIN` result into a single `ShareLink`. Returns `None`
+    /// if the result set was empty.
+    pub fn try_one_share_link(rows: Vec<ShareLinkJoinRow>) -> storage::Result<Option<ShareLink>> {
+        let mut iter = rows.into_iter();
+        let Some(first) = iter.next() else {
+            return Ok(None);
+        };
+        let mut repos = Vec::new();
+        if let (Some(rid), Some(name)) = (first.repo_id, first.repo_full_name.clone()) {
+            repos.push(ShareLinkRepo {
+                repo_id: rid as u64,
+                repo_full_name: name,
+            });
+        }
+        for row in iter {
+            if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name) {
+                repos.push(ShareLinkRepo {
+                    repo_id: rid as u64,
+                    repo_full_name: name,
+                });
+            }
+        }
+        Ok(Some(row_to_share_link(&first, repos)?))
+    }
+
+    /// Collapse a flat `LEFT JOIN` result into a list of `ShareLink`s, preserving
+    /// the SQL ORDER BY ordering.
+    pub fn collect_share_links(rows: Vec<ShareLinkJoinRow>) -> storage::Result<Vec<ShareLink>> {
+        // We preserve the SQL ordering (created_at DESC, id) by tracking insertion order.
+        let mut order: Vec<String> = Vec::new();
+        // Map from id → (first row for the link, accumulated repos)
+        let mut by_link: BTreeMap<String, (usize, Vec<ShareLinkRepo>)> = BTreeMap::new();
+        // We also need to keep the first row per link for conversion.
+        let mut first_rows: Vec<ShareLinkJoinRow> = Vec::new();
+
+        for row in rows {
+            let key = row.id.clone();
+            if let std::collections::btree_map::Entry::Vacant(e) = by_link.entry(key.clone()) {
+                let idx = first_rows.len();
+                first_rows.push(ShareLinkJoinRow {
+                    id: row.id.clone(),
+                    slug: row.slug.clone(),
+                    installation_id: row.installation_id,
+                    account_id: row.account_id,
+                    created_by: row.created_by,
+                    created_at: row.created_at.clone(),
+                    expires_at: row.expires_at.clone(),
+                    max_uses: row.max_uses,
+                    uses_count: row.uses_count,
+                    permission: row.permission.clone(),
+                    approval_required: row.approval_required,
+                    internal_note: row.internal_note.clone(),
+                    revoked_at: row.revoked_at.clone(),
+                    revoked_by: row.revoked_by,
+                    repo_id: None,
+                    repo_full_name: None,
+                });
+                e.insert((idx, Vec::new()));
+                order.push(key.clone());
+            }
+            let (idx, repos_vec) = by_link.get_mut(&key).expect("just inserted or existed");
+            if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name) {
+                repos_vec.push(ShareLinkRepo {
+                    repo_id: rid as u64,
+                    repo_full_name: name,
+                });
+            }
+            let _ = idx; // suppress unused warning
+        }
+
+        order
+            .into_iter()
+            .map(|k| {
+                let (idx, repos) = by_link.remove(&k).expect("inserted above");
+                row_to_share_link(&first_rows[idx], repos)
+            })
+            .collect()
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    pub fn parse_dt(s: &str) -> storage::Result<chrono::DateTime<chrono::Utc>> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .map_err(|e| storage::Error::Corrupt(format!("datetime: {e}")))
+    }
+
+    pub fn parse_selected_repos(raw: &str) -> storage::Result<domain::SelectedRepos> {
+        if raw == "all" {
+            return Ok(domain::SelectedRepos::All);
+        }
+        let v: Vec<u64> = serde_json::from_str(raw)
+            .map_err(|e| storage::Error::Corrupt(format!("selected_repos JSON: {e}")))?;
+        Ok(domain::SelectedRepos::Subset(v))
+    }
+
+    pub fn encode_selected_repos(s: &domain::SelectedRepos) -> String {
+        match s {
+            domain::SelectedRepos::All => "all".to_string(),
+            domain::SelectedRepos::Subset(v) => {
+                serde_json::to_string(v).expect("vec<u64> serializes")
+            }
+        }
     }
 }
