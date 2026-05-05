@@ -1,0 +1,37 @@
+# Cloudflare Worker — Web binary
+# Deploy: wrangler deploy --config wrangler/web.toml
+# Build: worker-build --release -p web-worker
+
+name = "ghinvite-web"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[build]
+command = "worker-build --release -p web-worker"
+
+[migrations]
+directory = "../migrations"
+
+# D1 database binding (matches env.d1("DB") in web-worker/src/lib.rs)
+[[d1_databases]]
+binding = "DB"
+database_name = "ghinvite"
+database_id = "REPLACE_WITH_WRANGLER_D1_CREATE_OUTPUT"
+
+# KV namespace for session storage (matches env.kv("SESSIONS"))
+[[kv_namespaces]]
+binding = "SESSIONS"
+id = "REPLACE_WITH_WRANGLER_KV_CREATE_OUTPUT"
+
+# Non-secret config vars
+[vars]
+GHINVITE_BASE_URL           = "https://ghinvite.workers.dev"
+GHINVITE_RESTATE_INGRESS    = "https://ACCOUNT_ID.restate.cloud"
+GHINVITE_GITHUB_INSTALL_URL = "https://github.com/apps/YOUR_APP_NAME/installations/new"
+
+# Secrets (set via `wrangler secret put`; never commit these values):
+# GHINVITE_SESSION_SECRET       - generate: openssl rand -hex 32
+# GHINVITE_GITHUB_CLIENT_ID     - from GitHub App settings
+# GHINVITE_GITHUB_CLIENT_SECRET - from GitHub App settings
+# GHINVITE_WEBHOOK_SECRET       - from GitHub App settings

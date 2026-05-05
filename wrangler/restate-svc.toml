@@ -1,0 +1,21 @@
+# Cloudflare Worker — Restate Service
+# Deploy: wrangler deploy --config wrangler/restate-svc.toml
+# Build: worker-build --release -p restate-svc-worker
+
+name = "ghinvite-restate-svc"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[build]
+command = "worker-build --release -p restate-svc-worker"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ghinvite"
+database_id = "REPLACE_WITH_SAME_ID_AS_WEB_TOML"
+
+# Secrets (set via `wrangler secret put`):
+# GHINVITE_GITHUB_APP_ID          - GitHub App numeric ID
+# GHINVITE_GITHUB_APP_PRIVATE_KEY - base64-encoded PEM: base64 -w0 private-key.pem
+# RESTATE_IDENTITY_KEY            - from Restate Cloud console (Deployments → Identity key)
