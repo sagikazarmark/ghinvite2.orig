@@ -16,7 +16,7 @@ use worker::D1Database;
 
 use crate::bind::{
     classify_d1_error, collect_share_links, encode_selected_repos, try_one_share_link,
-    InstallationRow, ShareLinkJoinRow, UserRow,
+    GithubInvitationRow, InstallationRow, InvitationRequestRow, ShareLinkJoinRow, UserRow,
 };
 
 /// Wraps a `Future` and unsafely implements `Send`.
@@ -502,67 +502,403 @@ impl Storage for D1Storage {
 
     async fn insert_invitation_request_and_increment_uses(
         &self,
-        _request: &InvitationRequest,
+        request: &InvitationRequest,
     ) -> Result<()> {
-        unimplemented!("D1Storage::insert_invitation_request_and_increment_uses")
+        let id_str = request.id.to_string();
+        let share_link_id_str = request.share_link_id.to_string();
+        let requester_id = request.requester_id;
+        let justification = request
+            .justification
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+        let state_str = request.state.to_string();
+        let decided_by = request
+            .decided_by
+            .map(|d| JsValue::from_f64(d as f64))
+            .unwrap_or(JsValue::null());
+        let decided_at = request
+            .decided_at
+            .map(|d| JsValue::from_str(&d.to_rfc3339()))
+            .unwrap_or(JsValue::null());
+        let decline_reason = request
+            .decline_reason
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+        let created_at_str = request.created_at.to_rfc3339();
+
+        wasm_send(async {
+            let stmt1 = self
+                .db
+                .prepare(
+                    "INSERT INTO invitation_requests
+                       (id, share_link_id, requester_id, justification, state,
+                        decided_by, decided_at, decline_reason, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .bind(&[
+                    JsValue::from_str(&id_str),
+                    JsValue::from_str(&share_link_id_str),
+                    JsValue::from_f64(requester_id as f64),
+                    justification,
+                    JsValue::from_str(&state_str),
+                    decided_by,
+                    decided_at,
+                    decline_reason,
+                    JsValue::from_str(&created_at_str),
+                ])
+                .map_err(bind_err)?;
+
+            let stmt2 = self
+                .db
+                .prepare(
+                    "UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1",
+                )
+                .bind(&[JsValue::from_str(&share_link_id_str)])
+                .map_err(bind_err)?;
+
+            self.db
+                .batch(vec![stmt1, stmt2])
+                .await
+                .map_err(classify_d1_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    async fn record_request_decision(&self, _decision: &RequestDecision) -> Result<()> {
-        unimplemented!("D1Storage::record_request_decision")
+    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()> {
+        let state_str = decision.state.to_string();
+        let decided_by = decision
+            .decided_by
+            .map(|d| JsValue::from_f64(d as f64))
+            .unwrap_or(JsValue::null());
+        let decided_at_str = decision.decided_at.to_rfc3339();
+        let decline_reason = decision
+            .decline_reason
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+        let request_id_str = decision.request_id.to_string();
+
+        wasm_send(async {
+            let result = self
+                .db
+                .prepare(
+                    "UPDATE invitation_requests
+                     SET state = ?1, decided_by = ?2, decided_at = ?3, decline_reason = ?4
+                     WHERE id = ?5 AND state = 'pending'",
+                )
+                .bind(&[
+                    JsValue::from_str(&state_str),
+                    decided_by,
+                    JsValue::from_str(&decided_at_str),
+                    decline_reason,
+                    JsValue::from_str(&request_id_str),
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            if rows_changed(&result)? == 0 {
+                return Err(storage::Error::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
-    async fn get_invitation_request(&self, _id: RequestId) -> Result<Option<InvitationRequest>> {
-        unimplemented!("D1Storage::get_invitation_request")
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
+        let id_str = id.to_string();
+        wasm_send(async {
+            let row: Option<InvitationRequestRow> = self
+                .db
+                .prepare(
+                    "SELECT id, share_link_id, requester_id, justification, state,
+                            decided_by, decided_at, decline_reason, created_at
+                     FROM invitation_requests WHERE id = ?1",
+                )
+                .bind(&[JsValue::from_str(&id_str)])
+                .map_err(bind_err)?
+                .first::<InvitationRequestRow>(None)
+                .await
+                .map_err(classify_d1_error)?;
+            row.map(|r| r.try_into_domain()).transpose()
+        })
+        .await
     }
 
     async fn list_pending_requests_for_account(
         &self,
-        _account_id: u64,
+        account_id: u64,
     ) -> Result<Vec<InvitationRequest>> {
-        unimplemented!("D1Storage::list_pending_requests_for_account")
+        wasm_send(async {
+            let rows: Vec<InvitationRequestRow> = self
+                .db
+                .prepare(
+                    "SELECT r.id, r.share_link_id, r.requester_id, r.justification, r.state,
+                            r.decided_by, r.decided_at, r.decline_reason, r.created_at
+                     FROM invitation_requests r
+                     JOIN share_links l ON l.id = r.share_link_id
+                     WHERE l.account_id = ?1 AND r.state = 'pending'
+                     ORDER BY r.created_at",
+                )
+                .bind(&[JsValue::from_f64(account_id as f64)])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<InvitationRequestRow>()
+                .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
+            rows.into_iter().map(|r| r.try_into_domain()).collect()
+        })
+        .await
     }
 
     async fn list_requests_for_link(
         &self,
-        _link_id: ShareLinkId,
+        link_id: ShareLinkId,
     ) -> Result<Vec<InvitationRequest>> {
-        unimplemented!("D1Storage::list_requests_for_link")
+        let link_id_str = link_id.to_string();
+        wasm_send(async {
+            let rows: Vec<InvitationRequestRow> = self
+                .db
+                .prepare(
+                    "SELECT id, share_link_id, requester_id, justification, state,
+                            decided_by, decided_at, decline_reason, created_at
+                     FROM invitation_requests WHERE share_link_id = ?1
+                     ORDER BY created_at DESC",
+                )
+                .bind(&[JsValue::from_str(&link_id_str)])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<InvitationRequestRow>()
+                .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
+            rows.into_iter().map(|r| r.try_into_domain()).collect()
+        })
+        .await
     }
 
     // -------- github invitations --------
 
-    async fn insert_github_invitation(&self, _invitation: &GithubInvitation) -> Result<()> {
-        unimplemented!("D1Storage::insert_github_invitation")
+    async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
+        let id_str = invitation.id.to_string();
+        let request_id_str = invitation.invitation_request_id.to_string();
+        let repo_id = invitation.repo_id;
+        let github_invitation_id = invitation
+            .github_invitation_id
+            .map(|g| JsValue::from_f64(g as f64))
+            .unwrap_or(JsValue::null());
+        let state_str = invitation.state.to_string();
+        let error_message = invitation
+            .error_message
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+        let created_at_str = invitation.created_at.to_rfc3339();
+        let updated_at_str = invitation.updated_at.to_rfc3339();
+
+        wasm_send(async {
+            self.db
+                .prepare(
+                    "INSERT INTO github_invitations
+                       (id, invitation_request_id, repo_id, github_invitation_id,
+                        state, error_message, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                )
+                .bind(&[
+                    JsValue::from_str(&id_str),
+                    JsValue::from_str(&request_id_str),
+                    JsValue::from_f64(repo_id as f64),
+                    github_invitation_id,
+                    JsValue::from_str(&state_str),
+                    error_message,
+                    JsValue::from_str(&created_at_str),
+                    JsValue::from_str(&updated_at_str),
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            Ok(())
+        })
+        .await
     }
 
-    async fn update_github_invitation(&self, _update: &GithubInvitationUpdate) -> Result<()> {
-        unimplemented!("D1Storage::update_github_invitation")
+    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
+        let state_str = update.state.to_string();
+        let github_invitation_id = update
+            .github_invitation_id
+            .map(|g| JsValue::from_f64(g as f64))
+            .unwrap_or(JsValue::null());
+        let error_message = update
+            .error_message
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+        let updated_at_str = update.updated_at.to_rfc3339();
+        let id_str = update.id.to_string();
+
+        wasm_send(async {
+            let result = self
+                .db
+                .prepare(
+                    "UPDATE github_invitations
+                     SET state = ?1,
+                         github_invitation_id = COALESCE(?2, github_invitation_id),
+                         error_message = ?3,
+                         updated_at = ?4
+                     WHERE id = ?5",
+                )
+                .bind(&[
+                    JsValue::from_str(&state_str),
+                    github_invitation_id,
+                    error_message,
+                    JsValue::from_str(&updated_at_str),
+                    JsValue::from_str(&id_str),
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            if rows_changed(&result)? == 0 {
+                return Err(storage::Error::NotFound);
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn get_github_invitation(
         &self,
-        _id: GithubInvitationId,
+        id: GithubInvitationId,
     ) -> Result<Option<GithubInvitation>> {
-        unimplemented!("D1Storage::get_github_invitation")
+        let id_str = id.to_string();
+        wasm_send(async {
+            let row: Option<GithubInvitationRow> = self
+                .db
+                .prepare(
+                    "SELECT id, invitation_request_id, repo_id, github_invitation_id,
+                            state, error_message, created_at, updated_at
+                     FROM github_invitations WHERE id = ?1",
+                )
+                .bind(&[JsValue::from_str(&id_str)])
+                .map_err(bind_err)?
+                .first::<GithubInvitationRow>(None)
+                .await
+                .map_err(classify_d1_error)?;
+            row.map(|r| r.try_into_domain()).transpose()
+        })
+        .await
     }
 
     async fn get_github_invitation_by_github_id(
         &self,
-        _github_id: u64,
+        github_id: u64,
     ) -> Result<Option<GithubInvitation>> {
-        unimplemented!("D1Storage::get_github_invitation_by_github_id")
+        wasm_send(async {
+            let row: Option<GithubInvitationRow> = self
+                .db
+                .prepare(
+                    "SELECT id, invitation_request_id, repo_id, github_invitation_id,
+                            state, error_message, created_at, updated_at
+                     FROM github_invitations WHERE github_invitation_id = ?1",
+                )
+                .bind(&[JsValue::from_f64(github_id as f64)])
+                .map_err(bind_err)?
+                .first::<GithubInvitationRow>(None)
+                .await
+                .map_err(classify_d1_error)?;
+            row.map(|r| r.try_into_domain()).transpose()
+        })
+        .await
     }
 
     async fn list_pending_github_invitations_for_installation(
         &self,
-        _installation_id: u64,
+        installation_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        unimplemented!("D1Storage::list_pending_github_invitations_for_installation")
+        wasm_send(async {
+            let rows: Vec<GithubInvitationRow> = self
+                .db
+                .prepare(
+                    "SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id,
+                            g.state, g.error_message, g.created_at, g.updated_at
+                     FROM github_invitations g
+                     JOIN invitation_requests r ON r.id = g.invitation_request_id
+                     JOIN share_links l ON l.id = r.share_link_id
+                     WHERE l.installation_id = ?1
+                       AND g.state IN ('sending', 'sent')
+                     ORDER BY g.created_at",
+                )
+                .bind(&[JsValue::from_f64(installation_id as f64)])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<GithubInvitationRow>()
+                .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
+            rows.into_iter().map(|r| r.try_into_domain()).collect()
+        })
+        .await
     }
 
     // -------- audit --------
 
-    async fn audit(&self, _event: &AuditEvent) -> Result<()> {
-        unimplemented!("D1Storage::audit")
+    async fn audit(&self, event: &AuditEvent) -> Result<()> {
+        let id_str = event.id.to_string();
+        let account_id = event.account_id;
+        let occurred_at_str = event.occurred_at.to_rfc3339();
+        let event_type_str = event.event_type.as_str();
+        let actor_kind_str = event.actor_kind.to_string();
+        let actor_id = event
+            .actor_id
+            .map(|a| JsValue::from_f64(a as f64))
+            .unwrap_or(JsValue::null());
+        let target_kind_str = event.target_kind.to_string();
+        let target_id = event.target_id.clone();
+        let metadata = if event.metadata.is_null() {
+            JsValue::null()
+        } else {
+            JsValue::from_str(
+                &serde_json::to_string(&event.metadata)
+                    .expect("audit metadata serializes"),
+            )
+        };
+        let request_id = event
+            .request_id
+            .as_deref()
+            .map(JsValue::from_str)
+            .unwrap_or(JsValue::null());
+
+        wasm_send(async {
+            self.db
+                .prepare(
+                    "INSERT INTO audit_events
+                       (id, account_id, occurred_at, event_type, actor_kind, actor_id,
+                        target_kind, target_id, metadata, request_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                )
+                .bind(&[
+                    JsValue::from_str(&id_str),
+                    JsValue::from_f64(account_id as f64),
+                    JsValue::from_str(&occurred_at_str),
+                    JsValue::from_str(event_type_str),
+                    JsValue::from_str(&actor_kind_str),
+                    actor_id,
+                    JsValue::from_str(&target_kind_str),
+                    JsValue::from_str(&target_id),
+                    metadata,
+                    request_id,
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            Ok(())
+        })
+        .await
     }
 }

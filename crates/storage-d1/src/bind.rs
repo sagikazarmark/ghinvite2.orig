@@ -217,6 +217,78 @@ pub mod wasm_impl {
             .collect()
     }
 
+    #[derive(Deserialize)]
+    pub struct InvitationRequestRow {
+        pub id: String,
+        pub share_link_id: String,
+        pub requester_id: i64,
+        pub justification: Option<String>,
+        pub state: String,
+        pub decided_by: Option<i64>,
+        pub decided_at: Option<String>,
+        pub decline_reason: Option<String>,
+        pub created_at: String,
+    }
+
+    impl InvitationRequestRow {
+        pub fn try_into_domain(self) -> storage::Result<domain::InvitationRequest> {
+            use std::str::FromStr;
+            Ok(domain::InvitationRequest {
+                id: domain::RequestId::from_ulid(
+                    ulid::Ulid::from_str(&self.id)
+                        .map_err(|e| Error::Corrupt(format!("req id: {e}")))?,
+                ),
+                share_link_id: ShareLinkId::from_ulid(
+                    ulid::Ulid::from_str(&self.share_link_id)
+                        .map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
+                ),
+                requester_id: self.requester_id as u64,
+                justification: self.justification,
+                state: domain::RequestState::from_str(&self.state)
+                    .map_err(|e| Error::Corrupt(e.to_string()))?,
+                decided_by: self.decided_by.map(|d| d as u64),
+                decided_at: self.decided_at.as_deref().map(parse_dt).transpose()?,
+                decline_reason: self.decline_reason,
+                created_at: parse_dt(&self.created_at)?,
+            })
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct GithubInvitationRow {
+        pub id: String,
+        pub invitation_request_id: String,
+        pub repo_id: i64,
+        pub github_invitation_id: Option<i64>,
+        pub state: String,
+        pub error_message: Option<String>,
+        pub created_at: String,
+        pub updated_at: String,
+    }
+
+    impl GithubInvitationRow {
+        pub fn try_into_domain(self) -> storage::Result<domain::GithubInvitation> {
+            use std::str::FromStr;
+            Ok(domain::GithubInvitation {
+                id: domain::GithubInvitationId::from_ulid(
+                    ulid::Ulid::from_str(&self.id)
+                        .map_err(|e| Error::Corrupt(format!("ginv id: {e}")))?,
+                ),
+                invitation_request_id: domain::RequestId::from_ulid(
+                    ulid::Ulid::from_str(&self.invitation_request_id)
+                        .map_err(|e| Error::Corrupt(format!("req id: {e}")))?,
+                ),
+                repo_id: self.repo_id as u64,
+                github_invitation_id: self.github_invitation_id.map(|g| g as u64),
+                state: domain::InvitationState::from_str(&self.state)
+                    .map_err(|e| Error::Corrupt(e.to_string()))?,
+                error_message: self.error_message,
+                created_at: parse_dt(&self.created_at)?,
+                updated_at: parse_dt(&self.updated_at)?,
+            })
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     pub fn parse_dt(s: &str) -> storage::Result<chrono::DateTime<chrono::Utc>> {
