@@ -15,7 +15,6 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 audit.workspace = true
-axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
 cookie.workspace = true
@@ -31,14 +30,26 @@ serde_json.workspace = true
 serde_qs.workspace = true
 storage.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
 tower.workspace = true
 tower-http.workspace = true
 tower-sessions.workspace = true
-tower-sessions-sqlx-store.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+
+# axum's `tokio` feature pulls in the full mio-backed tokio runtime, which does
+# not compile on wasm32. The native binary needs it for `axum::serve`; the
+# Workers build (`web-worker`) drives the router via `worker::axum::run` and
+# does not need it. Cargo unions feature sets and can't subtract, so we list
+# axum twice — workspace dep is target-specific instead of unconditional.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tower-sessions-sqlx-store.workspace = true
+
+# Wasm32 / Workers build: same axum, minus the `tokio` feature.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 
 [dev-dependencies]
 github = { workspace = true, features = ["test-mock"] }

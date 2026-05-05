@@ -8,6 +8,7 @@ members = [
     "crates/github",
     "crates/restate-svc",
     "crates/web",
+    "crates/web-worker",
 ]
 
 [workspace.package]
@@ -59,3 +60,4 @@ storage-d1 = { path = "crates/storage-d1" }
 github = { path = "crates/github" }
 restate-svc = { path = "crates/restate-svc" }
 web = { path = "crates/web" }
+web-worker = { path = "crates/web-worker" }
