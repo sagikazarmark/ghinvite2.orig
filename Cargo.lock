@@ -2462,6 +2462,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-svc-worker"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "console_error_panic_hook",
+ "github",
+ "http",
+ "http-body-util",
+ "restate-sdk",
+ "restate-svc",
+ "storage",
+ "storage-d1",
+ "tracing-wasm",
+ "worker",
+]
+
+[[package]]
 name = "rfc6979"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3934,6 +3951,7 @@ dependencies = [
  "axum",
  "console_error_panic_hook",
  "github",
+ "hex",
  "serde_json",
  "storage",
  "storage-d1",
