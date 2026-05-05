@@ -64,7 +64,21 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
     let github_client = Arc::new(github_client_from_env(&env)?);
 
     let state = restate_svc::AppState::new(storage, github_client);
-    let endpoint = restate_svc::build_endpoint(state);
+    // RESTATE_IDENTITY_KEY is required in production — it is the public key
+    // Restate Cloud uses to sign inbound requests. Without it the endpoint
+    // accepts any caller. Set via:
+    //   wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
+    let identity_key = env.secret("RESTATE_IDENTITY_KEY")
+        .map(|s| s.to_string().trim().to_string())
+        .ok();
+    if identity_key.is_none() {
+        worker::console_warn!(
+            "RESTATE_IDENTITY_KEY is not set — endpoint will accept unsigned requests. \
+             This is only safe for local dev."
+        );
+    }
+    let endpoint = restate_svc::build_endpoint(state, identity_key.as_deref())
+        .map_err(worker_err)?;
 
     // Cloudflare Workers does not support true bidirectional streaming — it
     // buffers the entire request body before passing it to the worker. We

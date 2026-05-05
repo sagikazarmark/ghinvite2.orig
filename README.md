@@ -79,10 +79,18 @@ On first run (or after `rm dev.sqlite`), migrations are applied automatically. Y
 After it starts, register it with Restate once:
 
 ```bash
+# macOS / Docker Desktop — restate-svc is on the host, Restate is in Docker:
 curl -X POST http://localhost:9070/restate/v1/deployments \
   -H 'Content-Type: application/json' \
-  -d '{"uri": "http://localhost:9080"}'
+  -d '{"uri": "http://host.docker.internal:9080"}'
+
+# Linux — use the Docker bridge IP instead (host.docker.internal is not automatic):
+# curl -X POST http://localhost:9070/restate/v1/deployments \
+#   -H 'Content-Type: application/json' \
+#   -d '{"uri": "http://172.17.0.1:9080"}'
 ```
+
+> **Note:** `restate-svc` binds to `127.0.0.1:9080` by default, so the URI you give to Restate must resolve to the host from *inside* the Restate container — not just from your shell. Use `GHINVITE_LISTEN_ADDR=0.0.0.0:9080 cargo run -p restate-svc` if `host.docker.internal` is unavailable on your platform.
 
 **Terminal 3 — web**
 

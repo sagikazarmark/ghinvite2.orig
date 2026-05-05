@@ -33,7 +33,7 @@ async fn setup_restate() -> SocketAddr {
             .with_base("http://localhost:3001"),
     );
     let state = restate_svc::AppState::new(storage, github_client);
-    let endpoint = restate_svc::build_endpoint(state);
+    let endpoint = restate_svc::build_endpoint(state, None).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

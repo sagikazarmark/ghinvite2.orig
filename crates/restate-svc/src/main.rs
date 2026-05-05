@@ -7,8 +7,11 @@
 //! - `GHINVITE_GITHUB_APP_ID`          — GitHub App numeric id (default: 0, disables real API calls)
 //! - `GHINVITE_GITHUB_APP_PRIVATE_KEY`      — PKCS#8 PEM private key as a plain string (not base64)
 //! - `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE` — path to the PEM file (alternative to the above)
-//! - `GHINVITE_LISTEN_ADDR`            — bind address (default: 0.0.0.0:9080)
+//! - `GHINVITE_LISTEN_ADDR`            — bind address (default: 127.0.0.1:9080); use 0.0.0.0:9080
+//!                                       when Restate must reach this binary from inside Docker
 //! - `GHINVITE_DATABASE_PATH`          — path to SQLite file (default: in-memory, resets on restart)
+//! - `RESTATE_IDENTITY_KEY`            — Restate Cloud signing key (`publickeyv1_...`); optional for
+//!                                       local dev, required in production
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -62,10 +65,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let state = AppState::new(storage, github_client);
-    let endpoint = build_endpoint(state);
+    // Identity verification is optional for local dev (docker compose Restate
+    // does not sign requests). In production the Worker reads
+    // RESTATE_IDENTITY_KEY from wrangler secrets.
+    let identity_key = std::env::var("RESTATE_IDENTITY_KEY").ok()
+        .map(|s| s.trim().to_string());
+    if identity_key.is_none() {
+        tracing::warn!(
+            "RESTATE_IDENTITY_KEY not set — endpoint will accept unsigned requests \
+             (safe for local dev only)"
+        );
+    }
+    let endpoint = build_endpoint(state, identity_key.as_deref())?;
 
     let addr: SocketAddr = std::env::var("GHINVITE_LISTEN_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:9080".into())
+        .unwrap_or_else(|_| "127.0.0.1:9080".into())
         .parse()?;
 
     tracing::info!("restate-svc listening on http://{addr}");

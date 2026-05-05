@@ -29,15 +29,26 @@ pub use state::AppState;
 use restate_sdk::endpoint::Endpoint;
 
 /// Build a fully-bound Restate endpoint with all five ghinvite services.
-/// Plan 7's Workers `#[event(fetch)]` calls this once per cold start.
-pub fn build_endpoint(state: AppState) -> Endpoint {
+///
+/// `identity_key` is the Restate Cloud identity public key
+/// (`publickeyv1_...`). When `Some`, the endpoint will reject any request not
+/// signed by Restate Cloud. Pass `None` only in local dev where Restate runs
+/// without identity signing (plain `docker compose up`).
+///
+/// Returns `Err` if `identity_key` is `Some` but is not a valid
+/// `publickeyv1_`-prefixed Ed25519 key — callers should treat this as a fatal
+/// startup error.
+///
+/// **Production:** always pass `Some` — set `RESTATE_IDENTITY_KEY` via
+/// `wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml`.
+pub fn build_endpoint(state: AppState, identity_key: Option<&str>) -> std::result::Result<Endpoint, String> {
     use github_invitation::GithubInvitation as _;
     use installation::Installation as _;
     use invitation_request::InvitationRequest as _;
     use reconcile::Reconcile as _;
     use share_link::ShareLink as _;
 
-    Endpoint::builder()
+    let mut builder = Endpoint::builder()
         .bind(
             installation::InstallationImpl {
                 state: state.clone(),
@@ -62,6 +73,13 @@ pub fn build_endpoint(state: AppState) -> Endpoint {
             }
             .serve(),
         )
-        .bind(reconcile::ReconcileImpl { state }.serve())
-        .build()
+        .bind(reconcile::ReconcileImpl { state }.serve());
+
+    if let Some(key) = identity_key {
+        builder = builder
+            .identity_key(key)
+            .map_err(|e| format!("RESTATE_IDENTITY_KEY is invalid: {e}"))?;
+    }
+
+    Ok(builder.build())
 }
