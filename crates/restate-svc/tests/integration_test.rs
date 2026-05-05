@@ -72,19 +72,20 @@ async fn installation_install_and_query() {
 
     let client = reqwest::Client::new();
     let resp = client
-        .post("http://localhost:8080/Installation/1/install")
+        .post("http://localhost:8080/Installation/1/onboard")
         .json(&serde_json::json!({
             "installation_id": 1,
+            "actor_user_id": 7,
             "account_id": 42,
             "account_login": "test-org",
             "account_type": "Organization",
-            "account_avatar_url": "https://avatars.github.com/u/42",
-            "selected_repos": "all"
+            "selected_repos": "all",
+            "installed_at": "2026-05-04T12:00:00Z"
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "Installation::install failed");
+    assert_eq!(resp.status(), 200, "Installation::onboard failed");
 }
 
 #[tokio::test]
