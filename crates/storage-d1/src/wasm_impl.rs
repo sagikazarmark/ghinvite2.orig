@@ -231,8 +231,6 @@ impl Storage for D1Storage {
                             installed_at, uninstalled_at, selected_repos
                      FROM installations WHERE uninstalled_at IS NULL ORDER BY installed_at",
                 )
-                .bind(&[])
-                .map_err(bind_err)?
                 .all()
                 .await
                 .map_err(classify_d1_error)?
@@ -333,10 +331,9 @@ impl Storage for D1Storage {
             .collect();
 
         wasm_send(async {
-            // Use explicit BEGIN/COMMIT/ROLLBACK for atomicity — batch() does not roll back.
-            self.db.exec("BEGIN").await.map_err(classify_d1_error)?;
+            let mut stmts = Vec::new();
 
-            let result: Result<()> = async {
+            stmts.push(
                 self.db
                     .prepare(
                         "INSERT INTO share_links
@@ -361,12 +358,11 @@ impl Storage for D1Storage {
                         revoked_at,
                         revoked_by,
                     ])
-                    .map_err(bind_err)?
-                    .run()
-                    .await
-                    .map_err(classify_d1_error)?;
+                    .map_err(bind_err)?,
+            );
 
-                for (link_id, repo_id, repo_full_name) in &repos {
+            for (link_id, repo_id, repo_full_name) in &repos {
+                stmts.push(
                     self.db
                         .prepare(
                             "INSERT INTO share_link_repos (share_link_id, repo_id, repo_full_name)
@@ -377,25 +373,15 @@ impl Storage for D1Storage {
                             JsValue::from_f64(*repo_id as f64),
                             JsValue::from_str(repo_full_name),
                         ])
-                        .map_err(bind_err)?
-                        .run()
-                        .await
-                        .map_err(classify_d1_error)?;
-                }
-                Ok(())
+                        .map_err(bind_err)?,
+                );
             }
-            .await;
 
-            match result {
-                Ok(()) => {
-                    self.db.exec("COMMIT").await.map_err(classify_d1_error)?;
-                    Ok(())
-                }
-                Err(e) => {
-                    self.db.exec("ROLLBACK").await.ok();
-                    Err(e)
-                }
-            }
+            self.db
+                .batch(stmts)
+                .await
+                .map_err(classify_d1_error)?;
+            Ok(())
         })
         .await
     }
