@@ -42,7 +42,7 @@ wrangler d1 migrations apply ghinvite --config wrangler/web.toml
 ### 4. Create KV namespace for sessions
 
 ```bash
-wrangler kv:namespace create "SESSIONS" --config wrangler/web.toml
+wrangler kv namespace create "SESSIONS" --config wrangler/web.toml
 ```
 
 Copy the `id` into `wrangler/web.toml` under `[[kv_namespaces]]`.
@@ -68,8 +68,12 @@ wrangler secret put GHINVITE_GITHUB_CLIENT_SECRET --config wrangler/web.toml
 wrangler secret put GHINVITE_WEBHOOK_SECRET --config wrangler/web.toml
 
 # Restate service — GitHub App private key (base64-encoded for safe storage):
+# Linux:
 base64 -w0 private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
-wrangler secret put GHINVITE_GITHUB_APP_ID --config wrangler/restate-svc.toml
+# macOS:
+base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
+
+# GitHub App ID is a var, not a secret — update GHINVITE_GITHUB_APP_ID in wrangler/restate-svc.toml [vars] directly.
 
 # Restate identity key (from Restate Cloud console → Deployments → Identity key):
 wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
@@ -151,7 +155,10 @@ openssl rand -hex 32 | wrangler secret put GHINVITE_SESSION_SECRET --config wran
 ### GitHub private key
 
 ```bash
+# Linux:
 base64 -w0 new-private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
+# macOS:
+base64 new-private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
 ```
 
 ## Rollback
