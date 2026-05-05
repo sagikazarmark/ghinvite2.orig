@@ -3,7 +3,7 @@ name = "github-stub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+publish = false
 
 [[bin]]
 name = "github-stub"
