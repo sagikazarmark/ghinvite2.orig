@@ -14,10 +14,26 @@ The core business logic lives in native Rust crates (`crates/restate-svc`, `crat
 ## Prerequisites
 
 - Rust 1.85 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
-- Node.js 20+ (for Tailwind/wrangler)
-- Docker (for Restate in local integration tests)
+- Node.js 20+ (for building CSS)
+- Docker (for Restate)
 
 With [devenv](https://devenv.sh): `devenv shell` gives you Rust + Node + lld in one step.
+
+## GitHub App setup
+
+You need a GitHub App before the service can authenticate users or send invitations.
+
+1. Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**
+2. Fill in:
+   - **Homepage URL**: `http://127.0.0.1:8787` (or your public URL)
+   - **Callback URL**: `http://127.0.0.1:8787/oauth/callback`
+   - **Webhook URL**: `http://<public-url>/webhooks/github` (use [ngrok](https://ngrok.com) for local dev)
+   - **Webhook secret**: any random string — set it as `GHINVITE_WEBHOOK_SECRET`
+3. **Repository permissions**: Members → Read & Write, Metadata → Read-only
+4. **Subscribe to events**: `Installation`, `Member`
+5. After creating: note the **App ID** (`GHINVITE_GITHUB_APP_ID`) and generate a **private key** (`.pem` file, `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE`)
+6. Under **OAuth** in the app settings: note the **Client ID** and generate a **Client secret** (`GHINVITE_GITHUB_CLIENT_ID` / `GHINVITE_GITHUB_CLIENT_SECRET`)
+7. Install the app on your org or personal account and note the install URL: `https://github.com/apps/<your-app-name>/installations/new`
 
 ## Running unit tests
 
@@ -32,6 +48,12 @@ cargo test --workspace --exclude github-stub
 Two options: native Rust binaries (faster iteration) or Wrangler dev (closer to production).
 
 ### Option A — Native binaries (recommended for development)
+
+First-time only — build the CSS:
+
+```bash
+cd crates/web && npm install && npm run build:css && cd ../..
+```
 
 Three terminals:
 
