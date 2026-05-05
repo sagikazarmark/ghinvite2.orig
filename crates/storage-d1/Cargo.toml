@@ -8,9 +8,6 @@ publish.workspace = true
 [features]
 d1-suite = []
 
-[dev-dependencies]
-tokio = { workspace = true, features = ["process"] }
-
 [dependencies]
 async-trait.workspace = true
 audit.workspace = true

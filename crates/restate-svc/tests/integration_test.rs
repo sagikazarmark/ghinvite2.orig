@@ -87,12 +87,3 @@ async fn installation_install_and_query() {
         .unwrap();
     assert_eq!(resp.status(), 200, "Installation::onboard failed");
 }
-
-#[tokio::test]
-#[ignore]
-async fn full_happy_path() {
-    reset_github_stub().await;
-    let _addr = setup_restate().await;
-    // TODO: implement after installation_install_and_query is proven
-    todo!("implement after basic wiring is confirmed")
-}
