@@ -5,8 +5,8 @@
 //! Environment variables (all optional — defaults work for `docker compose up`):
 //!
 //! - `GHINVITE_GITHUB_APP_ID`          — GitHub App numeric id (default: 0, disables real API calls)
-//! - `GHINVITE_GITHUB_APP_PRIVATE_KEY` — PKCS#8 PEM private key as a plain string
-//!                                        (not base64). If unset, JWT signing fails at runtime.
+//! - `GHINVITE_GITHUB_APP_PRIVATE_KEY`      — PKCS#8 PEM private key as a plain string (not base64)
+//! - `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE` — path to the PEM file (alternative to the above)
 //! - `GHINVITE_LISTEN_ADDR`            — bind address (default: 0.0.0.0:9080)
 //! - `GHINVITE_DATABASE_PATH`          — path to SQLite file (default: in-memory, resets on restart)
 
@@ -38,15 +38,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    let pem: Option<String> = if let Ok(pem) = std::env::var("GHINVITE_GITHUB_APP_PRIVATE_KEY") {
+        Some(pem)
+    } else if let Ok(path) = std::env::var("GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE") {
+        Some(std::fs::read_to_string(&path)
+            .map_err(|e| format!("reading {path}: {e}"))?)
+    } else {
+        None
+    };
+
     let transport = Arc::new(ReqwestTransport::new()?);
-    let github_client = if let Ok(pem) = std::env::var("GHINVITE_GITHUB_APP_PRIVATE_KEY") {
+    let github_client = if let Some(pem) = pem {
         let signer = AppJwtSigner::from_pkcs8_pem(app_id, &pem)?;
         Arc::new(InstallationClient::new(transport, signer))
     } else {
         tracing::warn!(
-            "GHINVITE_GITHUB_APP_PRIVATE_KEY not set — GitHub API calls will fail at runtime"
+            "neither GHINVITE_GITHUB_APP_PRIVATE_KEY nor GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE set \
+             — GitHub API calls will fail at runtime"
         );
-        // Build a dummy signer so the binary starts; real calls will error.
         let dummy_pem = include_str!("../../github/src/jwt_test_key.pem");
         let signer = AppJwtSigner::from_pkcs8_pem(app_id, dummy_pem)?;
         Arc::new(InstallationClient::new(transport, signer))

@@ -47,12 +47,12 @@ Wait for: `Restate is ready`
 
 ```bash
 GHINVITE_GITHUB_APP_ID=<your-app-id> \
-GHINVITE_GITHUB_APP_PRIVATE_KEY="$(cat path/to/private-key.pem)" \
+GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE=path/to/private-key.pem \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
 cargo run -p restate-svc
 ```
 
-On first run (or after `rm dev.sqlite`), migrations are applied automatically. Without `GHINVITE_GITHUB_APP_PRIVATE_KEY` the binary starts but GitHub API calls will fail.
+On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. Without either, the binary starts but GitHub API calls will fail at runtime.
 
 After it starts, register it with Restate once:
 
@@ -68,12 +68,11 @@ curl -X POST http://localhost:9070/restate/v1/deployments \
 GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
 GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
 GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
+GHINVITE_DATABASE_PATH=./dev.sqlite \
 cargo run -p web
 ```
 
-App available at `http://127.0.0.1:8787`. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. All other env vars have safe defaults for local dev.
-
-Both services share the same `dev.sqlite` file by default (pass `GHINVITE_DATABASE_PATH=./dev.sqlite` to the web binary too once that flag is wired in — currently the web binary uses in-memory SQLite, so set the same path for both if you need shared state).
+App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. All other env vars have safe defaults.
 
 ### Option B — Wrangler dev (production-equivalent)
 

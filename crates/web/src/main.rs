@@ -12,8 +12,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = WebConfig::for_local_dev();
 
-    // Storage: in-memory sqlite (per-process). Plan 7 swaps in D1.
-    let storage: Arc<dyn storage::Storage> = Arc::new(storage::SqlxStorage::in_memory().await?);
+    let storage: Arc<dyn storage::Storage> = match std::env::var("GHINVITE_DATABASE_PATH") {
+        Ok(path) => {
+            let s = storage::SqlxStorage::at_path(std::path::Path::new(&path)).await?;
+            s.run_migrations().await?;
+            Arc::new(s)
+        }
+        Err(_) => {
+            tracing::warn!("GHINVITE_DATABASE_PATH not set — using in-memory SQLite (state resets on restart)");
+            Arc::new(storage::SqlxStorage::in_memory().await?)
+        }
+    };
 
     // GitHub transport: real reqwest. Local-dev OAuth only works if you
     // configure GHINVITE_GITHUB_CLIENT_ID / SECRET to point at a real GitHub
