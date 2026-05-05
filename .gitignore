@@ -30,3 +30,4 @@ data/
 *.sqlite-*
 .env.*
 !.env.example
+.worktrees/
