@@ -29,6 +29,10 @@ cargo test --workspace --exclude github-stub
 
 ## Running locally (full stack)
 
+Two options: native Rust binaries (faster iteration) or Wrangler dev (closer to production).
+
+### Option A — Native binaries (recommended for development)
+
 Three terminals:
 
 **Terminal 1 — Restate**
@@ -39,29 +43,60 @@ docker compose up
 
 Wait for: `Restate is ready`
 
-**Terminal 2 — web worker** (Wrangler dev mode, uses local D1 + KV)
+**Terminal 2 — restate-svc**
 
-First-time only — apply migrations to local D1:
+```bash
+GHINVITE_GITHUB_APP_ID=<your-app-id> \
+GHINVITE_GITHUB_APP_PRIVATE_KEY="$(cat path/to/private-key.pem)" \
+GHINVITE_DATABASE_PATH=./dev.sqlite \
+cargo run -p restate-svc
+```
+
+On first run (or after `rm dev.sqlite`), migrations are applied automatically. Without `GHINVITE_GITHUB_APP_PRIVATE_KEY` the binary starts but GitHub API calls will fail.
+
+After it starts, register it with Restate once:
+
+```bash
+curl -X POST http://localhost:9070/restate/v1/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{"uri": "http://localhost:9080"}'
+```
+
+**Terminal 3 — web**
+
+```bash
+GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
+GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
+GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
+cargo run -p web
+```
+
+App available at `http://127.0.0.1:8787`. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. All other env vars have safe defaults for local dev.
+
+Both services share the same `dev.sqlite` file by default (pass `GHINVITE_DATABASE_PATH=./dev.sqlite` to the web binary too once that flag is wired in — currently the web binary uses in-memory SQLite, so set the same path for both if you need shared state).
+
+### Option B — Wrangler dev (production-equivalent)
+
+First-time only:
 
 ```bash
 wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
 ```
 
-Then start the worker:
+Then:
 
 ```bash
+# Terminal 1
+docker compose up
+
+# Terminal 2
 wrangler dev --config wrangler/web.toml
-```
 
-Copy the `.dev.vars` template (see `docs/deploy.md`) and fill in your GitHub App credentials before starting.
-
-**Terminal 3 — restate-svc worker**
-
-```bash
+# Terminal 3
 wrangler dev --config wrangler/restate-svc.toml
 ```
 
-After both workers are running, register the restate-svc endpoint with Restate:
+Register restate-svc with Restate after it starts (port may differ — check Wrangler output):
 
 ```bash
 curl -X POST http://localhost:9070/restate/v1/deployments \
@@ -69,7 +104,7 @@ curl -X POST http://localhost:9070/restate/v1/deployments \
   -d '{"uri": "http://localhost:8787"}'
 ```
 
-The web worker is then available at `http://localhost:8788` (or whichever port Wrangler assigns).
+See `.dev.vars` (created during deploy setup — `docs/deploy.md`) for the full env var list.
 
 ## Integration tests
 

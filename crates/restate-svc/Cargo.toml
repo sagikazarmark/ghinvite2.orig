@@ -8,18 +8,24 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "restate-svc"
+path = "src/main.rs"
+
 [features]
 integration = []
 
 [dependencies]
 async-trait.workspace = true
+restate-sdk = { workspace = true, features = ["http_server"] }
+tokio.workspace = true
+tracing-subscriber.workspace = true
 audit.workspace = true
 bytes = "1"
 chrono.workspace = true
 domain.workspace = true
 github.workspace = true
 rand.workspace = true
-restate-sdk.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 storage.workspace = true
