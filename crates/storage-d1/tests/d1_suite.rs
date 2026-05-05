@@ -17,7 +17,12 @@ fn wrangler_d1_execute(sql: &str) -> String {
         ])
         .output()
         .expect("wrangler not on PATH — install with: npm i -g wrangler");
-    String::from_utf8_lossy(&out.stdout).to_string()
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() || stdout.trim().is_empty() {
+        return format!("[exit {}] stdout={stdout} stderr={stderr}", out.status);
+    }
+    stdout.to_string()
 }
 
 #[test]
@@ -32,7 +37,7 @@ fn d1_schema_tables_exist() {
         "github_invitations",
         "audit_events",
     ] {
-        let out = wrangler_d1_execute(&format!("SELECT COUNT(*) as cnt FROM {table}"));
+        let out = wrangler_d1_execute(&format!("SELECT COUNT(*) as cnt FROM \"{table}\""));
         assert!(out.contains("cnt"), "table {table} missing or inaccessible: {out}");
     }
 }
