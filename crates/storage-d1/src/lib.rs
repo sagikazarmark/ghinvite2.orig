@@ -7,4 +7,5 @@ mod wasm_impl;
 #[cfg(target_arch = "wasm32")]
 pub use wasm_impl::D1Storage;
 
+#[cfg(target_arch = "wasm32")]
 pub mod bind;

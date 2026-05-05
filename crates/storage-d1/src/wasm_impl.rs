@@ -20,7 +20,10 @@ impl D1Storage {
     }
 }
 
-// wasm32 is single-threaded: no actual threads exist, so Send + Sync are vacuously true.
+// SAFETY: D1Database holds a JS object reference (JsValue) which is !Send + !Sync upstream.
+// This is sound only under the single-threaded Cloudflare Workers execution model where
+// no OS threads exist and wasm32 has no thread-spawn capability. If SharedArrayBuffer-based
+// threads are ever added to the build, these impls must be revisited.
 unsafe impl Send for D1Storage {}
 unsafe impl Sync for D1Storage {}
 

@@ -17,6 +17,7 @@ thiserror.workspace = true
 ulid.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# Task 5+: add "kv" to features when KvSessionStore is implemented in crates/web-worker
 worker = { version = "0.8", features = ["d1"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
