@@ -123,9 +123,15 @@ fn config_from_env(env: &Env) -> worker::Result<web::WebConfig> {
     let base_url = env.var("GHINVITE_BASE_URL")?.to_string();
 
     let secret_str = env.secret("GHINVITE_SESSION_SECRET")?.to_string();
+    let decoded = hex::decode(&secret_str)
+        .map_err(|e| worker::Error::RustError(format!("GHINVITE_SESSION_SECRET not valid hex: {e}")))?;
+    if decoded.len() < 32 {
+        return Err(worker::Error::RustError(
+            "GHINVITE_SESSION_SECRET must be at least 32 bytes (64 hex chars)".into(),
+        ));
+    }
     let mut session_secret = [0u8; 32];
-    let bytes = secret_str.as_bytes();
-    session_secret[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
+    session_secret.copy_from_slice(&decoded[..32]);
 
     Ok(web::WebConfig {
         base_url: base_url.clone(),
@@ -156,10 +162,10 @@ async fn fetch(
     env: Env,
     _ctx: Context,
 ) -> worker::Result<axum::response::Response> {
-    use tower::Service;
+    use tower::ServiceExt;
 
     console_error_panic_hook::set_once();
-    tracing_wasm::set_as_global_default();
+    let _ = tracing_wasm::try_set_as_global_default();
 
     let config = config_from_env(&env)?;
     let db = env.d1("DB")?;
@@ -169,7 +175,7 @@ async fn fetch(
     let restate = Arc::new(web::RestateClient::new(&config.restate_ingress).map_err(worker_err)?);
     let state = web::AppState::new(storage, transport, restate, config);
     let session_store = KvSessionStore::from_env(&env)?;
-    let mut app = web::build_app(state, session_store);
+    let app = web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`
     // implements `tower::Service<http::Request<B>>` directly, so we call
@@ -177,7 +183,7 @@ async fn fetch(
     // `IntoResponse` impl for `http::Response<B: http_body::Body<Data=Bytes>>`
     // (gated on the `http` feature) converts that to a `web_sys::Response`
     // for us.
-    let resp = match app.call(req).await {
+    let resp = match app.oneshot(req).await {
         Ok(r) => r,
         Err(e) => match e {}, // `Infallible`: no value can construct this arm.
     };

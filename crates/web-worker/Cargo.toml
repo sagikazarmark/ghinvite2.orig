@@ -29,4 +29,5 @@ web.workspace = true
 # conversions used to return an axum response.
 worker = { version = "0.8", features = ["d1", "axum", "http"] }
 console_error_panic_hook = "0.1.7"
+hex = "0.4"
 tracing-wasm = "0.2"
