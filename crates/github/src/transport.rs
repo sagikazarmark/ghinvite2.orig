@@ -137,22 +137,27 @@ pub trait HttpTransport: Send + Sync + 'static {
 /// Production reqwest impl. Lives behind a thin wrapper so the rest of the
 /// crate doesn't have to deal with reqwest types directly.
 ///
-/// Native-only: on `wasm32-unknown-unknown`, reqwest's response future is
-/// `!Send` (it wraps `js-sys::futures::JsFuture`), which conflicts with the
-/// `HttpTransport: Send + Sync + 'static` bound that Restate handlers need on
-/// native. Workers builds plug in a different `HttpTransport` impl (e.g. one
-/// backed by `worker::Fetch`) — added in Plan 3.
-#[cfg(not(target_arch = "wasm32"))]
+/// On native targets the reqwest future is naturally `Send`. On
+/// `wasm32-unknown-unknown` (Cloudflare Workers) reqwest dispatches to
+/// `fetch` and its future wraps `JsFuture`, which is `!Send`. We wrap that
+/// future in [`WasmSendFut`] so the resulting `async fn` body is `Send`,
+/// which is sound: wasm32-unknown-unknown has no OS threads, so values
+/// never cross thread boundaries. This lets the same `ReqwestTransport`
+/// satisfy `HttpTransport: Send + Sync + 'static` on both targets.
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: reqwest::Client,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl ReqwestTransport {
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+        // `reqwest::ClientBuilder::timeout` is gated to non-wasm targets:
+        // on wasm reqwest delegates to `fetch`, which has no timeout knob
+        // (the Workers runtime applies its own per-request limits).
+        let builder = reqwest::Client::builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.timeout(std::time::Duration::from_secs(30));
+        let client = builder
             .build()
             .map_err(|e| Error::Transport(format!("building reqwest client: {e}")))?;
         Ok(Self { client })
@@ -164,46 +169,78 @@ impl ReqwestTransport {
     }
 }
 
+/// Wraps a `!Send` future and asserts `Send`. See module docs above for the
+/// soundness argument under wasm32-unknown-unknown's single-threaded model.
+#[cfg(target_arch = "wasm32")]
+struct WasmSendFut<F>(F);
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl<F> Send for WasmSendFut<F> {}
+
+#[cfg(target_arch = "wasm32")]
+impl<F: std::future::Future> std::future::Future for WasmSendFut<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        // SAFETY: structural pin projection to the only field.
+        unsafe { self.map_unchecked_mut(|s| &mut s.0) }.poll(cx)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_send<F: std::future::Future>(f: F) -> WasmSendFut<F> {
+    WasmSendFut(f)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
+fn wasm_send<F: std::future::Future>(f: F) -> F {
+    f
+}
+
 #[async_trait]
 impl HttpTransport for ReqwestTransport {
     async fn send(&self, request: Request) -> Result<Response> {
-        let method = match request.method {
-            Method::Get => reqwest::Method::GET,
-            Method::Post => reqwest::Method::POST,
-            Method::Put => reqwest::Method::PUT,
-            Method::Delete => reqwest::Method::DELETE,
-        };
-        let mut builder = self.client.request(method, &request.url);
-        for (k, v) in &request.headers {
-            builder = builder.header(k, v);
-        }
-        if let Some(body) = request.body {
-            builder = builder.body(body);
-        }
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| Error::Transport(e.to_string()))?;
+        wasm_send(async move {
+            let method = match request.method {
+                Method::Get => reqwest::Method::GET,
+                Method::Post => reqwest::Method::POST,
+                Method::Put => reqwest::Method::PUT,
+                Method::Delete => reqwest::Method::DELETE,
+            };
+            let mut builder = self.client.request(method, &request.url);
+            for (k, v) in &request.headers {
+                builder = builder.header(k, v);
+            }
+            if let Some(body) = request.body {
+                builder = builder.body(body);
+            }
+            let resp = builder
+                .send()
+                .await
+                .map_err(|e| Error::Transport(e.to_string()))?;
 
-        let status = resp.status().as_u16();
-        let mut headers = BTreeMap::new();
-        for (name, value) in resp.headers() {
-            headers.insert(
-                name.as_str().to_ascii_lowercase(),
-                value.to_str().unwrap_or("<non-ascii header>").to_string(),
-            );
-        }
-        let body = resp
-            .bytes()
-            .await
-            .map_err(|e| Error::Transport(format!("reading body: {e}")))?
-            .to_vec();
-        Ok(Response {
-            status,
-            headers,
-            body,
+            let status = resp.status().as_u16();
+            let mut headers = BTreeMap::new();
+            for (name, value) in resp.headers() {
+                headers.insert(
+                    name.as_str().to_ascii_lowercase(),
+                    value.to_str().unwrap_or("<non-ascii header>").to_string(),
+                );
+            }
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|e| Error::Transport(format!("reading body: {e}")))?
+                .to_vec();
+            Ok(Response {
+                status,
+                headers,
+                body,
+            })
         })
+        .await
     }
 }
 

@@ -15,12 +15,18 @@ crate-type = ["cdylib"]
 # wasm32. On native (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 async-trait.workspace = true
+# Mirror `crates/web/Cargo.toml`: axum without the `tokio` feature so we don't
+# pull in mio/tokio-net on wasm32.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 github.workspace = true
 serde_json.workspace = true
 storage.workspace = true
 storage-d1.workspace = true
+tower.workspace = true
 tower-sessions.workspace = true
 web.workspace = true
-worker = { version = "0.8", features = ["d1", "axum"] }
+# `http` feature exposes `worker::HttpRequest` and the `From<http::Response>`
+# conversions used to return an axum response.
+worker = { version = "0.8", features = ["d1", "axum", "http"] }
 console_error_panic_hook = "0.1.7"
 tracing-wasm = "0.2"

@@ -3931,11 +3931,13 @@ name = "web-worker"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
  "console_error_panic_hook",
  "github",
  "serde_json",
  "storage",
  "storage-d1",
+ "tower",
  "tower-sessions",
  "tracing-wasm",
  "web",

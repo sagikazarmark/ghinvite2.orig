@@ -10,6 +10,7 @@ pub mod routes;
 pub mod session;
 pub mod state;
 pub mod views;
+pub mod wasm_compat;
 
 // Re-exports filled in as types appear:
 pub use config::WebConfig;

@@ -27,8 +27,14 @@ pub struct RestateClient {
 
 impl RestateClient {
     pub fn new(ingress_base: impl Into<String>) -> Result<Self> {
-        let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+        // `reqwest::ClientBuilder::timeout` is not available on the wasm32 target
+        // (Cloudflare Workers): on wasm reqwest dispatches to fetch, which has
+        // no timeout knob. The Workers runtime applies its own per-request
+        // limits, so skipping the builder option is correct.
+        let builder = Client::builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.timeout(std::time::Duration::from_secs(15));
+        let client = builder
             .build()
             .map_err(|e| WebError::Restate(format!("building reqwest client: {e}")))?;
         Ok(Self {
@@ -50,27 +56,33 @@ impl RestateClient {
         method: &str,
         input: &I,
     ) -> Result<()> {
-        let url = if key.is_empty() {
-            format!("{}/{}/send/{}", self.ingress_base, service, method)
-        } else {
-            format!("{}/{}/{}/{}/send", self.ingress_base, service, key, method)
-        };
-        let resp = self
-            .client
-            .post(&url)
-            .json(input)
-            .send()
-            .await
-            .map_err(|e| WebError::Restate(format!("send {service}/{method}: {e}")))?;
+        // Wrap the body in `wasm_send` so the returned future is `Send` on
+        // wasm32 (where reqwest's underlying `JsFuture` is `!Send`). axum
+        // handlers calling this require Send futures.
+        crate::wasm_compat::wasm_send(async move {
+            let url = if key.is_empty() {
+                format!("{}/{}/send/{}", self.ingress_base, service, method)
+            } else {
+                format!("{}/{}/{}/{}/send", self.ingress_base, service, key, method)
+            };
+            let resp = self
+                .client
+                .post(&url)
+                .json(input)
+                .send()
+                .await
+                .map_err(|e| WebError::Restate(format!("send {service}/{method}: {e}")))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WebError::Restate(format!(
-                "send {service}/{method} -> {status}: {body}"
-            )));
-        }
-        Ok(())
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(WebError::Restate(format!(
+                    "send {service}/{method} -> {status}: {body}"
+                )));
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Request-response invocation. Use sparingly — most state changes use
@@ -82,29 +94,33 @@ impl RestateClient {
         method: &str,
         input: &I,
     ) -> Result<O> {
-        let url = if key.is_empty() {
-            format!("{}/{}/{}", self.ingress_base, service, method)
-        } else {
-            format!("{}/{}/{}/{}", self.ingress_base, service, key, method)
-        };
-        let resp = self
-            .client
-            .post(&url)
-            .json(input)
-            .send()
-            .await
-            .map_err(|e| WebError::Restate(format!("call {service}/{method}: {e}")))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WebError::Restate(format!(
-                "call {service}/{method} -> {}: {body}",
-                status.as_u16()
-            )));
-        }
-        resp.json::<O>()
-            .await
-            .map_err(|e| WebError::Restate(format!("decoding {service}/{method} response: {e}")))
+        // Same Send-bound rationale as `send` above.
+        crate::wasm_compat::wasm_send(async move {
+            let url = if key.is_empty() {
+                format!("{}/{}/{}", self.ingress_base, service, method)
+            } else {
+                format!("{}/{}/{}/{}", self.ingress_base, service, key, method)
+            };
+            let resp = self
+                .client
+                .post(&url)
+                .json(input)
+                .send()
+                .await
+                .map_err(|e| WebError::Restate(format!("call {service}/{method}: {e}")))?;
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return Err(WebError::Restate(format!(
+                    "call {service}/{method} -> {}: {body}",
+                    status.as_u16()
+                )));
+            }
+            resp.json::<O>().await.map_err(|e| {
+                WebError::Restate(format!("decoding {service}/{method} response: {e}"))
+            })
+        })
+        .await
     }
 }
 
