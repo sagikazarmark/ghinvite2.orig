@@ -10,6 +10,7 @@ members = [
     "crates/restate-svc-worker",
     "crates/web",
     "crates/web-worker",
+    "crates/github-stub",
 ]
 
 [workspace.package]
