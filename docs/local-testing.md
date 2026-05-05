@@ -9,7 +9,7 @@
 ## Terminal 1 — Restate
 
 ```bash
-docker compose up
+docker run --rm -p 8080:8080 -p 9070:9070 docker.restate.dev/restatedev/restate:latest
 ```
 
 Wait for: `Restate is ready` in the output.
