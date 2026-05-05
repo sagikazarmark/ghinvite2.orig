@@ -8,6 +8,9 @@ publish.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[features]
+integration = []
+
 [dependencies]
 async-trait.workspace = true
 audit.workspace = true
@@ -27,5 +30,8 @@ tracing.workspace = true
 github = { workspace = true, features = ["test-mock"] }
 storage = { workspace = true, features = ["test-suite"] }
 rand_chacha.workspace = true
+reqwest.workspace = true
+restate-sdk = { version = "0.10", features = ["http_server", "hyper", "schemars", "rust_crypto"] }
+serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
