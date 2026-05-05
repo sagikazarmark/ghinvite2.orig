@@ -84,12 +84,10 @@ async fn add_collaborator(
 ) -> impl IntoResponse {
     let mut s = state.lock().unwrap();
     s.calls += 1;
-    let key = (owner, repo, user);
-    if s.collaborators.contains_key(&key) {
-        s.collaborators.insert(key, true);
+    let already_existed = s.collaborators.insert((owner, repo, user), true).is_some();
+    if already_existed {
         StatusCode::NO_CONTENT
     } else {
-        s.collaborators.insert(key, true);
         StatusCode::CREATED
     }
 }
