@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace --exclude github-stub
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace -- -D warnings
+
+  wasm32:
+    name: wasm32 build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p storage-d1 --target wasm32-unknown-unknown
+      - run: cargo build -p web-worker --target wasm32-unknown-unknown
+      - run: cargo build -p restate-svc-worker --target wasm32-unknown-unknown
+
+  integration:
+    name: Restate integration tests
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    services:
+      restate:
+        image: docker.restate.dev/restatedev/restate:latest
+        ports:
+          - 8080:8080
+          - 9070:9070
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Wait for Restate
+        run: until curl -sf http://localhost:9070/health; do sleep 2; done
+      - name: Start github-stub
+        run: |
+          cargo build -p github-stub
+          ./target/debug/github-stub --port 3001 &
+      - name: Run integration tests
+        run: cargo test -p restate-svc --features integration -- --ignored

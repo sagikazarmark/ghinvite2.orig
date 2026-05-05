@@ -15,7 +15,7 @@ The decomposition was agreed during brainstorming on 2026-05-04. Order is fixed:
 | 5 | **Dashboard** | `2026-05-04-ghinvite-dashboard.md` | Implemented | Account dashboard + link CRUD form + revoke + approval queue + settings page; form POSTs routed to Restate via ingress | 4, 3 |
 | 6 | **Recipient flow** | `2026-05-04-ghinvite-recipient-flow.md` | Implemented | `/i/:slug` landing + request submission + pending page + webhook HMAC-verified receiver; route smoke tests including valid/bad HMAC coverage | 4, 3 |
 | 7 | **Workers + D1 deployment** | `2026-05-04-ghinvite-workers-d1.md` | Implemented | `D1Storage` impl, two `wrangler.toml`s (web + restate-svc), secrets management, end-to-end deploy run | 5, 6 |
-| 8 | **E2E + CI** | _not yet written_ | Pending | Restate-in-Docker integration test, GitHub-stub server, GitHub Actions workflow | 7 |
+| 8 | **E2E + CI** | `2026-05-04-ghinvite-e2e-ci.md` | Implemented | Restate-in-Docker integration test, GitHub-stub server, GitHub Actions workflow | 7 |
 
 ## Why one-at-a-time
 
