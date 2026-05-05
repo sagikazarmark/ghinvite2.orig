@@ -558,10 +558,17 @@ impl Storage for D1Storage {
                 .bind(&[JsValue::from_str(&share_link_id_str)])
                 .map_err(bind_err)?;
 
-            self.db
+            let results = self
+                .db
                 .batch(vec![stmt1, stmt2])
                 .await
                 .map_err(classify_d1_error)?;
+            // results[1] is the UPDATE on share_links; 0 rows_changed means link not found.
+            if let Some(update_result) = results.get(1) {
+                if rows_changed(update_result)? == 0 {
+                    return Err(storage::Error::NotFound);
+                }
+            }
             Ok(())
         })
         .await
