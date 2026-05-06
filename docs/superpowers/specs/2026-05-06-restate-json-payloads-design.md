@@ -90,6 +90,19 @@ cargo test -p restate-svc
 
 `cargo check` validates SDK macro signatures, `Json<T>` usage, and `JsonSchema` derive coverage. `cargo test` verifies that the pure handler behavior remains unchanged.
 
+When local Restate and `github-stub` are already running, optionally run the ignored runtime smoke to confirm raw JSON ingress still works with the new `Json<T>` handler signatures:
+
+```bash
+cargo test -p restate-svc --features integration -- --ignored
+```
+
+Add schema-shape tests for domain types whose schema cannot be trusted from a simple derive:
+
+- ULID newtypes used in Restate payloads produce a string schema that matches their existing 26-character JSON string serialization.
+- `SelectedRepos` produces a schema matching its existing wire format: either the exact string `"all"` or an array of repo IDs.
+
+These tests should avoid broad snapshots of schemars output. Assert only the stable contract that Restate discovery consumers depend on.
+
 If domain types embedded in Restate payloads lack schema support, add schema derives or manual schema annotations in the owning `domain` crate with the narrowest required changes. Do not change their serde wire format while adding schema support.
 
 ## Non-Goals
