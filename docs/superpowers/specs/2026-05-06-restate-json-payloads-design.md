@@ -37,6 +37,21 @@ Add `schemars` support to `domain` only for types embedded in Restate payloads. 
 - `ShareLinkRepo` can derive schema directly once its fields do.
 - `SelectedRepos` uses custom serde: either the string `"all"` or an array of repo IDs. Its schema must model that untagged union rather than pretending it is an enum object.
 
+Framing flow:
+
+```text
+Restate ingress / workflow journal / promise
+        |
+        v
+restate_sdk::serde::Json<T>
+        |
+        v
+plain Rust payload T
+        |
+        v
+existing pure handler logic
+```
+
 For each type currently passed to `impl_restate_json_payload!`, derive `schemars::JsonSchema` alongside existing `serde::{Serialize, Deserialize}` derives. Do this recursively for nested payload field types as well; for example, `OnWebhookInput` embeds `WebhookAction`, so `WebhookAction` needs schema support even though it did not call the old macro directly.
 
 Change Restate trait signatures from bare payload types to `Json<T>` where Restate frames input or output payloads. Examples:
