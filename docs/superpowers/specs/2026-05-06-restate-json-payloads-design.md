@@ -116,3 +116,17 @@ If domain types embedded in Restate payloads lack schema support, add schema der
 This refactor does not change Restate service names, method names, endpoint registration, request JSON shapes, storage schemas, GitHub API behavior, audit behavior, or web routes.
 
 It does not introduce compatibility shims for the deleted macro because there are no external consumers of the macro and the conversion is internal to `restate-svc`.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | - | Not run |
+| Codex Review | `/codex review` | Independent 2nd opinion | 1 | ISSUES FOUND | Outside voice found 6 issues; all were accepted into this spec |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 6 issues found, 0 critical gaps, 0 unresolved |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | - | Not applicable; backend/internal refactor |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | - | Not run |
+
+- **CROSS-MODEL:** Outside voice agreed with schema/test concerns and added recursive schema, promise wrapper, wrapper cleanup, ingress-test, and dependency-version details.
+- **UNRESOLVED:** 0
+- **VERDICT:** ENG CLEARED - ready to implement.
