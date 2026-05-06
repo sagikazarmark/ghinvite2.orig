@@ -60,7 +60,7 @@ macro_rules! ulid_newtype {
             fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
                 json_schema!({
                     "type": "string",
-                    "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+                    "pattern": "^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$"
                 })
             }
         }
@@ -111,7 +111,7 @@ mod tests {
         );
         assert_eq!(
             schema.get("pattern").and_then(serde_json::Value::as_str),
-            Some("^[0-9A-HJKMNP-TV-Z]{26}$")
+            Some("^[0-9A-HJKMNP-TV-Za-hjkmnp-tv-z]{26}$")
         );
     }
 }

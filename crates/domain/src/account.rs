@@ -108,6 +108,7 @@ impl JsonSchema for SelectedRepos {
                     "type": "array",
                     "items": {
                         "type": "integer",
+                        "format": "uint64",
                         "minimum": 0
                     }
                 }
@@ -201,6 +202,7 @@ mod tests {
         assert!(variants.iter().any(|variant| {
             variant.get("type") == Some(&serde_json::json!("array"))
                 && variant.pointer("/items/type") == Some(&serde_json::json!("integer"))
+                && variant.pointer("/items/format") == Some(&serde_json::json!("uint64"))
         }));
     }
 }
