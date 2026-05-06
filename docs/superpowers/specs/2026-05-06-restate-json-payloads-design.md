@@ -61,6 +61,8 @@ Ok(Json(output))
 
 For workflow internals that Restate frames, use `Json<T>` at the framing boundary and unwrap before plain Rust matching or comparisons. This applies to durable `ctx.run` outputs and `ctx.promise::<Json<Decision>>(...)` payloads.
 
+Update generated Restate client calls to match the new `Json<T>` signatures. The in-crate fan-out from `InvitationRequest` to `GithubInvitationClient::create` should pass `Json(inv_input)` rather than the bare `CreateInvitationInput`.
+
 Remove the old helper module and imports:
 
 - Delete `crates/restate-svc/src/restate_payload.rs`.
