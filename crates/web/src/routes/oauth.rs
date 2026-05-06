@@ -44,7 +44,10 @@ async fn login(
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
     session.oauth_csrf = Some(csrf.clone());
-    session.return_to = q.return_to.as_deref().and_then(crate::session::validate_return_to);
+    session.return_to = q
+        .return_to
+        .as_deref()
+        .and_then(crate::session::validate_return_to);
     session::save(&tower, &session)
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
@@ -159,7 +162,7 @@ async fn oauth_callback(
     if let Some(installation_id) = q.installation_id {
         tracing::info!(
             installation_id,
-            "OAuth callback carried installation_id; awaiting webhook onboarding"
+            "OAuth callback carried installation_id; setup URL handles verified onboarding"
         );
     }
 

@@ -19,7 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(s)
         }
         Err(_) => {
-            tracing::warn!("GHINVITE_DATABASE_PATH not set — using in-memory SQLite (state resets on restart)");
+            tracing::warn!(
+                "GHINVITE_DATABASE_PATH not set — using in-memory SQLite (state resets on restart)"
+            );
             Arc::new(storage::SqlxStorage::in_memory().await?)
         }
     };

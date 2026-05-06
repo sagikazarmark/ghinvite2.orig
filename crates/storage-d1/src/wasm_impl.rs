@@ -15,8 +15,8 @@ use wasm_bindgen::JsValue;
 use worker::D1Database;
 
 use crate::bind::{
-    classify_d1_error, collect_share_links, encode_selected_repos, try_one_share_link,
     GithubInvitationRow, InstallationRow, InvitationRequestRow, ShareLinkJoinRow, UserRow,
+    classify_d1_error, collect_share_links, encode_selected_repos, try_one_share_link,
 };
 
 /// Wraps a `Future` and unsafely implements `Send`.
@@ -377,10 +377,7 @@ impl Storage for D1Storage {
                 );
             }
 
-            self.db
-                .batch(stmts)
-                .await
-                .map_err(classify_d1_error)?;
+            self.db.batch(stmts).await.map_err(classify_d1_error)?;
             Ok(())
         })
         .await
@@ -552,9 +549,7 @@ impl Storage for D1Storage {
 
             let stmt2 = self
                 .db
-                .prepare(
-                    "UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1",
-                )
+                .prepare("UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1")
                 .bind(&[JsValue::from_str(&share_link_id_str)])
                 .map_err(bind_err)?;
 
@@ -662,10 +657,7 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn list_requests_for_link(
-        &self,
-        link_id: ShareLinkId,
-    ) -> Result<Vec<InvitationRequest>> {
+    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> {
         let link_id_str = link_id.to_string();
         wasm_send(async {
             let rows: Vec<InvitationRequestRow> = self
@@ -870,8 +862,7 @@ impl Storage for D1Storage {
             JsValue::null()
         } else {
             JsValue::from_str(
-                &serde_json::to_string(&event.metadata)
-                    .expect("audit metadata serializes"),
+                &serde_json::to_string(&event.metadata).expect("audit metadata serializes"),
             )
         };
         let request_id = event

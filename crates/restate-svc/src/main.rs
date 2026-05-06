@@ -31,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(s)
         }
         Err(_) => {
-            tracing::warn!("GHINVITE_DATABASE_PATH not set — using in-memory SQLite (state resets on restart)");
+            tracing::warn!(
+                "GHINVITE_DATABASE_PATH not set — using in-memory SQLite (state resets on restart)"
+            );
             Arc::new(storage::SqlxStorage::in_memory().await?)
         }
     };
@@ -44,8 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pem: Option<String> = if let Ok(pem) = std::env::var("GHINVITE_GITHUB_APP_PRIVATE_KEY") {
         Some(pem)
     } else if let Ok(path) = std::env::var("GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE") {
-        Some(std::fs::read_to_string(&path)
-            .map_err(|e| format!("reading {path}: {e}"))?)
+        Some(std::fs::read_to_string(&path).map_err(|e| format!("reading {path}: {e}"))?)
     } else {
         None
     };
@@ -68,7 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Identity verification is optional for local dev (docker compose Restate
     // does not sign requests). In production the Worker reads
     // RESTATE_IDENTITY_KEY from wrangler secrets.
-    let identity_key = std::env::var("RESTATE_IDENTITY_KEY").ok()
+    let identity_key = std::env::var("RESTATE_IDENTITY_KEY")
+        .ok()
         .map(|s| s.trim().to_string());
     if identity_key.is_none() {
         tracing::warn!(
@@ -83,7 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()?;
 
     tracing::info!("restate-svc listening on http://{addr}");
-    tracing::info!("register with: curl -X POST http://localhost:9070/restate/v1/deployments -H 'Content-Type: application/json' -d '{{\"uri\":\"http://host.docker.internal:{}\"}}'", addr.port());
+    tracing::info!(
+        "register with: curl -X POST http://localhost:9070/restate/v1/deployments -H 'Content-Type: application/json' -d '{{\"uri\":\"http://host.docker.internal:{}\"}}'",
+        addr.port()
+    );
 
     HttpServer::new(endpoint).listen_and_serve(addr).await;
     Ok(())

@@ -21,8 +21,8 @@ pub struct Session {
     /// (60-second cache per spec §10.3).
     pub admin_checks: HashMap<String, AdminCheck>,
     /// Stored by `GET /login?return_to=<path>` and consumed by the OAuth callback
-    /// to bounce the user back to the share-link request page after sign-in.
-    /// Only `/i/`-prefixed relative paths are stored (open-redirect prevention).
+    /// to bounce the user back after sign-in. Only known relative paths are
+    /// stored (open-redirect prevention).
     #[serde(default)]
     pub return_to: Option<String>,
 }
@@ -39,14 +39,16 @@ impl Session {
     }
 }
 
-/// Validates a `return_to` query parameter. Only accepts relative paths that
-/// start with `/i/` — prevents open redirect and path-traversal bypasses.
+/// Validates a `return_to` query parameter. Only accepts relative paths for
+/// invite flows and GitHub App setup returns — prevents open redirect and
+/// path-traversal bypasses.
 /// Returns `None` on rejection.
 pub fn validate_return_to(raw: &str) -> Option<String> {
-    // Must be relative (starts with '/'), not protocol-relative ('//'), and
-    // confined to recipient routes. The `..` check prevents traversal like
-    // `/i/../../admin`.
-    if raw.starts_with("/i/") && !raw.starts_with("//") && !raw.contains("..") {
+    if raw.starts_with("//") || raw.contains("..") {
+        None
+    } else if raw.starts_with("/i/") {
+        Some(raw.to_string())
+    } else if raw == "/setup/github" || raw.starts_with("/setup/github?") {
         Some(raw.to_string())
     } else {
         None
@@ -169,10 +171,19 @@ mod tests {
             validate_return_to("/i/AAAAAAAAAAAAAAAA/request"),
             Some("/i/AAAAAAAAAAAAAAAA/request".to_string())
         );
+        assert_eq!(
+            validate_return_to("/setup/github?installation_id=77&setup_action=install"),
+            Some("/setup/github?installation_id=77&setup_action=install".to_string())
+        );
         assert_eq!(validate_return_to("/"), None);
+        assert_eq!(validate_return_to("/setup"), None);
+        assert_eq!(validate_return_to("/setup/github/extra"), None);
         assert_eq!(validate_return_to("https://evil.com"), None);
         assert_eq!(validate_return_to("//evil.com/i/foo"), None);
         assert_eq!(validate_return_to("/i/../../admin"), None); // path traversal
-        assert_eq!(validate_return_to("/i/../etc/passwd"), None); // path traversal
+        assert_eq!(
+            validate_return_to("/setup/github?installation_id=77/../admin"),
+            None
+        );
     }
 }

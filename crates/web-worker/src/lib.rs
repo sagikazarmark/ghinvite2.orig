@@ -123,8 +123,9 @@ fn config_from_env(env: &Env) -> worker::Result<web::WebConfig> {
     let base_url = env.var("GHINVITE_BASE_URL")?.to_string();
 
     let secret_str = env.secret("GHINVITE_SESSION_SECRET")?.to_string();
-    let decoded = hex::decode(&secret_str)
-        .map_err(|e| worker::Error::RustError(format!("GHINVITE_SESSION_SECRET not valid hex: {e}")))?;
+    let decoded = hex::decode(&secret_str).map_err(|e| {
+        worker::Error::RustError(format!("GHINVITE_SESSION_SECRET not valid hex: {e}"))
+    })?;
     if decoded.len() < 32 {
         return Err(worker::Error::RustError(
             "GHINVITE_SESSION_SECRET must be at least 32 bytes (64 hex chars)".into(),

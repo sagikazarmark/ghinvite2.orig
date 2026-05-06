@@ -69,6 +69,23 @@ pub struct GhInstallationRepos {
     pub repositories: Vec<GhRepo>,
 }
 
+/// `GET /user/installations` response envelope.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GhUserInstallationList {
+    pub total_count: u64,
+    pub installations: Vec<GhUserInstallation>,
+}
+
+/// One GitHub App installation visible to a user access token.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GhUserInstallation {
+    pub id: u64,
+    pub account: GhUser,
+    pub repository_selection: String,
+    pub target_type: String,
+    pub target_id: u64,
+}
+
 /// OAuth code-exchange success payload. GitHub returns `application/json`
 /// when `Accept: application/json` is set.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -124,6 +141,53 @@ mod tests {
         assert_eq!(r.total_count, 2);
         assert_eq!(r.repositories.len(), 2);
         assert_eq!(r.repositories[0].full_name, "a/b");
+    }
+
+    #[test]
+    fn user_installation_list_decodes_org_installation() {
+        let raw = br#"{
+            "total_count": 1,
+            "installations": [{
+                "id": 77,
+                "account": {
+                    "id": 9001,
+                    "login": "acme",
+                    "avatar_url": "https://avatars.example/u/9001",
+                    "type": "Organization"
+                },
+                "repository_selection": "selected",
+                "target_type": "Organization",
+                "target_id": 9001
+            }]
+        }"#;
+        let list: GhUserInstallationList = serde_json::from_slice(raw).unwrap();
+        assert_eq!(list.total_count, 1);
+        assert_eq!(list.installations[0].id, 77);
+        assert_eq!(list.installations[0].account.login, "acme");
+        assert_eq!(
+            list.installations[0].account.account_type.as_deref(),
+            Some("Organization")
+        );
+        assert_eq!(list.installations[0].repository_selection, "selected");
+    }
+
+    #[test]
+    fn user_installation_list_decodes_user_installation() {
+        let raw = br#"{
+            "total_count": 1,
+            "installations": [{
+                "id": 88,
+                "account": {"id": 42, "login": "octocat", "type": "User"},
+                "repository_selection": "all",
+                "target_type": "User",
+                "target_id": 42
+            }]
+        }"#;
+        let list: GhUserInstallationList = serde_json::from_slice(raw).unwrap();
+        assert_eq!(list.installations[0].id, 88);
+        assert_eq!(list.installations[0].account.login, "octocat");
+        assert_eq!(list.installations[0].repository_selection, "all");
+        assert_eq!(list.installations[0].target_type, "User");
     }
 
     #[test]

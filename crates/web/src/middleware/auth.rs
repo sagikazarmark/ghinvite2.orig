@@ -108,10 +108,11 @@ where
             return Err(WebError::NotFound);
         }
 
-        let axum::extract::Path(params): axum::extract::Path<std::collections::HashMap<String, String>> =
-            axum::extract::Path::from_request_parts(parts, outer_state)
-                .await
-                .map_err(|e| WebError::BadRequest(format!("path: {e}")))?;
+        let axum::extract::Path(params): axum::extract::Path<
+            std::collections::HashMap<String, String>,
+        > = axum::extract::Path::from_request_parts(parts, outer_state)
+            .await
+            .map_err(|e| WebError::BadRequest(format!("path: {e}")))?;
         let login = params
             .get("login")
             .ok_or_else(|| WebError::BadRequest("missing :login path param".into()))?

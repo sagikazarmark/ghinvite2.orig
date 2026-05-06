@@ -23,7 +23,11 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
     let login = props.account_login.clone();
     let recent_links_view = props.recent_links.iter().map(|link| {
         let active = link.is_active(props.now);
-        let badge = if active { "badge badge-success" } else { "badge badge-ghost" };
+        let badge = if active {
+            "badge badge-success"
+        } else {
+            "badge badge-ghost"
+        };
         let label = if active { "active" } else { "inactive" };
         let id_str = link.id.to_string();
         let slug_str = link.slug.as_str().to_string();

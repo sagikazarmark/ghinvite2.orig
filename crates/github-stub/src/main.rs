@@ -2,12 +2,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    Json,
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Router,
 };
 use chrono::{Duration, Utc};
 use clap::Parser;
@@ -69,8 +68,8 @@ async fn create_access_token(
         let mut s = state.lock().unwrap();
         s.calls += 1;
     }
-    let expires_at = (Utc::now() + Duration::hours(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expires_at =
+        (Utc::now() + Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let body = json!({
         "token": format!("test-token-for-{id}"),
         "expires_at": expires_at,

@@ -50,7 +50,11 @@ pub fn LandingPage(props: LandingProps) -> Element {
             let expiry_text = if days <= 0 {
                 "Expires today".to_string()
             } else {
-                format!("Expires in {} day{}", days, if days == 1 { "" } else { "s" })
+                format!(
+                    "Expires in {} day{}",
+                    days,
+                    if days == 1 { "" } else { "s" }
+                )
             };
             rsx! {
                 p { class: "text-sm opacity-70", "{expiry_text}" }

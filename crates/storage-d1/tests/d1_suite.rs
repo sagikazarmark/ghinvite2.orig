@@ -11,9 +11,15 @@ use std::process::Command;
 fn wrangler_d1_execute(sql: &str) -> String {
     let out = Command::new("wrangler")
         .args([
-            "d1", "execute", "ghinvite", "--local",
-            "--config", "wrangler/web.toml",
-            "--json", "--command", sql,
+            "d1",
+            "execute",
+            "ghinvite",
+            "--local",
+            "--config",
+            "wrangler/web.toml",
+            "--json",
+            "--command",
+            sql,
         ])
         .output()
         .expect("wrangler not on PATH — install with: npm i -g wrangler");
@@ -38,6 +44,9 @@ fn d1_schema_tables_exist() {
         "audit_events",
     ] {
         let out = wrangler_d1_execute(&format!("SELECT COUNT(*) as cnt FROM \"{table}\""));
-        assert!(out.contains("cnt"), "table {table} missing or inaccessible: {out}");
+        assert!(
+            out.contains("cnt"),
+            "table {table} missing or inaccessible: {out}"
+        );
     }
 }

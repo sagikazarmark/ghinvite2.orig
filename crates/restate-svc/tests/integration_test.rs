@@ -15,9 +15,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use github::InstallationClient;
 use github::jwt::AppJwtSigner;
 use github::transport::ReqwestTransport;
-use github::InstallationClient;
 use restate_sdk::http_server::HttpServer;
 use storage::SqlxStorage;
 use tokio::net::TcpListener;
@@ -28,10 +28,8 @@ async fn setup_restate() -> SocketAddr {
     let storage = Arc::new(SqlxStorage::in_memory().await.unwrap());
     let transport = Arc::new(ReqwestTransport::new().unwrap());
     let signer = AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap();
-    let github_client = Arc::new(
-        InstallationClient::new(transport, signer)
-            .with_base("http://localhost:3001"),
-    );
+    let github_client =
+        Arc::new(InstallationClient::new(transport, signer).with_base("http://localhost:3001"));
     let state = restate_svc::AppState::new(storage, github_client);
     let endpoint = restate_svc::build_endpoint(state, None).unwrap();
 

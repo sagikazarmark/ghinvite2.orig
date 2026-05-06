@@ -43,6 +43,7 @@ where
         .merge(routes::health::router())
         .merge(routes::home::router())
         .merge(routes::oauth::router())
+        .merge(routes::setup::router())
         .merge(routes::dashboard::router())
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())

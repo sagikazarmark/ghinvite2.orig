@@ -8,7 +8,9 @@
 //!    `/user/memberships/orgs/{login}`).
 
 use crate::error::{Error, Result};
-use crate::payloads::{GhInstallationRepos, GhMembership, GhTokenResponse, GhUser};
+use crate::payloads::{
+    GhInstallationRepos, GhMembership, GhTokenResponse, GhUser, GhUserInstallationList,
+};
 use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
@@ -197,13 +199,32 @@ impl UserApiClient {
         resp.ensure_success()?.json()
     }
 
+    /// `GET /user/installations` — installations of this GitHub App that the
+    /// signed-in user can access. Used by setup-return handling to verify the
+    /// untrusted `installation_id` query parameter from GitHub.
+    #[tracing::instrument(skip(self), fields(method = "list_user_installations"))]
+    pub async fn list_user_installations(&self) -> Result<GhUserInstallationList> {
+        let req = self.auth_request(Method::Get, "/user/installations?per_page=100");
+        let resp = self.transport.send(req).await?;
+        if !(200..300).contains(&resp.status) {
+            tracing::warn!(
+                status = resp.status,
+                "github GET /user/installations returned non-2xx"
+            );
+        }
+        resp.ensure_success()?.json()
+    }
+
     /// `GET /user/installations/{installation_id}/repositories` — repos the
     /// signed-in user can see through this app installation. Used by the
     /// dashboard's link-create form to render a repo-picker.
     ///
     /// Paginates with `?per_page=100` (v1 simplification; installations with
     /// >100 repos need paging in v1.1).
-    #[tracing::instrument(skip(self), fields(method = "list_user_installation_repos", installation_id))]
+    #[tracing::instrument(
+        skip(self),
+        fields(method = "list_user_installation_repos", installation_id)
+    )]
     pub async fn list_user_installation_repos(
         &self,
         installation_id: u64,
@@ -446,6 +467,40 @@ mod user_api_tests {
             .await
             .unwrap_err();
         assert_eq!(err.status(), Some(404));
+    }
+
+    #[tokio::test]
+    async fn list_user_installations_decodes_response() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Get,
+            url: "https://api.github.test/user/installations?per_page=100".into(),
+            required_headers: {
+                let mut h = BTreeMap::new();
+                h.insert("authorization".into(), "Bearer u_xxx".into());
+                h.insert("accept".into(), "application/vnd.github+json".into());
+                h
+            },
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{
+                    "total_count": 1,
+                    "installations": [{
+                        "id": 77,
+                        "account": {"id": 9001, "login": "acme", "type": "Organization"},
+                        "repository_selection": "selected",
+                        "target_type": "Organization",
+                        "target_id": 9001
+                    }]
+                }"#
+                .to_vec(),
+            },
+        }]);
+        let resp = client_with(mock).list_user_installations().await.unwrap();
+        assert_eq!(resp.total_count, 1);
+        assert_eq!(resp.installations[0].id, 77);
+        assert_eq!(resp.installations[0].account.login, "acme");
     }
 
     #[tokio::test]

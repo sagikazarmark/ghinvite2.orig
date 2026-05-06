@@ -41,7 +41,10 @@ use restate_sdk::endpoint::Endpoint;
 ///
 /// **Production:** always pass `Some` — set `RESTATE_IDENTITY_KEY` via
 /// `wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml`.
-pub fn build_endpoint(state: AppState, identity_key: Option<&str>) -> std::result::Result<Endpoint, String> {
+pub fn build_endpoint(
+    state: AppState,
+    identity_key: Option<&str>,
+) -> std::result::Result<Endpoint, String> {
     use github_invitation::GithubInvitation as _;
     use installation::Installation as _;
     use invitation_request::InvitationRequest as _;

@@ -150,7 +150,11 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     let id_str = props.link.id.to_string();
     let slug = props.link.slug.as_str().to_string();
     let active = props.link.is_active(props.now);
-    let badge_class = if active { "badge badge-success" } else { "badge badge-ghost" };
+    let badge_class = if active {
+        "badge badge-success"
+    } else {
+        "badge badge-ghost"
+    };
     let badge_label = if active { "active" } else { "inactive" };
     let perm = match props.link.permission {
         Permission::Pull => "pull",

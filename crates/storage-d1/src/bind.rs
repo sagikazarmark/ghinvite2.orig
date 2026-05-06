@@ -4,14 +4,12 @@ pub use wasm_impl::*;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_impl {
-    use domain::{
-        Account, AccountType, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
-    };
+    use domain::{Account, AccountType, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User};
     use serde::Deserialize;
     use std::collections::BTreeMap;
     use std::str::FromStr;
-    use ulid::Ulid;
     use storage::{ConflictKind, Error};
+    use ulid::Ulid;
 
     /// Convert a worker::Error to a storage::Error by inspecting the message string.
     pub fn classify_d1_error(e: worker::Error) -> Error {
@@ -61,11 +59,7 @@ pub mod wasm_impl {
                 account_type: AccountType::from_str(&self.account_type)
                     .map_err(|e| Error::Corrupt(e.to_string()))?,
                 installed_at: parse_dt(&self.installed_at)?,
-                uninstalled_at: self
-                    .uninstalled_at
-                    .as_deref()
-                    .map(parse_dt)
-                    .transpose()?,
+                uninstalled_at: self.uninstalled_at.as_deref().map(parse_dt).transpose()?,
                 selected_repos: parse_selected_repos(&self.selected_repos)?,
             })
         }

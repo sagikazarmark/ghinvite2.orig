@@ -23,10 +23,7 @@ struct SubmitForm {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/i/{slug}", get(landing))
-        .route(
-            "/i/{slug}/request",
-            get(request_form).post(submit_request),
-        )
+        .route("/i/{slug}/request", get(request_form).post(submit_request))
         .route("/i/{slug}/pending/{request_id}", get(pending))
 }
 
@@ -46,12 +43,14 @@ async fn landing(
     } else {
         None
     };
-    let html = render(move || rsx! {
-        crate::views::invitation::LandingPage {
-            slug: slug.clone(),
-            link: link.clone(),
-            signed_in_login: signed_in_login.clone(),
-            now,
+    let html = render(move || {
+        rsx! {
+            crate::views::invitation::LandingPage {
+                slug: slug.clone(),
+                link: link.clone(),
+                signed_in_login: signed_in_login.clone(),
+                now,
+            }
         }
     });
     Html(html).into_response()
@@ -86,13 +85,15 @@ async fn request_form(
     let flash = session::take_flash(&tower).await.unwrap_or(None);
     let signed_in_login = session.login.clone();
     let request_id_str = request_id.to_string();
-    let html = render(move || rsx! {
-        crate::views::invitation::RequestFormPage {
-            slug: slug.clone(),
-            link: link.clone(),
-            signed_in_login: signed_in_login.clone(),
-            flash: flash.clone(),
-            request_id: request_id_str.clone(),
+    let html = render(move || {
+        rsx! {
+            crate::views::invitation::RequestFormPage {
+                slug: slug.clone(),
+                link: link.clone(),
+                signed_in_login: signed_in_login.clone(),
+                flash: flash.clone(),
+                request_id: request_id_str.clone(),
+            }
         }
     });
     Html(html).into_response()
@@ -115,7 +116,8 @@ async fn submit_request(
         _ => return crate::error::WebError::NotFound.into_response(),
     };
 
-    let justification = form.justification
+    let justification = form
+        .justification
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -124,8 +126,8 @@ async fn submit_request(
     // Use the ULID pre-generated in the GET handler for double-submit dedup.
     // Fallback to a fresh ULID if the hidden field was absent or tampered.
     use std::str::FromStr;
-    let request_id = domain::RequestId::from_str(&form.request_id)
-        .unwrap_or_else(|_| domain::RequestId::new());
+    let request_id =
+        domain::RequestId::from_str(&form.request_id).unwrap_or_else(|_| domain::RequestId::new());
 
     let input = serde_json::json!({
         "request_id": request_id.to_string(),
@@ -137,7 +139,12 @@ async fn submit_request(
 
     if let Err(e) = state
         .restate
-        .send("InvitationRequest", &request_id.to_string(), "submit", &input)
+        .send(
+            "InvitationRequest",
+            &request_id.to_string(),
+            "submit",
+            &input,
+        )
         .await
     {
         tracing::warn!(error = ?e, "InvitationRequest::submit send failed");
@@ -166,8 +173,10 @@ async fn pending(
 
     let session = session::load(&tower).await.unwrap_or_default();
     if !session.is_authenticated() {
-        return Redirect::to(&format!("/login?return_to=/i/{slug}/pending/{request_id_str}"))
-            .into_response();
+        return Redirect::to(&format!(
+            "/login?return_to=/i/{slug}/pending/{request_id_str}"
+        ))
+        .into_response();
     }
 
     let request_id = match domain::RequestId::from_str(&request_id_str) {
@@ -179,16 +188,18 @@ async fn pending(
     let request_state = match state.storage.get_invitation_request(request_id).await {
         Ok(Some(r)) if r.requester_id == session.user_id => Some(r.state),
         Ok(Some(_)) => return crate::error::WebError::NotFound.into_response(), // wrong user
-        Ok(None) => None, // not yet committed
+        Ok(None) => None,                                                       // not yet committed
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
     let signed_in_login = Some(session.login.clone());
-    let html = render(move || rsx! {
-        crate::views::invitation::PendingPage {
-            slug: slug.clone(),
-            request_state,
-            signed_in_login: signed_in_login.clone(),
+    let html = render(move || {
+        rsx! {
+            crate::views::invitation::PendingPage {
+                slug: slug.clone(),
+                request_state,
+                signed_in_login: signed_in_login.clone(),
+            }
         }
     });
     Html(html).into_response()

@@ -49,6 +49,8 @@ Copy the `id` into `wrangler/web.toml` under `[[kv_namespaces]]`.
 
 ### 5. Update wrangler config vars
 
+Complete [GitHub App Setup](#github-app-setup) first, then return here with the install URL, App ID, OAuth credentials, and webhook secret.
+
 In `wrangler/web.toml`, update `[vars]`:
 - `GHINVITE_BASE_URL` — your public domain (e.g. `https://ghinvite.example.com`)
 - `GHINVITE_RESTATE_INGRESS` — your Restate Cloud ingress URL
@@ -178,8 +180,21 @@ wrangler rollback --config wrangler/restate-svc.toml
 1. Create a GitHub App at https://github.com/settings/apps/new
 2. Set **Homepage URL** to your `GHINVITE_BASE_URL`
 3. Set **Callback URL** to `{GHINVITE_BASE_URL}/oauth/callback`
-4. Set **Webhook URL** to `{GHINVITE_BASE_URL}/webhooks/github`
-5. Generate and download a private key (used for `GHINVITE_GITHUB_APP_PRIVATE_KEY`)
-6. Note the **App ID** (used for `GHINVITE_GITHUB_APP_ID`)
-7. Note the **Client ID** and generate a **Client Secret** (used for OAuth vars)
-8. Generate a **Webhook Secret** (used for `GHINVITE_WEBHOOK_SECRET`)
+4. Set **Setup URL** to `{GHINVITE_BASE_URL}/setup/github`
+5. Enable **Redirect on update**
+6. Set **Webhook URL** to `{GHINVITE_BASE_URL}/webhooks/github`
+7. Set repository permissions: **Administration** → **Read & write**, **Metadata** → **Read-only**
+8. Subscribe to `Member` and `Repository invitation` if GitHub shows them for the selected permissions. `installation` and `installation_repositories` are app-level GitHub App events that GitHub sends by default.
+9. Generate and download a private key (used for `GHINVITE_GITHUB_APP_PRIVATE_KEY`)
+10. Note the **App ID** (used for `GHINVITE_GITHUB_APP_ID`)
+11. Note the **Client ID** and generate a **Client Secret** (used for OAuth vars)
+12. Generate a **Webhook Secret** (used for `GHINVITE_WEBHOOK_SECRET`)
+
+### Troubleshooting GitHub App setup
+
+- **No redirect after install**: confirm the GitHub App **Setup URL** is `{GHINVITE_BASE_URL}/setup/github` and **Redirect on update** is enabled.
+- **`missing installation_id`**: GitHub did not return through the Setup URL. Recheck the Setup URL and install the app from the app installation URL again.
+- **`installation is not visible to signed-in user`**: sign out of ghinvite, sign in with the GitHub user that installed or can administer the app installation, then retry the GitHub App install/update.
+- **`Restate error` or setup returns 502**: make sure Restate is running, the `Installation` service is registered, and `GHINVITE_RESTATE_INGRESS` points at the active Restate ingress.
+- **Repository picker is empty after a selected-repository install**: reopen the GitHub App installation settings, verify repository access, and use **Update** so GitHub redirects back to ghinvite with `setup_action=update`.
+- **Permission failures when inviting collaborators**: confirm repository permissions are **Administration: Read & write** and **Metadata: Read-only**.

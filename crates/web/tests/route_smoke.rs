@@ -74,6 +74,24 @@ async fn install_redirects_to_install_url() {
 }
 
 #[tokio::test]
+async fn setup_route_requires_installation_id() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/setup/github")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("installation_id"));
+}
+
+#[tokio::test]
 async fn logout_clears_session_and_redirects_home() {
     let app = build_test_app().await;
     let resp = app
@@ -163,7 +181,11 @@ async fn invitation_landing_unknown_slug_returns_404() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "GET /i/AAAAAAAAAAAAAAAA");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "GET /i/AAAAAAAAAAAAAAAA"
+    );
 }
 
 #[tokio::test]
@@ -186,8 +208,14 @@ async fn invitation_request_form_unauthenticated_redirects_to_login() {
         "GET /i/.../request unauthenticated should redirect to /login"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.contains("/login"), "expected redirect to /login, got {location}");
-    assert!(location.contains("return_to="), "expected return_to in redirect, got {location}");
+    assert!(
+        location.contains("/login"),
+        "expected redirect to /login, got {location}"
+    );
+    assert!(
+        location.contains("return_to="),
+        "expected return_to in redirect, got {location}"
+    );
 }
 
 #[tokio::test]
@@ -210,7 +238,10 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
         "GET /i/.../pending/... unauthenticated should redirect to /login"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.contains("/login"), "expected redirect to /login, got {location}");
+    assert!(
+        location.contains("/login"),
+        "expected redirect to /login, got {location}"
+    );
     assert!(
         location.contains("return_to="),
         "expected return_to in redirect location, got {location}"
@@ -247,7 +278,10 @@ async fn webhook_bad_hmac_returns_401() {
             Request::builder()
                 .method("POST")
                 .uri("/webhooks/github")
-                .header("x-hub-signature-256", "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                .header(
+                    "x-hub-signature-256",
+                    "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                )
                 .body(Body::from(r#"{"action":"ping"}"#))
                 .unwrap(),
         )

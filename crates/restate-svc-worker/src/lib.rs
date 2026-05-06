@@ -68,7 +68,8 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
     // Restate Cloud uses to sign inbound requests. Without it the endpoint
     // accepts any caller. Set via:
     //   wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
-    let identity_key = env.secret("RESTATE_IDENTITY_KEY")
+    let identity_key = env
+        .secret("RESTATE_IDENTITY_KEY")
         .map(|s| s.to_string().trim().to_string())
         .ok();
     if identity_key.is_none() {
@@ -77,8 +78,8 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
              This is only safe for local dev."
         );
     }
-    let endpoint = restate_svc::build_endpoint(state, identity_key.as_deref())
-        .map_err(worker_err)?;
+    let endpoint =
+        restate_svc::build_endpoint(state, identity_key.as_deref()).map_err(worker_err)?;
 
     // Cloudflare Workers does not support true bidirectional streaming — it
     // buffers the entire request body before passing it to the worker. We

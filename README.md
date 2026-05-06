@@ -27,13 +27,24 @@ You need a GitHub App before the service can authenticate users or send invitati
 2. Fill in:
    - **Homepage URL**: `http://127.0.0.1:8787` (or your public URL)
    - **Callback URL**: `http://127.0.0.1:8787/oauth/callback`
+   - **Setup URL**: `http://127.0.0.1:8787/setup/github` (or `{GHINVITE_BASE_URL}/setup/github` in production)
+   - Enable **Redirect on update** so repository-selection changes return to ghinvite
    - **Webhook URL**: `http://<public-url>/webhooks/github` (use [ngrok](https://ngrok.com) for local dev)
    - **Webhook secret**: any random string — set it as `GHINVITE_WEBHOOK_SECRET`
-3. **Repository permissions**: Members → Read & Write, Metadata → Read-only
-4. **Subscribe to events**: `Installation`, `Member`
+3. **Repository permissions**: Administration → Read & write, Metadata → Read-only
+4. **Subscribe to events**: `Member` and `Repository invitation` if available for your selected permissions. GitHub sends `installation` and `installation_repositories` to GitHub Apps by default; they are app-level events and may not appear as repository-level checkboxes.
 5. After creating: note the **App ID** (`GHINVITE_GITHUB_APP_ID`) and generate a **private key** (`.pem` file, `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE`)
 6. Under **OAuth** in the app settings: note the **Client ID** and generate a **Client secret** (`GHINVITE_GITHUB_CLIENT_ID` / `GHINVITE_GITHUB_CLIENT_SECRET`)
 7. Install the app on your org or personal account and note the install URL: `https://github.com/apps/<your-app-name>/installations/new`
+
+### Troubleshooting GitHub App setup
+
+- **No redirect after install**: confirm the GitHub App **Setup URL** is `{GHINVITE_BASE_URL}/setup/github` and **Redirect on update** is enabled.
+- **`missing installation_id`**: GitHub did not return through the Setup URL. Recheck the Setup URL and install the app from the app installation URL again.
+- **`installation is not visible to signed-in user`**: sign out of ghinvite, sign in with the GitHub user that installed or can administer the app installation, then retry the GitHub App install/update.
+- **`Restate error` or setup returns 502**: make sure Restate is running, the `Installation` service is registered, and `GHINVITE_RESTATE_INGRESS` points at the active Restate ingress.
+- **Repository picker is empty after a selected-repository install**: reopen the GitHub App installation settings, verify repository access, and use **Update** so GitHub redirects back to ghinvite with `setup_action=update`.
+- **Permission failures when inviting collaborators**: confirm repository permissions are **Administration: Read & write** and **Metadata: Read-only**.
 
 ## Running unit tests
 

@@ -8,6 +8,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use chrono::Utc;
+use domain::SelectedRepos;
+use std::collections::BTreeSet;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/webhooks/github", post(handle_webhook))
@@ -44,10 +46,7 @@ async fn handle_webhook(
         }
     };
 
-    let event_type = match headers
-        .get("x-github-event")
-        .and_then(|v| v.to_str().ok())
-    {
+    let event_type = match headers.get("x-github-event").and_then(|v| v.to_str().ok()) {
         Some(e) => e.to_owned(),
         None => {
             tracing::warn!("webhook: missing X-GitHub-Event header");
@@ -127,7 +126,12 @@ async fn handle_repository_invitation(
 
     state
         .restate
-        .send("GithubInvitation", &inv.id.to_string(), "on_webhook", &input)
+        .send(
+            "GithubInvitation",
+            &inv.id.to_string(),
+            "on_webhook",
+            &input,
+        )
         .await
         .map_err(|e| format!("Restate send: {e}"))?;
 
@@ -174,7 +178,12 @@ async fn handle_installation(
             });
             state
                 .restate
-                .send("Installation", &installation_id.to_string(), "uninstall", &input)
+                .send(
+                    "Installation",
+                    &installation_id.to_string(),
+                    "uninstall",
+                    &input,
+                )
                 .await
                 .map_err(|e| format!("Restate send: {e}"))?;
             tracing::info!(
@@ -184,11 +193,12 @@ async fn handle_installation(
             );
         }
         "created" => {
-            // Backup onboarding path — primary path is OAuth callback.
+            // Setup URL is the primary onboarding path; installation.created is
+            // only a reconciliation signal for now.
             tracing::debug!(
                 installation_id,
                 delivery = delivery_id,
-                "installation.created (backup path — primary is OAuth callback)"
+                "installation.created observed; setup URL handles verified onboarding"
             );
         }
         _ => {
@@ -196,6 +206,43 @@ async fn handle_installation(
         }
     }
     Ok(())
+}
+
+fn repository_ids(value: &serde_json::Value) -> Vec<u64> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repo| repo.get("id").and_then(|id| id.as_u64()))
+        .collect()
+}
+
+fn selected_repos_from_repository_event(
+    payload: &serde_json::Value,
+    current: &SelectedRepos,
+) -> Result<Option<SelectedRepos>, String> {
+    match payload["repository_selection"]
+        .as_str()
+        .unwrap_or("selected")
+    {
+        "all" => Ok(Some(SelectedRepos::All)),
+        "selected" => {
+            let mut ids: BTreeSet<u64> = match current {
+                SelectedRepos::All => {
+                    return Ok(None);
+                }
+                SelectedRepos::Subset(existing) => existing.iter().copied().collect(),
+            };
+            for id in repository_ids(&payload["repositories_removed"]) {
+                ids.remove(&id);
+            }
+            for id in repository_ids(&payload["repositories_added"]) {
+                ids.insert(id);
+            }
+            Ok(Some(SelectedRepos::Subset(ids.into_iter().collect())))
+        }
+        other => Err(format!("unsupported repository_selection: {other}")),
+    }
 }
 
 async fn handle_installation_repositories(
@@ -207,22 +254,38 @@ async fn handle_installation_repositories(
         .as_u64()
         .ok_or_else(|| "installation_repositories: missing installation.id".to_string())?;
 
-    let selected_repos = payload["repository_selection"].as_str().unwrap_or("selected");
-    let added = payload["repositories_added"].clone();
-    let removed = payload["repositories_removed"].clone();
+    let current = state
+        .storage
+        .get_installation(installation_id)
+        .await
+        .map_err(|e| format!("storage lookup: {e}"))?
+        .ok_or_else(|| {
+            format!("installation_repositories: unknown installation {installation_id}")
+        })?;
+    let Some(selected_repos) =
+        selected_repos_from_repository_event(payload, &current.selected_repos)?
+    else {
+        tracing::warn!(
+            installation_id,
+            delivery = delivery_id,
+            "installation_repositories selected-repo delta cannot repair prior all-repos state; setup update redirect will reconcile"
+        );
+        return Ok(());
+    };
 
     let input = serde_json::json!({
         "installation_id": installation_id,
-        "selected_repos": {
-            "type": selected_repos,
-            "added": added,
-            "removed": removed,
-        },
+        "selected_repos": selected_repos,
     });
 
     state
         .restate
-        .send("Installation", &installation_id.to_string(), "repos_changed", &input)
+        .send(
+            "Installation",
+            &installation_id.to_string(),
+            "repos_changed",
+            &input,
+        )
         .await
         .map_err(|e| format!("Restate send: {e}"))?;
 
@@ -232,4 +295,52 @@ async fn handle_installation_repositories(
         "installation_repositories routed"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::SelectedRepos;
+
+    #[test]
+    fn repository_selection_webhook_all_maps_to_all() {
+        let payload = serde_json::json!({
+            "repository_selection": "all",
+            "repositories_added": [],
+            "repositories_removed": []
+        });
+        let current = SelectedRepos::Subset(vec![10, 11]);
+        assert_eq!(
+            selected_repos_from_repository_event(&payload, &current).unwrap(),
+            Some(SelectedRepos::All)
+        );
+    }
+
+    #[test]
+    fn repository_selection_webhook_applies_selected_delta() {
+        let payload = serde_json::json!({
+            "repository_selection": "selected",
+            "repositories_added": [{"id": 12}],
+            "repositories_removed": [{"id": 10}]
+        });
+        let current = SelectedRepos::Subset(vec![10, 11]);
+        assert_eq!(
+            selected_repos_from_repository_event(&payload, &current).unwrap(),
+            Some(SelectedRepos::Subset(vec![11, 12]))
+        );
+    }
+
+    #[test]
+    fn repository_selection_webhook_all_to_selected_is_not_repairable_from_delta() {
+        let payload = serde_json::json!({
+            "repository_selection": "selected",
+            "repositories_added": [],
+            "repositories_removed": [{"id": 10}]
+        });
+        let current = SelectedRepos::All;
+        assert_eq!(
+            selected_repos_from_repository_event(&payload, &current).unwrap(),
+            None
+        );
+    }
 }

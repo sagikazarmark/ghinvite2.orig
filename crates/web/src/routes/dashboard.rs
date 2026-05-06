@@ -357,8 +357,18 @@ async fn requests_queue(
 
     let mut rows: Vec<crate::views::requests::PendingRequestRow> = Vec::new();
     for req in pending {
-        let link = state.storage.get_share_link_by_id(req.share_link_id).await.ok().flatten();
-        let user = state.storage.get_user(req.requester_id).await.ok().flatten();
+        let link = state
+            .storage
+            .get_share_link_by_id(req.share_link_id)
+            .await
+            .ok()
+            .flatten();
+        let user = state
+            .storage
+            .get_user(req.requester_id)
+            .await
+            .ok()
+            .flatten();
         let (link_slug, link_id) = match link {
             Some(l) => (l.slug.as_str().to_string(), l.id.to_string()),
             None => ("(deleted link)".to_string(), String::new()),
@@ -456,8 +466,11 @@ async fn approve_request(
             .await;
         }
     }
-    axum::response::Redirect::to(&format!("/accounts/{}/requests", admin.account.account_login))
-        .into_response()
+    axum::response::Redirect::to(&format!(
+        "/accounts/{}/requests",
+        admin.account.account_login
+    ))
+    .into_response()
 }
 
 async fn decline_request(
@@ -522,8 +535,11 @@ async fn decline_request(
             .await;
         }
     }
-    axum::response::Redirect::to(&format!("/accounts/{}/requests", admin.account.account_login))
-        .into_response()
+    axum::response::Redirect::to(&format!(
+        "/accounts/{}/requests",
+        admin.account.account_login
+    ))
+    .into_response()
 }
 
 async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
