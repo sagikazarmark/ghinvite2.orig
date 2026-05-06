@@ -1,4 +1,6 @@
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 use ulid::Ulid;
@@ -41,6 +43,27 @@ macro_rules! ulid_newtype {
                 Ulid::from_str(s).map(Self)
             }
         }
+
+        impl JsonSchema for $name {
+            fn schema_name() -> Cow<'static, str> {
+                stringify!($name).into()
+            }
+
+            fn schema_id() -> Cow<'static, str> {
+                concat!(module_path!(), "::", stringify!($name)).into()
+            }
+
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+                json_schema!({
+                    "type": "string",
+                    "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+                })
+            }
+        }
     };
 }
 
@@ -77,5 +100,18 @@ mod tests {
         // Ulid serializes as a 26-char base32 string.
         assert!(json.starts_with('"') && json.ends_with('"'));
         assert_eq!(json.trim_matches('"').len(), 26);
+    }
+
+    #[test]
+    fn id_schema_matches_ulid_string_wire_format() {
+        let schema = schemars::schema_for!(ShareLinkId).to_value();
+        assert_eq!(
+            schema.get("type").and_then(serde_json::Value::as_str),
+            Some("string")
+        );
+        assert_eq!(
+            schema.get("pattern").and_then(serde_json::Value::as_str),
+            Some("^[0-9A-HJKMNP-TV-Z]{26}$")
+        );
     }
 }

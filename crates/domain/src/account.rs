@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
+use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
 /// GitHub account type. The two variants are GitHub-defined and stable.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "PascalCase")]
 pub enum AccountType {
     User,
@@ -86,6 +88,34 @@ impl<'de> Deserialize<'de> for SelectedRepos {
     }
 }
 
+impl JsonSchema for SelectedRepos {
+    fn schema_name() -> Cow<'static, str> {
+        "SelectedRepos".into()
+    }
+
+    fn schema_id() -> Cow<'static, str> {
+        concat!(module_path!(), "::SelectedRepos").into()
+    }
+
+    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "oneOf": [
+                {
+                    "type": "string",
+                    "const": "all"
+                },
+                {
+                    "type": "array",
+                    "items": {
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                }
+            ]
+        })
+    }
+}
+
 impl SelectedRepos {
     pub fn includes(&self, repo_id: u64) -> bool {
         match self {
@@ -154,5 +184,23 @@ mod tests {
     fn selected_repos_serde_rejects_other_strings() {
         let err = serde_json::from_str::<SelectedRepos>("\"none\"").unwrap_err();
         assert!(err.to_string().contains("selected_repos"));
+    }
+
+    #[test]
+    fn selected_repos_schema_matches_wire_format() {
+        let schema = schemars::schema_for!(SelectedRepos).to_value();
+        let variants = schema
+            .get("oneOf")
+            .and_then(serde_json::Value::as_array)
+            .expect("SelectedRepos schema should use oneOf");
+
+        assert!(variants.iter().any(|variant| {
+            variant.get("type") == Some(&serde_json::json!("string"))
+                && variant.get("const") == Some(&serde_json::json!("all"))
+        }));
+        assert!(variants.iter().any(|variant| {
+            variant.get("type") == Some(&serde_json::json!("array"))
+                && variant.pointer("/items/type") == Some(&serde_json::json!("integer"))
+        }));
     }
 }

@@ -2,6 +2,7 @@ use crate::ids::ShareLinkId;
 use crate::permission::Permission;
 use crate::slug::Slug;
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,7 +24,7 @@ pub struct ShareLink {
     pub repos: Vec<ShareLinkRepo>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ShareLinkRepo {
     pub repo_id: u64,
     pub repo_full_name: String,
