@@ -28,7 +28,7 @@ This includes public service, object, and workflow handler signatures as well as
 
 ## Detailed Design
 
-Add a direct `schemars` dependency for `restate-svc`. Prefer a workspace dependency so the version is explicit and shared consistently with the Restate SDK's schema feature. Enable `schemars`'s `chrono04` feature because Restate payloads include `chrono::DateTime<Utc>` fields.
+Add a workspace `schemars` dependency on the same major version used by `restate-sdk`'s schema feature (`1.2` in the current lockfile). Enable `schemars`'s `chrono04` feature because Restate payloads include `chrono::DateTime<Utc>` fields. Consume this workspace dependency from every crate that derives or implements `JsonSchema`, including `domain` and `restate-svc`, so all derives satisfy the same `schemars::JsonSchema` trait bound that `restate_sdk::serde::Json<T>` requires.
 
 Add `schemars` support to `domain` only for types embedded in Restate payloads. The schema must match the existing JSON wire format:
 
@@ -37,7 +37,7 @@ Add `schemars` support to `domain` only for types embedded in Restate payloads. 
 - `ShareLinkRepo` can derive schema directly once its fields do.
 - `SelectedRepos` uses custom serde: either the string `"all"` or an array of repo IDs. Its schema must model that untagged union rather than pretending it is an enum object.
 
-For each type currently passed to `impl_restate_json_payload!`, derive `schemars::JsonSchema` alongside existing `serde::{Serialize, Deserialize}` derives.
+For each type currently passed to `impl_restate_json_payload!`, derive `schemars::JsonSchema` alongside existing `serde::{Serialize, Deserialize}` derives. Do this recursively for nested payload field types as well; for example, `OnWebhookInput` embeds `WebhookAction`, so `WebhookAction` needs schema support even though it did not call the old macro directly.
 
 Change Restate trait signatures from bare payload types to `Json<T>` where Restate frames input or output payloads. Examples:
 
@@ -53,11 +53,15 @@ At implementation edges, unwrap immediately and keep the existing pure logic unc
 let Json(input) = input;
 ```
 
+`InvitationRequest::decide` is the exception to the blanket unwrap rule: it bridges directly into `ctx.resolve_promise`. If `submit` waits on `ctx.promise::<Json<Decision>>(...)`, then `decide` must resolve the promise with `Json<Decision>` as well, either by keeping the wrapper through `ctx.resolve_promise("decision", decision)` or by explicitly rewrapping before resolution.
+
 For methods returning payloads, wrap the existing output before returning:
 
 ```rust
 Ok(Json(output))
 ```
+
+Remove local newtypes that existed only to work around the old custom Restate framing traits when `Json<T>` can represent the shape directly. In particular, prefer `Json<RequestState>` over `SubmitOutput` and `Json<Vec<CreateInvitationInput>>` over `DispatchInputs`, verified by `cargo check`. Keep a wrapper only if the SDK proves a direct `Json<T>` shape is unsupported or the wrapper has a non-framing domain purpose.
 
 For workflow internals that Restate frames, use `Json<T>` at the framing boundary and unwrap before plain Rust matching or comparisons. This applies to durable `ctx.run` outputs and `ctx.promise::<Json<Decision>>(...)` payloads.
 
@@ -85,16 +89,18 @@ Run:
 
 ```bash
 cargo check -p restate-svc
-cargo test -p restate-svc
+cargo test -p domain -p restate-svc
 ```
 
-`cargo check` validates SDK macro signatures, `Json<T>` usage, and `JsonSchema` derive coverage. `cargo test` verifies that the pure handler behavior remains unchanged.
+`cargo check` validates SDK macro signatures, `Json<T>` usage, and `JsonSchema` derive coverage. `cargo test -p domain -p restate-svc` verifies the new domain schema-shape tests and the existing pure handler behavior.
 
-When local Restate and `github-stub` are already running, optionally run the ignored runtime smoke to confirm raw JSON ingress still works with the new `Json<T>` handler signatures:
+Run the ignored runtime smoke with local Restate and `github-stub` to confirm raw JSON ingress still works with the new `Json<T>` handler signatures:
 
 ```bash
 cargo test -p restate-svc --features integration -- --ignored
 ```
+
+The runtime smoke should cover more than `Installation::onboard`. Add or update ignored integration coverage for at least one request/response object method such as `ShareLink::create` and one workflow/shared path such as `InvitationRequest::submit` or `InvitationRequest::decide`. These tests protect the real web invocation path, which sends raw `serde_json::Value` request bodies to Restate rather than generated Rust clients.
 
 Add schema-shape tests for domain types whose schema cannot be trusted from a simple derive:
 
