@@ -12,6 +12,10 @@ services:
     volumes:
       - restate-data:/restate-data
 
+  tunnel:
+    profiles: [tunnel]
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate --url http://host.docker.internal:8787
+
 volumes:
   restate-data:
-
