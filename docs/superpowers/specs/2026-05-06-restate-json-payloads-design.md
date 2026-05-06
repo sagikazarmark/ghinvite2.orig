@@ -69,7 +69,9 @@ Remove the old helper module and imports:
 - Remove `pub(crate) mod restate_payload;` from `lib.rs`.
 - Remove all `use crate::impl_restate_json_payload;` imports.
 - Remove all `impl_restate_json_payload!(...)` calls.
+- Remove the direct `bytes` dependency from `crates/restate-svc/Cargo.toml` if no other code uses it after deleting the macro.
 - Update comments that refer to the old macro or custom Restate framing traits.
+- Update markdown documentation references that still point future readers at `impl_restate_json_payload!`, including the dashboard plan's `Decision` type consistency note.
 
 ## Error Handling
 
