@@ -1,7 +1,6 @@
 //! `GithubInvitation` Virtual Object: create, on_webhook, cancel, tick_expire.
 
 use crate::audit::{Actor, Target};
-use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
@@ -11,9 +10,11 @@ use domain::GithubInvitation as DomainGithubInvitation;
 use domain::{GithubInvitationId, InvitationState, RequestId};
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
+use restate_sdk::serde::Json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct CreateInvitationInput {
     pub invitation_id: GithubInvitationId,
     pub invitation_request_id: RequestId,
@@ -25,21 +26,21 @@ pub struct CreateInvitationInput {
     pub now: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct OnWebhookInput {
     pub invitation_id: GithubInvitationId,
     pub action: WebhookAction,
     pub at: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebhookAction {
     Accepted,
     Declined,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct CancelInvitationInput {
     pub invitation_id: GithubInvitationId,
     pub installation_id: u64,
@@ -47,17 +48,12 @@ pub struct CancelInvitationInput {
     pub at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct TickExpireInput {
     pub invitation_id: GithubInvitationId,
     pub installation_id: u64,
     pub at: DateTime<Utc>,
 }
-
-impl_restate_json_payload!(CreateInvitationInput);
-impl_restate_json_payload!(OnWebhookInput);
-impl_restate_json_payload!(CancelInvitationInput);
-impl_restate_json_payload!(TickExpireInput);
 
 /// Split a `repo_full_name` of the form `"owner/name"` into its components.
 /// GitHub guarantees this format; an unsplit string surfaces as an Invariant.
@@ -71,10 +67,10 @@ fn split_full_name(full_name: &str) -> crate::error::Result<(&str, &str)> {
 
 #[restate_sdk::object]
 pub trait GithubInvitation {
-    async fn create(input: CreateInvitationInput) -> std::result::Result<(), TerminalError>;
-    async fn on_webhook(input: OnWebhookInput) -> std::result::Result<(), TerminalError>;
-    async fn cancel(input: CancelInvitationInput) -> std::result::Result<(), TerminalError>;
-    async fn tick_expire(input: TickExpireInput) -> std::result::Result<(), TerminalError>;
+    async fn create(input: Json<CreateInvitationInput>) -> std::result::Result<(), TerminalError>;
+    async fn on_webhook(input: Json<OnWebhookInput>) -> std::result::Result<(), TerminalError>;
+    async fn cancel(input: Json<CancelInvitationInput>) -> std::result::Result<(), TerminalError>;
+    async fn tick_expire(input: Json<TickExpireInput>) -> std::result::Result<(), TerminalError>;
 }
 
 pub struct GithubInvitationImpl {
@@ -85,8 +81,9 @@ impl GithubInvitation for GithubInvitationImpl {
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
-        input: CreateInvitationInput,
+        input: Json<CreateInvitationInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             create_logic(&self.state, &input, request_id.clone())
@@ -100,8 +97,9 @@ impl GithubInvitation for GithubInvitationImpl {
     async fn on_webhook(
         &self,
         ctx: ObjectContext<'_>,
-        input: OnWebhookInput,
+        input: Json<OnWebhookInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             on_webhook_logic(&self.state, &input, request_id.clone())
@@ -115,8 +113,9 @@ impl GithubInvitation for GithubInvitationImpl {
     async fn cancel(
         &self,
         ctx: ObjectContext<'_>,
-        input: CancelInvitationInput,
+        input: Json<CancelInvitationInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             cancel_logic(&self.state, &input, request_id.clone())
@@ -130,8 +129,9 @@ impl GithubInvitation for GithubInvitationImpl {
     async fn tick_expire(
         &self,
         ctx: ObjectContext<'_>,
-        input: TickExpireInput,
+        input: Json<TickExpireInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             tick_expire_logic(&self.state, &input, request_id.clone())

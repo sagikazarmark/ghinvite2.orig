@@ -18,6 +18,7 @@ use restate_sdk::context::{
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::errors::TerminalError;
+use restate_sdk::serde::Json;
 use serde::{Deserialize, Serialize};
 
 /// Maximum time we keep a request "pending awaiting admin decision".
@@ -224,7 +225,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
                     inv_input.invitation_id.to_string(),
                 )
-                .create(inv_input)
+                .create(Json(inv_input))
                 .send();
             }
         }
