@@ -2571,7 +2571,7 @@ git commit -m "chore(web): apply rustfmt and clippy fixes; mark Plan 5 done"
 - `RequireAdminOf` (Task 3) is consumed identically across Tasks 7, 9, 10, 11, 12, 14, 15, 16, 17. The struct fields `session`, `account`, `tower` are stable.
 - `Flash` / `FlashLevel` (Task 4) are imported from `crate::session` in every page component.
 - `LinkFormValues` (Task 8) is consumed by Task 9's GET handler (default values) and Task 10's POST handler (on validation error, would re-render with parsed values; Plan 5 chose to redirect-with-flash on POST errors instead, so re-render of the form with parsed values is not exercised — `LinkFormValues::default()` is the only call site for now).
-- `Decision::Approve` / `Decision::Decline` JSON shape (Tasks 15, 16) matches `crates/restate-svc/src/invitation_request.rs::Decision` exactly via `#[derive(Serialize)]` + the `impl_restate_json_payload!` macro from Plan 3.
+- `Decision::Approve` / `Decision::Decline` JSON shape (Tasks 15, 16) matches `crates/restate-svc/src/invitation_request.rs::Decision` exactly via `#[derive(Serialize, Deserialize, JsonSchema)]` and `restate_sdk::serde::Json<Decision>` framing.
 - The `ShareLink` Dioxus components access `link.id`, `link.slug`, `link.uses_count`, `link.permission`, `link.is_active(now)`, `link.account_id`, `link.created_at`. These are all `pub` per Plan 1's `crates/domain/src/share_link.rs`.
 
 **Audit trail of decisions made while writing this plan:**

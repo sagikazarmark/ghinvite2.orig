@@ -21,7 +21,6 @@ restate-sdk = { workspace = true, features = ["http_server"] }
 tokio.workspace = true
 tracing-subscriber.workspace = true
 audit.workspace = true
-bytes = "1"
 chrono.workspace = true
 domain.workspace = true
 github.workspace = true

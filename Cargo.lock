@@ -2653,7 +2653,6 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "audit",
- "bytes",
  "chrono",
  "domain",
  "github",
