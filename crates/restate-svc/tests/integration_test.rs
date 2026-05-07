@@ -15,17 +15,34 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use domain::RequestId;
 use github::InstallationClient;
 use github::jwt::AppJwtSigner;
 use github::transport::ReqwestTransport;
 use restate_sdk::http_server::HttpServer;
-use storage::SqlxStorage;
+use storage::{SqlxStorage, Storage};
 use tokio::net::TcpListener;
 
 const TEST_KEY_PEM: &str = include_str!("../../github/src/jwt_test_key.pem");
 
 async fn setup_restate() -> SocketAddr {
-    let storage = Arc::new(SqlxStorage::in_memory().await.unwrap());
+    let storage = SqlxStorage::in_memory().await.unwrap();
+    let last_seen_at = chrono::DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    // ShareLink and InvitationRequest enforce user FKs; this smoke only exercises ingress.
+    for (user_id, login) in [(7, "creator"), (8, "requester")] {
+        storage
+            .upsert_user(&domain::User {
+                user_id,
+                login: login.to_string(),
+                avatar_url: None,
+                last_seen_at: last_seen_at.clone(),
+            })
+            .await
+            .unwrap();
+    }
+    let storage = Arc::new(storage);
     let transport = Arc::new(ReqwestTransport::new().unwrap());
     let signer = AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap();
     let github_client =
@@ -33,8 +50,10 @@ async fn setup_restate() -> SocketAddr {
     let state = restate_svc::AppState::new(storage, github_client);
     let endpoint = restate_svc::build_endpoint(state, None).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let endpoint_host =
+        std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| "172.18.0.1".to_string());
     tokio::spawn(async move {
         HttpServer::new(endpoint)
             .serve_with_cancel(listener, std::future::pending::<()>())
@@ -43,9 +62,9 @@ async fn setup_restate() -> SocketAddr {
 
     // Register with Restate admin API
     reqwest::Client::new()
-        .post("http://localhost:9070/restate/v1/deployments")
+        .post("http://localhost:9070/deployments")
         .json(&serde_json::json!({
-            "uri": format!("http://127.0.0.1:{}", addr.port())
+            "uri": format!("http://{}:{}", endpoint_host, addr.port())
         }))
         .send()
         .await
@@ -64,12 +83,13 @@ async fn reset_github_stub() {
 
 #[tokio::test]
 #[ignore]
-async fn installation_install_and_query() {
+async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
     reset_github_stub().await;
     let _addr = setup_restate().await;
 
     let client = reqwest::Client::new();
-    let resp = client
+
+    let onboard_resp = client
         .post("http://localhost:8080/Installation/1/onboard")
         .json(&serde_json::json!({
             "installation_id": 1,
@@ -83,5 +103,60 @@ async fn installation_install_and_query() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "Installation::onboard failed");
+    assert_eq!(onboard_resp.status(), 200, "Installation::onboard failed");
+
+    let create_link_resp = client
+        .post("http://localhost:8080/ShareLink/raw-json-smoke/create")
+        .json(&serde_json::json!({
+            "installation_id": 1,
+            "account_id": 42,
+            "created_by": 7,
+            "created_at": "2026-05-04T12:00:00Z",
+            "expires_at": "2026-05-04T12:00:01Z",
+            "max_uses": null,
+            "permission": "pull",
+            "approval_required": true,
+            "internal_note": null,
+            "repos": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_link_resp.status(), 200, "ShareLink::create failed");
+    let create_link_body: serde_json::Value = create_link_resp.json().await.unwrap();
+    let link_id = create_link_body
+        .get("link_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("ShareLink::create response should contain link_id")
+        .to_string();
+    assert!(
+        create_link_body
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+            .is_some(),
+        "ShareLink::create response should contain slug"
+    );
+
+    let request_id = RequestId::new().to_string();
+    let submit_resp = client
+        .post(format!(
+            "http://localhost:8080/InvitationRequest/{request_id}/submit"
+        ))
+        .json(&serde_json::json!({
+            "request_id": request_id,
+            "share_link_id": link_id,
+            "requester_id": 8,
+            "justification": null,
+            "created_at": "2026-05-04T12:00:00Z"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        submit_resp.status(),
+        200,
+        "InvitationRequest::submit failed"
+    );
+    let final_state: String = submit_resp.json().await.unwrap();
+    assert_eq!(final_state, "expired");
 }
