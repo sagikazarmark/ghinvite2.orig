@@ -3,7 +3,6 @@
 
 use crate::audit::{Actor, Target};
 use crate::error::HandlerError;
-use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Duration, Utc};
@@ -19,13 +18,14 @@ use restate_sdk::context::{
 };
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Maximum time we keep a request "pending awaiting admin decision".
 /// Per spec §Q8: `min(link.expires_at - now, 7d)`.
 pub const MAX_DECISION_WAIT: Duration = Duration::days(7);
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct SubmitRequestInput {
     pub request_id: RequestId,
     pub share_link_id: domain::ShareLinkId,
@@ -36,7 +36,7 @@ pub struct SubmitRequestInput {
 
 /// Decision payload — admin's approve/decline handler in Plan 5
 /// resolves the "decision" durable promise with this.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub enum Decision {
     Approve {
         decided_by: u64,
@@ -49,38 +49,17 @@ pub enum Decision {
     },
 }
 
-/// Final terminal state returned by the workflow. Wrapper newtype around
-/// `domain::RequestState` because Restate framing traits (`Serialize`,
-/// `Deserialize`, `PayloadMetadata`) can't be implemented for foreign types
-/// (orphan rule); they have to live alongside the type definition.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(transparent)]
-pub struct SubmitOutput(pub RequestState);
-
-impl_restate_json_payload!(SubmitRequestInput);
-impl_restate_json_payload!(Decision);
-impl_restate_json_payload!(SubmitOutput);
-impl_restate_json_payload!(PreDecisionOutcome);
-impl_restate_json_payload!(AppliedDecision);
-impl_restate_json_payload!(DispatchInputs);
-
-/// Wrapper around the per-repo `CreateInvitationInput` list so the workflow
-/// can journal the fan-out plan via `ctx.run`. Restate's framing requires a
-/// Sized type implementing its `Serialize`/`Deserialize`; `Vec<T>` from a
-/// foreign-impl point of view doesn't satisfy that without a newtype.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(transparent)]
-pub struct DispatchInputs(pub Vec<crate::github_invitation::CreateInvitationInput>);
-
 #[restate_sdk::workflow]
 pub trait InvitationRequest {
     /// One-shot workflow per `request_id`. Returns the final state.
-    async fn submit(input: SubmitRequestInput) -> std::result::Result<SubmitOutput, TerminalError>;
+    async fn submit(
+        input: Json<SubmitRequestInput>,
+    ) -> std::result::Result<Json<RequestState>, TerminalError>;
 
     /// Resolve the "decision" durable promise in `submit` with an Approve/Decline decision.
     /// Called by the admin's approve/decline handler (Plan 5).
     #[shared]
-    async fn decide(decision: Decision) -> std::result::Result<(), TerminalError>;
+    async fn decide(decision: Json<Decision>) -> std::result::Result<(), TerminalError>;
 }
 
 pub struct InvitationRequestImpl {
@@ -91,12 +70,13 @@ impl InvitationRequest for InvitationRequestImpl {
     async fn submit(
         &self,
         ctx: WorkflowContext<'_>,
-        input: SubmitRequestInput,
-    ) -> std::result::Result<SubmitOutput, TerminalError> {
+        input: Json<SubmitRequestInput>,
+    ) -> std::result::Result<Json<RequestState>, TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
 
         // Phase 1: insert pending row, emit `request.created`, classify outcome.
-        let outcome = {
+        let Json(outcome) = {
             let state = self.state.clone();
             let input = input.clone();
             let request_id = request_id.clone();
@@ -107,6 +87,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 async move {
                     pre_decision_logic(&state, &input, input.created_at, request_id)
                         .await
+                        .map(Json)
                         .map_err(crate::error::to_sdk_handler_error)
                 }
             })
@@ -131,7 +112,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 // The durable promise name "decision" is deterministically derived
                 // from the workflow id, making the resolve target deterministic.
                 // Plan 5's admin server function resolves it via Restate's SDK.
-                let promise = ctx.promise::<Decision>("decision");
+                let promise = ctx.promise::<Json<Decision>>("decision");
 
                 // ctx.sleep takes a Duration; our deadline is absolute. The
                 // workflow handler runs at `created_at` (or replay time);
@@ -153,7 +134,8 @@ impl InvitationRequest for InvitationRequestImpl {
                 // admin's `decided_at` (awakeable).
                 restate_sdk::select! {
                     res = promise => {
-                        match res? {
+                        let Json(decision) = res?;
+                        match decision {
                             Decision::Approve { decided_by, decided_at } => AppliedDecision::Approve {
                                 decided_by,
                                 at: decided_at,
@@ -173,10 +155,7 @@ impl InvitationRequest for InvitationRequestImpl {
         };
 
         // Phase 3: durably record the decision and emit the audit row.
-        // Returning `SubmitOutput` (a local newtype) keeps the journal payload
-        // Restate-serializable; `RequestState` lives in `domain` and we can't
-        // implement `restate_sdk::serde::*` for foreign types.
-        let SubmitOutput(final_state) = {
+        let Json(final_state) = {
             let state = self.state.clone();
             let request_id_inner = request_id.clone();
             let req_id = input.request_id;
@@ -188,7 +167,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 async move {
                     apply_decision_logic(&state, req_id, account_id, decision, request_id_inner)
                         .await
-                        .map(SubmitOutput)
+                        .map(Json)
                         .map_err(crate::error::to_sdk_handler_error)
                 }
             })
@@ -200,7 +179,7 @@ impl InvitationRequest for InvitationRequestImpl {
         if final_state == RequestState::Approved {
             // Build the per-repo dispatch inputs in a journaled run so each
             // GithubInvitationId is stable across replays.
-            let DispatchInputs(inputs) = {
+            let Json(inputs) = {
                 let state = self.state.clone();
                 let req_id = input.request_id;
                 let now = input.created_at;
@@ -209,7 +188,7 @@ impl InvitationRequest for InvitationRequestImpl {
                     async move {
                         build_dispatch_inputs(&state, req_id, now)
                             .await
-                            .map(DispatchInputs)
+                            .map(Json)
                             .map_err(crate::error::to_sdk_handler_error)
                     }
                 })
@@ -218,10 +197,6 @@ impl InvitationRequest for InvitationRequestImpl {
             };
 
             for inv_input in inputs {
-                // Best-effort fan-out via the generated `GithubInvitationClient`.
-                // Plan 5 / Task 19's `build_endpoint` will tie the actual
-                // routing together; integration tests against a live Restate
-                // are deferred to Plan 8.
                 ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
                     inv_input.invitation_id.to_string(),
                 )
@@ -230,28 +205,24 @@ impl InvitationRequest for InvitationRequestImpl {
             }
         }
 
-        Ok(SubmitOutput(final_state))
+        Ok(Json(final_state))
     }
 
     async fn decide(
         &self,
         ctx: SharedWorkflowContext<'_>,
-        decision: Decision,
+        decision: Json<Decision>,
     ) -> std::result::Result<(), TerminalError> {
-        // Resolve the workflow's "decision" durable promise. The web binary's
-        // approve/decline handlers invoke this via Restate ingress; the
-        // workflow's `submit` handler is racing this promise against the
-        // `decision_deadline` sleep.
+        // Keep Json<Decision> intact: submit waits on the same wrapped promise type.
         ctx.resolve_promise("decision", decision);
         Ok(())
     }
 }
 
 /// Outcome of the pre-decision phase. Drives the workflow handler's branching.
-///
-/// `Serialize`/`Deserialize` derives + the `impl_restate_json_payload!` macro
-/// below let this be journaled as the result of `ctx.run("pre_decision")`.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Wrapped in `Json<PreDecisionOutcome>` at the `ctx.run("pre_decision")`
+/// boundary so Restate journals it with SDK-managed JSON framing.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub enum PreDecisionOutcome {
     /// Link auto-approves; no awakeable race needed. Carries `account_id` so
     /// `apply_decision_logic` can audit without re-reading the link.
@@ -266,7 +237,7 @@ pub enum PreDecisionOutcome {
 /// Concrete decision the workflow has resolved on. Distinct from
 /// [`Decision`] (the awakeable payload from admin) because the workflow may
 /// also auto-approve or expire on its own.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub enum AppliedDecision {
     AutoApprove {
         at: DateTime<Utc>,
