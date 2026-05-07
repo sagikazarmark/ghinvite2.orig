@@ -1,7 +1,6 @@
 //! `ShareLink` Virtual Object: create, revoke, tick_expiration.
 
 use crate::audit::{Actor, Target};
-use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
@@ -12,9 +11,11 @@ use domain::{Permission, ShareLinkId, ShareLinkRepo, Slug};
 use rand::rngs::OsRng;
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
+use restate_sdk::serde::Json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct CreateLinkInput {
     pub installation_id: u64,
     pub account_id: u64,
@@ -28,36 +29,34 @@ pub struct CreateLinkInput {
     pub repos: Vec<ShareLinkRepo>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct CreateLinkOutput {
     pub link_id: ShareLinkId,
     pub slug: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RevokeLinkInput {
     pub link_id: ShareLinkId,
     pub by_user: u64,
     pub when: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct TickExpirationInput {
     pub link_id: ShareLinkId,
     pub at: DateTime<Utc>,
 }
 
-impl_restate_json_payload!(CreateLinkInput);
-impl_restate_json_payload!(CreateLinkOutput);
-impl_restate_json_payload!(RevokeLinkInput);
-impl_restate_json_payload!(TickExpirationInput);
-
 #[restate_sdk::object]
 pub trait ShareLink {
-    async fn create(input: CreateLinkInput)
-    -> std::result::Result<CreateLinkOutput, TerminalError>;
-    async fn revoke(input: RevokeLinkInput) -> std::result::Result<(), TerminalError>;
-    async fn tick_expiration(input: TickExpirationInput) -> std::result::Result<(), TerminalError>;
+    async fn create(
+        input: Json<CreateLinkInput>,
+    ) -> std::result::Result<Json<CreateLinkOutput>, TerminalError>;
+    async fn revoke(input: Json<RevokeLinkInput>) -> std::result::Result<(), TerminalError>;
+    async fn tick_expiration(
+        input: Json<TickExpirationInput>,
+    ) -> std::result::Result<(), TerminalError>;
 }
 
 pub struct ShareLinkImpl {
@@ -68,23 +67,28 @@ impl ShareLink for ShareLinkImpl {
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
-        input: CreateLinkInput,
-    ) -> std::result::Result<CreateLinkOutput, TerminalError> {
+        input: Json<CreateLinkInput>,
+    ) -> std::result::Result<Json<CreateLinkOutput>, TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
-        ctx.run(|| async {
-            create_logic(&self.state, &input, request_id.clone())
-                .await
-                .map_err(crate::error::to_sdk_handler_error)
-        })
-        .name("create")
-        .await
+        let Json(output) = ctx
+            .run(|| async {
+                create_logic(&self.state, &input, request_id.clone())
+                    .await
+                    .map(Json)
+                    .map_err(crate::error::to_sdk_handler_error)
+            })
+            .name("create")
+            .await?;
+        Ok(Json(output))
     }
 
     async fn revoke(
         &self,
         ctx: ObjectContext<'_>,
-        input: RevokeLinkInput,
+        input: Json<RevokeLinkInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             revoke_logic(&self.state, &input, request_id.clone())
@@ -98,8 +102,9 @@ impl ShareLink for ShareLinkImpl {
     async fn tick_expiration(
         &self,
         ctx: ObjectContext<'_>,
-        input: TickExpirationInput,
+        input: Json<TickExpirationInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             tick_expiration_logic(&self.state, &input, request_id.clone())

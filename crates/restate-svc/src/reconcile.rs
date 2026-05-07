@@ -2,25 +2,24 @@
 
 use crate::audit::{Actor, Target};
 use crate::error::HandlerError;
-use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
 use domain::InvitationState;
 use restate_sdk::context::{Context, ContextSideEffects, RunFuture};
 use restate_sdk::errors::TerminalError;
+use restate_sdk::serde::Json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct DailyRunInput {
     pub at: DateTime<Utc>,
 }
 
-impl_restate_json_payload!(DailyRunInput);
-
 #[restate_sdk::service]
 pub trait Reconcile {
-    async fn daily_run(input: DailyRunInput) -> std::result::Result<(), TerminalError>;
+    async fn daily_run(input: Json<DailyRunInput>) -> std::result::Result<(), TerminalError>;
 }
 
 pub struct ReconcileImpl {
@@ -31,8 +30,9 @@ impl Reconcile for ReconcileImpl {
     async fn daily_run(
         &self,
         ctx: Context<'_>,
-        input: DailyRunInput,
+        input: Json<DailyRunInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             daily_run_logic(&self.state, &input, request_id.clone())

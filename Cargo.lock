@@ -2661,6 +2661,7 @@ dependencies = [
  "rand_chacha 0.3.1",
  "reqwest",
  "restate-sdk",
+ "schemars 1.2.1",
  "serde",
  "serde_json",
  "sqlx",

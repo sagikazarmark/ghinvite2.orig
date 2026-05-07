@@ -2,16 +2,17 @@
 
 use crate::audit::{Actor, Target};
 use crate::error::HandlerError;
-use crate::impl_restate_json_payload;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
 use domain::{Account, AccountType, SelectedRepos};
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
+use restate_sdk::serde::Json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct OnboardInput {
     pub installation_id: u64,
     pub actor_user_id: u64,
@@ -22,27 +23,25 @@ pub struct OnboardInput {
     pub installed_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct ReposChangedInput {
     pub installation_id: u64,
     pub selected_repos: SelectedRepos,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct UninstallInput {
     pub installation_id: u64,
     pub uninstalled_at: DateTime<Utc>,
 }
 
-impl_restate_json_payload!(OnboardInput);
-impl_restate_json_payload!(ReposChangedInput);
-impl_restate_json_payload!(UninstallInput);
-
 #[restate_sdk::object]
 pub trait Installation {
-    async fn onboard(input: OnboardInput) -> std::result::Result<(), TerminalError>;
-    async fn repos_changed(input: ReposChangedInput) -> std::result::Result<(), TerminalError>;
-    async fn uninstall(input: UninstallInput) -> std::result::Result<(), TerminalError>;
+    async fn onboard(input: Json<OnboardInput>) -> std::result::Result<(), TerminalError>;
+    async fn repos_changed(
+        input: Json<ReposChangedInput>,
+    ) -> std::result::Result<(), TerminalError>;
+    async fn uninstall(input: Json<UninstallInput>) -> std::result::Result<(), TerminalError>;
 }
 
 pub struct InstallationImpl {
@@ -53,8 +52,9 @@ impl Installation for InstallationImpl {
     async fn onboard(
         &self,
         ctx: ObjectContext<'_>,
-        input: OnboardInput,
+        input: Json<OnboardInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             onboard_logic(&self.state, &input, request_id.clone())
@@ -68,8 +68,9 @@ impl Installation for InstallationImpl {
     async fn repos_changed(
         &self,
         ctx: ObjectContext<'_>,
-        input: ReposChangedInput,
+        input: Json<ReposChangedInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             repos_changed_logic(&self.state, &input, request_id.clone())
@@ -83,8 +84,9 @@ impl Installation for InstallationImpl {
     async fn uninstall(
         &self,
         ctx: ObjectContext<'_>,
-        input: UninstallInput,
+        input: Json<UninstallInput>,
     ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
         ctx.run(|| async {
             uninstall_logic(&self.state, &input, request_id.clone())
