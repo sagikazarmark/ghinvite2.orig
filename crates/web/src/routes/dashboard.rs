@@ -1,10 +1,10 @@
 //! `/accounts/{login}/...` routes. Plan 5.
 
-use crate::commands::{
-    CreateShareLink, DecideInvitationRequest, InvitationRequestDecision, RevokeShareLink,
-};
 use crate::account_admin_reads::{
     find_account_admin_request, find_account_admin_share_link, pending_request_queue,
+};
+use crate::commands::{
+    CreateShareLink, DecideInvitationRequest, InvitationRequestDecision, RevokeShareLink,
 };
 use crate::middleware::auth::RequireAdminOf;
 use crate::session;
@@ -300,12 +300,9 @@ async fn revoke_link(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    if let Err(e) = find_account_admin_share_link(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        link_id,
-    )
-    .await
+    if let Err(e) =
+        find_account_admin_share_link(state.storage.as_ref(), admin.account.account_id, link_id)
+            .await
     {
         return e.into_response();
     }
