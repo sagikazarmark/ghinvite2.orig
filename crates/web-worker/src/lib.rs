@@ -174,7 +174,8 @@ async fn fetch(
     let transport: Arc<dyn github::HttpTransport> =
         Arc::new(github::transport::ReqwestTransport::new().map_err(worker_err)?);
     let restate = Arc::new(web::RestateClient::new(&config.restate_ingress).map_err(worker_err)?);
-    let state = web::AppState::new(storage, transport, restate, config);
+    let commands = Arc::new(web::RestateCommands::new(restate));
+    let state = web::AppState::new(storage, transport, commands, config);
     let session_store = KvSessionStore::from_env(&env)?;
     let app = web::build_app(state, session_store);
 

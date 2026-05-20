@@ -1,52 +1,122 @@
 use axum::body::Body;
-use axum::extract::Path;
 use axum::http::{Request, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::post;
+use domain::{AccountType, SelectedRepos};
 use github::mocks::{Expectation, MockTransport};
 use github::transport::{Method, Response};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
-use web::{AppState, RestateClient, WebConfig, build_app};
+use web::commands::{
+    CreateShareLink, CreateShareLinkOutput, DecideInvitationRequest, GhinviteCommands,
+    OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
+    RepositorySelectionChangeSource, RevokeShareLink, RouteGithubInvitationWebhook,
+    SubmitInvitationRequest,
+};
+use web::{AppState, WebConfig, build_app};
 
-async fn spawn_restate_recorder() -> (String, Arc<Mutex<Vec<Value>>>) {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let calls_for_route = calls.clone();
-    let app = axum::Router::new().route(
-        "/Installation/{id}/{method}",
-        post(
-            move |Path((id, method)): Path<(String, String)>,
-                  axum::Json(body): axum::Json<Value>| {
-                let calls = calls_for_route.clone();
-                async move {
-                    calls.lock().unwrap().push(serde_json::json!({
-                        "id": id,
-                        "method": method,
-                        "body": body,
-                    }));
-                    axum::Json(Value::Null).into_response()
-                }
-            },
-        ),
-    );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), calls)
+#[derive(Clone, Debug, PartialEq)]
+enum RecordedCommand {
+    OnboardInstallation {
+        installation_id: u64,
+        actor_user_id: u64,
+        account_id: u64,
+        account_login: String,
+        account_type: AccountType,
+        selected_repos: SelectedRepos,
+    },
+    RecordRepositorySelectionChange {
+        installation_id: u64,
+        selected_repos: SelectedRepos,
+        source: RepositorySelectionChangeSource,
+    },
 }
 
-async fn build_app_with(mock: MockTransport, restate_base: &str) -> axum::Router {
+#[derive(Default)]
+struct RecordingCommands {
+    calls: Arc<Mutex<Vec<RecordedCommand>>>,
+}
+
+#[async_trait::async_trait]
+impl GhinviteCommands for RecordingCommands {
+    async fn create_share_link(
+        &self,
+        _command: CreateShareLink,
+    ) -> web::Result<CreateShareLinkOutput> {
+        panic!("unexpected create_share_link command")
+    }
+
+    async fn revoke_share_link(&self, _command: RevokeShareLink) -> web::Result<()> {
+        panic!("unexpected revoke_share_link command")
+    }
+
+    async fn submit_invitation_request(
+        &self,
+        _command: SubmitInvitationRequest,
+    ) -> web::Result<()> {
+        panic!("unexpected submit_invitation_request command")
+    }
+
+    async fn decide_invitation_request(
+        &self,
+        _command: DecideInvitationRequest,
+    ) -> web::Result<()> {
+        panic!("unexpected decide_invitation_request command")
+    }
+
+    async fn onboard_installation(&self, command: OnboardInstallation) -> web::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RecordedCommand::OnboardInstallation {
+                installation_id: command.installation_id,
+                actor_user_id: command.actor_user_id,
+                account_id: command.account_id,
+                account_login: command.account_login,
+                account_type: command.account_type,
+                selected_repos: command.selected_repos,
+            });
+        Ok(())
+    }
+
+    async fn record_repository_selection_change(
+        &self,
+        command: RecordRepositorySelectionChange,
+    ) -> web::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RecordedCommand::RecordRepositorySelectionChange {
+                installation_id: command.installation_id,
+                selected_repos: command.selected_repos,
+                source: command.source,
+            });
+        Ok(())
+    }
+
+    async fn record_installation_uninstalled(
+        &self,
+        _command: RecordInstallationUninstalled,
+    ) -> web::Result<()> {
+        panic!("unexpected record_installation_uninstalled command")
+    }
+
+    async fn route_github_invitation_webhook(
+        &self,
+        _command: RouteGithubInvitationWebhook,
+    ) -> web::Result<()> {
+        panic!("unexpected route_github_invitation_webhook command")
+    }
+}
+
+async fn build_app_with(mock: MockTransport) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
     let storage: Arc<dyn storage::Storage> =
         Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
     let transport: Arc<dyn github::HttpTransport> = Arc::new(mock);
-    let restate = Arc::new(RestateClient::new(restate_base).unwrap());
-    let state = AppState::new(storage, transport, restate, WebConfig::for_local_dev());
+    let commands = Arc::new(RecordingCommands::default());
+    let calls = commands.calls.clone();
+    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
     let session_store = tower_sessions::MemoryStore::default();
-    build_app(state, session_store)
+    (build_app(state, session_store), calls)
 }
 
 fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
@@ -122,8 +192,7 @@ fn oauth_expectations(login: &str, user_id: u64) -> Vec<Expectation> {
 
 #[tokio::test]
 async fn setup_unauthenticated_redirects_to_login_with_return_to() {
-    let (restate_base, _calls) = spawn_restate_recorder().await;
-    let app = build_app_with(MockTransport::scripted(vec![]), &restate_base).await;
+    let (app, _calls) = build_app_with(MockTransport::scripted(vec![])).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -143,7 +212,6 @@ async fn setup_unauthenticated_redirects_to_login_with_return_to() {
 
 #[tokio::test]
 async fn setup_rejects_spoofed_installation_id() {
-    let (restate_base, calls) = spawn_restate_recorder().await;
     let mut expectations = oauth_expectations("octocat", 42);
     expectations.push(Expectation::ok_json(
         Method::Get,
@@ -159,7 +227,7 @@ async fn setup_rejects_spoofed_installation_id() {
             }]
         }),
     ));
-    let app = build_app_with(MockTransport::scripted(expectations), &restate_base).await;
+    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -177,7 +245,6 @@ async fn setup_rejects_spoofed_installation_id() {
 
 #[tokio::test]
 async fn setup_verified_org_install_calls_onboard_and_redirects() {
-    let (restate_base, calls) = spawn_restate_recorder().await;
     let mut expectations = oauth_expectations("octocat", 42);
     expectations.push(Expectation::ok_json(
         Method::Get,
@@ -204,7 +271,7 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
             ]
         }),
     ));
-    let app = build_app_with(MockTransport::scripted(expectations), &restate_base).await;
+    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -224,22 +291,21 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["id"], "77");
-    assert_eq!(calls[0]["method"], "onboard");
-    assert_eq!(calls[0]["body"]["installation_id"], 77);
-    assert_eq!(calls[0]["body"]["actor_user_id"], 42);
-    assert_eq!(calls[0]["body"]["account_id"], 9001);
-    assert_eq!(calls[0]["body"]["account_login"], "acme");
-    assert_eq!(calls[0]["body"]["account_type"], "Organization");
     assert_eq!(
-        calls[0]["body"]["selected_repos"],
-        serde_json::json!([10, 11])
+        calls[0],
+        RecordedCommand::OnboardInstallation {
+            installation_id: 77,
+            actor_user_id: 42,
+            account_id: 9001,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            selected_repos: SelectedRepos::Subset(vec![10, 11]),
+        }
     );
 }
 
 #[tokio::test]
 async fn setup_verified_user_install_calls_onboard_and_redirects() {
-    let (restate_base, calls) = spawn_restate_recorder().await;
     let mut expectations = oauth_expectations("octocat", 42);
     expectations.push(Expectation::ok_json(
         Method::Get,
@@ -255,7 +321,7 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
             }]
         }),
     ));
-    let app = build_app_with(MockTransport::scripted(expectations), &restate_base).await;
+    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -275,15 +341,21 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["id"], "88");
-    assert_eq!(calls[0]["method"], "onboard");
-    assert_eq!(calls[0]["body"]["account_type"], "User");
-    assert_eq!(calls[0]["body"]["selected_repos"], "all");
+    assert_eq!(
+        calls[0],
+        RecordedCommand::OnboardInstallation {
+            installation_id: 88,
+            actor_user_id: 42,
+            account_id: 42,
+            account_login: "octocat".into(),
+            account_type: AccountType::User,
+            selected_repos: SelectedRepos::All,
+        }
+    );
 }
 
 #[tokio::test]
 async fn setup_update_calls_repos_changed_and_redirects() {
-    let (restate_base, calls) = spawn_restate_recorder().await;
     let mut expectations = oauth_expectations("octocat", 42);
     expectations.push(Expectation::ok_json(
         Method::Get,
@@ -309,7 +381,7 @@ async fn setup_update_calls_repos_changed_and_redirects() {
             ]
         }),
     ));
-    let app = build_app_with(MockTransport::scripted(expectations), &restate_base).await;
+    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -329,8 +401,12 @@ async fn setup_update_calls_repos_changed_and_redirects() {
 
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["id"], "77");
-    assert_eq!(calls[0]["method"], "repos_changed");
-    assert_eq!(calls[0]["body"]["installation_id"], 77);
-    assert_eq!(calls[0]["body"]["selected_repos"], serde_json::json!([12]));
+    assert_eq!(
+        calls[0],
+        RecordedCommand::RecordRepositorySelectionChange {
+            installation_id: 77,
+            selected_repos: SelectedRepos::Subset(vec![12]),
+            source: RepositorySelectionChangeSource::SetupReturn,
+        }
+    );
 }

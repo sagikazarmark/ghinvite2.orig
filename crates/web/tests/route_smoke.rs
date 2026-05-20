@@ -7,7 +7,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
-use web::{AppState, RestateClient, WebConfig, build_app};
+use web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 
 async fn build_test_app() -> axum::Router {
     use github::mocks::MockTransport;
@@ -15,7 +15,8 @@ async fn build_test_app() -> axum::Router {
         Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
     let transport: Arc<dyn github::HttpTransport> = Arc::new(MockTransport::scripted(vec![]));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let state = AppState::new(storage, transport, restate, WebConfig::for_local_dev());
+    let commands = Arc::new(RestateCommands::new(restate));
+    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }

@@ -1,7 +1,7 @@
 //! Shared dependency container threaded through every route handler.
 
+use crate::commands::GhinviteCommands;
 use crate::config::WebConfig;
-use crate::restate_client::RestateClient;
 use github::HttpTransport;
 use std::sync::Arc;
 use storage::Storage;
@@ -11,7 +11,7 @@ use storage::Storage;
 pub struct AppState {
     pub storage: Arc<dyn Storage>,
     pub github_transport: Arc<dyn HttpTransport>,
-    pub restate: Arc<RestateClient>,
+    pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
 }
 
@@ -19,13 +19,13 @@ impl AppState {
     pub fn new(
         storage: Arc<dyn Storage>,
         github_transport: Arc<dyn HttpTransport>,
-        restate: Arc<RestateClient>,
+        commands: Arc<dyn GhinviteCommands>,
         config: WebConfig,
     ) -> Self {
         Self {
             storage,
             github_transport,
-            restate,
+            commands,
             config,
         }
     }

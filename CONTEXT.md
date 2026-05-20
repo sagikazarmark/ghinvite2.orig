@@ -1,0 +1,27 @@
+# ghinvite Context
+
+## Glossary
+
+### Account
+A GitHub account where ghinvite is installed. An account may be a personal GitHub account or a GitHub organization.
+
+### Personal Account
+A GitHub account owned by an individual person, as distinct from a GitHub organization.
+
+### GitHub User
+An individual GitHub identity that can sign in, create share links, request access, or decide invitation requests.
+
+### Account Admin
+A GitHub user with current GitHub-derived authority to administer an account in ghinvite. For an organization account this is an organization owner; for a personal account this is the same GitHub user who owns the account.
+
+### Share Link
+A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link.
+
+### Invitation Request
+A recipient's request for access through a share link. It may be auto-approved or wait for an account admin decision.
+
+### GitHub Invitation
+A repository collaborator invitation sent through GitHub for one repository as the result of an approved invitation request.
+
+### Repository Identity
+The GitHub owner and repository name pair that identifies a repository for collaborator invitations while preserving the display full name. It has exactly one owner and one repository name; both are non-empty.

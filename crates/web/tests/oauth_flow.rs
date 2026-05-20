@@ -9,14 +9,15 @@ use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
-use web::{AppState, RestateClient, WebConfig, build_app};
+use web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 
 async fn build_app_with_mock(mock: MockTransport) -> axum::Router {
     let storage: Arc<dyn storage::Storage> =
         Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
     let transport: Arc<dyn github::HttpTransport> = Arc::new(mock);
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let state = AppState::new(storage, transport, restate, WebConfig::for_local_dev());
+    let commands = Arc::new(RestateCommands::new(restate));
+    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }

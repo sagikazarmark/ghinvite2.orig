@@ -2,6 +2,7 @@
 //! layouts. Plan 7 wraps `build_app()` in a Workers `#[event(fetch)]`; Plans 5
 //! and 6 fill in the dashboard and recipient routes.
 
+pub mod commands;
 pub mod config;
 pub mod error;
 pub mod middleware;
@@ -13,6 +14,7 @@ pub mod views;
 pub mod wasm_compat;
 
 // Re-exports filled in as types appear:
+pub use commands::{GhinviteCommands, RestateCommands};
 pub use config::WebConfig;
 pub use error::{Result, WebError};
 pub use restate_client::RestateClient;
@@ -24,7 +26,7 @@ use axum::Router;
 /// supplied externally so Plan 7 can swap in a D1-backed store; for native
 /// dev pass `tower_sessions_sqlx_store::SqliteStore`.
 ///
-/// `state` carries storage, github transport, restate client, and config.
+/// `state` carries storage, github transport, command facade, and config.
 pub fn build_app<S>(state: AppState, session_store: S) -> Router
 where
     S: tower_sessions::SessionStore + Clone + 'static,

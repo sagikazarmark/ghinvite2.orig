@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_sessions_sqlx_store::SqliteStore;
-use web::{AppState, RestateClient, WebConfig, build_app};
+use web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Restate client: ingress at config.restate_ingress (defaults to
     // 127.0.0.1:8080 from `docker compose up -d restate`).
     let restate = Arc::new(RestateClient::new(&config.restate_ingress)?);
+    let commands = Arc::new(RestateCommands::new(restate));
 
     // Session store: a local sqlite database.
     let session_pool =
@@ -42,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_store = SqliteStore::new(session_pool);
     session_store.migrate().await?;
 
-    let state = AppState::new(storage, transport, restate, config);
+    let state = AppState::new(storage, transport, commands, config);
     let app = build_app(state, session_store);
 
     let addr = "127.0.0.1:8787".parse::<std::net::SocketAddr>()?;

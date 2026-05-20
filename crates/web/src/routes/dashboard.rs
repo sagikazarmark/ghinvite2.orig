@@ -1,5 +1,8 @@
 //! `/accounts/{login}/...` routes. Plan 5.
 
+use crate::commands::{
+    CreateShareLink, DecideInvitationRequest, InvitationRequestDecision, RevokeShareLink,
+};
 use crate::middleware::auth::RequireAdminOf;
 use crate::session;
 use crate::state::AppState;
@@ -189,26 +192,20 @@ async fn create_link(
             .into_response();
     }
 
-    let input = serde_json::json!({
-        "installation_id": admin.account.installation_id,
-        "account_id": admin.account.account_id,
-        "created_by": admin.session.user_id,
-        "created_at": now,
-        "expires_at": expires_at,
-        "max_uses": max_uses,
-        "permission": permission,
-        "approval_required": approval_required,
-        "internal_note": internal_note,
-        "repos": repos,
-    });
-    let output: serde_json::Value = match state
-        .restate
-        .call(
-            "ShareLink",
-            &admin.account.account_id.to_string(),
-            "create",
-            &input,
-        )
+    let output = match state
+        .commands
+        .create_share_link(CreateShareLink {
+            installation_id: admin.account.installation_id,
+            account_id: admin.account.account_id,
+            created_by: admin.session.user_id,
+            created_at: now,
+            expires_at,
+            max_uses,
+            permission,
+            approval_required,
+            internal_note,
+            repos,
+        })
         .await
     {
         Ok(v) => v,
@@ -229,10 +226,7 @@ async fn create_link(
             .into_response();
         }
     };
-    let link_id = output
-        .get("link_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
+    let link_id = output.link_id.to_string();
 
     let _ = session::set_flash(
         &admin.tower,
@@ -302,19 +296,14 @@ async fn revoke_link(
         _ => return crate::error::WebError::NotFound.into_response(),
     };
 
-    let input = serde_json::json!({
-        "link_id": link_id,
-        "by_user": admin.session.user_id,
-        "when": Utc::now(),
-    });
     if let Err(e) = state
-        .restate
-        .send(
-            "ShareLink",
-            &admin.account.account_id.to_string(),
-            "revoke",
-            &input,
-        )
+        .commands
+        .revoke_share_link(RevokeShareLink {
+            account_id: admin.account.account_id,
+            link_id,
+            by_user: admin.session.user_id,
+            when: Utc::now(),
+        })
         .await
     {
         tracing::warn!(error = ?e, "ShareLink::revoke failed");
@@ -428,20 +417,15 @@ async fn approve_request(
     };
     let _ = link; // ownership verified
 
-    let input = serde_json::json!({
-        "Approve": {
-            "decided_by": admin.session.user_id,
-            "decided_at": Utc::now(),
-        }
-    });
     match state
-        .restate
-        .call::<serde_json::Value, serde_json::Value>(
-            "InvitationRequest",
-            &request_id_str,
-            "decide",
-            &input,
-        )
+        .commands
+        .decide_invitation_request(DecideInvitationRequest {
+            request_id,
+            decision: InvitationRequestDecision::Approve {
+                decided_by: admin.session.user_id,
+                decided_at: Utc::now(),
+            },
+        })
         .await
     {
         Ok(_) => {
@@ -496,21 +480,16 @@ async fn decline_request(
     let _ = link;
 
     // v1: no reason field in the form; v1.1 will add a textarea.
-    let input = serde_json::json!({
-        "Decline": {
-            "decided_by": admin.session.user_id,
-            "decided_at": Utc::now(),
-            "reason": null,
-        }
-    });
     match state
-        .restate
-        .call::<serde_json::Value, serde_json::Value>(
-            "InvitationRequest",
-            &request_id_str,
-            "decide",
-            &input,
-        )
+        .commands
+        .decide_invitation_request(DecideInvitationRequest {
+            request_id,
+            decision: InvitationRequestDecision::Decline {
+                decided_by: admin.session.user_id,
+                decided_at: Utc::now(),
+                reason: None,
+            },
+        })
         .await
     {
         Ok(_) => {

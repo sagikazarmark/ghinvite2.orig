@@ -36,7 +36,7 @@ wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 github = { path = ".", features = ["test-mock"] }
-jsonwebtoken = { workspace = true, features = ["use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
+jsonwebtoken = { workspace = true, features = ["rust_crypto", "use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
 tokio.workspace = true
 wiremock.workspace = true
 

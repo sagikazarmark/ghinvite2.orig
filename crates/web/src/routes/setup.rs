@@ -1,5 +1,8 @@
 //! GitHub App Setup URL return handling.
 
+use crate::commands::{
+    OnboardInstallation, RecordRepositorySelectionChange, RepositorySelectionChangeSource,
+};
 use crate::error::{Result, WebError};
 use crate::session;
 use crate::state::AppState;
@@ -90,38 +93,27 @@ async fn handle_github_setup(
 
     match action {
         SetupAction::Install => {
-            let input = serde_json::json!({
-                "installation_id": installation.id,
-                "actor_user_id": session.user_id,
-                "account_id": installation.account.id,
-                "account_login": account_login.clone(),
-                "account_type": account_type,
-                "selected_repos": selected_repos,
-                "installed_at": Utc::now(),
-            });
             state
-                .restate
-                .call::<_, ()>(
-                    "Installation",
-                    &installation.id.to_string(),
-                    "onboard",
-                    &input,
-                )
+                .commands
+                .onboard_installation(OnboardInstallation {
+                    installation_id: installation.id,
+                    actor_user_id: session.user_id,
+                    account_id: installation.account.id,
+                    account_login: account_login.clone(),
+                    account_type,
+                    selected_repos,
+                    installed_at: Utc::now(),
+                })
                 .await?;
         }
         SetupAction::Update => {
-            let input = serde_json::json!({
-                "installation_id": installation.id,
-                "selected_repos": selected_repos,
-            });
             state
-                .restate
-                .call::<_, ()>(
-                    "Installation",
-                    &installation.id.to_string(),
-                    "repos_changed",
-                    &input,
-                )
+                .commands
+                .record_repository_selection_change(RecordRepositorySelectionChange {
+                    installation_id: installation.id,
+                    selected_repos,
+                    source: RepositorySelectionChangeSource::SetupReturn,
+                })
                 .await?;
         }
     }

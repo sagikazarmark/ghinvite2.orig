@@ -1,5 +1,6 @@
 //! `/i/{slug}...` routes. Plan 6: recipient flow.
 
+use crate::commands::SubmitInvitationRequest;
 use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
@@ -129,22 +130,15 @@ async fn submit_request(
     let request_id =
         domain::RequestId::from_str(&form.request_id).unwrap_or_else(|_| domain::RequestId::new());
 
-    let input = serde_json::json!({
-        "request_id": request_id.to_string(),
-        "share_link_id": link.id.to_string(),
-        "requester_id": session.user_id,
-        "justification": justification,
-        "created_at": now,
-    });
-
     if let Err(e) = state
-        .restate
-        .send(
-            "InvitationRequest",
-            &request_id.to_string(),
-            "submit",
-            &input,
-        )
+        .commands
+        .submit_invitation_request(SubmitInvitationRequest {
+            request_id,
+            share_link_id: link.id,
+            requester_id: session.user_id,
+            justification,
+            created_at: now,
+        })
         .await
     {
         tracing::warn!(error = ?e, "InvitationRequest::submit send failed");

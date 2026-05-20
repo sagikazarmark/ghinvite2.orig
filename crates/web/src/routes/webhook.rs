@@ -1,5 +1,9 @@
 //! `POST /webhooks/github` — HMAC-verified webhook receiver. Plan 6.
 
+use crate::commands::{
+    GithubInvitationWebhookAction, RecordInstallationUninstalled, RecordRepositorySelectionChange,
+    RepositorySelectionChangeSource, RouteGithubInvitationWebhook,
+};
 use crate::state::AppState;
 use axum::Router;
 use axum::body::Bytes;
@@ -95,9 +99,9 @@ async fn handle_repository_invitation(
         .as_u64()
         .ok_or_else(|| "repository_invitation: missing invitation.id".to_string())?;
 
-    let webhook_action = match action {
-        "accepted" => "Accepted",
-        "declined" => "Declined",
+    let (webhook_action, action_label) = match action {
+        "accepted" => (GithubInvitationWebhookAction::Accepted, "accepted"),
+        "declined" => (GithubInvitationWebhookAction::Declined, "declined"),
         _ => {
             tracing::debug!(action, "repository_invitation: unhandled action");
             return Ok(());
@@ -118,27 +122,20 @@ async fn handle_repository_invitation(
         return Ok(());
     };
 
-    let input = serde_json::json!({
-        "invitation_id": inv.id.to_string(),
-        "action": webhook_action,
-        "at": Utc::now(),
-    });
-
     state
-        .restate
-        .send(
-            "GithubInvitation",
-            &inv.id.to_string(),
-            "on_webhook",
-            &input,
-        )
+        .commands
+        .route_github_invitation_webhook(RouteGithubInvitationWebhook {
+            invitation_id: inv.id,
+            action: webhook_action,
+            at: Utc::now(),
+        })
         .await
         .map_err(|e| format!("Restate send: {e}"))?;
 
     tracing::info!(
         github_inv_id,
         our_id = %inv.id,
-        action = webhook_action,
+        action = action_label,
         delivery = delivery_id,
         "repository_invitation routed"
     );
@@ -172,18 +169,12 @@ async fn handle_installation(
 
     match action {
         "deleted" => {
-            let input = serde_json::json!({
-                "installation_id": installation_id,
-                "uninstalled_at": Utc::now(),
-            });
             state
-                .restate
-                .send(
-                    "Installation",
-                    &installation_id.to_string(),
-                    "uninstall",
-                    &input,
-                )
+                .commands
+                .record_installation_uninstalled(RecordInstallationUninstalled {
+                    installation_id,
+                    uninstalled_at: Utc::now(),
+                })
                 .await
                 .map_err(|e| format!("Restate send: {e}"))?;
             tracing::info!(
@@ -273,19 +264,13 @@ async fn handle_installation_repositories(
         return Ok(());
     };
 
-    let input = serde_json::json!({
-        "installation_id": installation_id,
-        "selected_repos": selected_repos,
-    });
-
     state
-        .restate
-        .send(
-            "Installation",
-            &installation_id.to_string(),
-            "repos_changed",
-            &input,
-        )
+        .commands
+        .record_repository_selection_change(RecordRepositorySelectionChange {
+            installation_id,
+            selected_repos,
+            source: RepositorySelectionChangeSource::Webhook,
+        })
         .await
         .map_err(|e| format!("Restate send: {e}"))?;
 
