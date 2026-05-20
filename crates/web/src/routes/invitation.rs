@@ -1,5 +1,6 @@
 //! `/i/{slug}...` routes. Plan 6: recipient flow.
 
+use super::share_link_resolution::{PendingRequestPolicy, resolve_public_share_link};
 use crate::commands::SubmitInvitationRequest;
 use crate::session;
 use crate::state::AppState;
@@ -34,10 +35,19 @@ async fn landing(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
-        Ok(Some(l)) if l.is_active(now) => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let resolved = match resolve_public_share_link(
+        state.storage.as_ref(),
+        &slug,
+        now,
+        PendingRequestPolicy::Ignore,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return error.into_response(),
     };
+    let slug = resolved.slug.as_str().to_string();
+    let link = resolved.link;
     let session = session::load(&tower).await.unwrap_or_default();
     let signed_in_login = if session.is_authenticated() {
         Some(session.login.clone())
@@ -67,21 +77,24 @@ async fn request_form(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
-        Ok(Some(l)) if l.is_active(now) => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let resolved = match resolve_public_share_link(
+        state.storage.as_ref(),
+        &slug,
+        now,
+        PendingRequestPolicy::RedirectForRequester(session.user_id),
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return error.into_response(),
     };
 
-    // Redirect to pending if requester already has a pending request (prevents duplicate Restate workflows).
-    if let Ok(requests) = state.storage.list_requests_for_link(link.id).await {
-        if let Some(existing) = requests
-            .iter()
-            .find(|r| r.requester_id == session.user_id && r.state == domain::RequestState::Pending)
-        {
-            return Redirect::to(&format!("/i/{slug}/pending/{}", existing.id)).into_response();
-        }
+    if let Some(redirect) = resolved.pending_redirect() {
+        return redirect.into_response();
     }
 
+    let slug = resolved.slug.as_str().to_string();
+    let link = resolved.link;
     let request_id = domain::RequestId::new();
     let flash = session::take_flash(&tower).await.unwrap_or(None);
     let signed_in_login = session.login.clone();
@@ -112,10 +125,24 @@ async fn submit_request(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
-        Ok(Some(l)) if l.is_active(now) => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let resolved = match resolve_public_share_link(
+        state.storage.as_ref(),
+        &slug,
+        now,
+        PendingRequestPolicy::RedirectForRequester(session.user_id),
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return error.into_response(),
     };
+
+    if let Some(redirect) = resolved.pending_redirect() {
+        return redirect.into_response();
+    }
+
+    let slug = resolved.slug.as_str().to_string();
+    let link = resolved.link;
 
     let justification = form
         .justification
