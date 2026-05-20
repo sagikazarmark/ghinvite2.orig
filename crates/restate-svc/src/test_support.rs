@@ -40,6 +40,19 @@ pub(crate) async fn fixture_state() -> AppState {
     AppState::new(fixture_storage().await, fixture_github_client(transport))
 }
 
+/// Convenience: an `AppState` plus concrete storage for tests that need
+/// debug-only audit reads.
+pub(crate) async fn fixture_state_with_storage() -> (AppState, Arc<storage::SqlxStorage>) {
+    use github::mocks::MockTransport;
+
+    let storage = Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
+    let storage_for_state: Arc<dyn storage::Storage> = storage.clone();
+    let transport = Arc::new(MockTransport::scripted(vec![]));
+    let state = AppState::new(storage_for_state, fixture_github_client(transport));
+
+    (state, storage)
+}
+
 /// Convenience: an `AppState` with in-memory storage and the supplied
 /// `MockTransport` (already script-loaded).
 pub(crate) async fn fixture_state_with_transport(transport: Arc<dyn HttpTransport>) -> AppState {

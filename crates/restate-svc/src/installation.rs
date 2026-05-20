@@ -106,6 +106,14 @@ pub async fn onboard_logic(
     input: &OnboardInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
+    onboard_installation_transition(state, input, request_id).await
+}
+
+async fn onboard_installation_transition(
+    state: &AppState,
+    input: &OnboardInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     let account = Account {
         installation_id: input.installation_id,
         account_id: input.account_id,
@@ -119,7 +127,6 @@ pub async fn onboard_logic(
     match state.storage.insert_installation(&account).await {
         Ok(()) => (),
         Err(storage::Error::Conflict(storage::ConflictKind::DuplicateId)) => {
-            // Already onboarded — idempotent retry, no audit emit.
             return Ok(());
         }
         Err(e) => return Err(HandlerError::Storage(e)),
@@ -146,6 +153,14 @@ pub async fn repos_changed_logic(
     input: &ReposChangedInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
+    change_installation_repos_transition(state, input, request_id).await
+}
+
+async fn change_installation_repos_transition(
+    state: &AppState,
+    input: &ReposChangedInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     state
         .storage
         .update_installation_repos(input.installation_id, &input.selected_repos)
@@ -162,19 +177,18 @@ pub async fn repos_changed_logic(
             ))
         })?;
 
-    let metadata = serde_json::json!({
-        "selected_repos_kind": match &input.selected_repos {
-            SelectedRepos::All => "all",
-            SelectedRepos::Subset(_) => "subset",
-        },
-    });
     crate::audit::emit(
         state,
         acct.account_id,
         EventType::InstallationReposChanged,
         Actor::Github,
         Target::installation(input.installation_id),
-        metadata,
+        serde_json::json!({
+            "selected_repos_kind": match &input.selected_repos {
+                SelectedRepos::All => "all",
+                SelectedRepos::Subset(_) => "subset",
+            },
+        }),
         request_id,
     )
     .await
@@ -187,6 +201,14 @@ pub async fn uninstall_logic(
     input: &UninstallInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
+    uninstall_installation_transition(state, input, request_id).await
+}
+
+async fn uninstall_installation_transition(
+    state: &AppState,
+    input: &UninstallInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     match state
         .storage
         .mark_installation_uninstalled(input.installation_id, input.uninstalled_at)
@@ -194,7 +216,6 @@ pub async fn uninstall_logic(
     {
         Ok(()) => (),
         Err(storage::Error::NotFound) => {
-            // Already uninstalled or never existed; idempotent.
             return Ok(());
         }
         Err(e) => return Err(HandlerError::Storage(e)),
@@ -211,16 +232,15 @@ pub async fn uninstall_logic(
             ))
         })?;
 
-    let metadata = serde_json::json!({
-        "uninstalled_at": input.uninstalled_at.to_rfc3339(),
-    });
     crate::audit::emit(
         state,
         acct.account_id,
         EventType::InstallationUninstalled,
         Actor::Github,
         Target::installation(input.installation_id),
-        metadata,
+        serde_json::json!({
+            "uninstalled_at": input.uninstalled_at.to_rfc3339(),
+        }),
         request_id,
     )
     .await
@@ -229,7 +249,8 @@ pub async fn uninstall_logic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_state};
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    use ::audit::{ActorKind, EventType, TargetKind};
 
     fn sample_input() -> OnboardInput {
         OnboardInput {
@@ -243,6 +264,13 @@ mod tests {
         }
     }
 
+    async fn audit_events(
+        storage: &::storage::SqlxStorage,
+        account_id: u64,
+    ) -> Vec<::audit::AuditEvent> {
+        storage.debug_list_audit(account_id).await.unwrap()
+    }
+
     #[tokio::test]
     async fn onboard_inserts_row_and_audits() {
         let state = fixture_state().await;
@@ -254,6 +282,45 @@ mod tests {
         assert_eq!(acct.account_login, "acme");
         assert_eq!(acct.account_id, 100);
         assert!(acct.uninstalled_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn onboard_transition_inserts_row_and_audits_once() {
+        let (state, storage) = fixture_state_with_storage().await;
+
+        onboard_installation_transition(&state, &sample_input(), Some("req-onboard".into()))
+            .await
+            .unwrap();
+
+        let acct = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(acct.account_login, "acme");
+        assert_eq!(acct.account_id, 100);
+        assert!(acct.uninstalled_at.is_none());
+
+        onboard_installation_transition(&state, &sample_input(), Some("req-onboard-again".into()))
+            .await
+            .unwrap();
+
+        let audits = audit_events(&storage, 100).await;
+        let created: Vec<_> = audits
+            .iter()
+            .filter(|event| event.event_type == EventType::InstallationCreated)
+            .collect();
+        assert_eq!(created.len(), 1);
+        let event = created[0];
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::Installation);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(event.request_id.as_deref(), Some("req-onboard"));
+        assert_eq!(
+            event.metadata.get("account_login"),
+            Some(&serde_json::json!("acme"))
+        );
+        assert_eq!(
+            event.metadata.get("account_type"),
+            Some(&serde_json::json!("Organization"))
+        );
     }
 
     #[tokio::test]
@@ -307,6 +374,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repos_changed_transition_updates_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        onboard_installation_transition(&state, &sample_input(), Some("req-onboard".into()))
+            .await
+            .unwrap();
+
+        change_installation_repos_transition(
+            &state,
+            &ReposChangedInput {
+                installation_id: 1,
+                selected_repos: SelectedRepos::Subset(vec![10, 20]),
+            },
+            Some("req-repos".into()),
+        )
+        .await
+        .unwrap();
+
+        let acct = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(acct.selected_repos, SelectedRepos::Subset(vec![10, 20]));
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::InstallationReposChanged)
+            .expect("repository-selection change should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::Installation);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(event.request_id.as_deref(), Some("req-repos"));
+        assert_eq!(
+            event.metadata.get("selected_repos_kind"),
+            Some(&serde_json::json!("subset"))
+        );
+    }
+
+    #[tokio::test]
     async fn repos_changed_unknown_installation_is_terminal() {
         let state = fixture_state().await;
         let err = repos_changed_logic(
@@ -343,6 +447,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn uninstall_transition_marks_and_audits_once() {
+        let (state, storage) = fixture_state_with_storage().await;
+        onboard_installation_transition(&state, &sample_input(), Some("req-onboard".into()))
+            .await
+            .unwrap();
+        let uninstalled_at = dt("2026-05-05T00:00:00Z");
+
+        uninstall_installation_transition(
+            &state,
+            &UninstallInput {
+                installation_id: 1,
+                uninstalled_at,
+            },
+            Some("req-uninstall".into()),
+        )
+        .await
+        .unwrap();
+
+        let acct = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(acct.uninstalled_at, Some(uninstalled_at));
+
+        uninstall_installation_transition(
+            &state,
+            &UninstallInput {
+                installation_id: 1,
+                uninstalled_at: dt("2026-05-06T00:00:00Z"),
+            },
+            Some("req-uninstall-again".into()),
+        )
+        .await
+        .unwrap();
+
+        let audits = audit_events(&storage, 100).await;
+        let uninstalled: Vec<_> = audits
+            .iter()
+            .filter(|event| event.event_type == EventType::InstallationUninstalled)
+            .collect();
+        assert_eq!(uninstalled.len(), 1);
+        let event = uninstalled[0];
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::Installation);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(event.request_id.as_deref(), Some("req-uninstall"));
+        assert_eq!(
+            event.metadata.get("uninstalled_at"),
+            Some(&serde_json::json!(uninstalled_at.to_rfc3339()))
+        );
+    }
+
+    #[tokio::test]
     async fn uninstall_unknown_installation_is_idempotent() {
         let state = fixture_state().await;
         let result = uninstall_logic(
@@ -358,5 +513,24 @@ mod tests {
             result.is_ok(),
             "missing installation should be idempotent: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn uninstall_transition_unknown_installation_does_not_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+
+        uninstall_installation_transition(
+            &state,
+            &UninstallInput {
+                installation_id: 999,
+                uninstalled_at: dt("2026-05-05T00:00:00Z"),
+            },
+            Some("req-uninstall-missing".into()),
+        )
+        .await
+        .unwrap();
+
+        let audits = audit_events(&storage, 100).await;
+        assert!(audits.is_empty());
     }
 }

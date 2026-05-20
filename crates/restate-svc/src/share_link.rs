@@ -122,6 +122,14 @@ pub async fn create_logic(
     input: &CreateLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<CreateLinkOutput> {
+    create_share_link_transition(state, input, request_id).await
+}
+
+async fn create_share_link_transition(
+    state: &AppState,
+    input: &CreateLinkInput,
+    request_id: Option<String>,
+) -> crate::error::Result<CreateLinkOutput> {
     let mut rng = OsRng;
     let slug = Slug::generate(&mut rng);
     let link_id = ShareLinkId::new();
@@ -175,13 +183,21 @@ pub async fn revoke_logic(
     input: &RevokeLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
+    revoke_share_link_transition(state, input, request_id).await
+}
+
+async fn revoke_share_link_transition(
+    state: &AppState,
+    input: &RevokeLinkInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     match state
         .storage
         .mark_share_link_revoked(input.link_id, input.by_user, input.when)
         .await
     {
         Ok(()) => (),
-        Err(storage::Error::NotFound) => return Ok(()), // idempotent
+        Err(storage::Error::NotFound) => return Ok(()),
         Err(e) => return Err(e.into()),
     }
 
@@ -193,14 +209,13 @@ pub async fn revoke_logic(
             storage::Error::NotFound,
         ))?;
 
-    let metadata = serde_json::json!({"by_user": input.by_user});
     crate::audit::emit(
         state,
         link.account_id,
         EventType::ShareLinkRevoked,
         Actor::User(input.by_user),
         Target::share_link(input.link_id),
-        metadata,
+        serde_json::json!({"by_user": input.by_user}),
         request_id,
     )
     .await
@@ -214,6 +229,14 @@ pub async fn tick_expiration_logic(
     input: &TickExpirationInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
+    expire_share_link_transition(state, input, request_id).await
+}
+
+async fn expire_share_link_transition(
+    state: &AppState,
+    input: &TickExpirationInput,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     let link = state
         .storage
         .get_share_link_by_id(input.link_id)
@@ -222,7 +245,6 @@ pub async fn tick_expiration_logic(
             storage::Error::NotFound,
         ))?;
 
-    // Defensive: an admin may have revoked the link before the timer fired.
     if link.revoked_at.is_some() {
         return Ok(());
     }
@@ -233,18 +255,16 @@ pub async fn tick_expiration_logic(
         )));
     };
     if input.at < expires {
-        // Timer fired early; skip.
         return Ok(());
     }
 
-    let metadata = serde_json::json!({"expired_at": input.at.to_rfc3339()});
     crate::audit::emit(
         state,
         link.account_id,
         EventType::ShareLinkExpired,
         Actor::System,
         Target::share_link(input.link_id),
-        metadata,
+        serde_json::json!({"expired_at": input.at.to_rfc3339()}),
         request_id,
     )
     .await
@@ -254,7 +274,8 @@ pub async fn tick_expiration_logic(
 mod tests {
     use super::*;
     use crate::error::HandlerError;
-    use crate::test_support::{dt, fixture_state};
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    use ::audit::{ActorKind, EventType, TargetKind};
     use domain::{AccountType, SelectedRepos};
 
     async fn seed_installation_and_user(state: &AppState) {
@@ -295,6 +316,13 @@ mod tests {
         }
     }
 
+    async fn audit_events(
+        storage: &::storage::SqlxStorage,
+        account_id: u64,
+    ) -> Vec<::audit::AuditEvent> {
+        storage.debug_list_audit(account_id).await.unwrap()
+    }
+
     #[tokio::test]
     async fn create_inserts_link_with_generated_slug() {
         let state = fixture_state().await;
@@ -315,6 +343,48 @@ mod tests {
         assert_eq!(link.uses_count, 0);
         assert_eq!(link.permission, Permission::Pull);
         assert!(link.approval_required);
+    }
+
+    #[tokio::test]
+    async fn create_transition_inserts_link_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+
+        let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+            .await
+            .unwrap();
+
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.slug.as_str(), out.slug);
+        assert_eq!(link.repos.len(), 1);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::ShareLinkCreated);
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::ShareLink);
+        assert_eq!(event.target_id, out.link_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-create"));
+        assert_eq!(
+            event.metadata.get("permission"),
+            Some(&serde_json::json!("pull"))
+        );
+        assert_eq!(
+            event.metadata.get("approval_required"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(event.metadata.get("max_uses"), Some(&serde_json::json!(5)));
+        assert_eq!(
+            event.metadata.get("repo_count"),
+            Some(&serde_json::json!(1))
+        );
     }
 
     #[tokio::test]
@@ -372,6 +442,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn revoke_transition_marks_and_audits_once() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+            .await
+            .unwrap();
+
+        revoke_share_link_transition(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T13:00:00Z"),
+            },
+            Some("req-revoke".into()),
+        )
+        .await
+        .unwrap();
+
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.revoked_by, Some(7));
+        assert_eq!(link.revoked_at, Some(dt("2026-05-04T13:00:00Z")));
+
+        revoke_share_link_transition(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T14:00:00Z"),
+            },
+            Some("req-revoke-again".into()),
+        )
+        .await
+        .unwrap();
+
+        let audits = audit_events(&storage, 100).await;
+        let revoked: Vec<_> = audits
+            .iter()
+            .filter(|event| event.event_type == EventType::ShareLinkRevoked)
+            .collect();
+        assert_eq!(revoked.len(), 1);
+        let event = revoked[0];
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::ShareLink);
+        assert_eq!(event.target_id, out.link_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-revoke"));
+        assert_eq!(event.metadata.get("by_user"), Some(&serde_json::json!(7)));
+    }
+
+    #[tokio::test]
     async fn revoke_already_revoked_is_idempotent() {
         let state = fixture_state().await;
         seed_installation_and_user(&state).await;
@@ -425,6 +551,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expire_transition_emits_audit_without_state_mutation() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+            .await
+            .unwrap();
+        let expired_at = dt("2026-06-03T12:00:00Z");
+
+        expire_share_link_transition(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: expired_at,
+            },
+            Some("req-expire".into()),
+        )
+        .await
+        .unwrap();
+
+        let link = state
+            .storage
+            .get_share_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(link.revoked_at.is_none());
+        assert_eq!(link.uses_count, 0);
+        assert!(!link.is_active(expired_at));
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::ShareLinkExpired)
+            .expect("expiration should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::ShareLink);
+        assert_eq!(event.target_id, out.link_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-expire"));
+        assert_eq!(
+            event.metadata.get("expired_at"),
+            Some(&serde_json::json!(expired_at.to_rfc3339()))
+        );
+    }
+
+    #[tokio::test]
     async fn tick_expiration_skips_revoked_link() {
         let state = fixture_state().await;
         seed_installation_and_user(&state).await;
@@ -451,6 +623,56 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn expire_transition_skips_early_and_revoked_links_without_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+            .await
+            .unwrap();
+
+        expire_share_link_transition(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: dt("2026-06-03T11:59:59Z"),
+            },
+            Some("req-early".into()),
+        )
+        .await
+        .unwrap();
+
+        revoke_share_link_transition(
+            &state,
+            &RevokeLinkInput {
+                link_id: out.link_id,
+                by_user: 7,
+                when: dt("2026-05-04T13:00:00Z"),
+            },
+            Some("req-revoke".into()),
+        )
+        .await
+        .unwrap();
+
+        expire_share_link_transition(
+            &state,
+            &TickExpirationInput {
+                link_id: out.link_id,
+                at: dt("2026-06-03T12:00:00Z"),
+            },
+            Some("req-expire-revoked".into()),
+        )
+        .await
+        .unwrap();
+
+        let audits = audit_events(&storage, 100).await;
+        let expired_count = audits
+            .iter()
+            .filter(|event| event.event_type == EventType::ShareLinkExpired)
+            .count();
+        assert_eq!(expired_count, 0);
     }
 
     #[tokio::test]
