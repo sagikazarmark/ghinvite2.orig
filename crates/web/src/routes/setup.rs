@@ -1,8 +1,6 @@
 //! GitHub App Setup URL return handling.
 
-use crate::commands::{
-    OnboardInstallation, RecordRepositorySelectionChange, RepositorySelectionChangeSource,
-};
+use crate::commands::{SetupReturn, SetupReturnAction, handle_setup_return};
 use crate::error::{Result, WebError};
 use crate::session;
 use crate::state::AppState;
@@ -27,32 +25,24 @@ struct SetupQuery {
     setup_action: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SetupAction {
-    Install,
-    Update,
-}
-
-impl SetupAction {
-    fn as_query_value(self) -> &'static str {
-        match self {
-            Self::Install => "install",
-            Self::Update => "update",
-        }
-    }
-}
-
-fn normalize_setup_action(action: Option<&str>) -> SetupAction {
+fn normalize_setup_action(action: Option<&str>) -> SetupReturnAction {
     match action {
-        Some("update") => SetupAction::Update,
-        _ => SetupAction::Install,
+        Some("update") => SetupReturnAction::Update,
+        _ => SetupReturnAction::Install,
     }
 }
 
-fn setup_return_to(installation_id: u64, action: SetupAction) -> String {
+fn setup_action_query_value(action: SetupReturnAction) -> &'static str {
+    match action {
+        SetupReturnAction::Install => "install",
+        SetupReturnAction::Update => "update",
+    }
+}
+
+fn setup_return_to(installation_id: u64, action: SetupReturnAction) -> String {
     let mut path = format!("/setup/github?installation_id={installation_id}");
     path.push_str("&setup_action=");
-    path.push_str(action.as_query_value());
+    path.push_str(setup_action_query_value(action));
     path
 }
 
@@ -91,32 +81,20 @@ async fn handle_github_setup(
     let selected_repos = selected_repos_for(&user_api, &installation).await?;
     let account_login = installation.account.login.clone();
 
-    match action {
-        SetupAction::Install => {
-            state
-                .commands
-                .onboard_installation(OnboardInstallation {
-                    installation_id: installation.id,
-                    actor_user_id: session.user_id,
-                    account_id: installation.account.id,
-                    account_login: account_login.clone(),
-                    account_type,
-                    selected_repos,
-                    installed_at: Utc::now(),
-                })
-                .await?;
-        }
-        SetupAction::Update => {
-            state
-                .commands
-                .record_repository_selection_change(RecordRepositorySelectionChange {
-                    installation_id: installation.id,
-                    selected_repos,
-                    source: RepositorySelectionChangeSource::SetupReturn,
-                })
-                .await?;
-        }
-    }
+    handle_setup_return(
+        state.commands.as_ref(),
+        SetupReturn {
+            action,
+            installation_id: installation.id,
+            actor_user_id: session.user_id,
+            account_id: installation.account.id,
+            account_login: account_login.clone(),
+            account_type,
+            selected_repos,
+            returned_at: Utc::now(),
+        },
+    )
+    .await?;
 
     Ok(Redirect::to(&format!("/accounts/{account_login}")).into_response())
 }
@@ -158,11 +136,11 @@ mod tests {
     #[test]
     fn setup_return_to_preserves_known_action() {
         assert_eq!(
-            setup_return_to(77, SetupAction::Install),
+            setup_return_to(77, SetupReturnAction::Install),
             "/setup/github?installation_id=77&setup_action=install"
         );
         assert_eq!(
-            setup_return_to(77, SetupAction::Update),
+            setup_return_to(77, SetupReturnAction::Update),
             "/setup/github?installation_id=77&setup_action=update"
         );
     }
@@ -171,14 +149,17 @@ mod tests {
     fn normalize_setup_action_defaults_unknown_values_to_install() {
         assert_eq!(
             normalize_setup_action(Some("install")),
-            SetupAction::Install
+            SetupReturnAction::Install
         );
-        assert_eq!(normalize_setup_action(Some("update")), SetupAction::Update);
+        assert_eq!(
+            normalize_setup_action(Some("update")),
+            SetupReturnAction::Update
+        );
         assert_eq!(
             normalize_setup_action(Some("install&return_to=//evil.test")),
-            SetupAction::Install
+            SetupReturnAction::Install
         );
-        assert_eq!(normalize_setup_action(None), SetupAction::Install);
+        assert_eq!(normalize_setup_action(None), SetupReturnAction::Install);
     }
 
     #[test]

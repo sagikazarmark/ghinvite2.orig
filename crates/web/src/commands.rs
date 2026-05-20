@@ -1,8 +1,9 @@
-use crate::error::Result;
+use crate::error::{Result, WebError};
 use crate::restate_client::RestateClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[async_trait]
@@ -248,11 +249,216 @@ pub struct RouteGithubInvitationWebhook {
     pub at: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GithubInvitationWebhookAction {
     Accepted,
     Declined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupReturnAction {
+    Install,
+    Update,
+}
+
+#[derive(Clone, Debug)]
+pub struct SetupReturn {
+    pub action: SetupReturnAction,
+    pub installation_id: u64,
+    pub actor_user_id: u64,
+    pub account_id: u64,
+    pub account_login: String,
+    pub account_type: domain::AccountType,
+    pub selected_repos: domain::SelectedRepos,
+    pub returned_at: DateTime<Utc>,
+}
+
+pub async fn handle_setup_return(
+    commands: &dyn GhinviteCommands,
+    setup_return: SetupReturn,
+) -> Result<()> {
+    match setup_return.action {
+        SetupReturnAction::Install => {
+            commands
+                .onboard_installation(OnboardInstallation {
+                    installation_id: setup_return.installation_id,
+                    actor_user_id: setup_return.actor_user_id,
+                    account_id: setup_return.account_id,
+                    account_login: setup_return.account_login,
+                    account_type: setup_return.account_type,
+                    selected_repos: setup_return.selected_repos,
+                    installed_at: setup_return.returned_at,
+                })
+                .await
+        }
+        SetupReturnAction::Update => {
+            commands
+                .record_repository_selection_change(RecordRepositorySelectionChange {
+                    installation_id: setup_return.installation_id,
+                    selected_repos: setup_return.selected_repos,
+                    source: RepositorySelectionChangeSource::SetupReturn,
+                })
+                .await
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GithubWebhookDispatchOutcome {
+    Routed,
+    Ignored,
+}
+
+pub async fn dispatch_github_webhook(
+    storage: &dyn storage::Storage,
+    commands: &dyn GhinviteCommands,
+    event_type: &str,
+    payload: &serde_json::Value,
+    received_at: DateTime<Utc>,
+) -> Result<GithubWebhookDispatchOutcome> {
+    match event_type {
+        "repository_invitation" => {
+            dispatch_repository_invitation_webhook(storage, commands, payload, received_at).await
+        }
+        "installation" => dispatch_installation_webhook(commands, payload, received_at).await,
+        "installation_repositories" => {
+            dispatch_installation_repositories_webhook(storage, commands, payload).await
+        }
+        _ => Ok(GithubWebhookDispatchOutcome::Ignored),
+    }
+}
+
+async fn dispatch_repository_invitation_webhook(
+    storage: &dyn storage::Storage,
+    commands: &dyn GhinviteCommands,
+    payload: &serde_json::Value,
+    received_at: DateTime<Utc>,
+) -> Result<GithubWebhookDispatchOutcome> {
+    let action = payload["action"].as_str().unwrap_or("");
+    let github_invitation_id = payload["invitation"]["id"]
+        .as_u64()
+        .ok_or_else(|| WebError::Internal("repository_invitation: missing invitation.id".into()))?;
+
+    let action = match action {
+        "accepted" => GithubInvitationWebhookAction::Accepted,
+        "declined" => GithubInvitationWebhookAction::Declined,
+        _ => return Ok(GithubWebhookDispatchOutcome::Ignored),
+    };
+
+    let Some(invitation) = storage
+        .get_github_invitation_by_github_id(github_invitation_id)
+        .await?
+    else {
+        return Ok(GithubWebhookDispatchOutcome::Ignored);
+    };
+
+    commands
+        .route_github_invitation_webhook(RouteGithubInvitationWebhook {
+            invitation_id: invitation.id,
+            action,
+            at: received_at,
+        })
+        .await?;
+
+    Ok(GithubWebhookDispatchOutcome::Routed)
+}
+
+async fn dispatch_installation_webhook(
+    commands: &dyn GhinviteCommands,
+    payload: &serde_json::Value,
+    received_at: DateTime<Utc>,
+) -> Result<GithubWebhookDispatchOutcome> {
+    let action = payload["action"].as_str().unwrap_or("");
+    let installation_id = payload["installation"]["id"]
+        .as_u64()
+        .ok_or_else(|| WebError::Internal("installation: missing installation.id".into()))?;
+
+    match action {
+        "deleted" => {
+            commands
+                .record_installation_uninstalled(RecordInstallationUninstalled {
+                    installation_id,
+                    uninstalled_at: received_at,
+                })
+                .await?;
+            Ok(GithubWebhookDispatchOutcome::Routed)
+        }
+        _ => Ok(GithubWebhookDispatchOutcome::Ignored),
+    }
+}
+
+fn repository_ids(value: &serde_json::Value) -> Vec<u64> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repo| repo.get("id").and_then(|id| id.as_u64()))
+        .collect()
+}
+
+fn selected_repos_from_repository_event(
+    payload: &serde_json::Value,
+    current: &domain::SelectedRepos,
+) -> Result<Option<domain::SelectedRepos>> {
+    match payload["repository_selection"]
+        .as_str()
+        .unwrap_or("selected")
+    {
+        "all" => Ok(Some(domain::SelectedRepos::All)),
+        "selected" => {
+            let mut ids: BTreeSet<u64> = match current {
+                domain::SelectedRepos::All => return Ok(None),
+                domain::SelectedRepos::Subset(existing) => existing.iter().copied().collect(),
+            };
+            for id in repository_ids(&payload["repositories_removed"]) {
+                ids.remove(&id);
+            }
+            for id in repository_ids(&payload["repositories_added"]) {
+                ids.insert(id);
+            }
+            Ok(Some(domain::SelectedRepos::Subset(
+                ids.into_iter().collect(),
+            )))
+        }
+        other => Err(WebError::Internal(format!(
+            "unsupported repository_selection: {other}"
+        ))),
+    }
+}
+
+async fn dispatch_installation_repositories_webhook(
+    storage: &dyn storage::Storage,
+    commands: &dyn GhinviteCommands,
+    payload: &serde_json::Value,
+) -> Result<GithubWebhookDispatchOutcome> {
+    let installation_id = payload["installation"]["id"].as_u64().ok_or_else(|| {
+        WebError::Internal("installation_repositories: missing installation.id".into())
+    })?;
+
+    let current = storage
+        .get_installation(installation_id)
+        .await?
+        .ok_or_else(|| {
+            WebError::Internal(format!(
+                "installation_repositories: unknown installation {installation_id}"
+            ))
+        })?;
+    let Some(selected_repos) =
+        selected_repos_from_repository_event(payload, &current.selected_repos)?
+    else {
+        return Ok(GithubWebhookDispatchOutcome::Ignored);
+    };
+
+    commands
+        .record_repository_selection_change(RecordRepositorySelectionChange {
+            installation_id,
+            selected_repos,
+            source: RepositorySelectionChangeSource::Webhook,
+        })
+        .await?;
+
+    Ok(GithubWebhookDispatchOutcome::Routed)
 }
 
 #[cfg(test)]
@@ -265,6 +471,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
+    use storage::Storage;
 
     #[derive(Clone, Debug)]
     struct RecordedCall {
@@ -335,6 +542,490 @@ mod tests {
         chrono::DateTime::parse_from_rfc3339(iso)
             .unwrap()
             .with_timezone(&Utc)
+    }
+
+    #[derive(Default)]
+    struct RecordingCommands {
+        calls: Arc<Mutex<Vec<RecordedCommand>>>,
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum RecordedCommand {
+        OnboardInstallation {
+            installation_id: u64,
+            actor_user_id: u64,
+            account_id: u64,
+            account_login: String,
+            account_type: domain::AccountType,
+            selected_repos: domain::SelectedRepos,
+            installed_at: chrono::DateTime<Utc>,
+        },
+        RecordRepositorySelectionChange {
+            installation_id: u64,
+            selected_repos: domain::SelectedRepos,
+            source: RepositorySelectionChangeSource,
+        },
+        RecordInstallationUninstalled {
+            installation_id: u64,
+            uninstalled_at: chrono::DateTime<Utc>,
+        },
+        RouteGithubInvitationWebhook {
+            invitation_id: domain::GithubInvitationId,
+            action: GithubInvitationWebhookAction,
+            at: chrono::DateTime<Utc>,
+        },
+    }
+
+    #[async_trait]
+    impl GhinviteCommands for RecordingCommands {
+        async fn create_share_link(
+            &self,
+            _command: CreateShareLink,
+        ) -> Result<CreateShareLinkOutput> {
+            panic!("unexpected create_share_link command")
+        }
+
+        async fn revoke_share_link(&self, _command: RevokeShareLink) -> Result<()> {
+            panic!("unexpected revoke_share_link command")
+        }
+
+        async fn submit_invitation_request(&self, _command: SubmitInvitationRequest) -> Result<()> {
+            panic!("unexpected submit_invitation_request command")
+        }
+
+        async fn decide_invitation_request(&self, _command: DecideInvitationRequest) -> Result<()> {
+            panic!("unexpected decide_invitation_request command")
+        }
+
+        async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(RecordedCommand::OnboardInstallation {
+                    installation_id: command.installation_id,
+                    actor_user_id: command.actor_user_id,
+                    account_id: command.account_id,
+                    account_login: command.account_login,
+                    account_type: command.account_type,
+                    selected_repos: command.selected_repos,
+                    installed_at: command.installed_at,
+                });
+            Ok(())
+        }
+
+        async fn record_repository_selection_change(
+            &self,
+            command: RecordRepositorySelectionChange,
+        ) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(RecordedCommand::RecordRepositorySelectionChange {
+                    installation_id: command.installation_id,
+                    selected_repos: command.selected_repos,
+                    source: command.source,
+                });
+            Ok(())
+        }
+
+        async fn record_installation_uninstalled(
+            &self,
+            command: RecordInstallationUninstalled,
+        ) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(RecordedCommand::RecordInstallationUninstalled {
+                    installation_id: command.installation_id,
+                    uninstalled_at: command.uninstalled_at,
+                });
+            Ok(())
+        }
+
+        async fn route_github_invitation_webhook(
+            &self,
+            command: RouteGithubInvitationWebhook,
+        ) -> Result<()> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(RecordedCommand::RouteGithubInvitationWebhook {
+                    invitation_id: command.invitation_id,
+                    action: command.action,
+                    at: command.at,
+                });
+            Ok(())
+        }
+    }
+
+    async fn seed_github_invitation(
+        storage: &storage::SqlxStorage,
+        github_invitation_id: u64,
+    ) -> domain::GithubInvitationId {
+        let account = domain::Account {
+            installation_id: 1,
+            account_id: 9001,
+            account_login: "acme".into(),
+            account_type: domain::AccountType::Organization,
+            installed_at: at("2026-05-20T13:30:00Z"),
+            uninstalled_at: None,
+            selected_repos: domain::SelectedRepos::All,
+        };
+        storage.insert_installation(&account).await.unwrap();
+        storage
+            .upsert_user(&domain::User {
+                user_id: 42,
+                login: "admin".into(),
+                avatar_url: None,
+                last_seen_at: at("2026-05-20T13:30:00Z"),
+            })
+            .await
+            .unwrap();
+        storage
+            .upsert_user(&domain::User {
+                user_id: 99,
+                login: "recipient".into(),
+                avatar_url: None,
+                last_seen_at: at("2026-05-20T13:30:00Z"),
+            })
+            .await
+            .unwrap();
+
+        let link_id = domain::ShareLinkId::new();
+        storage
+            .insert_share_link(&domain::ShareLink {
+                id: link_id,
+                slug: domain::Slug::from_string("0123456789ABCDEF".into()).unwrap(),
+                installation_id: 1,
+                account_id: 9001,
+                created_by: 42,
+                created_at: at("2026-05-20T13:30:00Z"),
+                expires_at: None,
+                max_uses: None,
+                uses_count: 0,
+                permission: domain::Permission::Pull,
+                approval_required: false,
+                internal_note: None,
+                revoked_at: None,
+                revoked_by: None,
+                repos: vec![domain::ShareLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                }],
+            })
+            .await
+            .unwrap();
+
+        let request_id = domain::RequestId::new();
+        storage
+            .insert_invitation_request_and_increment_uses(&domain::InvitationRequest {
+                id: request_id,
+                share_link_id: link_id,
+                requester_id: 99,
+                justification: None,
+                state: domain::RequestState::Pending,
+                decided_by: None,
+                decided_at: None,
+                decline_reason: None,
+                created_at: at("2026-05-20T13:35:00Z"),
+            })
+            .await
+            .unwrap();
+
+        let invitation_id = domain::GithubInvitationId::new();
+        storage
+            .insert_github_invitation(&domain::GithubInvitation {
+                id: invitation_id,
+                invitation_request_id: request_id,
+                repo_id: 10,
+                github_invitation_id: None,
+                state: domain::InvitationState::Sending,
+                error_message: None,
+                created_at: at("2026-05-20T13:40:00Z"),
+                updated_at: at("2026-05-20T13:40:00Z"),
+            })
+            .await
+            .unwrap();
+        storage
+            .update_github_invitation(&storage::GithubInvitationUpdate {
+                id: invitation_id,
+                state: domain::InvitationState::Sent,
+                github_invitation_id: Some(github_invitation_id),
+                error_message: None,
+                updated_at: at("2026-05-20T13:41:00Z"),
+            })
+            .await
+            .unwrap();
+
+        invitation_id
+    }
+
+    async fn seed_installation_with_repos(
+        storage: &storage::SqlxStorage,
+        selected_repos: domain::SelectedRepos,
+    ) {
+        storage
+            .insert_installation(&domain::Account {
+                installation_id: 77,
+                account_id: 9001,
+                account_login: "acme".into(),
+                account_type: domain::AccountType::Organization,
+                installed_at: at("2026-05-20T13:30:00Z"),
+                uninstalled_at: None,
+                selected_repos,
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn setup_return_install_delegates_to_onboard_command() {
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        handle_setup_return(
+            &commands,
+            SetupReturn {
+                action: SetupReturnAction::Install,
+                installation_id: 77,
+                actor_user_id: 42,
+                account_id: 9001,
+                account_login: "acme".into(),
+                account_type: domain::AccountType::Organization,
+                selected_repos: domain::SelectedRepos::All,
+                returned_at: at("2026-05-20T13:00:00Z"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::OnboardInstallation {
+                installation_id: 77,
+                actor_user_id: 42,
+                account_id: 9001,
+                account_login: "acme".into(),
+                account_type: domain::AccountType::Organization,
+                selected_repos: domain::SelectedRepos::All,
+                installed_at: at("2026-05-20T13:00:00Z"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_return_update_delegates_to_repository_selection_command() {
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        handle_setup_return(
+            &commands,
+            SetupReturn {
+                action: SetupReturnAction::Update,
+                installation_id: 77,
+                actor_user_id: 42,
+                account_id: 9001,
+                account_login: "acme".into(),
+                account_type: domain::AccountType::Organization,
+                selected_repos: domain::SelectedRepos::Subset(vec![10, 11]),
+                returned_at: at("2026-05-20T13:05:00Z"),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RecordRepositorySelectionChange {
+                installation_id: 77,
+                selected_repos: domain::SelectedRepos::Subset(vec![10, 11]),
+                source: RepositorySelectionChangeSource::SetupReturn,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_installation_deleted_event_delegates_to_uninstall_command() {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "installation",
+            &serde_json::json!({
+                "action": "deleted",
+                "installation": {"id": 77}
+            }),
+            at("2026-05-20T14:00:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Routed);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RecordInstallationUninstalled {
+                installation_id: 77,
+                uninstalled_at: at("2026-05-20T14:00:00Z"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_repository_invitation_event_delegates_to_invitation_webhook_command() {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        let invitation_id = seed_github_invitation(&storage, 99001).await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "repository_invitation",
+            &serde_json::json!({
+                "action": "accepted",
+                "invitation": {"id": 99001}
+            }),
+            at("2026-05-20T14:05:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Routed);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RouteGithubInvitationWebhook {
+                invitation_id,
+                action: GithubInvitationWebhookAction::Accepted,
+                at: at("2026-05-20T14:05:00Z"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_repository_invitation_declined_event_delegates_to_invitation_webhook_command() {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        let invitation_id = seed_github_invitation(&storage, 99002).await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "repository_invitation",
+            &serde_json::json!({
+                "action": "declined",
+                "invitation": {"id": 99002}
+            }),
+            at("2026-05-20T14:06:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Routed);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RouteGithubInvitationWebhook {
+                invitation_id,
+                action: GithubInvitationWebhookAction::Declined,
+                at: at("2026-05-20T14:06:00Z"),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_installation_repositories_event_delegates_to_repository_selection_command() {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        seed_installation_with_repos(&storage, domain::SelectedRepos::Subset(vec![10, 11])).await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "installation_repositories",
+            &serde_json::json!({
+                "repository_selection": "selected",
+                "installation": {"id": 77},
+                "repositories_removed": [{"id": 10}],
+                "repositories_added": [{"id": 12}]
+            }),
+            at("2026-05-20T14:10:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Routed);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RecordRepositorySelectionChange {
+                installation_id: 77,
+                selected_repos: domain::SelectedRepos::Subset(vec![11, 12]),
+                source: RepositorySelectionChangeSource::Webhook,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_installation_repositories_all_event_delegates_to_all_repository_selection_command()
+     {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        seed_installation_with_repos(&storage, domain::SelectedRepos::Subset(vec![10, 11])).await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "installation_repositories",
+            &serde_json::json!({
+                "repository_selection": "all",
+                "installation": {"id": 77},
+                "repositories_removed": [],
+                "repositories_added": []
+            }),
+            at("2026-05-20T14:15:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Routed);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RecordRepositorySelectionChange {
+                installation_id: 77,
+                selected_repos: domain::SelectedRepos::All,
+                source: RepositorySelectionChangeSource::Webhook,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn github_installation_repositories_all_to_selected_delta_is_ignored() {
+        let storage = storage::SqlxStorage::in_memory().await.unwrap();
+        seed_installation_with_repos(&storage, domain::SelectedRepos::All).await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+
+        let outcome = dispatch_github_webhook(
+            &storage,
+            &commands,
+            "installation_repositories",
+            &serde_json::json!({
+                "repository_selection": "selected",
+                "installation": {"id": 77},
+                "repositories_removed": [{"id": 10}],
+                "repositories_added": []
+            }),
+            at("2026-05-20T14:20:00Z"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, GithubWebhookDispatchOutcome::Ignored);
+        assert!(calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
