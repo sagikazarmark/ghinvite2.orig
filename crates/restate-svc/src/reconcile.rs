@@ -5,7 +5,7 @@ use crate::error::HandlerError;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
-use domain::InvitationState;
+use domain::{InvitationState, RepositoryIdentity};
 use restate_sdk::context::{Context, ContextSideEffects, RunFuture};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
@@ -104,13 +104,16 @@ async fn reconcile_single(
                 row.id, row.repo_id
             ))
         })?;
-    let (owner, repo_name) = repo.repo_full_name.split_once('/').ok_or_else(|| {
-        HandlerError::Invariant(format!("bad repo full name: {}", repo.repo_full_name))
+    let repository = RepositoryIdentity::parse(repo.repo_full_name.clone()).map_err(|err| {
+        HandlerError::Invariant(format!(
+            "invalid repo_full_name {:?}: {err}",
+            repo.repo_full_name
+        ))
     })?;
 
     let pending = state
         .github
-        .list_invitations(acct.installation_id, owner, repo_name)
+        .list_invitations(acct.installation_id, repository.owner(), repository.name())
         .await?;
     let still_pending = row
         .github_invitation_id
@@ -130,7 +133,12 @@ async fn reconcile_single(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let is_member = state
         .github
-        .is_collaborator(acct.installation_id, owner, repo_name, &recipient.login)
+        .is_collaborator(
+            acct.installation_id,
+            repository.owner(),
+            repository.name(),
+            &recipient.login,
+        )
         .await?;
 
     let (new_state, event) = if is_member {
@@ -196,7 +204,10 @@ mod tests {
     /// Seed: one installation, two users, one share_link with one repo, one
     /// invitation_request, one github_invitation row in `Sent` state.
     /// Returns the inserted invitation id.
-    async fn seed_one_pending(state: &AppState) -> GithubInvitationId {
+    async fn seed_one_pending_with_repo_full_name(
+        state: &AppState,
+        repo_full_name: &str,
+    ) -> GithubInvitationId {
         state
             .storage
             .insert_installation(&domain::Account {
@@ -247,7 +258,7 @@ mod tests {
             revoked_by: None,
             repos: vec![ShareLinkRepo {
                 repo_id: 10,
-                repo_full_name: "acme/api".into(),
+                repo_full_name: repo_full_name.into(),
             }],
         };
         state.storage.insert_share_link(&link).await.unwrap();
@@ -286,6 +297,10 @@ mod tests {
         inv_id
     }
 
+    async fn seed_one_pending(state: &AppState) -> GithubInvitationId {
+        seed_one_pending_with_repo_full_name(state, "acme/api").await
+    }
+
     #[tokio::test]
     async fn daily_run_no_change_when_still_pending() {
         let storage = fixture_storage().await;
@@ -307,6 +322,33 @@ mod tests {
         let github = fixture_github_client(Arc::new(mock));
         let state = AppState::new(storage, github);
         let inv_id = seed_one_pending(&state).await;
+
+        daily_run_logic(
+            &state,
+            &DailyRunInput {
+                at: dt("2026-05-05T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Sent);
+    }
+
+    #[tokio::test]
+    async fn daily_run_continues_when_repo_full_name_is_invalid() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![]);
+        let github = fixture_github_client(Arc::new(mock));
+        let state = AppState::new(storage, github);
+        let inv_id = seed_one_pending_with_repo_full_name(&state, "acme/team/api").await;
 
         daily_run_logic(
             &state,
