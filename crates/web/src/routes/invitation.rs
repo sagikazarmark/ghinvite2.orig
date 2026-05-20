@@ -1,8 +1,10 @@
 //! `/i/{slug}...` routes. Plan 6: recipient flow.
 
-use super::share_link_resolution::{PendingRequestPolicy, resolve_public_share_link};
 use crate::commands::SubmitInvitationRequest;
 use crate::session;
+use crate::share_link_resolution::{
+    PendingRequestPolicy, PublicShareLinkResolution, resolve_public_share_link,
+};
 use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
@@ -35,7 +37,7 @@ async fn landing(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let now = Utc::now();
-    let resolved = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_share_link(
         state.storage.as_ref(),
         &slug,
         now,
@@ -43,11 +45,13 @@ async fn landing(
     )
     .await
     {
-        Ok(resolved) => resolved,
-        Err(error) => return error.into_response(),
+        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicShareLinkResolution::PendingRequest { .. }) => {
+            return crate::error::WebError::NotFound.into_response();
+        }
+        Err(error) => return error.into_public_error().into_response(),
     };
-    let slug = resolved.slug.as_str().to_string();
-    let link = resolved.link;
+    let slug = slug.as_str().to_string();
     let session = session::load(&tower).await.unwrap_or_default();
     let signed_in_login = if session.is_authenticated() {
         Some(session.login.clone())
@@ -77,24 +81,25 @@ async fn request_form(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let resolved = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_share_link(
         state.storage.as_ref(),
         &slug,
         now,
-        PendingRequestPolicy::RedirectForRequester(session.user_id),
+        PendingRequestPolicy::RedirectForRecipient {
+            recipient_id: session.user_id,
+        },
     )
     .await
     {
-        Ok(resolved) => resolved,
-        Err(error) => return error.into_response(),
+        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicShareLinkResolution::PendingRequest { slug, request_id }) => {
+            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
+                .into_response();
+        }
+        Err(error) => return error.into_public_error().into_response(),
     };
 
-    if let Some(redirect) = resolved.pending_redirect() {
-        return redirect.into_response();
-    }
-
-    let slug = resolved.slug.as_str().to_string();
-    let link = resolved.link;
+    let slug = slug.as_str().to_string();
     let request_id = domain::RequestId::new();
     let flash = session::take_flash(&tower).await.unwrap_or(None);
     let signed_in_login = session.login.clone();
@@ -125,24 +130,25 @@ async fn submit_request(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let resolved = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_share_link(
         state.storage.as_ref(),
         &slug,
         now,
-        PendingRequestPolicy::RedirectForRequester(session.user_id),
+        PendingRequestPolicy::RedirectForRecipient {
+            recipient_id: session.user_id,
+        },
     )
     .await
     {
-        Ok(resolved) => resolved,
-        Err(error) => return error.into_response(),
+        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicShareLinkResolution::PendingRequest { slug, request_id }) => {
+            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
+                .into_response();
+        }
+        Err(error) => return error.into_public_error().into_response(),
     };
 
-    if let Some(redirect) = resolved.pending_redirect() {
-        return redirect.into_response();
-    }
-
-    let slug = resolved.slug.as_str().to_string();
-    let link = resolved.link;
+    let slug = slug.as_str().to_string();
 
     let justification = form
         .justification

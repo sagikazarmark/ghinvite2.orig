@@ -15,10 +15,10 @@ An individual GitHub identity that can sign in, create share links, request acce
 A GitHub user with current GitHub-derived authority to administer an account in ghinvite. For an organization account this is an organization owner; for a personal account this is the same GitHub user who owns the account.
 
 ### Share Link
-A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link.
+A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link. Public use of a share link means recipient use of that same shareable URL, not a separate kind of link.
 
 ### Invitation Request
-A recipient's request for access through a share link. It may be auto-approved or wait for an account admin decision.
+A recipient's request for access through a share link. It may be auto-approved or wait for an account admin decision. A recipient may have at most one pending invitation request for a given share link at a time.
 
 ### GitHub Invitation
 A repository collaborator invitation sent through GitHub for one repository as the result of an approved invitation request.

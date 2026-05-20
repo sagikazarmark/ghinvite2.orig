@@ -10,6 +10,7 @@ pub mod middleware;
 pub mod restate_client;
 pub mod routes;
 pub mod session;
+pub(crate) mod share_link_resolution;
 pub mod state;
 pub mod views;
 pub mod wasm_compat;

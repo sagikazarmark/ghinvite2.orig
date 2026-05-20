@@ -145,12 +145,21 @@ fn active_link(slug: &str) -> ShareLink {
 }
 
 fn pending_request(id: RequestId, link: ShareLinkId, requester_id: u64) -> InvitationRequest {
+    request_with_state(id, link, requester_id, RequestState::Pending)
+}
+
+fn request_with_state(
+    id: RequestId,
+    link: ShareLinkId,
+    requester_id: u64,
+    state: RequestState,
+) -> InvitationRequest {
     InvitationRequest {
         id,
         share_link_id: link,
         requester_id,
         justification: None,
-        state: RequestState::Pending,
+        state,
         decided_by: None,
         decided_at: None,
         decline_reason: None,
@@ -333,6 +342,36 @@ async fn landing_renders_active_link() {
 }
 
 #[tokio::test]
+async fn landing_with_existing_pending_request_still_renders_preview() {
+    let link = active_link(ACTIVE_SLUG);
+    let link_id = link.id;
+    let pending = pending_request(RequestId::new(), link_id, REQUESTER_ID);
+    let (app, _calls) = build_test_app(
+        link,
+        Some(pending),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("acme/api"));
+}
+
+#[tokio::test]
 async fn landing_returns_not_found_for_revoked_link() {
     let mut link = active_link(ACTIVE_SLUG);
     link.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
@@ -449,6 +488,71 @@ async fn request_form_with_existing_pending_request_redirects_to_pending_page() 
 }
 
 #[tokio::test]
+async fn request_form_with_other_recipient_pending_request_renders_form() {
+    let link = active_link(ACTIVE_SLUG);
+    let link_id = link.id;
+    let pending = pending_request(RequestId::new(), link_id, CREATOR_ID);
+    let (app, _calls) = build_test_app(
+        link,
+        Some(pending),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Submit request"));
+}
+
+#[tokio::test]
+async fn request_form_with_same_recipient_declined_request_renders_form() {
+    let link = active_link(ACTIVE_SLUG);
+    let link_id = link.id;
+    let declined = request_with_state(
+        RequestId::new(),
+        link_id,
+        REQUESTER_ID,
+        RequestState::Declined,
+    );
+    let (app, _calls) = build_test_app(
+        link,
+        Some(declined),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Submit request"));
+}
+
+#[tokio::test]
 async fn submit_with_existing_pending_request_redirects_to_pending_page_without_command() {
     let link = active_link(ACTIVE_SLUG);
     let link_id = link.id;
@@ -481,4 +585,49 @@ async fn submit_with_existing_pending_request_redirects_to_pending_page_without_
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(location, format!("/i/{ACTIVE_SLUG}/pending/{request_id}"));
     assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn submit_with_other_recipient_pending_request_sends_command() {
+    let link = active_link(ACTIVE_SLUG);
+    let link_id = link.id;
+    let pending = pending_request(RequestId::new(), link_id, CREATOR_ID);
+    let (app, calls) = build_test_app(
+        link,
+        Some(pending),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+    let posted_request_id = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "request_id={posted_request_id}&justification=ship-it"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(
+        location,
+        format!("/i/{ACTIVE_SLUG}/pending/{posted_request_id}")
+    );
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[RecordedCommand::SubmitInvitationRequest {
+            share_link_id: link_id,
+            requester_id: REQUESTER_ID,
+            justification: Some("ship-it".into()),
+        }]
+    );
 }
