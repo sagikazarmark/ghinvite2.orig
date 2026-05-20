@@ -2,6 +2,7 @@
 //! layouts. Plan 7 wraps `build_app()` in a Workers `#[event(fetch)]`; Plans 5
 //! and 6 fill in the dashboard and recipient routes.
 
+pub(crate) mod account_admin_reads;
 pub mod commands;
 pub mod config;
 pub mod error;
