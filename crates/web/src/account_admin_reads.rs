@@ -64,12 +64,8 @@ pub(crate) async fn pending_request_queue(
     let mut rows = Vec::with_capacity(pending.len());
 
     for request in pending {
-        let share_link = storage
-            .get_share_link_by_id(request.share_link_id)
-            .await
-            .ok()
-            .flatten();
-        let requester = storage.get_user(request.requester_id).await.ok().flatten();
+        let share_link = storage.get_share_link_by_id(request.share_link_id).await?;
+        let requester = storage.get_user(request.requester_id).await?;
         rows.push(pending_request_row(request, share_link, requester));
     }
 
@@ -205,6 +201,8 @@ mod tests {
         request: Option<InvitationRequest>,
         share_link: Option<ShareLink>,
         user: Option<User>,
+        fail_share_link_lookup: bool,
+        fail_user_lookup: bool,
     }
 
     #[async_trait::async_trait]
@@ -259,6 +257,10 @@ mod tests {
         }
 
         async fn get_user(&self, _user_id: u64) -> storage::Result<Option<User>> {
+            if self.fail_user_lookup {
+                return Err(storage::Error::Database("user lookup failed".into()));
+            }
+
             Ok(self.user.clone())
         }
 
@@ -279,6 +281,10 @@ mod tests {
             &self,
             _id: ShareLinkId,
         ) -> storage::Result<Option<ShareLink>> {
+            if self.fail_share_link_lookup {
+                return Err(storage::Error::Database("share link lookup failed".into()));
+            }
+
             Ok(self.share_link.clone())
         }
 
@@ -494,8 +500,10 @@ mod tests {
             rows[0].justification.as_deref(),
             Some("need repository access")
         );
+        assert_eq!(rows[0].created_at, dt("2026-05-04T12:30:00Z"));
         assert_eq!(rows[1].request_id, newer.id);
         assert_eq!(rows[1].requester_login, "alice");
+        assert_eq!(rows[1].created_at, dt("2026-05-04T12:40:00Z"));
     }
 
     #[tokio::test]
@@ -512,6 +520,8 @@ mod tests {
             request: None,
             share_link: None,
             user: None,
+            fail_share_link_lookup: false,
+            fail_user_lookup: false,
         };
 
         let rows = super::pending_request_queue(&storage, 9001).await.unwrap();
@@ -521,6 +531,34 @@ mod tests {
         assert_eq!(rows[0].link_slug, "(deleted link)");
         assert_eq!(rows[0].link_id, None);
         assert_eq!(rows[0].requester_login, "user-999999");
+    }
+
+    #[tokio::test]
+    async fn account_admin_pending_request_queue_propagates_related_record_storage_errors() {
+        let request = sample_request(
+            RequestId::new(),
+            ShareLinkId::new(),
+            802,
+            "2026-05-04T12:30:00Z",
+        );
+        let storage = FakeStorage {
+            pending_requests: vec![request],
+            request: None,
+            share_link: None,
+            user: None,
+            fail_share_link_lookup: true,
+            fail_user_lookup: false,
+        };
+
+        let err = super::pending_request_queue(&storage, 9001)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            crate::WebError::Storage(storage::Error::Database(message))
+                if message == "share link lookup failed"
+        ));
     }
 
     #[tokio::test]
@@ -536,6 +574,8 @@ mod tests {
             request: Some(request.clone()),
             share_link: None,
             user: None,
+            fail_share_link_lookup: false,
+            fail_user_lookup: false,
         };
 
         let err = super::find_account_admin_request(&storage, 9001, request.id)
