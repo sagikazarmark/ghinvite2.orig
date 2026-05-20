@@ -3,6 +3,9 @@
 use crate::commands::{
     CreateShareLink, DecideInvitationRequest, InvitationRequestDecision, RevokeShareLink,
 };
+use crate::account_admin_reads::{
+    find_account_admin_request, find_account_admin_share_link, pending_request_queue,
+};
 use crate::middleware::auth::RequireAdminOf;
 use crate::session;
 use crate::state::AppState;
@@ -254,9 +257,15 @@ async fn link_detail(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    let link = match state.storage.get_share_link_by_id(link_id).await {
-        Ok(Some(l)) if l.account_id == admin.account.account_id => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let link = match find_account_admin_share_link(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        link_id,
+    )
+    .await
+    {
+        Ok(link) => link,
+        Err(e) => return e.into_response(),
     };
 
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
@@ -291,10 +300,15 @@ async fn revoke_link(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    match state.storage.get_share_link_by_id(link_id).await {
-        Ok(Some(l)) if l.account_id == admin.account.account_id => {}
-        _ => return crate::error::WebError::NotFound.into_response(),
-    };
+    if let Err(e) = find_account_admin_share_link(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        link_id,
+    )
+    .await
+    {
+        return e.into_response();
+    }
 
     if let Err(e) = state
         .commands
@@ -338,43 +352,20 @@ async fn requests_queue(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireAdminOf,
 ) -> impl IntoResponse {
-    let pending = state
-        .storage
-        .list_pending_requests_for_account(admin.account.account_id)
-        .await
-        .unwrap_or_default();
-
-    let mut rows: Vec<crate::views::requests::PendingRequestRow> = Vec::new();
-    for req in pending {
-        let link = state
-            .storage
-            .get_share_link_by_id(req.share_link_id)
-            .await
-            .ok()
-            .flatten();
-        let user = state
-            .storage
-            .get_user(req.requester_id)
-            .await
-            .ok()
-            .flatten();
-        let (link_slug, link_id) = match link {
-            Some(l) => (l.slug.as_str().to_string(), l.id.to_string()),
-            None => ("(deleted link)".to_string(), String::new()),
-        };
-        let requester_login = user
-            .map(|u| u.login)
-            .unwrap_or_else(|| format!("user-{}", req.requester_id));
-        rows.push(crate::views::requests::PendingRequestRow {
-            request_id: req.id.to_string(),
-            link_slug,
-            link_id,
-            requester_login,
-            justification: req.justification,
-            created_at: req.created_at,
-        });
-    }
-    rows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+    let rows = match pending_request_queue(state.storage.as_ref(), admin.account.account_id).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|row| crate::views::requests::PendingRequestRow {
+                request_id: row.request_id.to_string(),
+                link_slug: row.link_slug,
+                link_id: row.link_id.map(|id| id.to_string()).unwrap_or_default(),
+                requester_login: row.requester_login,
+                justification: row.justification,
+                created_at: row.created_at,
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => return e.into_response(),
+    };
 
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
@@ -405,17 +396,16 @@ async fn approve_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    // Verify the request belongs to this account via storage lookup.
-    let req = match state.storage.get_invitation_request(request_id).await {
-        Ok(Some(r)) => r,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let _account_request = match find_account_admin_request(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        request_id,
+    )
+    .await
+    {
+        Ok(account_request) => account_request,
+        Err(e) => return e.into_response(),
     };
-    // Cross-check: the request's link must belong to this account.
-    let link = match state.storage.get_share_link_by_id(req.share_link_id).await {
-        Ok(Some(l)) if l.account_id == admin.account.account_id => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
-    };
-    let _ = link; // ownership verified
 
     match state
         .commands
@@ -469,15 +459,16 @@ async fn decline_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    let req = match state.storage.get_invitation_request(request_id).await {
-        Ok(Some(r)) => r,
-        _ => return crate::error::WebError::NotFound.into_response(),
+    let _account_request = match find_account_admin_request(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        request_id,
+    )
+    .await
+    {
+        Ok(account_request) => account_request,
+        Err(e) => return e.into_response(),
     };
-    let link = match state.storage.get_share_link_by_id(req.share_link_id).await {
-        Ok(Some(l)) if l.account_id == admin.account.account_id => l,
-        _ => return crate::error::WebError::NotFound.into_response(),
-    };
-    let _ = link;
 
     // v1: no reason field in the form; v1.1 will add a textarea.
     match state
