@@ -36,12 +36,30 @@ pub(crate) async fn find_account_admin_share_link(
     Ok(link)
 }
 
+pub(crate) async fn find_account_admin_request(
+    storage: &dyn Storage,
+    account_id: u64,
+    request_id: RequestId,
+) -> Result<AccountAdminInvitationRequest> {
+    let request = storage
+        .get_invitation_request(request_id)
+        .await?
+        .ok_or(WebError::NotFound)?;
+    let share_link =
+        find_account_admin_share_link(storage, account_id, request.share_link_id).await?;
+
+    Ok(AccountAdminInvitationRequest {
+        request,
+        share_link,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, Utc};
     use domain::{
-        Account, AccountType, Permission, SelectedRepos, ShareLink, ShareLinkId, ShareLinkRepo,
-        Slug, User,
+        Account, AccountType, InvitationRequest, Permission, RequestId, RequestState,
+        SelectedRepos, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
     };
     use storage::Storage;
 
@@ -98,6 +116,25 @@ mod tests {
         }
     }
 
+    fn sample_request(
+        id: RequestId,
+        share_link_id: ShareLinkId,
+        requester_id: u64,
+        created_at: &str,
+    ) -> InvitationRequest {
+        InvitationRequest {
+            id,
+            share_link_id,
+            requester_id,
+            justification: Some("need repository access".into()),
+            state: RequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            decline_reason: None,
+            created_at: dt(created_at),
+        }
+    }
+
     async fn storage_with_accounts() -> storage::SqlxStorage {
         let storage = storage::SqlxStorage::in_memory().await.unwrap();
         storage
@@ -108,7 +145,10 @@ mod tests {
             .insert_installation(&sample_account(2, 9002, "other"))
             .await
             .unwrap();
-        storage.upsert_user(&sample_user(701, "creator")).await.unwrap();
+        storage
+            .upsert_user(&sample_user(701, "creator"))
+            .await
+            .unwrap();
         storage
     }
 
@@ -134,6 +174,66 @@ mod tests {
         storage.insert_share_link(&link).await.unwrap();
 
         let err = super::find_account_admin_share_link(&storage, 9001, link.id)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, crate::WebError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn account_admin_request_lookup_returns_request_and_link_for_owner() {
+        let storage = storage_with_accounts().await;
+        storage
+            .upsert_user(&sample_user(802, "requester"))
+            .await
+            .unwrap();
+        let link = sample_link(9001, 1, 701, "QueueSlug0000003");
+        storage.insert_share_link(&link).await.unwrap();
+        let request_id = RequestId::new();
+        let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
+        storage
+            .insert_invitation_request_and_increment_uses(&request)
+            .await
+            .unwrap();
+
+        let found = super::find_account_admin_request(&storage, 9001, request_id)
+            .await
+            .unwrap();
+
+        assert_eq!(found.request.id, request_id);
+        assert_eq!(found.request.share_link_id, link.id);
+        assert_eq!(found.share_link.id, link.id);
+        assert_eq!(found.share_link.account_id, 9001);
+    }
+
+    #[tokio::test]
+    async fn account_admin_request_lookup_hides_wrong_account_request() {
+        let storage = storage_with_accounts().await;
+        storage
+            .upsert_user(&sample_user(802, "requester"))
+            .await
+            .unwrap();
+        let link = sample_link(9002, 2, 701, "QueueSlug0000004");
+        storage.insert_share_link(&link).await.unwrap();
+        let request_id = RequestId::new();
+        let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
+        storage
+            .insert_invitation_request_and_increment_uses(&request)
+            .await
+            .unwrap();
+
+        let err = super::find_account_admin_request(&storage, 9001, request_id)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, crate::WebError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn account_admin_request_lookup_hides_missing_request() {
+        let storage = storage_with_accounts().await;
+
+        let err = super::find_account_admin_request(&storage, 9001, RequestId::new())
             .await
             .unwrap_err();
 
