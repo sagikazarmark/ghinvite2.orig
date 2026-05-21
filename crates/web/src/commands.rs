@@ -31,6 +31,9 @@ pub trait GhinviteCommands: Send + Sync + 'static {
 const SHARE_LINK_SERVICE: &str = "ShareLink";
 const CREATE_SHARE_LINK_METHOD: &str = "create";
 const REVOKE_SHARE_LINK_METHOD: &str = "revoke";
+const INVITATION_REQUEST_SERVICE: &str = "InvitationRequest";
+const SUBMIT_INVITATION_REQUEST_METHOD: &str = "submit";
+const DECIDE_INVITATION_REQUEST_METHOD: &str = "decide";
 
 #[async_trait]
 pub(crate) trait RestateCommandAdapter: Send + Sync + 'static {
@@ -89,6 +92,10 @@ fn share_link_command_key(account_id: u64) -> String {
     account_id.to_string()
 }
 
+fn invitation_request_command_key(request_id: domain::RequestId) -> String {
+    request_id.to_string()
+}
+
 #[async_trait]
 impl<R> GhinviteCommands for RestateCommands<R>
 where
@@ -109,24 +116,28 @@ where
     }
 
     async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()> {
+        let key = invitation_request_command_key(command.request_id);
+        let payload = SubmitInvitationRequestPayload::from(command);
         self.restate
             .send(
-                "InvitationRequest",
-                &command.request_id.to_string(),
-                "submit",
-                &command,
+                INVITATION_REQUEST_SERVICE,
+                &key,
+                SUBMIT_INVITATION_REQUEST_METHOD,
+                &payload,
             )
             .await
     }
 
     async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()> {
+        let key = invitation_request_command_key(command.request_id);
+        let payload = InvitationRequestDecisionPayload::from(command.decision);
         let _: serde_json::Value = self
             .restate
             .call(
-                "InvitationRequest",
-                &command.request_id.to_string(),
-                "decide",
-                &command.decision,
+                INVITATION_REQUEST_SERVICE,
+                &key,
+                DECIDE_INVITATION_REQUEST_METHOD,
+                &payload,
             )
             .await?;
         Ok(())
@@ -229,7 +240,7 @@ pub struct RevokeShareLink {
     pub when: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug)]
 pub struct SubmitInvitationRequest {
     pub request_id: domain::RequestId,
     pub share_link_id: domain::ShareLinkId,
@@ -238,10 +249,81 @@ pub struct SubmitInvitationRequest {
     pub created_at: DateTime<Utc>,
 }
 
+impl SubmitInvitationRequest {
+    pub fn new(
+        request_id: domain::RequestId,
+        share_link_id: domain::ShareLinkId,
+        requester_id: u64,
+        justification: Option<String>,
+        created_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            request_id,
+            share_link_id,
+            requester_id,
+            justification,
+            created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SubmitInvitationRequestPayload {
+    request_id: domain::RequestId,
+    share_link_id: domain::ShareLinkId,
+    requester_id: u64,
+    justification: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+impl From<SubmitInvitationRequest> for SubmitInvitationRequestPayload {
+    fn from(command: SubmitInvitationRequest) -> Self {
+        Self {
+            request_id: command.request_id,
+            share_link_id: command.share_link_id,
+            requester_id: command.requester_id,
+            justification: command.justification,
+            created_at: command.created_at,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DecideInvitationRequest {
     pub request_id: domain::RequestId,
     pub decision: InvitationRequestDecision,
+}
+
+impl DecideInvitationRequest {
+    pub fn approve(
+        request_id: domain::RequestId,
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            request_id,
+            decision: InvitationRequestDecision::Approve {
+                decided_by,
+                decided_at,
+            },
+        }
+    }
+
+    pub fn decline(
+        request_id: domain::RequestId,
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+        reason: Option<String>,
+    ) -> Self {
+        Self {
+            request_id,
+            decision: InvitationRequestDecision::Decline {
+                decided_by,
+                decided_at,
+                reason,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -255,6 +337,42 @@ pub enum InvitationRequestDecision {
         decided_at: DateTime<Utc>,
         reason: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Serialize)]
+enum InvitationRequestDecisionPayload {
+    Approve {
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+    },
+    Decline {
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+        reason: Option<String>,
+    },
+}
+
+impl From<InvitationRequestDecision> for InvitationRequestDecisionPayload {
+    fn from(decision: InvitationRequestDecision) -> Self {
+        match decision {
+            InvitationRequestDecision::Approve {
+                decided_by,
+                decided_at,
+            } => Self::Approve {
+                decided_by,
+                decided_at,
+            },
+            InvitationRequestDecision::Decline {
+                decided_by,
+                decided_at,
+                reason,
+            } => Self::Decline {
+                decided_by,
+                decided_at,
+                reason,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1197,20 +1315,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn submit_invitation_request_sends_restate_workflow() {
-        let (base, calls) = spawn_restate_recorder(Value::Null).await;
-        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+    async fn submit_invitation_request_uses_invitation_request_command_adapter() {
+        let (restate, calls) = RecordingRestateClient::new(Value::Null);
+        let commands = RestateCommands::new(Arc::new(restate));
         let request_id = domain::RequestId::new();
         let share_link_id = domain::ShareLinkId::new();
 
         commands
-            .submit_invitation_request(SubmitInvitationRequest {
+            .submit_invitation_request(SubmitInvitationRequest::new(
                 request_id,
                 share_link_id,
-                requester_id: 42,
-                justification: Some("need access".into()),
-                created_at: at("2026-05-20T11:00:00Z"),
-            })
+                42,
+                Some("need access".into()),
+                at("2026-05-20T11:00:00Z"),
+            ))
             .await
             .unwrap();
 
@@ -1221,9 +1339,16 @@ mod tests {
         assert_eq!(call.key, request_id.to_string());
         assert_eq!(call.method, "submit");
         assert!(call.send);
-        assert_eq!(call.body["request_id"], request_id.to_string());
-        assert_eq!(call.body["share_link_id"], share_link_id.to_string());
-        assert_eq!(call.body["requester_id"], 42);
+        assert_eq!(
+            call.body,
+            serde_json::json!({
+                "request_id": request_id.to_string(),
+                "share_link_id": share_link_id.to_string(),
+                "requester_id": 42,
+                "justification": "need access",
+                "created_at": "2026-05-20T11:00:00Z"
+            })
+        );
     }
 
     #[tokio::test]
@@ -1255,19 +1380,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decide_invitation_request_calls_restate_decide_with_decision_payload() {
-        let (base, calls) = spawn_restate_recorder(Value::Null).await;
-        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+    async fn approve_invitation_request_uses_decision_payload() {
+        let (restate, calls) = RecordingRestateClient::new(Value::Null);
+        let commands = RestateCommands::new(Arc::new(restate));
         let request_id = domain::RequestId::new();
 
         commands
-            .decide_invitation_request(DecideInvitationRequest {
+            .decide_invitation_request(DecideInvitationRequest::approve(
                 request_id,
-                decision: InvitationRequestDecision::Approve {
-                    decided_by: 7,
-                    decided_at: at("2026-05-20T11:45:00Z"),
-                },
-            })
+                7,
+                at("2026-05-20T11:45:00Z"),
+            ))
             .await
             .unwrap();
 
@@ -1278,7 +1401,50 @@ mod tests {
         assert_eq!(call.key, request_id.to_string());
         assert_eq!(call.method, "decide");
         assert!(!call.send);
-        assert_eq!(call.body["Approve"]["decided_by"], 7);
+        assert_eq!(
+            call.body,
+            serde_json::json!({
+                "Approve": {
+                    "decided_by": 7,
+                    "decided_at": "2026-05-20T11:45:00Z"
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn decline_invitation_request_uses_decision_payload() {
+        let (restate, calls) = RecordingRestateClient::new(Value::Null);
+        let commands = RestateCommands::new(Arc::new(restate));
+        let request_id = domain::RequestId::new();
+
+        commands
+            .decide_invitation_request(DecideInvitationRequest::decline(
+                request_id,
+                8,
+                at("2026-05-20T12:15:00Z"),
+                Some("not enough context".into()),
+            ))
+            .await
+            .unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.service, "InvitationRequest");
+        assert_eq!(call.key, request_id.to_string());
+        assert_eq!(call.method, "decide");
+        assert!(!call.send);
+        assert_eq!(
+            call.body,
+            serde_json::json!({
+                "Decline": {
+                    "decided_by": 8,
+                    "decided_at": "2026-05-20T12:15:00Z",
+                    "reason": "not enough context"
+                }
+            })
+        );
     }
 
     #[tokio::test]
