@@ -746,7 +746,7 @@ impl Storage for D1Storage {
                 .prepare(
                     "UPDATE github_invitations
                      SET state = ?1,
-                         github_invitation_id = COALESCE(?2, github_invitation_id),
+                         github_invitation_id = ?2,
                          error_message = ?3,
                          updated_at = ?4
                      WHERE id = ?5",

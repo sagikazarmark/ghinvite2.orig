@@ -602,7 +602,7 @@ impl Storage for SqlxStorage {
     async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
         let res = sqlx::query(
             r#"UPDATE github_invitations
-               SET state = ?1, github_invitation_id = COALESCE(?2, github_invitation_id),
+               SET state = ?1, github_invitation_id = ?2,
                    error_message = ?3, updated_at = ?4
                WHERE id = ?5"#,
         )

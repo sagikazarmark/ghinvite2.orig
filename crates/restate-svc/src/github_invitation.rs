@@ -352,27 +352,6 @@ pub async fn on_webhook_logic(
         return Ok(()); // already settled; webhook is just confirming.
     }
 
-    let new_state = match input.action {
-        WebhookAction::Accepted => InvitationState::Accepted,
-        WebhookAction::Declined => InvitationState::Declined,
-    };
-    state
-        .storage
-        .update_github_invitation(&storage::GithubInvitationUpdate {
-            id: input.invitation_id,
-            state: new_state,
-            github_invitation_id: None,
-            error_message: None,
-            updated_at: input.at,
-        })
-        .await?;
-
-    let event_type = match new_state {
-        InvitationState::Accepted => EventType::InvitationAccepted,
-        InvitationState::Declined => EventType::InvitationDeclined,
-        _ => unreachable!("WebhookAction maps to Accepted/Declined"),
-    };
-
     let context = crate::invitation_context::load_github_invitation_account_context(
         state,
         input.invitation_id,
@@ -383,19 +362,85 @@ pub async fn on_webhook_logic(
     debug_assert_eq!(context.link.account_id, context.account.account_id);
     debug_assert_eq!(context.requester.user_id, context.request.requester_id);
 
-    let metadata = serde_json::json!({
-        "action": match input.action {
-            WebhookAction::Accepted => "accepted",
-            WebhookAction::Declined => "declined",
-        },
-    });
+    match input.action {
+        WebhookAction::Accepted => {
+            accept_invitation_from_webhook_transition(
+                state,
+                input.invitation_id,
+                context.account.account_id,
+                input.at,
+                request_id,
+            )
+            .await
+        }
+        WebhookAction::Declined => {
+            decline_invitation_from_webhook_transition(
+                state,
+                input.invitation_id,
+                context.account.account_id,
+                input.at,
+                request_id,
+            )
+            .await
+        }
+    }
+}
+
+async fn accept_invitation_from_webhook_transition(
+    state: &AppState,
+    invitation_id: GithubInvitationId,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: invitation_id,
+            state: InvitationState::Accepted,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: at,
+        })
+        .await?;
+
     crate::audit::emit(
         state,
-        context.account.account_id,
-        event_type,
+        account_id,
+        EventType::InvitationAccepted,
         Actor::Github,
-        Target::github_invitation(input.invitation_id),
-        metadata,
+        Target::github_invitation(invitation_id),
+        serde_json::json!({"action": "accepted"}),
+        request_id,
+    )
+    .await
+}
+
+async fn decline_invitation_from_webhook_transition(
+    state: &AppState,
+    invitation_id: GithubInvitationId,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: invitation_id,
+            state: InvitationState::Declined,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: at,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationDeclined,
+        Actor::Github,
+        Target::github_invitation(invitation_id),
+        serde_json::json!({"action": "declined"}),
         request_id,
     )
     .await
@@ -459,31 +504,48 @@ pub async fn cancel_logic(
         }
     }
 
+    cancel_invitation_transition(
+        state,
+        input.invitation_id,
+        context.account.account_id,
+        input.by_user,
+        input.at,
+        request_id,
+    )
+    .await
+}
+
+async fn cancel_invitation_transition(
+    state: &AppState,
+    invitation_id: GithubInvitationId,
+    account_id: u64,
+    by_user: Option<u64>,
+    at: DateTime<Utc>,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     state
         .storage
         .update_github_invitation(&storage::GithubInvitationUpdate {
-            id: input.invitation_id,
+            id: invitation_id,
             state: InvitationState::Cancelled,
             github_invitation_id: None,
             error_message: None,
-            updated_at: input.at,
+            updated_at: at,
         })
         .await?;
 
-    let actor = match input.by_user {
+    let actor = match by_user {
         Some(uid) => Actor::User(uid),
         None => Actor::System,
     };
-    let metadata = serde_json::json!({
-        "by_user": input.by_user,
-    });
+
     crate::audit::emit(
         state,
-        context.account.account_id,
+        account_id,
         EventType::InvitationCancelled,
         actor,
-        Target::github_invitation(input.invitation_id),
-        metadata,
+        Target::github_invitation(invitation_id),
+        serde_json::json!({"by_user": by_user}),
         request_id,
     )
     .await
@@ -536,25 +598,41 @@ pub async fn tick_expire_logic(
         return Ok(());
     }
 
+    expire_invitation_transition(
+        state,
+        input.invitation_id,
+        context.account.account_id,
+        input.at,
+        request_id,
+    )
+    .await
+}
+
+async fn expire_invitation_transition(
+    state: &AppState,
+    invitation_id: GithubInvitationId,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
     state
         .storage
         .update_github_invitation(&storage::GithubInvitationUpdate {
-            id: input.invitation_id,
+            id: invitation_id,
             state: InvitationState::Expired,
             github_invitation_id: None,
             error_message: None,
-            updated_at: input.at,
+            updated_at: at,
         })
         .await?;
 
-    let metadata = serde_json::json!({"reason": "tick_expire_no_longer_pending"});
     crate::audit::emit(
         state,
-        context.account.account_id,
+        account_id,
         EventType::InvitationExpired,
         Actor::System,
-        Target::github_invitation(input.invitation_id),
-        metadata,
+        Target::github_invitation(invitation_id),
+        serde_json::json!({"reason": "tick_expire_no_longer_pending"}),
         request_id,
     )
     .await
@@ -1153,6 +1231,207 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.is_terminal());
+    }
+
+    #[tokio::test]
+    async fn webhook_accept_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let req_id = seed_chain(&state).await;
+        let inv_id = seed_to_sent(&state, req_id).await;
+
+        accept_invitation_from_webhook_transition(
+            &state,
+            inv_id,
+            100,
+            dt("2026-05-04T14:00:00Z"),
+            Some("req-webhook-accepted".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Accepted);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationAccepted);
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-webhook-accepted"));
+        assert_eq!(
+            event.metadata.get("action"),
+            Some(&serde_json::json!("accepted"))
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_decline_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let req_id = seed_chain(&state).await;
+        let inv_id = seed_to_sent(&state, req_id).await;
+
+        decline_invitation_from_webhook_transition(
+            &state,
+            inv_id,
+            100,
+            dt("2026-05-04T14:00:00Z"),
+            Some("req-webhook-declined".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Declined);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationDeclined);
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-webhook-declined"));
+        assert_eq!(
+            event.metadata.get("action"),
+            Some(&serde_json::json!("declined"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_transition_updates_row_and_audits_user_actor() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        cancel_invitation_transition(
+            &state,
+            inv_id,
+            100,
+            Some(7),
+            dt("2026-05-04T15:00:00Z"),
+            Some("req-cancel-user".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Cancelled);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationCancelled);
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-cancel-user"));
+        assert_eq!(event.metadata.get("by_user"), Some(&serde_json::json!(7)));
+    }
+
+    #[tokio::test]
+    async fn cancel_transition_updates_row_and_audits_system_actor() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        cancel_invitation_transition(
+            &state,
+            inv_id,
+            100,
+            None,
+            dt("2026-05-04T15:00:00Z"),
+            Some("req-cancel-system".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Cancelled);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationCancelled);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-cancel-system"));
+        assert_eq!(
+            event.metadata.get("by_user"),
+            Some(&serde_json::Value::Null)
+        );
+    }
+
+    #[tokio::test]
+    async fn expire_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
+
+        expire_invitation_transition(
+            &state,
+            inv_id,
+            100,
+            dt("2026-05-11T13:00:00Z"),
+            Some("req-expire".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Expired);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationExpired);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-expire"));
+        assert_eq!(
+            event.metadata.get("reason"),
+            Some(&serde_json::json!("tick_expire_no_longer_pending"))
+        );
     }
 
     /// Like `seed_to_sent` but with link.repos populated so cancel/expire can
