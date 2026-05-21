@@ -157,6 +157,8 @@ async fn home_returns_html() {
     assert!(text.contains("Sign in with GitHub"));
     assert!(text.contains("captured history"));
     assert!(!text.contains("audit trail"));
+    assert!(text.contains("Access console for GitHub collaborators"));
+    assert!(!text.contains("class=\"hero"));
 }
 
 #[tokio::test]
