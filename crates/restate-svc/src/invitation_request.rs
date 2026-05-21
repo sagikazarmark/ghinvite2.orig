@@ -329,6 +329,159 @@ pub async fn apply_decision_logic(
     decision: AppliedDecision,
     request_id_for_audit: Option<String>,
 ) -> crate::error::Result<RequestState> {
+    match decision {
+        AppliedDecision::Approve { decided_by, at } => {
+            approve_request_transition(
+                state,
+                request_id,
+                account_id,
+                decided_by,
+                at,
+                request_id_for_audit,
+            )
+            .await
+        }
+        AppliedDecision::AutoApprove { at } => {
+            auto_approve_request_transition(state, request_id, account_id, at, request_id_for_audit)
+                .await
+        }
+        AppliedDecision::Decline {
+            decided_by,
+            at,
+            reason,
+        } => {
+            decline_request_transition(
+                state,
+                request_id,
+                account_id,
+                decided_by,
+                at,
+                reason,
+                request_id_for_audit,
+            )
+            .await
+        }
+        AppliedDecision::Expire { at } => {
+            expire_request_transition(state, request_id, account_id, at, request_id_for_audit).await
+        }
+    }
+}
+
+async fn approve_request_transition(
+    state: &AppState,
+    request_id: RequestId,
+    account_id: u64,
+    decided_by: u64,
+    decided_at: DateTime<Utc>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<RequestState> {
+    record_request_transition(
+        state,
+        storage::RequestDecision {
+            request_id,
+            state: RequestState::Approved,
+            decided_by: Some(decided_by),
+            decided_at,
+            decline_reason: None,
+        },
+        account_id,
+        EventType::RequestApproved,
+        Actor::User(decided_by),
+        serde_json::json!({}),
+        request_id_for_audit,
+    )
+    .await
+}
+
+async fn auto_approve_request_transition(
+    state: &AppState,
+    request_id: RequestId,
+    account_id: u64,
+    approved_at: DateTime<Utc>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<RequestState> {
+    record_request_transition(
+        state,
+        storage::RequestDecision {
+            request_id,
+            state: RequestState::Approved,
+            decided_by: None,
+            decided_at: approved_at,
+            decline_reason: None,
+        },
+        account_id,
+        EventType::RequestApproved,
+        Actor::System,
+        serde_json::json!({"reason": "auto_approve"}),
+        request_id_for_audit,
+    )
+    .await
+}
+
+async fn decline_request_transition(
+    state: &AppState,
+    request_id: RequestId,
+    account_id: u64,
+    decided_by: u64,
+    decided_at: DateTime<Utc>,
+    reason: Option<String>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<RequestState> {
+    let decline_reason_present = reason.is_some();
+    record_request_transition(
+        state,
+        storage::RequestDecision {
+            request_id,
+            state: RequestState::Declined,
+            decided_by: Some(decided_by),
+            decided_at,
+            decline_reason: reason,
+        },
+        account_id,
+        EventType::RequestDeclined,
+        Actor::User(decided_by),
+        serde_json::json!({"decline_reason_present": decline_reason_present}),
+        request_id_for_audit,
+    )
+    .await
+}
+
+async fn expire_request_transition(
+    state: &AppState,
+    request_id: RequestId,
+    account_id: u64,
+    expired_at: DateTime<Utc>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<RequestState> {
+    record_request_transition(
+        state,
+        storage::RequestDecision {
+            request_id,
+            state: RequestState::Expired,
+            decided_by: None,
+            decided_at: expired_at,
+            decline_reason: None,
+        },
+        account_id,
+        EventType::RequestExpired,
+        Actor::System,
+        serde_json::json!({"reason": "timeout"}),
+        request_id_for_audit,
+    )
+    .await
+}
+
+async fn record_request_transition(
+    state: &AppState,
+    decision: storage::RequestDecision,
+    account_id: u64,
+    event_type: EventType,
+    actor: Actor,
+    metadata: serde_json::Value,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<RequestState> {
+    let request_id = decision.request_id;
+    let new_state = decision.state;
     let req = state
         .storage
         .get_invitation_request(request_id)
@@ -338,74 +491,23 @@ pub async fn apply_decision_logic(
         return Ok(req.state);
     }
 
-    let (new_state, decided_by, decided_at, decline_reason, event) = match &decision {
-        AppliedDecision::Approve { decided_by, at } => (
-            RequestState::Approved,
-            Some(*decided_by),
-            *at,
-            None,
-            EventType::RequestApproved,
-        ),
-        AppliedDecision::AutoApprove { at } => (
-            RequestState::Approved,
-            None, // no human admin; audit Actor is System
-            *at,
-            None,
-            EventType::RequestApproved,
-        ),
-        AppliedDecision::Decline {
-            decided_by,
-            at,
-            reason,
-        } => (
-            RequestState::Declined,
-            Some(*decided_by),
-            *at,
-            reason.clone(),
-            EventType::RequestDeclined,
-        ),
-        AppliedDecision::Expire { at } => (
-            RequestState::Expired,
-            None, // timeout; audit Actor is System
-            *at,
-            None,
-            EventType::RequestExpired,
-        ),
-    };
-
-    match state
-        .storage
-        .record_request_decision(&storage::RequestDecision {
-            request_id,
-            state: new_state,
-            decided_by,
-            decided_at,
-            decline_reason,
-        })
-        .await
-    {
+    match state.storage.record_request_decision(&decision).await {
         Ok(()) => (),
-        Err(storage::Error::NotFound) => return Ok(new_state), // already decided
+        Err(storage::Error::NotFound) => {
+            let current = state
+                .storage
+                .get_invitation_request(request_id)
+                .await?
+                .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
+            return Ok(current.state);
+        }
         Err(e) => return Err(e.into()),
     }
 
-    let actor = match &decision {
-        AppliedDecision::Approve { decided_by, .. }
-        | AppliedDecision::Decline { decided_by, .. } => Actor::User(*decided_by),
-        AppliedDecision::AutoApprove { .. } | AppliedDecision::Expire { .. } => Actor::System,
-    };
-    let metadata = match &decision {
-        AppliedDecision::AutoApprove { .. } => serde_json::json!({"reason": "auto_approve"}),
-        AppliedDecision::Approve { .. } => serde_json::json!({}),
-        AppliedDecision::Decline { reason, .. } => serde_json::json!({
-            "decline_reason_present": reason.is_some(),
-        }),
-        AppliedDecision::Expire { .. } => serde_json::json!({"reason": "timeout"}),
-    };
     crate::audit::emit(
         state,
         account_id,
-        event,
+        event_type,
         actor,
         Target::request(request_id),
         metadata,
@@ -459,7 +561,8 @@ pub async fn build_dispatch_inputs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_state};
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    use ::audit::{ActorKind, EventType, TargetKind};
     use domain::{AccountType, Permission, SelectedRepos, ShareLink, ShareLinkId, Slug};
     use rand::SeedableRng;
 
@@ -520,6 +623,13 @@ mod tests {
         };
         state.storage.insert_share_link(&link).await.unwrap();
         link.id
+    }
+
+    async fn audit_events(
+        storage: &::storage::SqlxStorage,
+        account_id: u64,
+    ) -> Vec<::audit::AuditEvent> {
+        storage.debug_list_audit(account_id).await.unwrap()
     }
 
     #[tokio::test]
@@ -683,6 +793,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approve_transition_owns_state_and_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let link_id = seed_link(&state, true, None).await;
+        let req_id = RequestId::new();
+        let decided_at = dt("2026-05-04T13:00:00Z");
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: dt("2026-05-04T12:30:00Z"),
+            },
+            dt("2026-05-04T12:30:00Z"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let final_state = approve_request_transition(
+            &state,
+            req_id,
+            100,
+            7,
+            decided_at,
+            Some("req-approve".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(final_state, RequestState::Approved);
+
+        let req = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.state, RequestState::Approved);
+        assert_eq!(req.decided_by, Some(7));
+        assert_eq!(req.decided_at, Some(decided_at));
+        assert_eq!(req.decline_reason, None);
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::RequestApproved)
+            .expect("approval should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::InvitationRequest);
+        assert_eq!(event.target_id, req_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-approve"));
+        assert_eq!(event.metadata, serde_json::json!({}));
+    }
+
+    #[tokio::test]
     async fn apply_decision_decline_with_reason() {
         let state = fixture_state().await;
         let link_id = seed_link(&state, true, None).await;
@@ -726,6 +893,70 @@ mod tests {
         assert_eq!(
             req.decline_reason.as_deref(),
             Some("not familiar with this user")
+        );
+    }
+
+    #[tokio::test]
+    async fn decline_transition_owns_state_and_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let link_id = seed_link(&state, true, None).await;
+        let req_id = RequestId::new();
+        let decided_at = dt("2026-05-04T13:00:00Z");
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: dt("2026-05-04T12:30:00Z"),
+            },
+            dt("2026-05-04T12:30:00Z"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let final_state = decline_request_transition(
+            &state,
+            req_id,
+            100,
+            7,
+            decided_at,
+            Some("not familiar with this user".into()),
+            Some("req-decline".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(final_state, RequestState::Declined);
+
+        let req = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.state, RequestState::Declined);
+        assert_eq!(req.decided_by, Some(7));
+        assert_eq!(req.decided_at, Some(decided_at));
+        assert_eq!(
+            req.decline_reason.as_deref(),
+            Some("not familiar with this user")
+        );
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::RequestDeclined)
+            .expect("decline should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::InvitationRequest);
+        assert_eq!(event.target_id, req_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-decline"));
+        assert_eq!(
+            event.metadata.get("decline_reason_present"),
+            Some(&serde_json::json!(true))
         );
     }
 
@@ -888,6 +1119,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_approve_transition_owns_state_and_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let link_id = seed_link(&state, false, None).await;
+        let req_id = RequestId::new();
+        let now = dt("2026-05-04T12:30:00Z");
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: now,
+            },
+            now,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let final_state = auto_approve_request_transition(
+            &state,
+            req_id,
+            100,
+            now,
+            Some("req-auto-approve".into()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(final_state, RequestState::Approved);
+
+        let req = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.state, RequestState::Approved);
+        assert_eq!(req.decided_by, None);
+        assert_eq!(req.decided_at, Some(now));
+        assert_eq!(req.decline_reason, None);
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::RequestApproved)
+            .expect("auto approval should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::InvitationRequest);
+        assert_eq!(event.target_id, req_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-auto-approve"));
+        assert_eq!(
+            event.metadata.get("reason"),
+            Some(&serde_json::json!("auto_approve"))
+        );
+    }
+
+    #[tokio::test]
+    async fn expire_transition_owns_state_and_audit() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let link_id = seed_link(&state, true, None).await;
+        let req_id = RequestId::new();
+        let expired_at = dt("2026-05-11T12:30:00Z");
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: dt("2026-05-04T12:30:00Z"),
+            },
+            dt("2026-05-04T12:30:00Z"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let final_state =
+            expire_request_transition(&state, req_id, 100, expired_at, Some("req-expire".into()))
+                .await
+                .unwrap();
+        assert_eq!(final_state, RequestState::Expired);
+
+        let req = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.state, RequestState::Expired);
+        assert_eq!(req.decided_by, None);
+        assert_eq!(req.decided_at, Some(expired_at));
+        assert_eq!(req.decline_reason, None);
+
+        let audits = audit_events(&storage, 100).await;
+        let event = audits
+            .iter()
+            .find(|event| event.event_type == EventType::RequestExpired)
+            .expect("expiration should emit audit event");
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::InvitationRequest);
+        assert_eq!(event.target_id, req_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-expire"));
+        assert_eq!(
+            event.metadata.get("reason"),
+            Some(&serde_json::json!("timeout"))
+        );
+    }
+
+    #[tokio::test]
     async fn apply_decision_idempotent_after_first_decision() {
         let state = fixture_state().await;
         let link_id = seed_link(&state, true, None).await;
@@ -935,5 +1279,76 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result, RequestState::Approved, "first decision wins");
+    }
+
+    #[tokio::test]
+    async fn racing_transitions_return_the_winning_terminal_state() {
+        let state = fixture_state().await;
+        let link_id = seed_link(&state, true, None).await;
+        let req_id = RequestId::new();
+        pre_decision_logic(
+            &state,
+            &SubmitRequestInput {
+                request_id: req_id,
+                share_link_id: link_id,
+                requester_id: 8,
+                justification: None,
+                created_at: dt("2026-05-04T12:30:00Z"),
+            },
+            dt("2026-05-04T12:30:00Z"),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let start = std::sync::Arc::new(tokio::sync::Barrier::new(32));
+        let mut handles = Vec::new();
+        for index in 0..32 {
+            let state = state.clone();
+            let start = start.clone();
+            handles.push(tokio::spawn(async move {
+                start.wait().await;
+                if index % 2 == 0 {
+                    approve_request_transition(
+                        &state,
+                        req_id,
+                        100,
+                        7,
+                        dt("2026-05-04T13:00:00Z"),
+                        None,
+                    )
+                    .await
+                } else {
+                    decline_request_transition(
+                        &state,
+                        req_id,
+                        100,
+                        7,
+                        dt("2026-05-04T13:00:00Z"),
+                        Some("raced".into()),
+                        None,
+                    )
+                    .await
+                }
+            }));
+        }
+
+        let mut returned_states = Vec::new();
+        for handle in handles {
+            returned_states.push(handle.await.unwrap().unwrap());
+        }
+
+        let stored_state = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state;
+        assert!(stored_state.is_terminal());
+        assert!(
+            returned_states.iter().all(|state| *state == stored_state),
+            "all racing callers should observe {stored_state:?}, got {returned_states:?}"
+        );
     }
 }
