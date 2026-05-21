@@ -12,25 +12,23 @@ pub struct NavProps {
 pub fn Nav(props: NavProps) -> Element {
     rsx! {
         nav {
-            class: "navbar bg-base-100",
-            div {
-                class: "flex-1",
+            class: "navbar min-h-14 border-b border-base-300 bg-base-100 px-4 text-base-content",
+            div { class: "flex-1",
                 a {
-                    class: "btn btn-ghost text-xl",
+                    class: "btn btn-ghost px-2 text-base font-semibold tracking-tight",
                     href: "/",
                     "ghinvite"
                 }
             }
-            div {
-                class: "flex-none",
+            div { class: "flex-none gap-2",
                 {match props.signed_in_login.as_deref() {
                     Some(login) => rsx! {
-                        span { class: "px-2", "Signed in as @{login}" }
-                        a { class: "btn btn-primary", href: "/install", "Install on another account" }
-                        a { class: "btn btn-ghost", href: "/logout", "Sign out" }
+                        span { class: "hidden px-2 text-xs text-base-content/65 sm:inline-flex", "@{login}" }
+                        a { class: "btn btn-primary btn-sm", href: "/install", "Install on another account" }
+                        a { class: "btn btn-ghost btn-sm", href: "/logout", "Sign out" }
                     },
                     None => rsx! {
-                        a { class: "btn btn-primary", href: "/login", "Sign in with GitHub" }
+                        a { class: "btn btn-primary btn-sm", href: "/login", "Sign in with GitHub" }
                     }
                 }}
             }

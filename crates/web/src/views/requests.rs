@@ -110,6 +110,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "Pending requests · {props.account_login}".to_string(),
             account_login: Some(props.account_login.clone()),
+            active_nav: Some("requests".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6", h1 { class: "text-2xl font-bold", "Pending requests" } }

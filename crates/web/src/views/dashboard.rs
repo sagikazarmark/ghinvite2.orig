@@ -51,6 +51,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "{props.account_login} · ghinvite".to_string(),
             account_login: Some(props.account_login.clone()),
+            active_nav: Some("overview".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header {

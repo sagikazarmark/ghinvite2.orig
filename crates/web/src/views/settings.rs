@@ -26,6 +26,7 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "Settings · {login}".to_string(),
             account_login: Some(login.clone()),
+            active_nav: Some("settings".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6",

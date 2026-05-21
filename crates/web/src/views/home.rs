@@ -14,6 +14,9 @@ pub fn HomePage(props: HomePageProps) -> Element {
         HomeLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "ghinvite — invite collaborators with one shareable link".to_string(),
+            account_login: None,
+            active_nav: None,
+            flash: None,
             children: rsx! {
                 div {
                     class: "hero",

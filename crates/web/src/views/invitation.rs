@@ -92,6 +92,7 @@ pub fn LandingPage(props: LandingProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "You've been invited · ghinvite".to_string(),
             account_login: None,
+            active_nav: None,
             flash: None,
             children: rsx! {
                 h1 { class: "card-title text-2xl mb-4", "You've been invited" }
@@ -160,6 +161,7 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
             signed_in_login: Some(props.signed_in_login.clone()),
             title: "Request access · ghinvite".to_string(),
             account_login: None,
+            active_nav: None,
             flash: None,
             children: rsx! {
                 {flash_view}
@@ -284,6 +286,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "Request status · ghinvite".to_string(),
             account_login: None,
+            active_nav: None,
             flash: None,
             children: rsx! {
                 h1 { class: "card-title text-2xl mb-4", "Request status" }
