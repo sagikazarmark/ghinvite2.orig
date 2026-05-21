@@ -768,6 +768,15 @@ mod tests {
         storage.debug_list_audit(account_id).await.unwrap()
     }
 
+    async fn state_with_storage_and_mock(
+        mock: MockTransport,
+    ) -> (AppState, Arc<::storage::SqlxStorage>) {
+        let storage = Arc::new(::storage::SqlxStorage::in_memory().await.unwrap());
+        let storage_for_state: Arc<dyn storage::Storage> = storage.clone();
+        let github = fixture_github_client(Arc::new(mock));
+        (AppState::new(storage_for_state, github), storage)
+    }
+
     async fn seed_sending_invitation(state: &AppState, input: &CreateInvitationInput) {
         state
             .storage
@@ -890,7 +899,6 @@ mod tests {
 
     #[tokio::test]
     async fn create_502_propagates_transient_for_retry() {
-        let storage = fixture_storage().await;
         let mock = MockTransport::scripted(vec![
             token_mint(9),
             Expectation::status(
@@ -899,8 +907,7 @@ mod tests {
                 502,
             ),
         ]);
-        let github = fixture_github_client(Arc::new(mock));
-        let state = AppState::new(storage, github);
+        let (state, storage) = state_with_storage_and_mock(mock).await;
         let req_id = seed_chain(&state).await;
 
         let inv_id = GithubInvitationId::new();
@@ -909,7 +916,6 @@ mod tests {
             .unwrap_err();
         assert!(!err.is_terminal(), "5xx should be transient: {err:?}");
 
-        // The row was inserted in Sending; on retry Restate will re-call us.
         let row = state
             .storage
             .get_github_invitation(inv_id)
@@ -917,6 +923,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, InvitationState::Sending);
+
+        let audits = audit_events(&storage, 100).await;
+        assert!(audits.is_empty());
     }
 
     #[tokio::test]
@@ -1166,14 +1175,10 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_on_terminal_row_is_idempotent() {
-        let storage = fixture_storage().await;
-        let mock = MockTransport::scripted(vec![]);
-        let github = fixture_github_client(Arc::new(mock));
-        let state = AppState::new(storage, github);
+        let (state, storage) = fixture_state_with_storage().await;
         let req_id = seed_chain(&state).await;
         let inv_id = seed_to_sent(&state, req_id).await;
 
-        // First webhook -> Accepted (terminal).
         on_webhook_logic(
             &state,
             &OnWebhookInput {
@@ -1181,12 +1186,11 @@ mod tests {
                 action: WebhookAction::Accepted,
                 at: dt("2026-05-04T14:00:00Z"),
             },
-            None,
+            Some("req-first-webhook".into()),
         )
         .await
         .unwrap();
 
-        // Second webhook on the same row - should be a no-op, not an error.
         on_webhook_logic(
             &state,
             &OnWebhookInput {
@@ -1194,7 +1198,7 @@ mod tests {
                 action: WebhookAction::Declined,
                 at: dt("2026-05-04T15:00:00Z"),
             },
-            None,
+            Some("req-second-webhook".into()),
         )
         .await
         .unwrap();
@@ -1209,6 +1213,21 @@ mod tests {
             row.state,
             InvitationState::Accepted,
             "terminal state preserved"
+        );
+
+        let audits = audit_events(&storage, 100).await;
+        let invitation_events: Vec<_> = audits
+            .iter()
+            .filter(|event| event.target_id == inv_id.to_string())
+            .collect();
+        assert_eq!(invitation_events.len(), 1);
+        assert_eq!(
+            invitation_events[0].event_type,
+            EventType::InvitationAccepted
+        );
+        assert_eq!(
+            invitation_events[0].request_id.as_deref(),
+            Some("req-first-webhook")
         );
     }
 
@@ -1652,7 +1671,6 @@ mod tests {
 
     #[tokio::test]
     async fn tick_expire_skips_when_no_longer_pending() {
-        let storage = fixture_storage().await;
         let mock = MockTransport::scripted(vec![
             token_mint(9),
             Expectation::ok_json(
@@ -1661,8 +1679,7 @@ mod tests {
                 serde_json::json!([]),
             ),
         ]);
-        let github = fixture_github_client(Arc::new(mock));
-        let state = AppState::new(storage, github);
+        let (state, storage) = state_with_storage_and_mock(mock).await;
         let (_req_id, inv_id) = seed_chain_with_repos(&state).await;
 
         tick_expire_logic(
@@ -1672,7 +1689,7 @@ mod tests {
                 installation_id: 9,
                 at: dt("2026-05-11T13:00:00Z"),
             },
-            None,
+            Some("req-expire-skip".into()),
         )
         .await
         .unwrap();
@@ -1688,5 +1705,8 @@ mod tests {
             InvitationState::Sent,
             "row left for webhook to settle"
         );
+
+        let audits = audit_events(&storage, 100).await;
+        assert!(audits.is_empty());
     }
 }

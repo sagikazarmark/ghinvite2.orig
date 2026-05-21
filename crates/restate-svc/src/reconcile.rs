@@ -340,9 +340,17 @@ mod tests {
         storage.debug_list_audit(account_id).await.unwrap()
     }
 
+    async fn state_with_storage_and_mock(
+        mock: MockTransport,
+    ) -> (AppState, Arc<::storage::SqlxStorage>) {
+        let storage = Arc::new(::storage::SqlxStorage::in_memory().await.unwrap());
+        let storage_for_state: Arc<dyn storage::Storage> = storage.clone();
+        let github = fixture_github_client(Arc::new(mock));
+        (AppState::new(storage_for_state, github), storage)
+    }
+
     #[tokio::test]
     async fn daily_run_no_change_when_still_pending() {
-        let storage = fixture_storage().await;
         let mock = MockTransport::scripted(vec![
             token_mint(9),
             Expectation::ok_json(
@@ -358,8 +366,7 @@ mod tests {
                 ]),
             ),
         ]);
-        let github = fixture_github_client(Arc::new(mock));
-        let state = AppState::new(storage, github);
+        let (state, storage) = state_with_storage_and_mock(mock).await;
         let inv_id = seed_one_pending(&state).await;
 
         daily_run_logic(
@@ -367,7 +374,7 @@ mod tests {
             &DailyRunInput {
                 at: dt("2026-05-05T13:00:00Z"),
             },
-            None,
+            Some("req-reconcile-pending".into()),
         )
         .await
         .unwrap();
@@ -379,6 +386,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, InvitationState::Sent);
+
+        let audits = audit_events(&storage, 100).await;
+        assert!(audits.is_empty());
     }
 
     #[tokio::test]
