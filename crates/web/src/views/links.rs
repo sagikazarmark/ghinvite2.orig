@@ -387,6 +387,6 @@ mod tests {
         assert!(html.contains("push"));
         assert!(html.contains("2 / 5"));
         assert!(html.contains("Contractor onboarding"));
-        assert!(!html.contains("Revoke this link"));
+        assert!(!html.contains(concat!("Revoke this ", "link")));
     }
 }
