@@ -305,6 +305,17 @@ async fn scenario_github_invitation_lifecycle<S: Storage>(s: S) {
     .await
     .unwrap();
 
+    let accepted = s.get_github_invitation(g.id).await.unwrap().unwrap();
+    assert_eq!(accepted.state, InvitationState::Accepted);
+    assert_eq!(accepted.github_invitation_id, None);
+
+    assert!(
+        s.get_github_invitation_by_github_id(99001)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
     let now_done = s
         .list_pending_github_invitations_for_installation(1)
         .await

@@ -276,8 +276,8 @@ pub trait Storage: Send + Sync + 'static {
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
 
     /// Update an existing github_invitations row to a new state. The
-    /// `github_invitation_id` field is `COALESCE`d so passing `None` preserves
-    /// the previously stored id.
+    /// `github_invitation_id` field is assigned exactly: passing `None` clears
+    /// any previously stored upstream GitHub invitation id.
     ///
     /// **Errors:**
     /// - [`Error::NotFound`] if `update.id` doesn't match any row.
