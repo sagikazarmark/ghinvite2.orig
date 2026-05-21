@@ -142,11 +142,14 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
-            class: "min-h-screen bg-base-200 px-4 py-8 text-base-content antialiased",
+            class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
-            main { class: "mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-lg items-center",
-                div { class: "card w-full border border-base-300 bg-base-100 shadow-sm",
-                    div { class: "card-body", {props.children} }
+            Nav { signed_in_login: props.signed_in_login.clone() }
+            main { class: "min-h-[calc(100vh-3.5rem)] px-4 py-8",
+                div { class: "mx-auto flex min-h-[calc(100vh-7.5rem)] w-full max-w-lg items-center",
+                    div { class: "card w-full border border-base-300 bg-base-100 shadow-sm",
+                        div { class: "card-body", {props.children} }
+                    }
                 }
             }
         }
@@ -195,6 +198,8 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
+        assert!(html.contains("id=\"theme-selector\""));
+        assert!(html.contains("ghinvite-theme"));
         assert!(html.contains("Invitation"));
         assert!(html.contains("card"));
     }
