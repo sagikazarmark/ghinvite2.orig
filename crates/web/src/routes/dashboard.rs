@@ -213,7 +213,7 @@ async fn create_link(
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = ?e, "ShareLink::create failed");
+            tracing::warn!(error = ?e, "create share link command failed");
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
@@ -317,7 +317,7 @@ async fn revoke_link(
         })
         .await
     {
-        tracing::warn!(error = ?e, "ShareLink::revoke failed");
+        tracing::warn!(error = ?e, "revoke share link command failed");
         let _ = session::set_flash(
             &admin.tower,
             session::Flash {

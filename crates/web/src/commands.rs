@@ -2,6 +2,7 @@ use crate::error::{Result, WebError};
 use crate::restate_client::RestateClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -27,38 +28,83 @@ pub trait GhinviteCommands: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-#[derive(Clone, Debug)]
-pub struct RestateCommands {
-    restate: Arc<RestateClient>,
+const SHARE_LINK_SERVICE: &str = "ShareLink";
+const CREATE_SHARE_LINK_METHOD: &str = "create";
+const REVOKE_SHARE_LINK_METHOD: &str = "revoke";
+
+#[async_trait]
+pub(crate) trait RestateCommandAdapter: Send + Sync + 'static {
+    async fn send<I: Serialize + Send + Sync>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+    ) -> Result<()>;
+
+    async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+    ) -> Result<O>;
 }
 
-impl RestateCommands {
-    pub fn new(restate: Arc<RestateClient>) -> Self {
+#[async_trait]
+impl RestateCommandAdapter for RestateClient {
+    async fn send<I: Serialize + Send + Sync>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+    ) -> Result<()> {
+        RestateClient::send(self, service, key, method, input).await
+    }
+
+    async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+    ) -> Result<O> {
+        RestateClient::call(self, service, key, method, input).await
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RestateCommands<R = RestateClient> {
+    restate: Arc<R>,
+}
+
+impl<R> RestateCommands<R> {
+    pub fn new(restate: Arc<R>) -> Self {
         Self { restate }
     }
 }
 
+fn share_link_command_key(account_id: u64) -> String {
+    account_id.to_string()
+}
+
 #[async_trait]
-impl GhinviteCommands for RestateCommands {
+impl<R> GhinviteCommands for RestateCommands<R>
+where
+    R: RestateCommandAdapter,
+{
     async fn create_share_link(&self, command: CreateShareLink) -> Result<CreateShareLinkOutput> {
+        let key = share_link_command_key(command.account_id);
         self.restate
-            .call(
-                "ShareLink",
-                &command.account_id.to_string(),
-                "create",
-                &command,
-            )
+            .call(SHARE_LINK_SERVICE, &key, CREATE_SHARE_LINK_METHOD, &command)
             .await
     }
 
     async fn revoke_share_link(&self, command: RevokeShareLink) -> Result<()> {
+        let key = share_link_command_key(command.account_id);
         self.restate
-            .send(
-                "ShareLink",
-                &command.account_id.to_string(),
-                "revoke",
-                &command,
-            )
+            .send(SHARE_LINK_SERVICE, &key, REVOKE_SHARE_LINK_METHOD, &command)
             .await
     }
 
@@ -469,6 +515,7 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::post;
     use chrono::Utc;
+    use serde::de::DeserializeOwned;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use storage::Storage;
@@ -480,6 +527,83 @@ mod tests {
         method: String,
         send: bool,
         body: Value,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingRestateClient {
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
+        response: Value,
+    }
+
+    impl RecordingRestateClient {
+        fn new(response: Value) -> (Self, Arc<Mutex<Vec<RecordedCall>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    calls: calls.clone(),
+                    response,
+                },
+                calls,
+            )
+        }
+
+        async fn send<I: Serialize + Send + Sync>(
+            &self,
+            service: &str,
+            key: &str,
+            method: &str,
+            input: &I,
+        ) -> Result<()> {
+            self.calls.lock().unwrap().push(RecordedCall {
+                service: service.into(),
+                key: key.into(),
+                method: method.into(),
+                send: true,
+                body: serde_json::to_value(input).unwrap(),
+            });
+            Ok(())
+        }
+
+        async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
+            &self,
+            service: &str,
+            key: &str,
+            method: &str,
+            input: &I,
+        ) -> Result<O> {
+            self.calls.lock().unwrap().push(RecordedCall {
+                service: service.into(),
+                key: key.into(),
+                method: method.into(),
+                send: false,
+                body: serde_json::to_value(input).unwrap(),
+            });
+            serde_json::from_value(self.response.clone())
+                .map_err(|e| WebError::Restate(format!("decoding fake response: {e}")))
+        }
+    }
+
+    #[async_trait]
+    impl RestateCommandAdapter for RecordingRestateClient {
+        async fn send<I: Serialize + Send + Sync>(
+            &self,
+            service: &str,
+            key: &str,
+            method: &str,
+            input: &I,
+        ) -> Result<()> {
+            RecordingRestateClient::send(self, service, key, method, input).await
+        }
+
+        async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
+            &self,
+            service: &str,
+            key: &str,
+            method: &str,
+            input: &I,
+        ) -> Result<O> {
+            RecordingRestateClient::call(self, service, key, method, input).await
+        }
     }
 
     async fn spawn_restate_recorder(response: Value) -> (String, Arc<Mutex<Vec<RecordedCall>>>) {
@@ -1031,12 +1155,11 @@ mod tests {
     #[tokio::test]
     async fn create_share_link_calls_restate_create_and_returns_output() {
         let link_id = domain::ShareLinkId::new();
-        let (base, calls) = spawn_restate_recorder(serde_json::json!({
+        let (restate, calls) = RecordingRestateClient::new(serde_json::json!({
             "link_id": link_id,
             "slug": "0123456789abcdef"
-        }))
-        .await;
-        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+        }));
+        let commands = RestateCommands::new(Arc::new(restate));
 
         let output = commands
             .create_share_link(CreateShareLink {
@@ -1105,8 +1228,8 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_share_link_sends_restate_revoke_without_account_id_payload() {
-        let (base, calls) = spawn_restate_recorder(Value::Null).await;
-        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+        let (restate, calls) = RecordingRestateClient::new(Value::Null);
+        let commands = RestateCommands::new(Arc::new(restate));
         let link_id = domain::ShareLinkId::new();
 
         commands
