@@ -13,6 +13,7 @@ pub mod audit;
 pub mod error;
 pub mod github_invitation;
 pub mod installation;
+pub mod invitation_context;
 pub mod invitation_request;
 pub mod reconcile;
 pub mod share_link;

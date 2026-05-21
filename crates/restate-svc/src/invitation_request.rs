@@ -526,33 +526,25 @@ pub async fn build_dispatch_inputs(
     request_id: RequestId,
     now: DateTime<Utc>,
 ) -> crate::error::Result<Vec<crate::github_invitation::CreateInvitationInput>> {
-    let req = state
-        .storage
-        .get_invitation_request(request_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-    let link = state
-        .storage
-        .get_share_link_by_id(req.share_link_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-    let recipient = state
-        .storage
-        .get_user(req.requester_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
+    let context =
+        crate::invitation_context::load_invitation_request_context(state, request_id).await?;
+    let invitation_request_id = context.request.id;
+    let installation_id = context.link.installation_id;
+    let permission = context.link.permission;
+    let recipient_login = context.requester.login;
 
-    Ok(link
+    Ok(context
+        .link
         .repos
         .into_iter()
         .map(|r| crate::github_invitation::CreateInvitationInput {
             invitation_id: domain::GithubInvitationId::new(),
-            invitation_request_id: request_id,
-            installation_id: link.installation_id,
+            invitation_request_id,
+            installation_id,
             repo_id: r.repo_id,
             repo_full_name: r.repo_full_name,
-            recipient_login: recipient.login.clone(),
-            permission: link.permission,
+            recipient_login: recipient_login.clone(),
+            permission,
             now,
         })
         .collect())

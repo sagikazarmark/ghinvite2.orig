@@ -32,13 +32,14 @@ Add result structs for the contexts currently needed:
 
 - `InvitationRequestContext` loads an `InvitationRequest`, its `ShareLink`, and the requester `User`.
 - `GithubInvitationContext` loads a `GithubInvitation`, its `InvitationRequest`, its `ShareLink`, the matching `ShareLinkRepo`, the parsed `RepositoryIdentity`, the requester `User`, and the installation `Account`.
+- `GithubInvitationAccountContext` loads a `GithubInvitation`, its `InvitationRequest`, its `ShareLink`, the requester `User`, and the installation `Account` without resolving repository metadata. This preserves webhook behavior, because webhook audit only needs the account chain and historically did not require `ShareLink.repos` to contain the GitHub Invitation repo.
 
 The module should provide loaders shaped around existing callers:
 
 - `load_invitation_request_context(state, request_id)` for `invitation_request::build_dispatch_inputs`.
 - `load_github_invitation_context(state, invitation_id, expected_installation_id)` for `github_invitation::{cancel_logic,tick_expire_logic}`.
 - `load_github_invitation_context_for_account(state, account, row)` for `reconcile::reconcile_single`, where the daily sweep already has the active installation row and pending GitHub Invitation row.
-- `load_github_invitation_context_without_installation_check(state, invitation_id)` for webhook handling, because webhook inputs identify the GitHub Invitation row but do not carry an installation id.
+- `load_github_invitation_account_context(state, invitation_id)` for webhook handling, because webhook inputs identify the GitHub Invitation row but do not carry an installation id and do not need repository resolution.
 - `load_installation_account(state, installation_id)` for `github_invitation::create_logic`, which only needs the installation/account row for audit classification.
 
 Each loader should return owned domain rows. This keeps call sites simple, avoids lifetime complexity around `Arc<dyn Storage>`, and matches current code that already clones or moves repository strings into GitHub client calls.
@@ -48,8 +49,8 @@ Each loader should return owned domain rows. This keeps call sites simple, avoid
 The module owns classification for the repeated lookup chain:
 
 - Missing `GithubInvitation`, `InvitationRequest`, `ShareLink`, requester `User`, or installation row returns `HandlerError::Storage(storage::Error::NotFound)`.
-- A GitHub Invitation whose `repo_id` is not present in the Share Link repository set returns `HandlerError::Invariant`.
-- An invalid `repo_full_name` returns `HandlerError::Invariant` from the context module.
+- A GitHub Invitation whose `repo_id` is not present in the Share Link repository set returns `HandlerError::Invariant` in full GitHub Invitation context loaders.
+- An invalid `repo_full_name` returns `HandlerError::Invariant` from full GitHub Invitation context loaders.
 - A mismatched expected installation id returns `HandlerError::Invariant` because it means the workflow input is pointing at a different installation than the loaded Share Link/Account chain.
 - A mismatched expected account id returns `HandlerError::Invariant` because reconciliation is iterating one active installation account and must not audit against another account's link.
 
@@ -59,7 +60,7 @@ Storage database errors and corrupt rows should continue to propagate through `H
 
 Update `github_invitation.rs` so:
 
-- `on_webhook_logic` uses the context loader for account id resolution before emitting accepted or declined audit events.
+- `on_webhook_logic` uses the account context loader for account id resolution before emitting accepted or declined audit events, without introducing a repository invariant into webhook handling.
 - `cancel_logic` uses the context loader for request, link, repository, and account information before calling GitHub delete and emitting cancellation audit.
 - `tick_expire_logic` uses the context loader for request, link, repository, and account information before listing GitHub invitations and emitting expiration audit.
 - `create_logic` keeps its input-driven GitHub call path and replaces `lookup_account_id_for_installation` with `load_installation_account`.
@@ -73,6 +74,7 @@ Update `reconcile.rs` so `reconcile_single` uses the account-aware context loade
 Add focused unit tests in `invitation_context.rs` covering:
 
 - Complete GitHub Invitation context loads the expected invitation, request, link, repo, requester, and account.
+- Webhook account context loads without requiring a matching Share Link repository.
 - Missing Invitation Request returns `Storage(NotFound)`.
 - Missing Share Link returns `Storage(NotFound)`.
 - Missing requester returns `Storage(NotFound)`.

@@ -196,7 +196,9 @@ pub async fn create_logic(
         )
         .await;
 
-    let account_id = lookup_account_id_for_installation(state, input.installation_id).await?;
+    let account =
+        crate::invitation_context::load_installation_account(state, input.installation_id).await?;
+    let account_id = account.account_id;
 
     match outcome {
         Ok(Some(github_id)) => {
@@ -291,22 +293,6 @@ pub async fn create_logic(
     Ok(())
 }
 
-/// Helper: resolve account_id from an installation_id by direct lookup.
-/// Returns terminal `NotFound` if the installation row is unknown.
-async fn lookup_account_id_for_installation(
-    state: &AppState,
-    installation_id: u64,
-) -> crate::error::Result<u64> {
-    let acct = state
-        .storage
-        .get_installation(installation_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    Ok(acct.account_id)
-}
-
 /// Pure logic: transition the github_invitation row based on a webhook
 /// signal. Idempotent: if the row is already in a terminal state, no-op.
 pub async fn on_webhook_logic(
@@ -347,21 +333,15 @@ pub async fn on_webhook_logic(
         _ => unreachable!("WebhookAction maps to Accepted/Declined"),
     };
 
-    // Resolve account_id by walking row -> request -> link.
-    let request = state
-        .storage
-        .get_invitation_request(row.invitation_request_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    let link = state
-        .storage
-        .get_share_link_by_id(request.share_link_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
+    let context = crate::invitation_context::load_github_invitation_account_context(
+        state,
+        input.invitation_id,
+    )
+    .await?;
+    debug_assert_eq!(context.invitation.id, input.invitation_id);
+    debug_assert_eq!(context.request.id, row.invitation_request_id);
+    debug_assert_eq!(context.link.account_id, context.account.account_id);
+    debug_assert_eq!(context.requester.user_id, context.request.requester_id);
 
     let metadata = serde_json::json!({
         "action": match input.action {
@@ -371,7 +351,7 @@ pub async fn on_webhook_logic(
     });
     crate::audit::emit(
         state,
-        link.account_id,
+        context.account.account_id,
         event_type,
         Actor::Github,
         Target::github_invitation(input.invitation_id),
@@ -403,32 +383,14 @@ pub async fn cancel_logic(
         return Ok(());
     }
 
-    // Look up the repo full name from the invitation_request → share_link.repos chain.
-    let request = state
-        .storage
-        .get_invitation_request(row.invitation_request_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    let link = state
-        .storage
-        .get_share_link_by_id(request.share_link_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    let repo = link
-        .repos
-        .iter()
-        .find(|r| r.repo_id == row.repo_id)
-        .ok_or_else(|| {
-            crate::error::HandlerError::Invariant(format!(
-                "github_invitation {} references repo_id {} not in link.repos",
-                input.invitation_id, row.repo_id
-            ))
-        })?;
-    let repository = repository_identity(&repo.repo_full_name)?;
+    let context = crate::invitation_context::load_github_invitation_context(
+        state,
+        input.invitation_id,
+        input.installation_id,
+    )
+    .await?;
+    debug_assert_eq!(context.request.id, row.invitation_request_id);
+    debug_assert_eq!(context.repo.repo_id, row.repo_id);
 
     // Call GitHub if we know the upstream id; otherwise skip (row was Sending
     // and never got a 201, so nothing to delete).
@@ -437,8 +399,8 @@ pub async fn cancel_logic(
             .github
             .delete_invitation(
                 input.installation_id,
-                repository.owner(),
-                repository.name(),
+                context.repository.owner(),
+                context.repository.name(),
                 github_id,
             )
             .await
@@ -477,7 +439,7 @@ pub async fn cancel_logic(
     });
     crate::audit::emit(
         state,
-        link.account_id,
+        context.account.account_id,
         EventType::InvitationCancelled,
         actor,
         Target::github_invitation(input.invitation_id),
@@ -506,35 +468,22 @@ pub async fn tick_expire_logic(
         return Ok(());
     }
 
-    let request = state
-        .storage
-        .get_invitation_request(row.invitation_request_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    let link = state
-        .storage
-        .get_share_link_by_id(request.share_link_id)
-        .await?
-        .ok_or(crate::error::HandlerError::Storage(
-            storage::Error::NotFound,
-        ))?;
-    let repo = link
-        .repos
-        .iter()
-        .find(|r| r.repo_id == row.repo_id)
-        .ok_or_else(|| {
-            crate::error::HandlerError::Invariant(format!(
-                "github_invitation {} references repo_id {} not in link.repos",
-                input.invitation_id, row.repo_id
-            ))
-        })?;
-    let repository = repository_identity(&repo.repo_full_name)?;
+    let context = crate::invitation_context::load_github_invitation_context(
+        state,
+        input.invitation_id,
+        input.installation_id,
+    )
+    .await?;
+    debug_assert_eq!(context.request.id, row.invitation_request_id);
+    debug_assert_eq!(context.repo.repo_id, row.repo_id);
 
     let pending = state
         .github
-        .list_invitations(input.installation_id, repository.owner(), repository.name())
+        .list_invitations(
+            input.installation_id,
+            context.repository.owner(),
+            context.repository.name(),
+        )
         .await?;
     let still_pending = row
         .github_invitation_id
@@ -561,7 +510,7 @@ pub async fn tick_expire_logic(
     let metadata = serde_json::json!({"reason": "tick_expire_no_longer_pending"});
     crate::audit::emit(
         state,
-        link.account_id,
+        context.account.account_id,
         EventType::InvitationExpired,
         Actor::System,
         Target::github_invitation(input.invitation_id),

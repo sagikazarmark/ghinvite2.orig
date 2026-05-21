@@ -1,11 +1,10 @@
 //! `Reconcile` Service: daily sweep over pending GitHub invitations.
 
 use crate::audit::{Actor, Target};
-use crate::error::HandlerError;
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
-use domain::{InvitationState, RepositoryIdentity};
+use domain::InvitationState;
 use restate_sdk::context::{Context, ContextSideEffects, RunFuture};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
@@ -84,36 +83,19 @@ async fn reconcile_single(
     at: DateTime<Utc>,
     request_id_for_audit: Option<String>,
 ) -> crate::error::Result<()> {
-    let req = state
-        .storage
-        .get_invitation_request(row.invitation_request_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-    let link = state
-        .storage
-        .get_share_link_by_id(req.share_link_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-    let repo = link
-        .repos
-        .iter()
-        .find(|r| r.repo_id == row.repo_id)
-        .ok_or_else(|| {
-            HandlerError::Invariant(format!(
-                "github_invitation {} references repo_id {} not in link.repos",
-                row.id, row.repo_id
-            ))
-        })?;
-    let repository = RepositoryIdentity::parse(repo.repo_full_name.clone()).map_err(|err| {
-        HandlerError::Invariant(format!(
-            "invalid repo_full_name {:?}: {err}",
-            repo.repo_full_name
-        ))
-    })?;
+    let context =
+        crate::invitation_context::load_github_invitation_context_for_account(state, acct, row)
+            .await?;
+    debug_assert_eq!(context.request.id, row.invitation_request_id);
+    debug_assert_eq!(context.repo.repo_id, row.repo_id);
 
     let pending = state
         .github
-        .list_invitations(acct.installation_id, repository.owner(), repository.name())
+        .list_invitations(
+            acct.installation_id,
+            context.repository.owner(),
+            context.repository.name(),
+        )
         .await?;
     let still_pending = row
         .github_invitation_id
@@ -126,18 +108,13 @@ async fn reconcile_single(
 
     // GitHub no longer lists it. Disambiguate accepted vs. cancelled by
     // checking is_collaborator.
-    let recipient = state
-        .storage
-        .get_user(req.requester_id)
-        .await?
-        .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let is_member = state
         .github
         .is_collaborator(
             acct.installation_id,
-            repository.owner(),
-            repository.name(),
-            &recipient.login,
+            context.repository.owner(),
+            context.repository.name(),
+            &context.requester.login,
         )
         .await?;
 
@@ -160,7 +137,7 @@ async fn reconcile_single(
 
     crate::audit::emit(
         state,
-        link.account_id,
+        context.account.account_id,
         event,
         Actor::System,
         Target::github_invitation(row.id),
