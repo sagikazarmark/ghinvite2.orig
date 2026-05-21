@@ -321,6 +321,6 @@ mod tests {
         assert!(html.contains("Check again"));
         assert!(html.contains("awaiting admin review"));
         assert!(html.contains("Request status"));
-        assert!(html.contains("card"));
+        assert!(html.contains("/i/abcdEFGH01234567/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
     }
 }
