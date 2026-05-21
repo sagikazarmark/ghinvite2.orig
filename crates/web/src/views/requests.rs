@@ -57,6 +57,9 @@ mod tests {
         assert!(html.contains("acme/web"));
         assert!(html.contains("Approving sends GitHub collaborator invitations"));
         assert!(html.contains("Need access for launch"));
+        assert!(html.contains("Decision queue"));
+        assert!(html.contains("Approve request"));
+        assert!(html.contains("Decline request"));
     }
 
     #[test]
@@ -113,17 +116,21 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
             active_nav: Some("requests".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6", h1 { class: "text-2xl font-bold", "Pending requests" } }
+                header { class: "mb-6",
+                    p { class: "text-sm font-medium text-primary", "Requests" }
+                    h1 { class: "text-2xl font-semibold tracking-tight", "Decision queue" }
+                    p { class: "mt-1 text-sm text-base-content/65", "Review access requests before GitHub invitations are sent." }
+                }
                 {if props.rows.is_empty() {
                     rsx! {
-                        div { class: "rounded-box bg-base-100 p-6 text-base-content/70",
-                            h2 { class: "font-semibold text-base-content", "No pending requests" }
-                            p { class: "mt-1 text-sm", "Requests that need an admin decision will appear here before GitHub invitations are sent." }
+                        div { class: "rounded-box border border-base-300 bg-base-100 p-6 text-base-content/70 shadow-sm",
+                            h2 { class: "font-medium text-base-content", "No pending requests" }
+                            p { class: "mt-1 text-sm", "Requests that need an admin decision will appear here." }
                         }
                     }
                 } else {
                     rsx! {
-                        div { class: "space-y-4",
+                        div { class: "overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm",
                             {props.rows.iter().map(|r| {
                                 let rid = r.request_id.clone();
                                 let just = r.justification.clone();
@@ -139,91 +146,68 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let permission = r.permission.clone().unwrap_or_else(|| "unknown permission".into());
                                 let repos_available = !r.repos.is_empty();
                                 let actions_available = !link_id.is_empty() && repos_available;
-                                let expires = r
-                                    .expires_at
-                                    .map(|when| when.format("%Y-%m-%d").to_string())
-                                    .unwrap_or_else(|| "No expiration".into());
+                                let expires = r.expires_at.map(|when| when.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "No expiration".into());
                                 let approval = match r.approval_required {
                                     Some(true) => "Admin approval required",
                                     Some(false) => "Auto-approved link",
                                     None => "Approval mode unavailable",
                                 };
                                 let repos = if r.repos.is_empty() {
-                                    rsx! { p { class: "text-sm text-base-content/70", "Repository details unavailable" } }
+                                    rsx! { p { class: "text-sm text-base-content/65", "Repository details unavailable" } }
                                 } else {
                                     rsx! {
-                                        ul { class: "list-disc list-inside text-sm",
+                                        ul { class: "mt-1 flex flex-wrap gap-2 text-sm",
                                             {r.repos.iter().map(|repo| {
                                                 let repo = repo.clone();
-                                                rsx! { li { "{repo}" } }
+                                                rsx! { li { class: "badge badge-ghost", "{repo}" } }
                                             })}
                                         }
                                     }
                                 };
                                 rsx! {
-                                    div { class: "card bg-base-100 shadow",
-                                        div { class: "card-body gap-4",
-                                            div { class: "flex flex-col gap-4 md:flex-row md:justify-between md:items-start",
-                                                div { class: "space-y-3",
-                                                    div {
-                                                        p {
-                                                            strong { "@{requester}" }
-                                                            " requested access via "
-                                                            {link_label}
-                                                        }
-                                                        p { class: "text-xs text-base-content/60", "Requested at {created}" }
-                                                    }
-                                                    div { class: "flex flex-wrap gap-2",
-                                                        span { class: "badge badge-neutral", "Permission: {permission}" }
-                                                        span { class: "badge badge-ghost", "Expires: {expires}" }
-                                                        span { class: "badge badge-ghost", "{approval}" }
-                                                    }
-                                                    div {
-                                                        h3 { class: "font-semibold text-sm", "Repositories" }
-                                                        {repos}
-                                                    }
-                                                    {match just {
-                                                        Some(j) if !j.is_empty() => rsx! {
-                                                            blockquote { class: "text-sm italic text-base-content/80", "\"{j}\"" }
-                                                        },
-                                                        _ => rsx! {},
-                                                    }}
-                                                    {if repos_available {
-                                                        rsx! {
-                                                            p { class: "text-sm text-base-content/70",
-                                                                "Approving sends GitHub collaborator invitations for the repositories listed here."
-                                                            }
-                                                        }
-                                                    } else {
-                                                        rsx! {
-                                                            p { class: "text-sm text-base-content/70",
-                                                                "This request cannot be completed until its share link details are available."
-                                                            }
-                                                        }
-                                                    }}
+                                    div { class: "grid gap-4 border-b border-base-300 p-4 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-start",
+                                        div { class: "min-w-0 space-y-3",
+                                            div {
+                                                p { class: "font-medium",
+                                                    strong { "@{requester}" }
+                                                    " requested access via "
+                                                    {link_label}
                                                 }
-                                                {if actions_available {
-                                                    rsx! {
-                                                        div { class: "flex gap-2 md:flex-col md:items-stretch",
-                                                            form {
-                                                                method: "post",
-                                                                action: "/accounts/{login}/requests/{rid}/approve",
-                                                                button { r#type: "submit", class: "btn btn-success btn-sm", "Approve" }
-                                                            }
-                                                            form {
-                                                                method: "post",
-                                                                action: "/accounts/{login}/requests/{rid}/decline",
-                                                                button { r#type: "submit", class: "btn btn-error btn-sm", "Decline" }
-                                                            }
-                                                        }
-                                                    }
-                                                } else {
-                                                    rsx! {
-                                                        p { class: "text-sm font-medium text-base-content/60", "Decision unavailable" }
-                                                    }
-                                                }}
+                                                p { class: "text-xs text-base-content/55", "Requested at {created}" }
                                             }
+                                            div { class: "flex flex-wrap gap-2",
+                                                span { class: "badge badge-neutral", "Permission: {permission}" }
+                                                span { class: "badge badge-ghost", "Expires: {expires}" }
+                                                span { class: "badge badge-ghost", "{approval}" }
+                                            }
+                                            div {
+                                                p { class: "text-xs font-medium uppercase tracking-wide text-base-content/50", "Repositories" }
+                                                {repos}
+                                            }
+                                            {match just {
+                                                Some(j) if !j.is_empty() => rsx! { blockquote { class: "text-sm italic text-base-content/80", "\"{j}\"" } },
+                                                _ => rsx! {},
+                                            }}
+                                            {if repos_available {
+                                                rsx! { p { class: "text-sm text-base-content/70", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
+                                            } else {
+                                                rsx! { p { class: "text-sm text-base-content/70", "This request cannot be completed until its share link details are available." } }
+                                            }}
                                         }
+                                        {if actions_available {
+                                            rsx! {
+                                                div { class: "flex gap-2 md:flex-col md:items-stretch",
+                                                    form { method: "post", action: "/accounts/{login}/requests/{rid}/approve",
+                                                        button { r#type: "submit", class: "btn btn-success btn-sm", "Approve request" }
+                                                    }
+                                                    form { method: "post", action: "/accounts/{login}/requests/{rid}/decline",
+                                                        button { r#type: "submit", class: "btn btn-error btn-sm", "Decline request" }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            rsx! { p { class: "text-sm font-medium text-base-content/60", "Decision unavailable" } }
+                                        }}
                                     }
                                 }
                             })}
