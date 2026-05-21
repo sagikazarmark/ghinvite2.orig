@@ -324,6 +324,40 @@ impl DecideInvitationRequest {
             },
         }
     }
+
+    pub fn decision(&self) -> InvitationRequestDecisionView<'_> {
+        match &self.decision {
+            InvitationRequestDecision::Approve {
+                decided_by,
+                decided_at,
+            } => InvitationRequestDecisionView::Approve {
+                decided_by: *decided_by,
+                decided_at: decided_at.to_owned(),
+            },
+            InvitationRequestDecision::Decline {
+                decided_by,
+                decided_at,
+                reason,
+            } => InvitationRequestDecisionView::Decline {
+                decided_by: *decided_by,
+                decided_at: decided_at.to_owned(),
+                reason: reason.as_deref(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InvitationRequestDecisionView<'a> {
+    Approve {
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+    },
+    Decline {
+        decided_by: u64,
+        decided_at: DateTime<Utc>,
+        reason: Option<&'a str>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
