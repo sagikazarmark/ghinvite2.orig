@@ -224,6 +224,7 @@ async fn pending(
         rsx! {
             crate::views::invitation::PendingPage {
                 slug: slug.clone(),
+                request_id: request_id_str.clone(),
                 request_state,
                 signed_in_login: signed_in_login.clone(),
             }

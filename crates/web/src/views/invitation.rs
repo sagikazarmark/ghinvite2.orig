@@ -98,9 +98,12 @@ pub fn LandingPage(props: LandingProps) -> Element {
                 p { class: "mb-2",
                     "This link grants collaborator access to the following {repo_word}:"
                 }
-                ul { class: "list-disc list-inside mb-4", {repos_view} }
+                ul { class: "list-disc list-inside mb-4 space-y-1", {repos_view} }
                 p { class: "mb-2",
                     span { class: "badge badge-neutral", "Permission: {perm_label}" }
+                }
+                p { class: "text-sm text-base-content/70",
+                    "GitHub sign-in confirms your identity before any request is sent."
                 }
                 {expiry_view}
                 div { class: "card-actions justify-end mt-6", {cta_view} }
@@ -183,13 +186,16 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
                         name: "request_id",
                         value: "{request_id}",
                     }
-                    div { class: "form-control",
+                    div { class: "form-control gap-2",
+                        label { class: "label", r#for: "justification", span { class: "label-text font-medium", "Justification" } }
                         textarea {
+                            id: "justification",
                             name: "justification",
                             class: "textarea textarea-bordered w-full",
-                            placeholder: "Why do you need access? (optional)",
+                            placeholder: "Why do you need access?",
                             rows: "3",
                         }
+                        p { class: "text-sm text-base-content/70", "Optional, visible to account admins." }
                     }
                     div { class: "card-actions justify-end",
                         button {
@@ -209,6 +215,7 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
 #[derive(Clone, PartialEq, Props)]
 pub struct PendingProps {
     pub slug: String,
+    pub request_id: String,
     pub request_state: Option<RequestState>,
     pub signed_in_login: Option<String>,
 }
@@ -216,26 +223,30 @@ pub struct PendingProps {
 #[component]
 pub fn PendingPage(props: PendingProps) -> Element {
     let slug = props.slug.clone();
+    let request_id = props.request_id.clone();
+    let refresh_href = format!("/i/{slug}/pending/{request_id}");
 
     let status_view = match props.request_state {
         None => rsx! {
             div { class: "alert alert-warning",
-                span {
-                    "Your request is being processed. Refresh to check status."
+                div {
+                    p { "Your request is being processed." }
+                    a { class: "link", href: "{refresh_href}", "Check again" }
                 }
             }
         },
         Some(RequestState::Pending) => rsx! {
             div { class: "alert alert-warning",
-                span {
-                    "Your request is awaiting admin review. Refresh to check status."
+                div {
+                    p { "Your request is awaiting admin review." }
+                    a { class: "link", href: "{refresh_href}", "Check again" }
                 }
             }
         },
         Some(RequestState::Approved) => rsx! {
             div { class: "alert alert-success",
                 span {
-                    "Approved! Check your GitHub notifications for the repository invitation."
+                    "Approved! Check your GitHub notifications and email for the repository invitation."
                 }
             }
         },
@@ -279,5 +290,28 @@ pub fn PendingPage(props: PendingProps) -> Element {
                 {status_view}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use domain::RequestState;
+
+    #[test]
+    fn pending_page_renders_refresh_affordance() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                PendingPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                    request_state: Some(RequestState::Pending),
+                    signed_in_login: Some("octocat".to_string()),
+                }
+            }
+        });
+
+        assert!(html.contains("Check again"));
+        assert!(html.contains("awaiting admin review"));
     }
 }

@@ -339,6 +339,7 @@ async fn landing_renders_active_link() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("acme/api"));
+    assert!(text.contains("GitHub sign-in confirms your identity"));
 }
 
 #[tokio::test]
@@ -515,6 +516,8 @@ async fn request_form_with_other_recipient_pending_request_renders_form() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Submit request"));
+    assert!(text.contains("Justification"));
+    assert!(text.contains("visible to account admins"));
 }
 
 #[tokio::test]
@@ -550,6 +553,7 @@ async fn request_form_with_same_recipient_declined_request_renders_form() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Submit request"));
+    assert!(text.contains("Justification"));
 }
 
 #[tokio::test]
