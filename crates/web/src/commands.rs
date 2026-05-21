@@ -291,7 +291,7 @@ impl From<SubmitInvitationRequest> for SubmitInvitationRequestPayload {
 #[derive(Clone, Debug)]
 pub struct DecideInvitationRequest {
     pub request_id: domain::RequestId,
-    pub decision: InvitationRequestDecision,
+    decision: InvitationRequestDecision,
 }
 
 impl DecideInvitationRequest {
@@ -327,7 +327,7 @@ impl DecideInvitationRequest {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub enum InvitationRequestDecision {
+enum InvitationRequestDecision {
     Approve {
         decided_by: u64,
         decided_at: DateTime<Utc>,

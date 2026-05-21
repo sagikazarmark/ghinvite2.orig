@@ -165,16 +165,16 @@ async fn submit_request(
 
     if let Err(e) = state
         .commands
-        .submit_invitation_request(SubmitInvitationRequest {
+        .submit_invitation_request(SubmitInvitationRequest::new(
             request_id,
-            share_link_id: link.id,
-            requester_id: session.user_id,
+            link.id,
+            session.user_id,
             justification,
-            created_at: now,
-        })
+            now,
+        ))
         .await
     {
-        tracing::warn!(error = ?e, "InvitationRequest::submit send failed");
+        tracing::warn!(error = ?e, "submit invitation request command failed");
         let _ = session::set_flash(
             &tower,
             session::Flash {

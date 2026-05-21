@@ -3,9 +3,7 @@
 use crate::account_admin_reads::{
     find_account_admin_request, find_account_admin_share_link, pending_request_queue,
 };
-use crate::commands::{
-    CreateShareLink, DecideInvitationRequest, InvitationRequestDecision, RevokeShareLink,
-};
+use crate::commands::{CreateShareLink, DecideInvitationRequest, RevokeShareLink};
 use crate::middleware::auth::RequireAdminOf;
 use crate::session;
 use crate::state::AppState;
@@ -406,13 +404,11 @@ async fn approve_request(
 
     match state
         .commands
-        .decide_invitation_request(DecideInvitationRequest {
+        .decide_invitation_request(DecideInvitationRequest::approve(
             request_id,
-            decision: InvitationRequestDecision::Approve {
-                decided_by: admin.session.user_id,
-                decided_at: Utc::now(),
-            },
-        })
+            admin.session.user_id,
+            Utc::now(),
+        ))
         .await
     {
         Ok(_) => {
@@ -426,7 +422,7 @@ async fn approve_request(
             .await;
         }
         Err(e) => {
-            tracing::warn!(error = ?e, "InvitationRequest::decide(approve) failed");
+            tracing::warn!(error = ?e, "approve invitation request command failed");
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
@@ -470,14 +466,12 @@ async fn decline_request(
     // v1: no reason field in the form; v1.1 will add a textarea.
     match state
         .commands
-        .decide_invitation_request(DecideInvitationRequest {
+        .decide_invitation_request(DecideInvitationRequest::decline(
             request_id,
-            decision: InvitationRequestDecision::Decline {
-                decided_by: admin.session.user_id,
-                decided_at: Utc::now(),
-                reason: None,
-            },
-        })
+            admin.session.user_id,
+            Utc::now(),
+            None,
+        ))
         .await
     {
         Ok(_) => {
@@ -491,7 +485,7 @@ async fn decline_request(
             .await;
         }
         Err(e) => {
-            tracing::warn!(error = ?e, "InvitationRequest::decide(decline) failed");
+            tracing::warn!(error = ?e, "decline invitation request command failed");
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
