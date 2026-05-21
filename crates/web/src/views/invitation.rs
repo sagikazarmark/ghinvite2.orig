@@ -95,15 +95,15 @@ pub fn LandingPage(props: LandingProps) -> Element {
             active_nav: None,
             flash: None,
             children: rsx! {
-                h1 { class: "card-title text-2xl mb-4", "You've been invited" }
-                p { class: "mb-2",
-                    "This link grants collaborator access to the following {repo_word}:"
+                h1 { class: "text-2xl font-semibold tracking-tight", "Access request" }
+                p { class: "mt-2 text-sm text-base-content/70",
+                    "This share link requests collaborator access to the following {repo_word}:"
                 }
-                ul { class: "list-disc list-inside mb-4 space-y-1", {repos_view} }
-                p { class: "mb-2",
+                ul { class: "mt-4 list-inside list-disc space-y-1 rounded-box border border-base-300 bg-base-200 p-4 text-sm", {repos_view} }
+                p { class: "mt-4",
                     span { class: "badge badge-neutral", "Permission: {perm_label}" }
                 }
-                p { class: "text-sm text-base-content/70",
+                p { class: "mt-3 text-sm text-base-content/70",
                     "GitHub sign-in confirms your identity before any request is sent."
                 }
                 {expiry_view}
@@ -164,6 +164,10 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
             active_nav: None,
             flash: None,
             children: rsx! {
+                header { class: "mb-4",
+                    h1 { class: "text-2xl font-semibold tracking-tight", "Request access" }
+                    p { class: "mt-1 text-sm text-base-content/70", "Confirm the repositories and include context for the account admins." }
+                }
                 {flash_view}
                 div { class: "alert alert-info mb-4",
                     span {
@@ -316,5 +320,7 @@ mod tests {
 
         assert!(html.contains("Check again"));
         assert!(html.contains("awaiting admin review"));
+        assert!(html.contains("Request status"));
+        assert!(html.contains("card"));
     }
 }
