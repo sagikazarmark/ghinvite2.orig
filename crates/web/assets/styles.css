@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @plugin "daisyui" {
-  themes: ghinvite --default;
+  themes: ghinvite --default, ghinvite-dark;
 }
 
 @plugin "daisyui/theme" {
@@ -32,6 +32,45 @@
   --color-warning-content: oklch(24% 0.03 80);
   --color-error: oklch(58% 0.18 25);
   --color-error-content: oklch(98% 0.004 25);
+
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "ghinvite-dark";
+  default: false;
+  prefersdark: false;
+  color-scheme: dark;
+
+  --color-base-100: oklch(22% 0.018 255);
+  --color-base-200: oklch(18% 0.018 255);
+  --color-base-300: oklch(30% 0.02 255);
+  --color-base-content: oklch(91% 0.012 255);
+
+  --color-primary: oklch(68% 0.13 255);
+  --color-primary-content: oklch(18% 0.018 255);
+  --color-secondary: oklch(70% 0.075 260);
+  --color-secondary-content: oklch(18% 0.018 255);
+  --color-accent: oklch(72% 0.1 205);
+  --color-accent-content: oklch(18% 0.018 255);
+  --color-neutral: oklch(84% 0.012 255);
+  --color-neutral-content: oklch(18% 0.018 255);
+
+  --color-info: oklch(72% 0.11 245);
+  --color-info-content: oklch(18% 0.018 255);
+  --color-success: oklch(70% 0.11 155);
+  --color-success-content: oklch(18% 0.018 155);
+  --color-warning: oklch(78% 0.13 80);
+  --color-warning-content: oklch(20% 0.025 80);
+  --color-error: oklch(68% 0.15 25);
+  --color-error-content: oklch(18% 0.018 25);
 
   --radius-selector: 0.5rem;
   --radius-field: 0.5rem;

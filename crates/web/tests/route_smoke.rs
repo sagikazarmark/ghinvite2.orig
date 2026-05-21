@@ -134,6 +134,8 @@ async fn static_styles_returns_css() {
     assert!(text.contains("ghinvite"));
     assert!(text.contains("--color-primary"));
     assert!(text.contains("oklch("));
+    assert!(text.contains("ghinvite-dark"));
+    assert!(text.contains("color-scheme:dark"));
 }
 
 #[tokio::test]
