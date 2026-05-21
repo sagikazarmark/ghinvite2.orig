@@ -118,17 +118,39 @@ async fn reconcile_single(
         )
         .await?;
 
-    let (new_state, event) = if is_member {
-        (InvitationState::Accepted, EventType::InvitationAccepted)
+    if is_member {
+        accept_reconciled_invitation_transition(
+            state,
+            row,
+            context.account.account_id,
+            at,
+            request_id_for_audit,
+        )
+        .await
     } else {
-        (InvitationState::Cancelled, EventType::InvitationCancelled)
-    };
+        cancel_reconciled_invitation_transition(
+            state,
+            row,
+            context.account.account_id,
+            at,
+            request_id_for_audit,
+        )
+        .await
+    }
+}
 
+async fn accept_reconciled_invitation_transition(
+    state: &AppState,
+    row: &domain::GithubInvitation,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<()> {
     state
         .storage
         .update_github_invitation(&storage::GithubInvitationUpdate {
             id: row.id,
-            state: new_state,
+            state: InvitationState::Accepted,
             github_invitation_id: None,
             error_message: None,
             updated_at: at,
@@ -137,8 +159,38 @@ async fn reconcile_single(
 
     crate::audit::emit(
         state,
-        context.account.account_id,
-        event,
+        account_id,
+        EventType::InvitationAccepted,
+        Actor::System,
+        Target::github_invitation(row.id),
+        serde_json::json!({"reconciled": true}),
+        request_id_for_audit,
+    )
+    .await
+}
+
+async fn cancel_reconciled_invitation_transition(
+    state: &AppState,
+    row: &domain::GithubInvitation,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id_for_audit: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: row.id,
+            state: InvitationState::Cancelled,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: at,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationCancelled,
         Actor::System,
         Target::github_invitation(row.id),
         serde_json::json!({"reconciled": true}),
@@ -150,7 +202,10 @@ async fn reconcile_single(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_github_client, fixture_storage};
+    use crate::test_support::{
+        dt, fixture_github_client, fixture_state_with_storage, fixture_storage,
+    };
+    use ::audit::{ActorKind, EventType, TargetKind};
     use domain::{
         AccountType, GithubInvitationId, Permission, RequestId, RequestState, SelectedRepos,
         ShareLink, ShareLinkId, ShareLinkRepo, Slug,
@@ -278,6 +333,13 @@ mod tests {
         seed_one_pending_with_repo_full_name(state, "acme/api").await
     }
 
+    async fn audit_events(
+        storage: &::storage::SqlxStorage,
+        account_id: u64,
+    ) -> Vec<::audit::AuditEvent> {
+        storage.debug_list_audit(account_id).await.unwrap()
+    }
+
     #[tokio::test]
     async fn daily_run_no_change_when_still_pending() {
         let storage = fixture_storage().await;
@@ -344,6 +406,98 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, InvitationState::Sent);
+    }
+
+    #[tokio::test]
+    async fn reconciled_accept_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let inv_id = seed_one_pending(&state).await;
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        accept_reconciled_invitation_transition(
+            &state,
+            &row,
+            100,
+            dt("2026-05-05T13:00:00Z"),
+            Some("req-reconcile-accept".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Accepted);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationAccepted);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-reconcile-accept"));
+        assert_eq!(
+            event.metadata.get("reconciled"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciled_cancel_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let inv_id = seed_one_pending(&state).await;
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        cancel_reconciled_invitation_transition(
+            &state,
+            &row,
+            100,
+            dt("2026-05-05T13:00:00Z"),
+            Some("req-reconcile-cancel".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Cancelled);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationCancelled);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-reconcile-cancel"));
+        assert_eq!(
+            event.metadata.get("reconciled"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     #[tokio::test]
