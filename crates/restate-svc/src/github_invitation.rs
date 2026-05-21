@@ -551,6 +551,36 @@ async fn cancel_invitation_transition(
     .await
 }
 
+async fn expire_invitation_transition(
+    state: &AppState,
+    invitation_id: GithubInvitationId,
+    account_id: u64,
+    at: DateTime<Utc>,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: invitation_id,
+            state: InvitationState::Expired,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: at,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationExpired,
+        Actor::System,
+        Target::github_invitation(invitation_id),
+        serde_json::json!({"reason": "tick_expire_no_longer_pending"}),
+        request_id,
+    )
+    .await
+}
+
 /// Pure logic: at expiration time, confirm via GitHub list_invitations that
 /// the row is still pending; if so, mark expired + audit.
 pub async fn tick_expire_logic(
@@ -603,36 +633,6 @@ pub async fn tick_expire_logic(
         input.invitation_id,
         context.account.account_id,
         input.at,
-        request_id,
-    )
-    .await
-}
-
-async fn expire_invitation_transition(
-    state: &AppState,
-    invitation_id: GithubInvitationId,
-    account_id: u64,
-    at: DateTime<Utc>,
-    request_id: Option<String>,
-) -> crate::error::Result<()> {
-    state
-        .storage
-        .update_github_invitation(&storage::GithubInvitationUpdate {
-            id: invitation_id,
-            state: InvitationState::Expired,
-            github_invitation_id: None,
-            error_message: None,
-            updated_at: at,
-        })
-        .await?;
-
-    crate::audit::emit(
-        state,
-        account_id,
-        EventType::InvitationExpired,
-        Actor::System,
-        Target::github_invitation(invitation_id),
-        serde_json::json!({"reason": "tick_expire_no_longer_pending"}),
         request_id,
     )
     .await
