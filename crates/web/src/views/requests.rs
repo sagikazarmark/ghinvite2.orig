@@ -89,6 +89,8 @@ mod tests {
         assert!(!html.contains(
             "Approving sends GitHub collaborator invitations for the repositories listed here."
         ));
+        assert!(!html.contains("/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve"));
+        assert!(!html.contains("/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/decline"));
     }
 }
 
@@ -135,6 +137,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let created = r.created_at;
                                 let permission = r.permission.clone().unwrap_or_else(|| "unknown permission".into());
                                 let repos_available = !r.repos.is_empty();
+                                let actions_available = !link_id.is_empty() && repos_available;
                                 let expires = r
                                     .expires_at
                                     .map(|when| when.format("%Y-%m-%d").to_string())
@@ -198,18 +201,26 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                         }
                                                     }}
                                                 }
-                                                div { class: "flex gap-2 md:flex-col md:items-stretch",
-                                                    form {
-                                                        method: "post",
-                                                        action: "/accounts/{login}/requests/{rid}/approve",
-                                                        button { r#type: "submit", class: "btn btn-success btn-sm", "Approve" }
+                                                {if actions_available {
+                                                    rsx! {
+                                                        div { class: "flex gap-2 md:flex-col md:items-stretch",
+                                                            form {
+                                                                method: "post",
+                                                                action: "/accounts/{login}/requests/{rid}/approve",
+                                                                button { r#type: "submit", class: "btn btn-success btn-sm", "Approve" }
+                                                            }
+                                                            form {
+                                                                method: "post",
+                                                                action: "/accounts/{login}/requests/{rid}/decline",
+                                                                button { r#type: "submit", class: "btn btn-error btn-sm", "Decline" }
+                                                            }
+                                                        }
                                                     }
-                                                    form {
-                                                        method: "post",
-                                                        action: "/accounts/{login}/requests/{rid}/decline",
-                                                        button { r#type: "submit", class: "btn btn-error btn-sm", "Decline" }
+                                                } else {
+                                                    rsx! {
+                                                        p { class: "text-sm font-medium text-base-content/60", "Decision unavailable" }
                                                     }
-                                                }
+                                                }}
                                             }
                                         }
                                     }
