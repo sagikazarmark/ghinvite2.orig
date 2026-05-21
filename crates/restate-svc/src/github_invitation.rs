@@ -202,88 +202,27 @@ pub async fn create_logic(
 
     match outcome {
         Ok(Some(github_id)) => {
-            // 201 — invitation pending.
-            state
-                .storage
-                .update_github_invitation(&storage::GithubInvitationUpdate {
-                    id: input.invitation_id,
-                    state: InvitationState::Sent,
-                    github_invitation_id: Some(github_id),
-                    error_message: None,
-                    updated_at: input.now,
-                })
+            // 201 - invitation pending.
+            mark_invitation_sent_transition(state, input, account_id, github_id, request_id)
                 .await?;
-            crate::audit::emit(
-                state,
-                account_id,
-                EventType::InvitationSent,
-                Actor::System,
-                Target::github_invitation(input.invitation_id),
-                serde_json::json!({
-                    "github_invitation_id": github_id,
-                    "repo_full_name": input.repo_full_name,
-                    "recipient": input.recipient_login,
-                }),
-                request_id,
-            )
-            .await?;
         }
         Ok(None) => {
-            // 204 — already a collaborator.
-            state
-                .storage
-                .update_github_invitation(&storage::GithubInvitationUpdate {
-                    id: input.invitation_id,
-                    state: InvitationState::Accepted,
-                    github_invitation_id: None,
-                    error_message: None,
-                    updated_at: input.now,
-                })
+            // 204 - already a collaborator.
+            mark_invitation_already_accepted_transition(state, input, account_id, request_id)
                 .await?;
-            crate::audit::emit(
-                state,
-                account_id,
-                EventType::InvitationAccepted,
-                Actor::Github,
-                Target::github_invitation(input.invitation_id),
-                serde_json::json!({
-                    "reason": "already_collaborator",
-                    "repo_full_name": input.repo_full_name,
-                    "recipient": input.recipient_login,
-                }),
-                request_id,
-            )
-            .await?;
         }
         Err(e) => {
             let h: crate::error::HandlerError = e.into();
             if !h.is_terminal() {
-                // Transient — let Restate retry.
+                // Transient - let Restate retry.
                 return Err(h);
             }
-            // Terminal 4xx — mark failed, audit, return Ok so Restate doesn't retry.
-            let msg = h.to_string();
-            state
-                .storage
-                .update_github_invitation(&storage::GithubInvitationUpdate {
-                    id: input.invitation_id,
-                    state: InvitationState::Failed,
-                    github_invitation_id: None,
-                    error_message: Some(msg.clone()),
-                    updated_at: input.now,
-                })
-                .await?;
-            crate::audit::emit(
+            // Terminal 4xx - mark failed, audit, return Ok so Restate does not retry.
+            mark_invitation_send_failed_transition(
                 state,
+                input,
                 account_id,
-                EventType::InvitationSendFailed,
-                Actor::System,
-                Target::github_invitation(input.invitation_id),
-                serde_json::json!({
-                    "error": msg,
-                    "repo_full_name": input.repo_full_name,
-                    "recipient": input.recipient_login,
-                }),
+                h.to_string(),
                 request_id,
             )
             .await?;
@@ -291,6 +230,107 @@ pub async fn create_logic(
     }
 
     Ok(())
+}
+
+async fn mark_invitation_sent_transition(
+    state: &AppState,
+    input: &CreateInvitationInput,
+    account_id: u64,
+    github_invitation_id: u64,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: InvitationState::Sent,
+            github_invitation_id: Some(github_invitation_id),
+            error_message: None,
+            updated_at: input.now,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationSent,
+        Actor::System,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({
+            "github_invitation_id": github_invitation_id,
+            "repo_full_name": input.repo_full_name,
+            "recipient": input.recipient_login,
+        }),
+        request_id,
+    )
+    .await
+}
+
+async fn mark_invitation_already_accepted_transition(
+    state: &AppState,
+    input: &CreateInvitationInput,
+    account_id: u64,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: InvitationState::Accepted,
+            github_invitation_id: None,
+            error_message: None,
+            updated_at: input.now,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationAccepted,
+        Actor::Github,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({
+            "reason": "already_collaborator",
+            "repo_full_name": input.repo_full_name,
+            "recipient": input.recipient_login,
+        }),
+        request_id,
+    )
+    .await
+}
+
+async fn mark_invitation_send_failed_transition(
+    state: &AppState,
+    input: &CreateInvitationInput,
+    account_id: u64,
+    error_message: String,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    state
+        .storage
+        .update_github_invitation(&storage::GithubInvitationUpdate {
+            id: input.invitation_id,
+            state: InvitationState::Failed,
+            github_invitation_id: None,
+            error_message: Some(error_message.clone()),
+            updated_at: input.now,
+        })
+        .await?;
+
+    crate::audit::emit(
+        state,
+        account_id,
+        EventType::InvitationSendFailed,
+        Actor::System,
+        Target::github_invitation(input.invitation_id),
+        serde_json::json!({
+            "error": error_message,
+            "repo_full_name": input.repo_full_name,
+            "recipient": input.recipient_login,
+        }),
+        request_id,
+    )
+    .await
 }
 
 /// Pure logic: transition the github_invitation row based on a webhook
@@ -525,7 +565,10 @@ mod tests {
     use super::*;
     use crate::HandlerError;
     use crate::state::AppState;
-    use crate::test_support::{dt, fixture_github_client, fixture_storage};
+    use crate::test_support::{
+        dt, fixture_github_client, fixture_state_with_storage, fixture_storage,
+    };
+    use ::audit::{ActorKind, EventType, TargetKind};
     use domain::{AccountType, Permission, SelectedRepos, ShareLinkId, Slug};
     use github::mocks::{Expectation, MockTransport};
     use github::transport::{Method, Response};
@@ -638,6 +681,30 @@ mod tests {
             permission: Permission::Push,
             now: dt("2026-05-04T13:01:00Z"),
         }
+    }
+
+    async fn audit_events(
+        storage: &::storage::SqlxStorage,
+        account_id: u64,
+    ) -> Vec<::audit::AuditEvent> {
+        storage.debug_list_audit(account_id).await.unwrap()
+    }
+
+    async fn seed_sending_invitation(state: &AppState, input: &CreateInvitationInput) {
+        state
+            .storage
+            .insert_github_invitation(&DomainGithubInvitation {
+                id: input.invitation_id,
+                invitation_request_id: input.invitation_request_id,
+                repo_id: input.repo_id,
+                github_invitation_id: None,
+                state: InvitationState::Sending,
+                error_message: None,
+                created_at: input.now,
+                updated_at: input.now,
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -772,6 +839,152 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, InvitationState::Sending);
+    }
+
+    #[tokio::test]
+    async fn sent_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let req_id = seed_chain(&state).await;
+        let inv_id = GithubInvitationId::new();
+        let input = sample_input(inv_id, req_id);
+        seed_sending_invitation(&state, &input).await;
+
+        mark_invitation_sent_transition(&state, &input, 100, 9988, Some("req-sent".into()))
+            .await
+            .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Sent);
+        assert_eq!(row.github_invitation_id, Some(9988));
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationSent);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-sent"));
+        assert_eq!(
+            event.metadata.get("github_invitation_id"),
+            Some(&serde_json::json!(9988))
+        );
+        assert_eq!(
+            event.metadata.get("repo_full_name"),
+            Some(&serde_json::json!("acme/api"))
+        );
+        assert_eq!(
+            event.metadata.get("recipient"),
+            Some(&serde_json::json!("alice"))
+        );
+    }
+
+    #[tokio::test]
+    async fn already_accepted_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let req_id = seed_chain(&state).await;
+        let inv_id = GithubInvitationId::new();
+        let input = sample_input(inv_id, req_id);
+        seed_sending_invitation(&state, &input).await;
+
+        mark_invitation_already_accepted_transition(
+            &state,
+            &input,
+            100,
+            Some("req-already".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Accepted);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message, None);
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationAccepted);
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-already"));
+        assert_eq!(
+            event.metadata.get("reason"),
+            Some(&serde_json::json!("already_collaborator"))
+        );
+        assert_eq!(
+            event.metadata.get("repo_full_name"),
+            Some(&serde_json::json!("acme/api"))
+        );
+        assert_eq!(
+            event.metadata.get("recipient"),
+            Some(&serde_json::json!("alice"))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_failed_transition_updates_row_and_audits() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let req_id = seed_chain(&state).await;
+        let inv_id = GithubInvitationId::new();
+        let input = sample_input(inv_id, req_id);
+        seed_sending_invitation(&state, &input).await;
+
+        mark_invitation_send_failed_transition(
+            &state,
+            &input,
+            100,
+            "terminal failure".into(),
+            Some("req-failed".into()),
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Failed);
+        assert_eq!(row.github_invitation_id, None);
+        assert_eq!(row.error_message.as_deref(), Some("terminal failure"));
+
+        let audits = audit_events(&storage, 100).await;
+        assert_eq!(audits.len(), 1);
+        let event = &audits[0];
+        assert_eq!(event.event_type, EventType::InvitationSendFailed);
+        assert_eq!(event.actor_kind, ActorKind::System);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+        assert_eq!(event.target_id, inv_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-failed"));
+        assert_eq!(
+            event.metadata.get("error"),
+            Some(&serde_json::json!("terminal failure"))
+        );
+        assert_eq!(
+            event.metadata.get("repo_full_name"),
+            Some(&serde_json::json!("acme/api"))
+        );
+        assert_eq!(
+            event.metadata.get("recipient"),
+            Some(&serde_json::json!("alice"))
+        );
     }
 
     #[tokio::test]
