@@ -58,6 +58,38 @@ mod tests {
         assert!(html.contains("Approving sends GitHub collaborator invitations"));
         assert!(html.contains("Need access for launch"));
     }
+
+    #[test]
+    fn requests_queue_renders_missing_link_context_without_broken_link() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                RequestsQueuePage {
+                    signed_in_login: Some("admin".into()),
+                    flash: None,
+                    account_login: "acme",
+                    rows: vec![PendingRequestRow {
+                        request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+                        link_slug: "(deleted link)".into(),
+                        link_id: "".into(),
+                        requester_login: "octocat".into(),
+                        justification: None,
+                        created_at: dt("2026-05-04T12:30:00Z"),
+                        permission: None,
+                        repos: vec![],
+                        expires_at: None,
+                        approval_required: None,
+                    }],
+                }
+            }
+        });
+
+        assert!(html.contains("(deleted link)"));
+        assert!(!html.contains("href=\"/accounts/acme/links/\""));
+        assert!(html.contains("Repository details unavailable"));
+        assert!(!html.contains(
+            "Approving sends GitHub collaborator invitations for the repositories listed here."
+        ));
+    }
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -94,9 +126,15 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let just = r.justification.clone();
                                 let link_id = r.link_id.clone();
                                 let link_slug = r.link_slug.clone();
+                                let link_label = if link_id.is_empty() {
+                                    rsx! { span { "{link_slug}" } }
+                                } else {
+                                    rsx! { a { class: "link", href: "/accounts/{login}/links/{link_id}", "{link_slug}" } }
+                                };
                                 let requester = r.requester_login.clone();
                                 let created = r.created_at;
                                 let permission = r.permission.clone().unwrap_or_else(|| "unknown permission".into());
+                                let repos_available = !r.repos.is_empty();
                                 let expires = r
                                     .expires_at
                                     .map(|when| when.format("%Y-%m-%d").to_string())
@@ -127,7 +165,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                         p {
                                                             strong { "@{requester}" }
                                                             " requested access via "
-                                                            a { class: "link", href: "/accounts/{login}/links/{link_id}", "{link_slug}" }
+                                                            {link_label}
                                                         }
                                                         p { class: "text-xs text-base-content/60", "Requested at {created}" }
                                                     }
@@ -146,9 +184,19 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                         },
                                                         _ => rsx! {},
                                                     }}
-                                                    p { class: "text-sm text-base-content/70",
-                                                        "Approving sends GitHub collaborator invitations for the repositories listed here."
-                                                    }
+                                                    {if repos_available {
+                                                        rsx! {
+                                                            p { class: "text-sm text-base-content/70",
+                                                                "Approving sends GitHub collaborator invitations for the repositories listed here."
+                                                            }
+                                                        }
+                                                    } else {
+                                                        rsx! {
+                                                            p { class: "text-sm text-base-content/70",
+                                                                "This request cannot be completed until its share link details are available."
+                                                            }
+                                                        }
+                                                    }}
                                                 }
                                                 div { class: "flex gap-2 md:flex-col md:items-stretch",
                                                     form {
