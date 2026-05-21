@@ -129,6 +129,11 @@ async fn static_styles_returns_css() {
         .to_str()
         .unwrap();
     assert!(ct.contains("text/css"));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("ghinvite"));
+    assert!(text.contains("--color-primary"));
+    assert!(text.contains("oklch("));
 }
 
 #[tokio::test]
