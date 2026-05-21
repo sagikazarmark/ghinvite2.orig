@@ -8,6 +8,53 @@ pub struct NavProps {
     pub signed_in_login: Option<String>,
 }
 
+const THEME_SYNC_SCRIPT: &str = r#"
+(function () {
+  var key = 'ghinvite-theme';
+  var light = 'ghinvite';
+  var dark = 'ghinvite-dark';
+
+  function valid(value) {
+    return value === light || value === dark;
+  }
+
+  function apply(value) {
+    var theme = valid(value) ? value : light;
+    document.documentElement.setAttribute('data-theme', theme);
+    if (document.body) {
+      document.body.setAttribute('data-theme', theme);
+    }
+    var selector = document.getElementById('theme-selector');
+    if (selector) {
+      selector.value = theme;
+    }
+  }
+
+  var stored = light;
+  try {
+    stored = window.localStorage.getItem(key) || light;
+  } catch (_) {
+    stored = light;
+  }
+  apply(stored);
+
+  document.addEventListener('DOMContentLoaded', function () {
+    apply(stored);
+    var selector = document.getElementById('theme-selector');
+    if (!selector) {
+      return;
+    }
+    selector.addEventListener('change', function (event) {
+      var next = valid(event.target.value) ? event.target.value : light;
+      apply(next);
+      try {
+        window.localStorage.setItem(key, next);
+      } catch (_) {}
+    });
+  });
+})();
+"#;
+
 #[component]
 pub fn Nav(props: NavProps) -> Element {
     rsx! {
@@ -20,7 +67,15 @@ pub fn Nav(props: NavProps) -> Element {
                     "ghinvite"
                 }
             }
-            div { class: "flex-none gap-2",
+            div { class: "flex-none items-center gap-2",
+                label { class: "sr-only", r#for: "theme-selector", "Theme" }
+                select {
+                    id: "theme-selector",
+                    class: "select select-bordered select-sm w-24",
+                    aria_label: "Theme",
+                    option { value: "ghinvite", selected: true, "Light" }
+                    option { value: "ghinvite-dark", "Dark" }
+                }
                 {match props.signed_in_login.as_deref() {
                     Some(login) => rsx! {
                         span { class: "hidden px-2 text-xs text-base-content/65 sm:inline-flex", "@{login}" }
@@ -32,6 +87,7 @@ pub fn Nav(props: NavProps) -> Element {
                     }
                 }}
             }
+            script { "{THEME_SYNC_SCRIPT}" }
         }
     }
 }
@@ -47,5 +103,23 @@ pub fn Footer() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nav_renders_theme_selector() {
+        let html = crate::views::render::render(|| {
+            rsx! { Nav { signed_in_login: None } }
+        });
+
+        assert!(html.contains("Theme"));
+        assert!(html.contains("Light"));
+        assert!(html.contains("Dark"));
+        assert!(html.contains("ghinvite-theme"));
+        assert!(html.contains("ghinvite-dark"));
     }
 }

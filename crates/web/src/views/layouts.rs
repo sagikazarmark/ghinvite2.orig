@@ -173,6 +173,7 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
+        assert!(!html.contains("data-theme=\"ghinvite-dark\""));
         assert!(html.contains("aria-current=\"page\""));
         assert!(html.contains("Pending requests"));
         assert!(html.contains("menu-active"));
