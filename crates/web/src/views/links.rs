@@ -199,6 +199,26 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
         Permission::Maintain => "maintain",
         Permission::Admin => "admin",
     };
+    let uses = props
+        .link
+        .max_uses
+        .map(|n| format!("{} / {}", props.link.uses_count, n))
+        .unwrap_or_else(|| format!("{} / unlimited", props.link.uses_count));
+    let expires = props
+        .link
+        .expires_at
+        .map(|when| when.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "No expiration".into());
+    let approval = if props.link.approval_required {
+        "Admin approval required"
+    } else {
+        "Requests are auto-approved"
+    };
+    let preview_href = props.share_url.clone();
+    let repos = props.link.repos.iter().map(|repo| {
+        let full_name = repo.repo_full_name.clone();
+        rsx! { li { "{full_name}" } }
+    });
 
     rsx! {
         DashboardLayout {
@@ -207,42 +227,88 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
             account_login: Some(props.account_login.clone()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6 flex items-center gap-3",
-                    h1 { class: "text-2xl font-bold", "{slug}" }
+                header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
+                    div {
+                        h1 { class: "text-2xl font-bold", "{slug}" }
+                        p { class: "text-sm text-base-content/70", "Share link details and controls" }
+                    }
                     span { class: "{badge_class}", "{badge_label}" }
                 }
                 section { class: "card bg-base-100 shadow mb-6",
-                    div { class: "card-body",
-                        h2 { class: "card-title", "Share URL" }
-                        p { class: "font-mono break-all", "{props.share_url}" }
+                    div { class: "card-body gap-4",
+                        div {
+                            h2 { class: "card-title", "Share URL" }
+                            p { class: "text-sm text-base-content/70", "Send this URL to recipients who should request access." }
+                        }
+                        input {
+                            class: "input input-bordered font-mono text-sm w-full",
+                            readonly: true,
+                            value: "{props.share_url}",
+                            aria_label: "Share URL",
+                        }
+                        div { class: "card-actions justify-start",
+                            a { class: "btn btn-outline", href: "{preview_href}", "Open recipient preview" }
+                        }
                     }
                 }
-                section { class: "grid grid-cols-2 gap-4 mb-6",
+                section { class: "grid grid-cols-1 md:grid-cols-2 gap-4 mb-6",
                     div { class: "card bg-base-100 shadow", div { class: "card-body",
-                        h3 { class: "font-semibold", "Permission" } p { "{perm}" }
+                        h3 { class: "font-semibold", "Permission" }
+                        p { "{perm}" }
                     }}
                     div { class: "card bg-base-100 shadow", div { class: "card-body",
                         h3 { class: "font-semibold", "Uses" }
-                        p { "{props.link.uses_count} / {props.link.max_uses.map(|n| n.to_string()).unwrap_or_else(|| \"∞\".into())}" }
+                        p { "{uses}" }
+                    }}
+                    div { class: "card bg-base-100 shadow", div { class: "card-body",
+                        h3 { class: "font-semibold", "Expiration" }
+                        p { "{expires}" }
+                    }}
+                    div { class: "card bg-base-100 shadow", div { class: "card-body",
+                        h3 { class: "font-semibold", "Approval" }
+                        p { "{approval}" }
                     }}
                 }
+                section { class: "card bg-base-100 shadow mb-6",
+                    div { class: "card-body",
+                        h2 { class: "card-title", "Repositories" }
+                        ul { class: "list-disc list-inside space-y-1", {repos} }
+                    }
+                }
+                {match props.link.internal_note.as_deref() {
+                    Some(note) => rsx! {
+                        section { class: "card bg-base-100 shadow mb-6",
+                            div { class: "card-body",
+                                h2 { class: "card-title", "Internal note" }
+                                p { "{note}" }
+                            }
+                        }
+                    },
+                    None => rsx! {},
+                }}
                 {if active {
                     rsx! {
-                        form {
-                            method: "post",
-                            action: "/accounts/{login}/links/{id_str}/revoke",
-                            class: "mt-4",
-                            button {
-                                r#type: "submit",
-                                class: "btn btn-error",
-                                "Revoke this link"
+                        section { class: "card bg-base-100 border border-error/30",
+                            div { class: "card-body",
+                                h2 { class: "card-title text-error", "Stop accepting new requests" }
+                                p { class: "text-sm text-base-content/70",
+                                    "This prevents new requests through this link. It does not cancel requests or GitHub invitations already in progress."
+                                }
+                                form {
+                                    method: "post",
+                                    action: "/accounts/{login}/links/{id_str}/revoke",
+                                    class: "mt-2",
+                                    button {
+                                        r#type: "submit",
+                                        class: "btn btn-error",
+                                        "Stop accepting new requests"
+                                    }
+                                }
                             }
                         }
                     }
                 } else {
-                    rsx! {
-                        p { class: "opacity-70", "This link is no longer active." }
-                    }
+                    rsx! { p { class: "text-base-content/70", "This link is no longer accepting requests." } }
                 }}
             },
         }
@@ -252,6 +318,41 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
+    use domain::{Permission, ShareLink, ShareLinkId, ShareLinkRepo, Slug};
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn sample_link() -> ShareLink {
+        ShareLink {
+            id: ShareLinkId::new(),
+            slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
+            installation_id: 1,
+            account_id: 9001,
+            created_by: 701,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: Some(dt("2026-06-03T12:00:00Z")),
+            max_uses: Some(5),
+            uses_count: 2,
+            permission: Permission::Push,
+            approval_required: true,
+            internal_note: Some("Contractor onboarding".into()),
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![
+                ShareLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                },
+                ShareLinkRepo {
+                    repo_id: 11,
+                    repo_full_name: "acme/web".into(),
+                },
+            ],
+        }
+    }
 
     #[test]
     fn link_form_defaults_are_safe() {
@@ -261,5 +362,31 @@ mod tests {
         assert_eq!(form.expires_in_days, "30");
         assert_eq!(form.max_uses, "");
         assert!(!form.approval_required);
+    }
+
+    #[test]
+    fn link_detail_renders_operational_context() {
+        let link = sample_link();
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkDetailPage {
+                    signed_in_login: Some("admin".into()),
+                    flash: None,
+                    account_login: String::from("acme"),
+                    link: link.clone(),
+                    now: dt("2026-05-05T12:00:00Z"),
+                    share_url: String::from("http://127.0.0.1:8787/i/abcdEFGH01234567"),
+                }
+            }
+        });
+
+        assert!(html.contains("Open recipient preview"));
+        assert!(html.contains("Stop accepting new requests"));
+        assert!(html.contains("acme/api"));
+        assert!(html.contains("acme/web"));
+        assert!(html.contains("push"));
+        assert!(html.contains("2 / 5"));
+        assert!(html.contains("Contractor onboarding"));
+        assert!(!html.contains("Revoke this link"));
     }
 }

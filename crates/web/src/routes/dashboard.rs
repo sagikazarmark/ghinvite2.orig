@@ -320,7 +320,7 @@ async fn revoke_link(
             &admin.tower,
             session::Flash {
                 level: session::FlashLevel::Error,
-                message: "Failed to revoke link. Please try again.".into(),
+                message: "Could not stop this link. Please try again.".into(),
             },
         )
         .await;
@@ -335,7 +335,7 @@ async fn revoke_link(
         &admin.tower,
         session::Flash {
             level: session::FlashLevel::Success,
-            message: "Link revoked.".into(),
+            message: "Link stopped accepting new requests.".into(),
         },
     )
     .await;
