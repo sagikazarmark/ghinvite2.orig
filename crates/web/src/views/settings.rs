@@ -28,9 +28,11 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
             account_login: Some(login.clone()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6", h1 { class: "text-2xl font-bold", "Settings" } }
-                p { class: "opacity-60 mb-6", "Settings are read-only in v1. Edits coming in v1.1." }
-                div { class: "space-y-4 max-w-lg",
+                header { class: "mb-6",
+                    h1 { class: "text-2xl font-bold", "Settings" }
+                    p { class: "mt-2 text-sm text-base-content/70", "Account status for this GitHub App installation." }
+                }
+                div { class: "space-y-4 max-w-2xl",
                     div { class: "card bg-base-100 shadow",
                         div { class: "card-body",
                             h2 { class: "card-title text-base", "Account" }
@@ -41,7 +43,11 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
                         div { class: "card-body",
                             h2 { class: "card-title text-base", "Repository access" }
                             p { "{repos_label}" }
+                            p { class: "text-sm text-base-content/70", "Change repository selection in the GitHub App installation settings for now." }
                         }
+                    }
+                    div { class: "alert",
+                        span { "Editable settings are planned for v1.1. This page currently reflects the active installation state." }
                     }
                 }
             },

@@ -59,7 +59,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                     p { class: "text-sm opacity-70", "{props.account_type}" }
                 }
                 div {
-                    class: "grid grid-cols-2 gap-4 mb-8",
+                    class: "grid grid-cols-1 md:grid-cols-2 gap-4 mb-8",
                     a {
                         class: "card bg-base-100 shadow",
                         href: "/accounts/{login}/requests",
@@ -67,6 +67,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                             class: "card-body",
                             h2 { class: "card-title", "Pending requests" }
                             p { class: "text-4xl", "{props.pending_requests}" }
+                            p { class: "text-sm text-base-content/70", "Review people waiting for repository access." }
                         }
                     }
                     a {
@@ -76,13 +77,20 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                             class: "card-body",
                             h2 { class: "card-title", "Active links" }
                             p { class: "text-4xl", "{props.active_links}" }
+                            p { class: "text-sm text-base-content/70", "Create another controlled access URL." }
                         }
                     }
                 }
                 section {
                     h2 { class: "text-xl font-semibold mb-3", "Recent links" }
                     {if props.recent_links.is_empty() {
-                        rsx! { p { class: "opacity-70", "No links yet — create one above." } }
+                        rsx! {
+                            div { class: "rounded-box bg-base-100 p-6 text-base-content/70",
+                                h3 { class: "font-semibold text-base-content", "No share links yet" }
+                                p { class: "mt-1 text-sm", "Create a link to let recipients request GitHub collaborator access without sending invites by hand." }
+                                a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first link" }
+                            }
+                        }
                     } else {
                         rsx! {
                             div { class: "overflow-x-auto",

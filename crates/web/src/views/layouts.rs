@@ -46,6 +46,15 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
             class: "min-h-screen bg-base-200 flex flex-col",
             "data-theme": "light",
             Nav { signed_in_login: props.signed_in_login.clone() }
+            nav { class: "md:hidden bg-base-100 border-y border-base-300 overflow-x-auto",
+                div { class: "flex gap-2 px-4 py-2 whitespace-nowrap",
+                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}", "Overview" }
+                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/links/new", "New link" }
+                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/requests", "Requests" }
+                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/audit", "Audit soon" }
+                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/settings", "Settings" }
+                }
+            }
             div {
                 class: "flex flex-1 container mx-auto px-4 py-6 gap-6",
                 aside {
@@ -55,7 +64,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                         li { a { href: "/accounts/{login}", "Overview" } }
                         li { a { href: "/accounts/{login}/links/new", "New link" } }
                         li { a { href: "/accounts/{login}/requests", "Pending requests" } }
-                        li { a { href: "/accounts/{login}/audit", "Audit log" } }
+                        li { a { href: "/accounts/{login}/audit", "Audit log (coming soon)" } }
                         li { a { href: "/accounts/{login}/settings", "Settings" } }
                     }
                 }

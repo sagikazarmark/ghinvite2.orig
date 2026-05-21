@@ -24,8 +24,8 @@ pub fn HomePage(props: HomePageProps) -> Element {
                             p {
                                 class: "py-6",
                                 "ghinvite turns ad-hoc \"can you add this person to our repo?\" \
-                                 messages into shareable links — with optional approval, expiration, \
-                                 and audit trail."
+                                 messages into shareable links with optional approval, expiration, \
+                                 and captured history."
                             }
                             {match props.signed_in_login.as_deref() {
                                 Some(_) => rsx! {

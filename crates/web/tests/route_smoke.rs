@@ -150,6 +150,8 @@ async fn home_returns_html() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("ghinvite"));
     assert!(text.contains("Sign in with GitHub"));
+    assert!(text.contains("captured history"));
+    assert!(!text.contains("audit trail"));
 }
 
 #[tokio::test]
