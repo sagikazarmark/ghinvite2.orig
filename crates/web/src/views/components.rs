@@ -26,6 +26,7 @@ pub fn Nav(props: NavProps) -> Element {
                 {match props.signed_in_login.as_deref() {
                     Some(login) => rsx! {
                         span { class: "px-2", "Signed in as @{login}" }
+                        a { class: "btn btn-primary", href: "/install", "Install on another account" }
                         a { class: "btn btn-ghost", href: "/logout", "Sign out" }
                     },
                     None => rsx! {
