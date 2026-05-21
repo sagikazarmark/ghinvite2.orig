@@ -16,7 +16,7 @@ pub struct LinkCreateFormProps {
     pub form: LinkFormValues,
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct LinkFormValues {
     pub permission: String,
     pub approval_required: bool,
@@ -24,6 +24,19 @@ pub struct LinkFormValues {
     pub expires_in_days: String,
     pub internal_note: String,
     pub selected_repo_ids: Vec<u64>,
+}
+
+impl Default for LinkFormValues {
+    fn default() -> Self {
+        Self {
+            permission: "pull".into(),
+            approval_required: false,
+            max_uses: String::new(),
+            expires_in_days: "30".into(),
+            internal_note: String::new(),
+            selected_repo_ids: Vec::new(),
+        }
+    }
 }
 
 #[component]
@@ -38,27 +51,34 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
             account_login: Some(props.account_login.clone()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6", h1 { class: "text-2xl font-bold", "New share link" } }
+                header { class: "mb-6",
+                    h1 { class: "text-2xl font-bold", "New share link" }
+                    p { class: "mt-2 text-sm text-base-content/70 max-w-2xl",
+                        "Create a URL that lets a GitHub user request collaborator access to the repositories you choose."
+                    }
+                }
                 form {
                     method: "post",
                     action: "/accounts/{login}/links",
-                    class: "space-y-4 max-w-2xl",
-                    div {
-                        class: "form-control",
-                        label { class: "label", "Permission level" }
+                    class: "space-y-6 max-w-2xl",
+                    div { class: "form-control gap-2",
+                        label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
                         select {
+                            id: "permission",
                             name: "permission",
-                            class: "select select-bordered",
+                            class: "select select-bordered w-full",
                             {perms.iter().map(|p| {
                                 let selected = props.form.permission == *p;
                                 rsx! { option { value: "{p}", selected: selected, "{p}" } }
                             })}
                         }
+                        p { class: "text-sm text-base-content/70", "Use pull for read-only access. Maintain and admin can change repository settings." }
                     }
-                    div {
-                        class: "form-control",
-                        label { class: "label cursor-pointer",
-                            span { class: "label-text", "Require admin approval" }
+                    div { class: "alert alert-warning",
+                        span { "Review elevated permissions before sharing. A link can send GitHub collaborator invitations when a request is approved." }
+                    }
+                    div { class: "form-control",
+                        label { class: "label cursor-pointer justify-start gap-3",
                             input {
                                 r#type: "checkbox",
                                 name: "approval_required",
@@ -66,62 +86,78 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 checked: props.form.approval_required,
                                 class: "checkbox",
                             }
+                            span { class: "label-text", "Require admin approval before invitations are sent" }
+                        }
+                        p { class: "text-sm text-base-content/70", "Leave unchecked to auto-approve requests that use this link." }
+                    }
+                    div { class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                        div { class: "form-control gap-2",
+                            label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max uses" } }
+                            input {
+                                id: "max_uses",
+                                r#type: "number",
+                                name: "max_uses",
+                                value: "{props.form.max_uses}",
+                                class: "input input-bordered w-full",
+                                min: "1",
+                                placeholder: "Unlimited",
+                            }
+                            p { class: "text-sm text-base-content/70", "Blank means unlimited requests." }
+                        }
+                        div { class: "form-control gap-2",
+                            label { class: "label", r#for: "expires_in_days", span { class: "label-text font-medium", "Expires in days" } }
+                            input {
+                                id: "expires_in_days",
+                                r#type: "number",
+                                name: "expires_in_days",
+                                value: "{props.form.expires_in_days}",
+                                class: "input input-bordered w-full",
+                                min: "1",
+                            }
+                            p { class: "text-sm text-base-content/70", "Default is 30 days. Blank creates a link with no expiration." }
                         }
                     }
-                    div {
-                        class: "form-control",
-                        label { class: "label", "Max uses (blank = unlimited)" }
-                        input {
-                            r#type: "number",
-                            name: "max_uses",
-                            value: "{props.form.max_uses}",
-                            class: "input input-bordered",
-                            min: "1",
-                        }
-                    }
-                    div {
-                        class: "form-control",
-                        label { class: "label", "Expires in (days, blank = no expiration)" }
-                        input {
-                            r#type: "number",
-                            name: "expires_in_days",
-                            value: "{props.form.expires_in_days}",
-                            class: "input input-bordered",
-                            min: "1",
-                        }
-                    }
-                    div {
-                        class: "form-control",
-                        label { class: "label", "Internal note (optional, admin-only)" }
+                    div { class: "form-control gap-2",
+                        label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
                         textarea {
+                            id: "internal_note",
                             name: "internal_note",
-                            class: "textarea textarea-bordered",
+                            class: "textarea textarea-bordered w-full",
+                            placeholder: "Why this link exists, visible only to admins",
                             "{props.form.internal_note}"
                         }
+                        p { class: "text-sm text-base-content/70", "Use notes to explain the audience, project, or expiry reason." }
                     }
-                    fieldset {
-                        class: "form-control",
-                        legend { class: "label", "Repositories" }
-                        {props.repos.iter().map(|repo| {
-                            let id = repo.id;
-                            let checked = props.form.selected_repo_ids.contains(&id);
-                            let full_name = repo.full_name.clone();
+                    fieldset { class: "form-control gap-2",
+                        legend { class: "label", span { class: "label-text font-medium", "Repositories" } }
+                        p { class: "text-sm text-base-content/70", "Select every repository this link may grant access to." }
+                        {if props.repos.is_empty() {
+                            rsx! { div { class: "alert", span { "No repositories are available for this installation." } } }
+                        } else {
                             rsx! {
-                                label { class: "label cursor-pointer justify-start gap-2",
-                                    input {
-                                        r#type: "checkbox",
-                                        name: "repo_ids",
-                                        value: "{id}",
-                                        checked: checked,
-                                        class: "checkbox",
-                                    }
-                                    span { "{full_name}" }
+                                div { class: "space-y-1 max-h-80 overflow-y-auto rounded-box border border-base-300 bg-base-100 p-3",
+                                    {props.repos.iter().map(|repo| {
+                                        let id = repo.id;
+                                        let checked = props.form.selected_repo_ids.contains(&id);
+                                        let full_name = repo.full_name.clone();
+                                        rsx! {
+                                            label { class: "label cursor-pointer justify-start gap-2",
+                                                input {
+                                                    r#type: "checkbox",
+                                                    name: "repo_ids",
+                                                    value: "{id}",
+                                                    checked: checked,
+                                                    class: "checkbox checkbox-sm",
+                                                }
+                                                span { "{full_name}" }
+                                            }
+                                        }
+                                    })}
                                 }
                             }
-                        })}
+                        }}
                     }
-                    div {
-                        class: "form-control",
+                    div { class: "form-control pt-2",
                         button {
                             r#type: "submit",
                             class: "btn btn-primary",
@@ -210,5 +246,20 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 }}
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_form_defaults_are_safe() {
+        let form = LinkFormValues::default();
+
+        assert_eq!(form.permission, "pull");
+        assert_eq!(form.expires_in_days, "30");
+        assert_eq!(form.max_uses, "");
+        assert!(!form.approval_required);
     }
 }
