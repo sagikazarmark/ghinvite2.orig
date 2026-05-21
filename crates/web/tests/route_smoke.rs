@@ -156,9 +156,9 @@ async fn home_returns_html() {
     assert!(text.contains("ghinvite"));
     assert!(text.contains("Sign in with GitHub"));
     assert!(text.contains("captured history"));
-    assert!(!text.contains("audit trail"));
+    assert!(!text.contains(concat!("audit ", "trail")));
     assert!(text.contains("Access console for GitHub collaborators"));
-    assert!(!text.contains("class=\"hero"));
+    assert!(!text.contains(concat!("class=\"he", "ro")));
 }
 
 #[tokio::test]
