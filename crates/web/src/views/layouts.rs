@@ -198,7 +198,7 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
-        assert!(html.contains("id=\"theme-selector\""));
+        assert!(html.contains("theme-toggle"));
         assert!(html.contains("ghinvite-theme"));
         assert!(html.contains("Invitation"));
         assert!(html.contains("card"));
