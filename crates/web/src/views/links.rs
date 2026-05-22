@@ -285,9 +285,9 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                                 a { class: "btn btn-error w-fit", href: "#stop-link-modal", "Stop accepting new requests" }
                             }
                         }
-                        div { class: "modal", role: "dialog", id: "stop-link-modal",
+                        div { class: "modal", role: "dialog", id: "stop-link-modal", aria_labelledby: "stop-link-modal-title", aria_modal: "true",
                             div { class: "modal-box",
-                                h3 { class: "text-lg font-semibold", "Confirm stop" }
+                                h3 { id: "stop-link-modal-title", class: "text-lg font-semibold", "Confirm stop" }
                                 p { class: "mt-2 text-sm text-base-content/70",
                                     "Recipients will no longer be able to create new requests from this share link. Existing requests and invitations continue."
                                 }
@@ -409,6 +409,9 @@ mod tests {
         assert!(html.contains("Contractor onboarding"));
         assert!(html.contains("id=\"stop-link-modal\""));
         assert!(html.contains("role=\"dialog\""));
+        assert!(html.contains("aria-labelledby=\"stop-link-modal-title\""));
+        assert!(html.contains("aria-modal=\"true\""));
+        assert!(html.contains("id=\"stop-link-modal-title\""));
         assert!(html.contains("Confirm stop"));
         assert!(html.contains("property-list"));
         assert!(html.contains("property-row"));
