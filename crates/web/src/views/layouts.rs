@@ -76,7 +76,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                         a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                         a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
                         a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
-                        a { class: "app-nav-row", href: "/accounts/{login}/audit", "Audit log" }
+                        a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit log" }
                         a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                     }
                     div { class: "sidebar-account-switcher border-t border-base-300 p-3",
@@ -94,7 +94,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                             a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                             a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
                             a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
-                            a { class: "app-nav-row", href: "/accounts/{login}/audit", "Audit" }
+                            a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit" }
                             a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
                     }
@@ -170,6 +170,13 @@ mod tests {
         assert!(html.contains("app-nav-row-active"));
         assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
         assert!(html.contains("app-nav-row flex w-full items-center"));
+        assert!(
+            html.contains(
+                "class=\"app-nav-row flex w-full items-center\" href=\"/accounts/acme/audit\""
+            ) || html.contains(
+                "href=\"/accounts/acme/audit\" class=\"app-nav-row flex w-full items-center\""
+            )
+        );
         assert!(html.contains("Pending requests"));
         assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
     }
