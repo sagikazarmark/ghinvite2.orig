@@ -60,6 +60,9 @@ mod tests {
         assert!(html.contains("Decision queue"));
         assert!(html.contains("Approve request"));
         assert!(html.contains("Decline request"));
+        assert!(html.contains("request-decision-list"));
+        assert!(html.contains("mac-panel"));
+        assert!(html.contains("compact-table"));
     }
 
     #[test]
@@ -123,14 +126,14 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                 }
                 {if props.rows.is_empty() {
                     rsx! {
-                        div { class: "rounded-box border border-base-300 bg-base-100 p-6 text-base-content/70 shadow-sm",
+                        div { class: "mac-panel p-5 text-base-content/70",
                             h2 { class: "font-medium text-base-content", "No pending requests" }
                             p { class: "mt-1 text-sm", "Requests that need an admin decision will appear here." }
                         }
                     }
                 } else {
                     rsx! {
-                        div { class: "overflow-hidden rounded-box border border-base-300 bg-base-100 shadow-sm",
+                        div { class: "request-decision-list mac-panel compact-table overflow-hidden",
                             {props.rows.iter().map(|r| {
                                 let rid = r.request_id.clone();
                                 let just = r.justification.clone();
@@ -139,7 +142,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let link_label = if link_id.is_empty() {
                                     rsx! { span { "{link_slug}" } }
                                 } else {
-                                    rsx! { a { class: "link", href: "/accounts/{login}/links/{link_id}", "{link_slug}" } }
+                                    rsx! { a { class: "link link-hover", href: "/accounts/{login}/links/{link_id}", "{link_slug}" } }
                                 };
                                 let requester = r.requester_login.clone();
                                 let created = r.created_at;
@@ -156,52 +159,52 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                     rsx! { p { class: "text-sm text-base-content/65", "Repository details unavailable" } }
                                 } else {
                                     rsx! {
-                                        ul { class: "mt-1 flex flex-wrap gap-2 text-sm",
+                                        ul { class: "mt-1 flex flex-wrap gap-1.5 text-sm",
                                             {r.repos.iter().map(|repo| {
                                                 let repo = repo.clone();
-                                                rsx! { li { class: "badge badge-ghost", "{repo}" } }
+                                                rsx! { li { class: "badge badge-ghost badge-sm", "{repo}" } }
                                             })}
                                         }
                                     }
                                 };
                                 rsx! {
-                                    div { class: "grid gap-4 border-b border-base-300 p-4 last:border-b-0 md:grid-cols-[minmax(0,1fr)_auto] md:items-start",
-                                        div { class: "min-w-0 space-y-3",
-                                            div {
-                                                p { class: "font-medium",
-                                                    strong { "@{requester}" }
-                                                    " requested access via "
-                                                    {link_label}
-                                                }
-                                                p { class: "text-xs text-base-content/55", "Requested at {created}" }
+                                    div { class: "grid gap-3 border-b border-base-300 px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(10rem,14rem)_minmax(0,1fr)_auto] lg:items-start",
+                                        div { class: "min-w-0",
+                                            p { class: "truncate text-sm font-medium", "@{requester}" }
+                                            p { class: "mt-0.5 text-xs text-base-content/55", "Requested at {created}" }
+                                        }
+                                        div { class: "min-w-0 space-y-2",
+                                            p { class: "text-sm",
+                                                "Via "
+                                                {link_label}
                                             }
-                                            div { class: "flex flex-wrap gap-2",
-                                                span { class: "badge badge-neutral", "Permission: {permission}" }
-                                                span { class: "badge badge-ghost", "Expires: {expires}" }
-                                                span { class: "badge badge-ghost", "{approval}" }
+                                            div { class: "flex flex-wrap gap-1.5",
+                                                span { class: "badge badge-neutral badge-sm", "Permission: {permission}" }
+                                                span { class: "badge badge-ghost badge-sm", "Expires: {expires}" }
+                                                span { class: "badge badge-ghost badge-sm", "{approval}" }
                                             }
                                             div {
-                                                p { class: "text-xs font-medium uppercase tracking-wide text-base-content/50", "Repositories" }
+                                                p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Repositories" }
                                                 {repos}
                                             }
                                             {match just {
-                                                Some(j) if !j.is_empty() => rsx! { blockquote { class: "text-sm italic text-base-content/80", "\"{j}\"" } },
+                                                Some(j) if !j.is_empty() => rsx! { blockquote { class: "rounded-box bg-base-200 px-3 py-2 text-sm text-base-content/80", "\"{j}\"" } },
                                                 _ => rsx! {},
                                             }}
                                             {if repos_available {
-                                                rsx! { p { class: "text-sm text-base-content/70", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
                                             } else {
-                                                rsx! { p { class: "text-sm text-base-content/70", "This request cannot be completed until its share link details are available." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its share link details are available." } }
                                             }}
                                         }
                                         {if actions_available {
                                             rsx! {
-                                                div { class: "flex gap-2 md:flex-col md:items-stretch",
+                                                div { class: "flex gap-2 lg:flex-col lg:items-stretch",
                                                     form { method: "post", action: "/accounts/{login}/requests/{rid}/approve",
-                                                        button { r#type: "submit", class: "btn btn-success btn-sm", "Approve request" }
+                                                        button { r#type: "submit", class: "btn btn-success btn-sm h-8 min-h-0", "Approve request" }
                                                     }
                                                     form { method: "post", action: "/accounts/{login}/requests/{rid}/decline",
-                                                        button { r#type: "submit", class: "btn btn-error btn-sm", "Decline request" }
+                                                        button { r#type: "submit", class: "btn btn-error btn-sm h-8 min-h-0", "Decline request" }
                                                     }
                                                 }
                                             }
