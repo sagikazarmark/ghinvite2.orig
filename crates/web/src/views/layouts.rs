@@ -41,24 +41,24 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
     let login = props.account_login.clone().unwrap_or_default();
     let active_nav = props.active_nav.clone().unwrap_or_default();
     let overview_side = if active_nav == "overview" {
-        "app-nav-row app-nav-row-active"
+        "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
-        "app-nav-row"
+        "app-nav-row flex w-full items-center"
     };
     let new_link_side = if active_nav == "new-link" {
-        "app-nav-row app-nav-row-active"
+        "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
-        "app-nav-row"
+        "app-nav-row flex w-full items-center"
     };
     let requests_side = if active_nav == "requests" {
-        "app-nav-row app-nav-row-active"
+        "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
-        "app-nav-row"
+        "app-nav-row flex w-full items-center"
     };
     let settings_side = if active_nav == "settings" {
-        "app-nav-row app-nav-row-active"
+        "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
-        "app-nav-row"
+        "app-nav-row flex w-full items-center"
     };
 
     rsx! {
@@ -168,6 +168,8 @@ mod tests {
         assert!(html.contains("Install another account"));
         assert!(html.contains("aria-current=\"page\""));
         assert!(html.contains("app-nav-row-active"));
+        assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
+        assert!(html.contains("app-nav-row flex w-full items-center"));
         assert!(html.contains("Pending requests"));
         assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
     }
