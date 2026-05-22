@@ -113,7 +113,7 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
 }
 
 #[tokio::test]
-async fn signed_in_admin_with_existing_installation_can_find_install_cta() {
+async fn signed_in_admin_with_existing_installation_can_find_session_controls() {
     let (app, cookie) = build_signed_in_app_with_installation().await;
     let resp = app
         .clone()
@@ -145,6 +145,7 @@ async fn signed_in_admin_with_existing_installation_can_find_install_cta() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Install on another account"));
-    assert!(text.contains("href=\"/install\""));
+    assert!(text.contains("Sign out"));
+    assert!(text.contains("href=\"/logout\""));
+    assert!(text.contains("theme-toggle"));
 }
