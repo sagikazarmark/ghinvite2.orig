@@ -34,23 +34,25 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
                     h1 { class: "text-2xl font-semibold tracking-tight", "Account status" }
                     p { class: "mt-1 text-sm text-base-content/65", "Current GitHub App installation state for {login}." }
                 }
-                div { class: "grid max-w-4xl gap-4 md:grid-cols-2",
-                    section { class: "card border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body gap-3",
-                            p { class: "text-xs font-medium uppercase tracking-wide text-base-content/50", "Account" }
-                            h2 { class: "text-lg font-semibold", "{login}" }
-                            p { class: "text-sm text-base-content/70", "{account_type}" }
+                section { class: "mac-panel max-w-3xl overflow-hidden",
+                    dl { class: "property-list",
+                        div { class: "property-row",
+                            dt { class: "property-label", "Account" }
+                            dd {
+                                p { class: "text-sm font-medium", "{login}" }
+                                p { class: "mt-0.5 text-xs text-base-content/60", "{account_type}" }
+                            }
                         }
-                    }
-                    section { class: "card border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body gap-3",
-                            p { class: "text-xs font-medium uppercase tracking-wide text-base-content/50", "Installation scope" }
-                            h2 { class: "text-lg font-semibold", "{repos_label}" }
-                            p { class: "text-sm text-base-content/70", "Change repository selection in the GitHub App settings in this version." }
+                        div { class: "property-row",
+                            dt { class: "property-label", "Installation scope" }
+                            dd {
+                                p { class: "text-sm font-medium", "{repos_label}" }
+                                p { class: "mt-0.5 text-xs text-base-content/60", "Change repository selection in the GitHub App settings in this version." }
+                            }
                         }
                     }
                 }
-                div { class: "alert mt-4 max-w-4xl shadow-sm",
+                div { class: "alert mt-4 max-w-3xl shadow-sm",
                     span { "Editable settings are planned for v1.1. This page reflects the active installation state." }
                 }
             },
@@ -87,5 +89,7 @@ mod tests {
         assert!(html.contains("Account status"));
         assert!(html.contains("Installation scope"));
         assert!(html.contains("GitHub App settings"));
+        assert!(html.contains("property-list"));
+        assert!(html.contains("mac-panel"));
     }
 }

@@ -60,8 +60,8 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     }
                 }
                 form { method: "post", action: "/accounts/{login}/links", class: "max-w-3xl space-y-5",
-                    section { class: "card border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body gap-5",
+                    section { class: "mac-panel",
+                        div { class: "space-y-4 p-4",
                             div {
                                 h2 { class: "text-base font-semibold", "Access configuration" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and the repositories this link can request." }
@@ -81,8 +81,8 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                         }
                     }
-                    section { class: "card border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body gap-5",
+                    section { class: "mac-panel",
+                        div { class: "space-y-4 p-4",
                             div {
                                 h2 { class: "text-base font-semibold", "Request handling" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Set approval, usage, and expiration guardrails." }
@@ -113,8 +113,8 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                         }
                     }
-                    section { class: "card border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body gap-4",
+                    section { class: "mac-panel",
+                        div { class: "space-y-4 p-4",
                             div {
                                 h2 { class: "text-base font-semibold", "Repository scope" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Select every repository this link may grant access to." }
@@ -129,7 +129,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                             let checked = props.form.selected_repo_ids.contains(&id);
                                             let full_name = repo.full_name.clone();
                                             rsx! {
-                                                label { class: "label cursor-pointer justify-start gap-3 rounded-field px-2 hover:bg-base-100",
+                                                label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
                                                     input { r#type: "checkbox", name: "repo_ids", value: "{id}", checked: checked, class: "checkbox checkbox-sm" }
                                                     span { class: "text-sm", "{full_name}" }
                                                 }
@@ -214,53 +214,59 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                     }
                     span { class: "{badge_class}", "{badge_label}" }
                 }
-                section { class: "card bg-base-100 shadow mb-6",
-                    div { class: "card-body gap-4",
-                        div {
-                            h2 { class: "card-title", "Share URL" }
-                            p { class: "text-sm text-base-content/70", "Send this URL to recipients who should request access." }
-                        }
+                section { class: "mac-panel mb-4 overflow-hidden",
+                    div { class: "border-b border-base-300 px-4 py-3",
+                        h2 { class: "text-sm font-semibold", "Share URL" }
+                        p { class: "mt-0.5 text-xs text-base-content/60", "Send this URL to recipients who should request access." }
+                    }
+                    div { class: "p-4",
                         input {
-                            class: "input input-bordered font-mono text-sm w-full",
+                            class: "input input-bordered input-sm w-full font-mono text-xs",
                             readonly: true,
                             value: "{props.share_url}",
                             aria_label: "Share URL",
                         }
-                        div { class: "card-actions justify-start",
-                            a { class: "btn btn-outline", href: "{preview_href}", "Open recipient preview" }
+                        div { class: "mt-3",
+                            a { class: "btn btn-outline btn-sm h-8 min-h-0", href: "{preview_href}", "Open recipient preview" }
                         }
                     }
                 }
-                section { class: "grid grid-cols-1 md:grid-cols-2 gap-4 mb-6",
-                    div { class: "card bg-base-100 shadow", div { class: "card-body",
-                        h3 { class: "font-semibold", "Permission" }
-                        p { "{perm}" }
-                    }}
-                    div { class: "card bg-base-100 shadow", div { class: "card-body",
-                        h3 { class: "font-semibold", "Uses" }
-                        p { "{uses}" }
-                    }}
-                    div { class: "card bg-base-100 shadow", div { class: "card-body",
-                        h3 { class: "font-semibold", "Expiration" }
-                        p { "{expires}" }
-                    }}
-                    div { class: "card bg-base-100 shadow", div { class: "card-body",
-                        h3 { class: "font-semibold", "Approval" }
-                        p { "{approval}" }
-                    }}
+                section { class: "mac-panel mb-4 overflow-hidden",
+                    dl { class: "property-list",
+                        div { class: "property-row",
+                            dt { class: "property-label", "Permission" }
+                            dd { class: "text-sm", "{perm}" }
+                        }
+                        div { class: "property-row",
+                            dt { class: "property-label", "Uses" }
+                            dd { class: "text-sm tabular-nums", "{uses}" }
+                        }
+                        div { class: "property-row",
+                            dt { class: "property-label", "Expiration" }
+                            dd { class: "text-sm", "{expires}" }
+                        }
+                        div { class: "property-row",
+                            dt { class: "property-label", "Approval" }
+                            dd { class: "text-sm", "{approval}" }
+                        }
+                    }
                 }
-                section { class: "card bg-base-100 shadow mb-6",
-                    div { class: "card-body",
-                        h2 { class: "card-title", "Repositories" }
-                        ul { class: "list-disc list-inside space-y-1", {repos} }
+                section { class: "mac-panel mb-4 overflow-hidden",
+                    div { class: "border-b border-base-300 px-4 py-3",
+                        h2 { class: "text-sm font-semibold", "Repositories" }
+                    }
+                    div { class: "p-4",
+                        ul { class: "space-y-1 text-sm", {repos} }
                     }
                 }
                 {match props.link.internal_note.as_deref() {
                     Some(note) => rsx! {
-                        section { class: "card bg-base-100 shadow mb-6",
-                            div { class: "card-body",
-                                h2 { class: "card-title", "Internal note" }
-                                p { "{note}" }
+                        section { class: "mac-panel mb-4 overflow-hidden",
+                            div { class: "border-b border-base-300 px-4 py-3",
+                                h2 { class: "text-sm font-semibold", "Internal note" }
+                            }
+                            div { class: "p-4",
+                                p { class: "text-sm text-base-content/80", "{note}" }
                             }
                         }
                     },
@@ -268,7 +274,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 }}
                 {if active {
                     rsx! {
-                        section { class: "card border border-error/30 bg-base-100 shadow-sm",
+                        section { class: "mac-panel border-error/30 bg-base-100",
                             div { class: "card-body gap-4",
                                 div {
                                     h2 { class: "text-base font-semibold text-error", "Stop accepting new requests" }
@@ -374,6 +380,8 @@ mod tests {
         assert!(html.contains("Request handling"));
         assert!(html.contains("Repository scope"));
         assert!(html.contains("acme/api"));
+        assert!(html.contains("mac-panel"));
+        assert!(html.contains("repo-choice-row"));
     }
 
     #[test]
@@ -402,6 +410,10 @@ mod tests {
         assert!(html.contains("id=\"stop-link-modal\""));
         assert!(html.contains("role=\"dialog\""));
         assert!(html.contains("Confirm stop"));
+        assert!(html.contains("property-list"));
+        assert!(html.contains("property-row"));
+        assert!(html.contains("mac-panel"));
+        assert!(!html.contains("md:grid-cols-2 gap-4"));
         assert!(!html.contains(concat!("Revoke this ", "link")));
     }
 }

@@ -95,7 +95,7 @@ pub fn LandingPage(props: LandingProps) -> Element {
             active_nav: None,
             flash: None,
             children: rsx! {
-                h1 { class: "text-2xl font-semibold tracking-tight", "Access request" }
+                h1 { class: "text-xl font-semibold tracking-tight", "Access request" }
                 p { class: "mt-2 text-sm text-base-content/70",
                     "This share link requests collaborator access to the following {repo_word}:"
                 }
@@ -165,7 +165,7 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
             flash: None,
             children: rsx! {
                 header { class: "mb-4",
-                    h1 { class: "text-2xl font-semibold tracking-tight", "Request access" }
+                    h1 { class: "text-xl font-semibold tracking-tight", "Request access" }
                     p { class: "mt-1 text-sm text-base-content/70", "Confirm the repositories and include context for the account admins." }
                 }
                 {flash_view}
@@ -293,7 +293,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
             active_nav: None,
             flash: None,
             children: rsx! {
-                h1 { class: "card-title text-2xl mb-4", "Request status" }
+                h1 { class: "mb-4 text-xl font-semibold tracking-tight", "Request status" }
                 {status_view}
             },
         }
@@ -321,6 +321,7 @@ mod tests {
         assert!(html.contains("Check again"));
         assert!(html.contains("awaiting admin review"));
         assert!(html.contains("Request status"));
+        assert!(!html.contains("card-title"));
         assert!(html.contains("/i/abcdEFGH01234567/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
     }
 }
