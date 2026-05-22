@@ -30,7 +30,7 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            main { class: "min-h-[calc(100vh-3.5rem)] px-4 py-8", {props.children} }
+            main { class: "min-h-[calc(100vh-3rem)] px-4 py-6", {props.children} }
             Footer {}
         }
     }
@@ -41,44 +41,24 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
     let login = props.account_login.clone().unwrap_or_default();
     let active_nav = props.active_nav.clone().unwrap_or_default();
     let overview_side = if active_nav == "overview" {
-        "menu-active"
+        "app-nav-row app-nav-row-active"
     } else {
-        ""
+        "app-nav-row"
     };
     let new_link_side = if active_nav == "new-link" {
-        "menu-active"
+        "app-nav-row app-nav-row-active"
     } else {
-        ""
+        "app-nav-row"
     };
     let requests_side = if active_nav == "requests" {
-        "menu-active"
+        "app-nav-row app-nav-row-active"
     } else {
-        ""
+        "app-nav-row"
     };
     let settings_side = if active_nav == "settings" {
-        "menu-active"
+        "app-nav-row app-nav-row-active"
     } else {
-        ""
-    };
-    let overview_mobile = if active_nav == "overview" {
-        "btn btn-primary btn-sm"
-    } else {
-        "btn btn-ghost btn-sm"
-    };
-    let new_link_mobile = if active_nav == "new-link" {
-        "btn btn-primary btn-sm"
-    } else {
-        "btn btn-ghost btn-sm"
-    };
-    let requests_mobile = if active_nav == "requests" {
-        "btn btn-primary btn-sm"
-    } else {
-        "btn btn-ghost btn-sm"
-    };
-    let settings_mobile = if active_nav == "settings" {
-        "btn btn-primary btn-sm"
-    } else {
-        "btn btn-ghost btn-sm"
+        "app-nav-row"
     };
 
     rsx! {
@@ -90,44 +70,48 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            nav { class: "border-b border-base-300 bg-base-100 md:hidden",
-                div { class: "flex gap-2 overflow-x-auto px-4 py-2 whitespace-nowrap",
-                    a { class: "{overview_mobile}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                    a { class: "{new_link_mobile}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
-                    a { class: "{requests_mobile}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
-                    a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/audit", "Audit soon" }
-                    a { class: "{settings_mobile}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
-                }
-            }
-            div { class: "mx-auto flex w-full max-w-7xl flex-1 gap-6 px-4 py-6 lg:px-6",
-                aside { class: "hidden w-56 shrink-0 md:block",
-                    div { class: "sticky top-6 space-y-4",
-                        div { class: "rounded-box border border-base-300 bg-base-100 p-3 shadow-sm",
-                            p { class: "text-xs font-medium uppercase tracking-wide text-base-content/50", "Account" }
-                            p { class: "mt-1 truncate text-sm font-semibold", "{login}" }
+            div { class: "dashboard-frame",
+                aside { class: "dashboard-sidebar hidden shrink-0 flex-col md:flex",
+                    nav { class: "flex-1 space-y-1 p-3 text-sm",
+                        a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                        a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                        a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
+                        a { class: "app-nav-row", href: "/accounts/{login}/audit", "Audit log" }
+                        a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                    }
+                    div { class: "sidebar-account-switcher border-t border-base-300 p-3",
+                        p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Active account" }
+                        a { class: "mt-2 flex min-w-0 items-center gap-2 rounded-box px-2 py-2 text-sm hover:bg-base-100", href: "/accounts/{login}/settings",
+                            span { class: "grid size-7 shrink-0 place-items-center rounded-lg bg-base-300 text-xs font-semibold", "@" }
+                            span { class: "min-w-0 flex-1 truncate font-medium", "{login}" }
                         }
-                        nav { class: "menu rounded-box border border-base-300 bg-base-100 p-2 shadow-sm",
-                            li { a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" } }
-                            li { a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" } }
-                            li { a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" } }
-                            li { a { href: "/accounts/{login}/audit", "Audit log (coming soon)" } }
-                            li { a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" } }
-                        }
+                        a { class: "btn btn-ghost btn-xs mt-2 h-7 min-h-0 w-full justify-start px-2", href: "/install", "Install another account" }
                     }
                 }
-                main { class: "min-w-0 flex-1",
-                    {match &props.flash {
-                        Some(f) => {
-                            let alert_class = match f.level {
-                                crate::session::FlashLevel::Success => "alert alert-success mb-4 shadow-sm",
-                                crate::session::FlashLevel::Error => "alert alert-error mb-4 shadow-sm",
-                                crate::session::FlashLevel::Info => "alert alert-info mb-4 shadow-sm",
-                            };
-                            rsx! { div { class: "{alert_class}", span { "{f.message}" } } }
+                div { class: "min-w-0 flex-1",
+                    nav { class: "mobile-dashboard-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
+                        div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
+                            a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                            a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                            a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
+                            a { class: "app-nav-row", href: "/accounts/{login}/audit", "Audit" }
+                            a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
-                        None => rsx! {},
-                    }}
-                    {props.children}
+                    }
+                    main { class: "dashboard-main",
+                        {match &props.flash {
+                            Some(f) => {
+                                let alert_class = match f.level {
+                                    crate::session::FlashLevel::Success => "alert alert-success mb-4 shadow-sm",
+                                    crate::session::FlashLevel::Error => "alert alert-error mb-4 shadow-sm",
+                                    crate::session::FlashLevel::Info => "alert alert-info mb-4 shadow-sm",
+                                };
+                                rsx! { div { class: "{alert_class}", span { "{f.message}" } } }
+                            }
+                            None => rsx! {},
+                        }}
+                        {props.children}
+                    }
                 }
             }
         }
@@ -145,10 +129,10 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            main { class: "min-h-[calc(100vh-3.5rem)] px-4 py-8",
-                div { class: "mx-auto flex min-h-[calc(100vh-7.5rem)] w-full max-w-lg items-center",
-                    div { class: "card w-full border border-base-300 bg-base-100 shadow-sm",
-                        div { class: "card-body", {props.children} }
+            main { class: "min-h-[calc(100vh-3rem)] px-4 py-6",
+                div { class: "mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-lg items-center",
+                    div { class: "mac-panel w-full",
+                        div { class: "p-6", {props.children} }
                     }
                 }
             }
@@ -161,7 +145,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_layout_marks_active_navigation() {
+    fn dashboard_layout_renders_real_sidebar_and_account_control() {
         let html = crate::views::render::render(|| {
             rsx! {
                 DashboardLayout {
@@ -176,10 +160,16 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
-        assert!(!html.contains("data-theme=\"ghinvite-dark\""));
+        assert!(html.contains("app-header"));
+        assert!(html.contains("dashboard-frame"));
+        assert!(html.contains("dashboard-sidebar"));
+        assert!(html.contains("mobile-dashboard-nav"));
+        assert!(html.contains("sidebar-account-switcher"));
+        assert!(html.contains("Install another account"));
         assert!(html.contains("aria-current=\"page\""));
+        assert!(html.contains("app-nav-row-active"));
         assert!(html.contains("Pending requests"));
-        assert!(html.contains("menu-active"));
+        assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
     }
 
     #[test]
@@ -201,6 +191,6 @@ mod tests {
         assert!(html.contains("theme-toggle"));
         assert!(html.contains("ghinvite-theme"));
         assert!(html.contains("Invitation"));
-        assert!(html.contains("card"));
+        assert!(html.contains("mac-panel"));
     }
 }
