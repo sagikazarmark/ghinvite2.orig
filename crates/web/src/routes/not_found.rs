@@ -5,7 +5,7 @@ use axum::http::{Method, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
 use dioxus::prelude::*;
 
-pub async fn public(method: Method, uri: Uri) -> Response {
+pub async fn public(method: Method, uri: Uri, tower: tower_sessions::Session) -> Response {
     if method != Method::GET && method != Method::HEAD {
         return plain_not_found();
     }
@@ -13,6 +13,13 @@ pub async fn public(method: Method, uri: Uri) -> Response {
     if is_asset_like_miss(uri.path()) {
         return plain_not_found();
     }
+
+    let session = crate::session::load(&tower).await.unwrap_or_default();
+    let signed_in_login = if session.is_authenticated() {
+        Some(session.login.clone())
+    } else {
+        None
+    };
 
     if method == Method::HEAD {
         return (
@@ -23,10 +30,10 @@ pub async fn public(method: Method, uri: Uri) -> Response {
             .into_response();
     }
 
-    let html = render(|| {
+    let html = render(move || {
         rsx! {
             crate::views::not_found::PublicNotFoundPage {
-                signed_in_login: None::<String>,
+                signed_in_login: signed_in_login.clone(),
             }
         }
     });

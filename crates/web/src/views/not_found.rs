@@ -4,7 +4,7 @@ use crate::views::layouts::{ConsoleLayout, HomeLayout, InvitationLayout};
 use dioxus::prelude::*;
 
 const PUBLIC_NOT_FOUND_MESSAGE: &str = "The link may be incorrect or no longer available.";
-const CONSOLE_NOT_FOUND_MESSAGE: &str = "This page is not available in the current account.";
+const CONSOLE_NOT_FOUND_MESSAGE: &str = "This console page is not available.";
 
 #[derive(Clone, PartialEq, Props)]
 pub struct NotFoundContentProps {

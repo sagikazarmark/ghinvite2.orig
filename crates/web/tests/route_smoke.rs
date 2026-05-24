@@ -372,6 +372,27 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
 }
 
 #[tokio::test]
+async fn console_audit_route_unauthenticated_redirects_to_login() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme/audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(
+        location,
+        "/login?return_to=%2Fconsole%2Faccounts%2Facme%2Faudit"
+    );
+}
+
+#[tokio::test]
 async fn webhook_route_rejects_missing_signature() {
     // A POST without an X-Hub-Signature-256 header must be rejected with 401.
     let app = build_test_app().await;

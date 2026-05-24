@@ -4,7 +4,7 @@ use crate::account_admin_reads::{
     find_account_admin_request, find_account_admin_share_link, pending_request_queue,
 };
 use crate::commands::{CreateShareLink, DecideInvitationRequest, RevokeShareLink};
-use crate::middleware::auth::RequireAdminOf;
+use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
@@ -66,7 +66,7 @@ fn login_redirect(return_to: &str) -> axum::response::Redirect {
     axum::response::Redirect::to(&format!("/login?return_to={encoded}"))
 }
 
-fn console_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
+fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
     let html = render(move || {
@@ -82,7 +82,7 @@ fn console_not_found_response(admin: &RequireAdminOf) -> axum::response::Respons
 
 async fn overview(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
     let now = Utc::now();
     let pending = state
@@ -128,7 +128,7 @@ async fn overview(
 
 async fn new_link_form(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
     let user_api = github::oauth::UserApiClient::new(
         state.github_transport.clone(),
@@ -178,7 +178,7 @@ struct CreateLinkForm {
 
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
     serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
 ) -> impl IntoResponse {
     use chrono::{Duration, Utc};
@@ -287,7 +287,7 @@ async fn create_link(
 
 async fn link_detail(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
@@ -331,7 +331,7 @@ async fn link_detail(
 
 async fn revoke_link(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
@@ -390,7 +390,7 @@ async fn revoke_link(
 
 async fn requests_queue(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
     let rows = match pending_request_queue(state.storage.as_ref(), admin.account.account_id).await {
         Ok(rows) => rows
@@ -428,7 +428,7 @@ async fn requests_queue(
     Html(html).into_response()
 }
 
-async fn audit_page(admin: RequireAdminOf) -> impl IntoResponse {
+async fn audit_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
@@ -447,7 +447,7 @@ async fn audit_page(admin: RequireAdminOf) -> impl IntoResponse {
 
 async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
@@ -508,7 +508,7 @@ async fn approve_request(
 
 async fn decline_request(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireAdminOf,
+    admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
@@ -569,7 +569,7 @@ async fn decline_request(
     .into_response()
 }
 
-async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
+async fn settings_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
     let account = admin.account.clone();
@@ -586,7 +586,7 @@ async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
     Html(html).into_response()
 }
 
-async fn not_found(admin: RequireAdminOf) -> impl IntoResponse {
+async fn not_found(admin: RequireConsoleAdminOf) -> impl IntoResponse {
     console_not_found_response(&admin)
 }
 

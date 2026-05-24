@@ -6,7 +6,9 @@ use crate::state::AppState;
 use axum::extract::FromRef;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use axum::response::{Html, IntoResponse};
 use chrono::{Duration, Utc};
+use dioxus::prelude::*;
 use github::oauth::UserApiClient;
 
 const ADMIN_CACHE_TTL_SECS: i64 = 60;
@@ -66,27 +68,38 @@ pub async fn check_admin(
     Ok(is_admin)
 }
 
-/// Extractor for routes nested under `/accounts/{login}/...`. Loads the
+fn generic_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
+    let html = crate::views::render::render(move || {
+        rsx! {
+            crate::views::not_found::PublicNotFoundPage {
+                signed_in_login: signed_in_login.clone(),
+            }
+        }
+    });
+    (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
+}
+
+/// Extractor for routes nested under `/console/accounts/{login}/...`. Loads the
 /// session, resolves `:login` → `domain::Account` via storage, and runs the
 /// admin recheck (60s cache per `crate::session::AdminCheck`). On any
-/// failure path — unauthenticated, no install, not admin, install is
-/// uninstalled — surfaces as `WebError::NotFound` (the framework maps
-/// that and `Forbidden` to 404 per spec §10.3).
+/// concealment path — no install, not admin, install is uninstalled — surfaces
+/// as a generic public 404. Unauthenticated console requests redirect to login
+/// before account authorization checks run.
 ///
 /// The handler MUST save the session after any mutation via
 /// `session::save(&tower, &session)` to persist cache updates.
-pub struct RequireAdminOf {
+pub struct RequireConsoleAdminOf {
     pub session: Session,
     pub account: domain::Account,
     pub tower: tower_sessions::Session,
 }
 
-impl<S> FromRequestParts<S> for RequireAdminOf
+impl<S> FromRequestParts<S> for RequireConsoleAdminOf
 where
     AppState: FromRef<S>,
     S: Send + Sync,
 {
-    type Rejection = WebError;
+    type Rejection = axum::response::Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -98,31 +111,45 @@ where
             .extensions
             .get::<tower_sessions::Session>()
             .cloned()
-            .ok_or_else(|| WebError::Session("no tower session in request extensions".into()))?;
+            .ok_or_else(|| {
+                WebError::Session("no tower session in request extensions".into()).into_response()
+            })?;
 
         let mut session = crate::session::load(&tower)
             .await
-            .map_err(|e| WebError::Session(e.to_string()))?;
+            .map_err(|e| WebError::Session(e.to_string()).into_response())?;
 
         if !session.is_authenticated() {
-            return Err(WebError::NotFound);
+            let return_to = parts
+                .uri
+                .path_and_query()
+                .map(|value| value.as_str())
+                .unwrap_or("/console");
+            let encoded: String =
+                url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
+            return Err(
+                axum::response::Redirect::to(&format!("/login?return_to={encoded}"))
+                    .into_response(),
+            );
         }
 
         let axum::extract::Path(params): axum::extract::Path<
             std::collections::HashMap<String, String>,
         > = axum::extract::Path::from_request_parts(parts, outer_state)
             .await
-            .map_err(|e| WebError::BadRequest(format!("path: {e}")))?;
+            .map_err(|e| WebError::BadRequest(format!("path: {e}")).into_response())?;
         let login = params
             .get("login")
-            .ok_or_else(|| WebError::BadRequest("missing :login path param".into()))?
+            .ok_or_else(|| {
+                WebError::BadRequest("missing :login path param".into()).into_response()
+            })?
             .clone();
 
-        let account = state
-            .storage
-            .get_active_installation_by_login(&login)
-            .await?
-            .ok_or(WebError::NotFound)?;
+        let account = match state.storage.get_active_installation_by_login(&login).await {
+            Ok(Some(account)) => account,
+            Ok(None) => return Err(generic_not_found_response(Some(session.login.clone()))),
+            Err(error) => return Err(WebError::Storage(error).into_response()),
+        };
 
         // Personal-account installations: `get_org_membership` returns 404 for
         // personal accounts, which maps to `is_admin = false` — locking the owner
@@ -130,17 +157,20 @@ where
         let is_admin = if account.account_type == domain::AccountType::User {
             session.login == account.account_login
         } else {
-            check_admin(&state, &mut session, &login).await?
+            match check_admin(&state, &mut session, &login).await {
+                Ok(is_admin) => is_admin,
+                Err(error) => return Err(error.into_response()),
+            }
         };
         if !is_admin {
-            return Err(WebError::NotFound);
+            return Err(generic_not_found_response(Some(session.login.clone())));
         }
 
         crate::session::save(&tower, &session)
             .await
-            .map_err(|e| WebError::Session(e.to_string()))?;
+            .map_err(|e| WebError::Session(e.to_string()).into_response())?;
 
-        Ok(RequireAdminOf {
+        Ok(RequireConsoleAdminOf {
             session,
             account,
             tower,
