@@ -187,6 +187,25 @@ async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
 }
 
 #[tokio::test]
+async fn dashboard_unknown_post_route_stays_plain_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/accounts/acme/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
+}
+
+#[tokio::test]
 async fn dashboard_post_missing_resource_stays_plain_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app

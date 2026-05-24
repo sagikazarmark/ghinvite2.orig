@@ -37,7 +37,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/accounts/{login}/settings", get(settings_page))
         .route("/accounts/{login}/audit", get(stub))
-        .route("/accounts/{login}/{*rest}", get(not_found))
+        .route(
+            "/accounts/{login}/{*rest}",
+            get(not_found).fallback(plain_not_found),
+        )
 }
 
 fn dashboard_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
@@ -542,6 +545,10 @@ async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
 
 async fn not_found(admin: RequireAdminOf) -> impl IntoResponse {
     dashboard_not_found_response(&admin)
+}
+
+async fn plain_not_found() -> impl IntoResponse {
+    crate::error::WebError::NotFound
 }
 
 async fn stub() -> impl IntoResponse {
