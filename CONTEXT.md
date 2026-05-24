@@ -17,6 +17,15 @@ A GitHub user with current GitHub-derived authority to administer an account in 
 ### Share Link
 A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link. Public use of a share link means recipient use of that same shareable URL, not a separate kind of link.
 
+### Public Surface
+Unauthenticated or broadly accessible pages outside a specific account console.
+
+### Recipient Flow
+The public share-link journey where a GitHub user reviews and submits an invitation request.
+
+### Account Console
+The account-scoped workspace where account admins manage share links, requests, and settings.
+
 ### Invitation Request
 A recipient's request for access through a share link. It may be auto-approved or wait for an account admin decision. A recipient may have at most one pending invitation request for a given share link at a time.
 
