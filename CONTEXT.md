@@ -15,7 +15,10 @@ An individual GitHub identity that can sign in, create share links, request acce
 A GitHub user with current GitHub-derived authority to administer an account in ghinvite. For an organization account this is an organization owner; for a personal account this is the same GitHub user who owns the account.
 
 ### Share Link
-A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link. Public use of a share link means recipient use of that same shareable URL, not a separate kind of link.
+A shareable URL created by an account admin that lets a GitHub user request repository collaborator access for the repositories and permission level configured on the link. Public use of a share link means recipient use of that same shareable URL, not a separate kind of link. User-facing copy may call this an invitation link when speaking to non-admins.
+
+### Share Link Code
+The short code from a share link that a recipient can enter to open the recipient flow.
 
 ### Public Surface
 Unauthenticated or broadly accessible pages outside a specific account console.
@@ -24,7 +27,7 @@ Unauthenticated or broadly accessible pages outside a specific account console.
 The public share-link journey where a GitHub user reviews and submits an invitation request.
 
 ### Account Console
-The account-scoped workspace where account admins manage share links, requests, and settings.
+The admin-facing, account-scoped workspace where account admins manage share links, requests, and settings.
 
 ### Audit Log
 An account-scoped history of access workflow events that account admins use to understand what happened in the account.
