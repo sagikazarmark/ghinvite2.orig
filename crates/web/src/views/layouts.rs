@@ -60,6 +60,11 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
     } else {
         "app-nav-row flex w-full items-center"
     };
+    let audit_side = if active_nav == "audit" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
 
     rsx! {
         head {
@@ -76,7 +81,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                         a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                         a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
                         a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
-                        a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit log" }
+                        a { class: "{audit_side}", href: "/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
                         a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                     }
                     div { class: "sidebar-account-switcher border-t border-base-300 p-3",
@@ -94,7 +99,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                             a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                             a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
                             a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
-                            a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit" }
+                            a { class: "{audit_side}", href: "/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
                             a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
                     }
@@ -170,15 +175,32 @@ mod tests {
         assert!(html.contains("app-nav-row-active"));
         assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
         assert!(html.contains("app-nav-row flex w-full items-center"));
-        assert!(
-            html.contains(
-                "class=\"app-nav-row flex w-full items-center\" href=\"/accounts/acme/audit\""
-            ) || html.contains(
-                "href=\"/accounts/acme/audit\" class=\"app-nav-row flex w-full items-center\""
-            )
-        );
+        assert!(html.contains("href=\"/accounts/acme/audit\""));
+        assert!(html.contains("Audit log"));
         assert!(html.contains("Pending requests"));
         assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
+    }
+
+    #[test]
+    fn dashboard_layout_marks_audit_navigation_active() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                DashboardLayout {
+                    signed_in_login: Some("admin".to_string()),
+                    title: "Audit log".to_string(),
+                    account_login: Some("acme".to_string()),
+                    active_nav: Some("audit".to_string()),
+                    flash: None,
+                    children: rsx! { p { "Audit" } },
+                }
+            }
+        });
+
+        assert!(html.contains("href=\"/accounts/acme/audit\""));
+        assert!(html.contains("Audit log"));
+        assert!(html.contains("aria-current=\"page\""));
+        assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
+        assert!(!html.contains("Audit log (coming soon)"));
     }
 
     #[test]
