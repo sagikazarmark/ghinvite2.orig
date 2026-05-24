@@ -37,6 +37,21 @@ pub fn router() -> Router<AppState> {
         )
         .route("/accounts/{login}/settings", get(settings_page))
         .route("/accounts/{login}/audit", get(stub))
+        .route("/accounts/{login}/{*rest}", get(not_found))
+}
+
+fn dashboard_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
+    let signed_in_login = Some(admin.session.login.clone());
+    let account_login = admin.account.account_login.clone();
+    let html = render(move || {
+        rsx! {
+            crate::views::not_found::DashboardNotFoundPage {
+                signed_in_login: signed_in_login.clone(),
+                account_login: account_login.clone(),
+            }
+        }
+    });
+    (StatusCode::NOT_FOUND, Html(html)).into_response()
 }
 
 async fn overview(
@@ -253,7 +268,7 @@ async fn link_detail(
 
     let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
         Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
+        Err(_) => return dashboard_not_found_response(&admin),
     };
     let link = match find_account_admin_share_link(
         state.storage.as_ref(),
@@ -263,6 +278,7 @@ async fn link_detail(
     .await
     {
         Ok(link) => link,
+        Err(crate::error::WebError::NotFound) => return dashboard_not_found_response(&admin),
         Err(e) => return e.into_response(),
     };
 
@@ -522,6 +538,10 @@ async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
         }
     });
     Html(html).into_response()
+}
+
+async fn not_found(admin: RequireAdminOf) -> impl IntoResponse {
+    dashboard_not_found_response(&admin)
 }
 
 async fn stub() -> impl IntoResponse {
