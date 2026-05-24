@@ -118,6 +118,7 @@ pub fn Nav(props: NavProps) -> Element {
                 }
                 {match props.signed_in_login.as_deref() {
                     Some(login) => rsx! {
+                        a { class: "btn btn-primary btn-sm h-8 min-h-0 px-3", href: "/console", "Console" }
                         span { class: "hidden max-w-32 truncate px-1 text-xs text-base-content/60 sm:inline-flex", "@{login}" }
                         a { class: "btn btn-ghost btn-sm h-8 min-h-0 px-2", href: "/logout", "Sign out" }
                     },
@@ -169,6 +170,8 @@ mod tests {
         assert!(!html.contains("aria-label=\"Use light theme\""));
         assert!(!html.contains("aria-label=\"Use dark theme\""));
         assert!(!html.contains("role=\"group\""));
+        assert!(html.contains("href=\"/console\""));
+        assert!(html.contains("Console"));
         assert!(html.contains("Sign out"));
         assert!(html.contains("@admin"));
         assert!(html.contains("window.localStorage.getItem(key)"));

@@ -113,7 +113,7 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
 }
 
 #[tokio::test]
-async fn signed_in_admin_with_existing_installation_can_find_session_controls() {
+async fn signed_in_admin_with_existing_installation_sees_public_home() {
     let (app, cookie) = build_signed_in_app_with_installation().await;
     let resp = app
         .clone()
@@ -127,25 +127,13 @@ async fn signed_in_admin_with_existing_installation_can_find_session_controls() 
         .await
         .unwrap();
 
-    let resp = if resp.status() == StatusCode::SEE_OTHER {
-        let location = resp.headers().get("location").unwrap().to_str().unwrap();
-        app.oneshot(
-            Request::builder()
-                .uri(location)
-                .header("cookie", cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap()
-    } else {
-        resp
-    };
-
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Sign out"));
-    assert!(text.contains("href=\"/logout\""));
-    assert!(text.contains("theme-toggle"));
+    assert!(text.contains("Share Link Code"));
+    assert!(text.contains("Create invitation link"));
+    assert!(text.contains("href=\"/console\""));
+    assert!(text.contains("Console"));
+    assert!(text.contains("@octocat"));
+    assert!(!text.contains("home-features"));
 }
