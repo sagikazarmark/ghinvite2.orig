@@ -79,7 +79,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                 aside { class: "console-sidebar hidden shrink-0 flex-col md:flex",
                     nav { class: "flex-1 space-y-1 p-3 text-sm",
                         a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                        a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                        a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New share link" }
                         a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
                         a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
                         a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
@@ -97,7 +97,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                     nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
                         div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
                             a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                            a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                            a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New share link" }
                             a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
                             a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
                             a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }

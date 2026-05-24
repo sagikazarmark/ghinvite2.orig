@@ -10,6 +10,7 @@ use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;
+use axum::http::{Method, Uri};
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
@@ -52,6 +53,7 @@ pub fn router() -> Router<AppState> {
             "/console/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
         )
+        .route("/console/{*rest}", get(console_unknown))
 }
 
 async fn console_index(
@@ -148,6 +150,19 @@ async fn load_console_accounts(
 fn login_redirect(return_to: &str) -> axum::response::Redirect {
     let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
     axum::response::Redirect::to(&format!("/login?return_to={encoded}"))
+}
+
+async fn console_unknown(uri: Uri, tower: tower_sessions::Session) -> axum::response::Response {
+    let session = session::load(&tower).await.unwrap_or_default();
+    if !session.is_authenticated() {
+        let return_to = uri
+            .path_and_query()
+            .map(|v| v.as_str())
+            .unwrap_or("/console");
+        return login_redirect(return_to).into_response();
+    }
+
+    crate::routes::not_found::public(Method::GET, uri, tower).await
 }
 
 fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::Response {

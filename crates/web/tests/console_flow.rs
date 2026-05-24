@@ -509,6 +509,47 @@ async fn console_unknown_route_unauthenticated_redirects_to_login() {
 }
 
 #[tokio::test]
+async fn console_unmatched_route_unauthenticated_redirects_to_login() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/login?return_to=%2Fconsole%2Fmissing");
+}
+
+#[tokio::test]
+async fn console_unmatched_route_for_signed_in_user_renders_generic_404() {
+    let (app, cookie) = build_signed_in_app_without_installation().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/missing")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("app-header"));
+    assert!(text.contains("@octocat"));
+    assert!(!text.contains("console-frame"));
+}
+
+#[tokio::test]
 async fn console_trailing_slash_unauthenticated_redirects_to_login() {
     let app = build_test_app().await;
     let resp = app

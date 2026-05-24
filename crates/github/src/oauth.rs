@@ -217,7 +217,7 @@ impl UserApiClient {
 
     /// `GET /user/installations/{installation_id}/repositories` — repos the
     /// signed-in user can see through this app installation. Used by the
-    /// dashboard's link-create form to render a repo-picker.
+    /// console's link-create form to render a repo-picker.
     ///
     /// Paginates with `?per_page=100` (v1 simplification; installations with
     /// >100 repos need paging in v1.1).
