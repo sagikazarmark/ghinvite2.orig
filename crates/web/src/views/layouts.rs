@@ -133,7 +133,12 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
         body {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
-            Nav { signed_in_login: props.signed_in_login.clone() }
+            a {
+                class: "fixed left-4 top-3 z-10 inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-sm font-semibold tracking-tight text-base-content hover:bg-base-100",
+                href: "/",
+                span { class: "grid size-5 place-items-center rounded-md bg-primary text-[0.7rem] font-bold text-primary-content", "g" }
+                span { "ghinvite" }
+            }
             main { class: "min-h-[calc(100vh-3rem)] px-4 py-6",
                 div { class: "mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-lg items-center",
                     div { class: "mac-panel w-full",
@@ -219,9 +224,14 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
-        assert!(html.contains("theme-toggle"));
-        assert!(html.contains("ghinvite-theme"));
+        assert!(html.contains("ghinvite"));
+        assert!(html.contains("href=\"/\""));
         assert!(html.contains("Invitation"));
         assert!(html.contains("mac-panel"));
+        assert!(!html.contains("app-header"));
+        assert!(!html.contains("theme-toggle"));
+        assert!(!html.contains("Sign in"));
+        assert!(!html.contains("Sign out"));
+        assert!(!html.contains("Console"));
     }
 }

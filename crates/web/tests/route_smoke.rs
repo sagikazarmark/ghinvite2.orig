@@ -257,6 +257,8 @@ async fn invitation_landing_unknown_slug_returns_404() {
     assert!(text.contains("The link may be incorrect or no longer available."));
     assert!(text.contains("Go home"));
     assert!(text.contains("mac-panel"));
+    assert!(!text.contains("app-header"));
+    assert!(!text.contains("theme-toggle"));
     assert!(!text.contains("expired"));
     assert!(!text.contains("revoked"));
 }
@@ -281,6 +283,8 @@ async fn invitation_unknown_nested_route_returns_recipient_404() {
     assert!(text.contains("The link may be incorrect or no longer available."));
     assert!(text.contains("Go home"));
     assert!(text.contains("mac-panel"));
+    assert!(!text.contains("app-header"));
+    assert!(!text.contains("theme-toggle"));
     assert!(!text.contains("home-hero"));
 }
 

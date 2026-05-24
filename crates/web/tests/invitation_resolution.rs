@@ -519,6 +519,8 @@ async fn request_form_with_other_recipient_pending_request_renders_form() {
     assert!(text.contains("Submit request"));
     assert!(text.contains("Justification"));
     assert!(text.contains("visible to account admins"));
+    assert!(text.contains("href=\"/logout\""));
+    assert!(!text.contains("return_to=/i/"));
 }
 
 #[tokio::test]

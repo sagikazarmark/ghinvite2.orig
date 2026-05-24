@@ -127,7 +127,6 @@ pub struct RequestFormProps {
 
 #[component]
 pub fn RequestFormPage(props: RequestFormProps) -> Element {
-    let slug = props.slug.clone();
     let login = props.signed_in_login.clone();
     let perm_label = permission_label(props.link.permission);
     let repo_count = props.link.repos.len();
@@ -152,7 +151,8 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
         rsx! { li { "{name}" } }
     });
 
-    let logout_href = format!("/logout?return_to=/i/{slug}/request");
+    let logout_href = "/logout".to_string();
+    let slug = props.slug.clone();
     let action = format!("/i/{slug}/request");
     let request_id = props.request_id.clone();
 
@@ -295,6 +295,10 @@ pub fn PendingPage(props: PendingProps) -> Element {
             children: rsx! {
                 h1 { class: "mb-4 text-xl font-semibold tracking-tight", "Request status" }
                 {status_view}
+                div { class: "mt-6 flex flex-col gap-2 sm:flex-row",
+                    a { class: "btn btn-primary", href: "/console", "Create your own link" }
+                    a { class: "btn btn-ghost", href: "/", "Go home" }
+                }
             },
         }
     }
@@ -323,5 +327,9 @@ mod tests {
         assert!(html.contains("Request status"));
         assert!(!html.contains("card-title"));
         assert!(html.contains("/i/abcdEFGH01234567/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(html.contains("Create your own link"));
+        assert!(html.contains("href=\"/console\""));
+        assert!(html.contains("Go home"));
+        assert!(html.contains("href=\"/\""));
     }
 }
