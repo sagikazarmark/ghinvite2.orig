@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod components;
 pub mod dashboard;
 pub mod home;
