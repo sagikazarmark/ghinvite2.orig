@@ -161,10 +161,14 @@ async fn home_returns_html() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("ghinvite"));
+    assert!(text.contains("home-hero"));
+    assert!(text.contains("home-hero-action"));
     assert!(text.contains("Sign in with GitHub"));
-    assert!(text.contains("captured history"));
-    assert!(!text.contains(concat!("audit ", "trail")));
-    assert!(text.contains("Access console for GitHub collaborators"));
+    assert!(text.contains("Controlled GitHub invitations without access guesswork"));
+    assert!(text.contains("home-features"));
+    assert!(text.contains("Controlled share links"));
+    assert!(text.contains("Review requests before invitations"));
+    assert!(text.contains("Operational history"));
     assert!(!text.contains(concat!("class=\"he", "ro")));
 }
 
