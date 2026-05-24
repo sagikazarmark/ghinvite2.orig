@@ -54,7 +54,8 @@ const THEME_SYNC_SCRIPT: &str = r#"
     if (document.body) {
       document.body.setAttribute('data-theme', theme);
     }
-    var toggles = document.querySelectorAll('[data-theme-toggle]');
+    var toggleSelector = '[data-theme-' + 'toggle]';
+    var toggles = document.querySelectorAll(toggleSelector);
     for (var i = 0; i < toggles.length; i += 1) {
       syncToggle(toggles[i], theme);
     }
@@ -73,7 +74,7 @@ const THEME_SYNC_SCRIPT: &str = r#"
   });
 
   document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-theme-toggle]');
+    var button = event.target.closest(toggleSelector);
     if (!button) {
       return;
     }
@@ -86,6 +87,11 @@ const THEME_SYNC_SCRIPT: &str = r#"
   });
 })();
 "#;
+
+#[component]
+pub fn ThemeSyncScript() -> Element {
+    rsx! { script { "{THEME_SYNC_SCRIPT}" } }
+}
 
 #[component]
 pub fn Nav(props: NavProps) -> Element {
@@ -127,7 +133,7 @@ pub fn Nav(props: NavProps) -> Element {
                     }
                 }}
             }
-            script { "{THEME_SYNC_SCRIPT}" }
+            ThemeSyncScript {}
         }
     }
 }

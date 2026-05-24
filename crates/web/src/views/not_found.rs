@@ -147,7 +147,11 @@ mod tests {
         assert!(html.contains("Page not found"));
         assert!(html.contains(PUBLIC_NOT_FOUND_MESSAGE));
         assert!(html.contains("mac-panel"));
-        assert!(html.contains("@octocat"));
+        assert!(html.contains("window.localStorage.getItem(key)"));
+        assert!(!html.contains("app-header"));
+        assert!(!html.contains("theme-toggle"));
+        assert!(!html.contains("Sign out"));
+        assert!(!html.contains("Console"));
     }
 
     #[test]

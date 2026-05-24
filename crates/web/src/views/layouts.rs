@@ -1,7 +1,7 @@
 //! Three Dioxus layouts: HomeLayout, ConsoleLayout, InvitationLayout.
 //! Each wraps page content in zone-specific chrome (per spec §12).
 
-use crate::views::components::{Footer, Nav};
+use crate::views::components::{Footer, Nav, ThemeSyncScript};
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -139,6 +139,7 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
                 span { class: "grid size-5 place-items-center rounded-md bg-primary text-[0.7rem] font-bold text-primary-content", "g" }
                 span { "ghinvite" }
             }
+            ThemeSyncScript {}
             main { class: "min-h-[calc(100vh-3rem)] px-4 py-6",
                 div { class: "mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-lg items-center",
                     div { class: "mac-panel w-full",
@@ -228,6 +229,7 @@ mod tests {
         assert!(html.contains("href=\"/\""));
         assert!(html.contains("Invitation"));
         assert!(html.contains("mac-panel"));
+        assert!(html.contains("window.localStorage.getItem(key)"));
         assert!(!html.contains("app-header"));
         assert!(!html.contains("theme-toggle"));
         assert!(!html.contains("Sign in"));
