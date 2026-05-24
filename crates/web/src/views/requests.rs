@@ -53,6 +53,8 @@ mod tests {
         });
 
         assert!(html.contains("push"));
+        assert!(html.contains("<title>Pending requests · acme</title>"));
+        assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("acme/api"));
         assert!(html.contains("acme/web"));
         assert!(html.contains("Approving sends GitHub collaborator invitations"));
@@ -114,7 +116,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "Pending requests · {props.account_login}".to_string(),
+            title: "Pending requests · {login}",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("requests".to_string()),
             flash: props.flash.clone(),

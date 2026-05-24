@@ -24,7 +24,7 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "Settings · {login}".to_string(),
+            title: "Settings · {login}",
             account_login: Some(login.clone()),
             active_nav: Some("settings".to_string()),
             flash: props.flash.clone(),
@@ -87,6 +87,8 @@ mod tests {
         });
 
         assert!(html.contains("Account status"));
+        assert!(html.contains("<title>Settings · acme</title>"));
+        assert!(!html.contains("{login}"));
         assert!(html.contains("Installation scope"));
         assert!(html.contains("GitHub App settings"));
         assert!(html.contains("property-list"));

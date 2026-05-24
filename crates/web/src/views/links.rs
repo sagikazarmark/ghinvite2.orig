@@ -47,7 +47,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "New share link · {props.account_login}".to_string(),
+            title: "New share link · {login}",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("new-link".to_string()),
             flash: props.flash.clone(),
@@ -202,7 +202,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "{slug} · {props.account_login}".to_string(),
+            title: "{slug} · {login}",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("overview".to_string()),
             flash: props.flash.clone(),
@@ -377,6 +377,8 @@ mod tests {
         });
 
         assert!(html.contains("Access configuration"));
+        assert!(html.contains("<title>New share link · acme</title>"));
+        assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Request handling"));
         assert!(html.contains("Repository scope"));
         assert!(html.contains("acme/api"));
@@ -401,6 +403,8 @@ mod tests {
         });
 
         assert!(html.contains("Open recipient preview"));
+        assert!(html.contains("<title>abcdEFGH01234567 · acme</title>"));
+        assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Stop accepting new requests"));
         assert!(html.contains("acme/api"));
         assert!(html.contains("acme/web"));

@@ -40,6 +40,8 @@ mod tests {
         });
 
         assert!(html.contains("Console overview"));
+        assert!(html.contains("<title>acme · ghinvite</title>"));
+        assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Review queue"));
         assert!(html.contains("Create first share link"));
         assert!(html.contains("Recent share links"));
@@ -80,7 +82,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "{props.account_login} · ghinvite".to_string(),
+            title: "{login} · ghinvite",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("overview".to_string()),
             flash: props.flash.clone(),
