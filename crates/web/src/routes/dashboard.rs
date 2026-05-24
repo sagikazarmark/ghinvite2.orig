@@ -9,7 +9,6 @@ use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
-use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
@@ -40,7 +39,7 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(decline_request),
         )
         .route("/accounts/{login}/settings", get(settings_page))
-        .route("/accounts/{login}/audit", get(stub))
+        .route("/accounts/{login}/audit", get(audit_page))
         .route(
             "/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
@@ -58,7 +57,7 @@ fn dashboard_not_found_response(admin: &RequireAdminOf) -> axum::response::Respo
             }
         }
     });
-    (StatusCode::NOT_FOUND, Html(html)).into_response()
+    (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
 }
 
 async fn overview(
@@ -406,6 +405,23 @@ async fn requests_queue(
     Html(html).into_response()
 }
 
+async fn audit_page(admin: RequireAdminOf) -> impl IntoResponse {
+    let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
+    let signed_in_login = Some(admin.session.login.clone());
+    let account_login = admin.account.account_login.clone();
+
+    let html = render(move || {
+        rsx! {
+            crate::views::audit::AuditLogPage {
+                signed_in_login: signed_in_login.clone(),
+                flash: flash.clone(),
+                account_login: account_login.clone(),
+            }
+        }
+    });
+    Html(html).into_response()
+}
+
 async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireAdminOf,
@@ -553,11 +569,4 @@ async fn not_found(admin: RequireAdminOf) -> impl IntoResponse {
 
 async fn plain_not_found() -> impl IntoResponse {
     crate::error::WebError::NotFound
-}
-
-async fn stub() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "Audit log is not yet implemented.",
-    )
 }

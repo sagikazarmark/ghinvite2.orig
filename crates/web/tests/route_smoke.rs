@@ -235,16 +235,21 @@ async fn favicon_returns_plain_404() {
 }
 
 #[tokio::test]
-async fn dashboard_routes_return_501() {
+async fn dashboard_audit_route_unauthenticated_returns_plain_404() {
     let app = build_test_app().await;
-    for path in ["/accounts/acme/audit"] {
-        let resp = app
-            .clone()
-            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED, "path = {path}");
-    }
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/accounts/acme/audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
 }
 
 // NOTE: The requester_id ownership guard in the `pending` handler is a security-critical

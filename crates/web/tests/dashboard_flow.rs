@@ -229,6 +229,37 @@ async fn dashboard_trailing_slash_for_admin_renders_dashboard_404() {
 }
 
 #[tokio::test]
+async fn dashboard_audit_page_for_admin_renders_coming_soon_state() {
+    let (app, cookie) = build_signed_in_admin_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/accounts/acme/audit")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("dashboard-frame"));
+    assert!(text.contains("Audit log coming soon"));
+    assert!(text.contains("ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."));
+    assert!(text.contains("Back to overview"));
+    assert!(text.contains("href=\"/accounts/acme\""));
+    assert!(text.contains("href=\"/accounts/acme/audit\""));
+    assert!(text.contains("aria-current=\"page\""));
+    assert!(text.contains("app-nav-row-active"));
+    assert!(!text.contains("Audit log is not yet implemented."));
+    assert!(!text.contains("<table"));
+    assert!(!text.contains("Filter"));
+    assert!(!text.contains("No events"));
+}
+
+#[tokio::test]
 async fn dashboard_unknown_post_route_stays_plain_404() {
     let app = build_test_app().await;
     let resp = app
