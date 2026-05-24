@@ -176,6 +176,47 @@ async fn home_returns_html() {
 }
 
 #[tokio::test]
+async fn public_unknown_get_returns_html_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/missing-page")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("The link may be incorrect or no longer available."));
+    assert!(text.contains("Go home"));
+    assert!(text.contains("app-header"));
+    assert!(!text.contains("dashboard-frame"));
+}
+
+#[tokio::test]
+async fn missing_static_asset_returns_plain_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/missing.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
+}
+
+#[tokio::test]
 async fn dashboard_routes_return_501() {
     let app = build_test_app().await;
     for path in ["/accounts/acme/audit"] {
@@ -194,7 +235,6 @@ async fn dashboard_routes_return_501() {
 
 #[tokio::test]
 async fn invitation_landing_unknown_slug_returns_404() {
-    // GET /i/{slug} is now implemented: unknown slug → 404.
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -210,6 +250,14 @@ async fn invitation_landing_unknown_slug_returns_404() {
         StatusCode::NOT_FOUND,
         "GET /i/AAAAAAAAAAAAAAAA"
     );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("The link may be incorrect or no longer available."));
+    assert!(text.contains("Go home"));
+    assert!(text.contains("mac-panel"));
+    assert!(!text.contains("expired"));
+    assert!(!text.contains("revoked"));
 }
 
 #[tokio::test]
