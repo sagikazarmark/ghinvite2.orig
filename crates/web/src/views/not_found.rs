@@ -99,7 +99,7 @@ pub struct ConsoleNotFoundPageProps {
 
 #[component]
 pub fn ConsoleNotFoundPage(props: ConsoleNotFoundPageProps) -> Element {
-    let overview_href = format!("/accounts/{}", props.account_login);
+    let overview_href = format!("/console/accounts/{}", props.account_login);
 
     rsx! {
         ConsoleLayout {
@@ -164,7 +164,7 @@ mod tests {
         assert!(html.contains("console-frame"));
         assert!(html.contains(CONSOLE_NOT_FOUND_MESSAGE));
         assert!(html.contains("Go to account overview"));
-        assert!(html.contains("href=\"/accounts/acme\""));
+        assert!(html.contains("href=\"/console/accounts/acme\""));
         assert!(!html.contains("app-nav-row-active"));
     }
 }

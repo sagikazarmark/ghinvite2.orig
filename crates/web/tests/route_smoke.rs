@@ -234,24 +234,6 @@ async fn favicon_returns_plain_404() {
     assert_eq!(&body[..], b"Not Found");
 }
 
-#[tokio::test]
-async fn dashboard_audit_route_unauthenticated_returns_plain_404() {
-    let app = build_test_app().await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/accounts/acme/audit")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"Not Found");
-}
-
 // NOTE: The requester_id ownership guard in the `pending` handler is a security-critical
 // check. It is exercised only at the unit level (handler code review) in Plan 6 and will
 // get an integration test in Plan 8 (tests/invitation_ownership.rs).

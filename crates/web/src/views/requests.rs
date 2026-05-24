@@ -92,13 +92,17 @@ mod tests {
         });
 
         assert!(html.contains("(deleted link)"));
-        assert!(!html.contains("href=\"/accounts/acme/links/\""));
+        assert!(!html.contains("href=\"/console/accounts/acme/links/\""));
         assert!(html.contains("Repository details unavailable"));
         assert!(!html.contains(
             "Approving sends GitHub collaborator invitations for the repositories listed here."
         ));
-        assert!(!html.contains("/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve"));
-        assert!(!html.contains("/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/decline"));
+        assert!(
+            !html.contains("/console/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve")
+        );
+        assert!(
+            !html.contains("/console/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/decline")
+        );
     }
 }
 
@@ -144,7 +148,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let link_label = if link_id.is_empty() {
                                     rsx! { span { "{link_slug}" } }
                                 } else {
-                                    rsx! { a { class: "link link-hover", href: "/accounts/{login}/links/{link_id}", "{link_slug}" } }
+                                    rsx! { a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{link_slug}" } }
                                 };
                                 let requester = r.requester_login.clone();
                                 let created = r.created_at;
@@ -202,10 +206,10 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                         {if actions_available {
                                             rsx! {
                                                 div { class: "flex gap-2 lg:flex-col lg:items-stretch",
-                                                    form { method: "post", action: "/accounts/{login}/requests/{rid}/approve",
+                                                    form { method: "post", action: "/console/accounts/{login}/requests/{rid}/approve",
                                                         button { r#type: "submit", class: "btn btn-success btn-sm h-8 min-h-0", "Approve request" }
                                                     }
-                                                    form { method: "post", action: "/accounts/{login}/requests/{rid}/decline",
+                                                    form { method: "post", action: "/console/accounts/{login}/requests/{rid}/decline",
                                                         button { r#type: "submit", class: "btn btn-error btn-sm h-8 min-h-0", "Decline request" }
                                                     }
                                                 }

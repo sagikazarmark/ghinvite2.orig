@@ -59,7 +59,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                         "Create a controlled URL that lets GitHub users request collaborator access to selected repositories."
                     }
                 }
-                form { method: "post", action: "/accounts/{login}/links", class: "max-w-3xl space-y-5",
+                form { method: "post", action: "/console/accounts/{login}/links", class: "max-w-3xl space-y-5",
                     section { class: "mac-panel",
                         div { class: "space-y-4 p-4",
                             div {
@@ -293,7 +293,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                                 }
                                 div { class: "modal-action",
                                     a { class: "btn btn-ghost", href: "#", "Cancel" }
-                                    form { method: "post", action: "/accounts/{login}/links/{id_str}/revoke",
+                                    form { method: "post", action: "/console/accounts/{login}/links/{id_str}/revoke",
                                         button { r#type: "submit", class: "btn btn-error", "Confirm stop" }
                                     }
                                 }

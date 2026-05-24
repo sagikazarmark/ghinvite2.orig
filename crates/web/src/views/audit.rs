@@ -35,7 +35,7 @@ pub fn AuditLogPage(props: AuditLogPageProps) -> Element {
                         p { class: "mt-2 text-sm leading-6 text-base-content/70",
                             "ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."
                         }
-                        a { class: "btn btn-primary btn-sm mt-5", href: "/accounts/{login}", "Back to overview" }
+                        a { class: "btn btn-primary btn-sm mt-5", href: "/console/accounts/{login}", "Back to overview" }
                     }
                 }
             },
@@ -67,7 +67,7 @@ mod tests {
         assert!(html.contains("Audit log coming soon"));
         assert!(html.contains("ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."));
         assert!(html.contains("Back to overview"));
-        assert!(html.contains("href=\"/accounts/acme\""));
+        assert!(html.contains("href=\"/console/accounts/acme\""));
         assert!(html.contains("mac-panel"));
         assert!(!html.contains("<table"));
         assert!(!html.contains("Filter"));

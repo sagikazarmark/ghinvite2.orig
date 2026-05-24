@@ -132,7 +132,7 @@ async fn console_overview_unauthenticated_returns_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme")
+                .uri("/console/accounts/acme")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -149,7 +149,7 @@ async fn console_unknown_route_unauthenticated_stays_plain_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme/missing")
+                .uri("/console/accounts/acme/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -167,7 +167,7 @@ async fn console_trailing_slash_unauthenticated_stays_plain_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme/")
+                .uri("/console/accounts/acme/")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -185,7 +185,7 @@ async fn console_unknown_route_for_admin_renders_console_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme/missing")
+                .uri("/console/accounts/acme/missing")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -200,7 +200,7 @@ async fn console_unknown_route_for_admin_renders_console_404() {
     assert!(text.contains("Page not found"));
     assert!(text.contains("This page is not available in the current account."));
     assert!(text.contains("Go to account overview"));
-    assert!(text.contains("href=\"/accounts/acme\""));
+    assert!(text.contains("href=\"/console/accounts/acme\""));
     assert!(!text.contains("app-nav-row-active"));
 }
 
@@ -210,7 +210,7 @@ async fn console_trailing_slash_for_admin_renders_console_404() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme/")
+                .uri("/console/accounts/acme/")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -234,7 +234,7 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/accounts/acme/audit")
+                .uri("/console/accounts/acme/audit")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -249,8 +249,8 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
     assert!(text.contains("Audit log coming soon"));
     assert!(text.contains("ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."));
     assert!(text.contains("Back to overview"));
-    assert!(text.contains("href=\"/accounts/acme\""));
-    assert!(text.contains("href=\"/accounts/acme/audit\""));
+    assert!(text.contains("href=\"/console/accounts/acme\""));
+    assert!(text.contains("href=\"/console/accounts/acme/audit\""));
     assert!(text.contains("aria-current=\"page\""));
     assert!(text.contains("app-nav-row-active"));
     assert!(!text.contains("Audit log is not yet implemented."));
@@ -266,7 +266,7 @@ async fn console_unknown_post_route_stays_plain_404() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/accounts/acme/missing")
+                .uri("/console/accounts/acme/missing")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -285,7 +285,7 @@ async fn console_post_missing_resource_stays_plain_404() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/accounts/acme/links/not-a-link-id/revoke")
+                .uri("/console/accounts/acme/links/not-a-link-id/revoke")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),

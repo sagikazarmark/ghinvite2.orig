@@ -1,4 +1,4 @@
-//! `/accounts/{login}/...` routes. Plan 5.
+//! `/console/accounts/{login}/...` routes. Plan 5.
 
 use crate::account_admin_reads::{
     find_account_admin_request, find_account_admin_share_link, pending_request_queue,
@@ -17,33 +17,53 @@ use serde::Deserialize;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/accounts/{login}", get(overview))
+        .route("/console", get(console_index))
+        .route("/console/accounts/{login}", get(overview))
         .route(
-            "/accounts/{login}/",
+            "/console/accounts/{login}/",
             get(not_found).fallback(plain_not_found),
         )
-        .route("/accounts/{login}/links/new", get(new_link_form))
-        .route("/accounts/{login}/links", axum::routing::post(create_link))
-        .route("/accounts/{login}/links/{link_id}", get(link_detail))
+        .route("/console/accounts/{login}/links/new", get(new_link_form))
         .route(
-            "/accounts/{login}/links/{link_id}/revoke",
+            "/console/accounts/{login}/links",
+            axum::routing::post(create_link),
+        )
+        .route(
+            "/console/accounts/{login}/links/{link_id}",
+            get(link_detail),
+        )
+        .route(
+            "/console/accounts/{login}/links/{link_id}/revoke",
             axum::routing::post(revoke_link),
         )
-        .route("/accounts/{login}/requests", get(requests_queue))
+        .route("/console/accounts/{login}/requests", get(requests_queue))
         .route(
-            "/accounts/{login}/requests/{request_id}/approve",
+            "/console/accounts/{login}/requests/{request_id}/approve",
             axum::routing::post(approve_request),
         )
         .route(
-            "/accounts/{login}/requests/{request_id}/decline",
+            "/console/accounts/{login}/requests/{request_id}/decline",
             axum::routing::post(decline_request),
         )
-        .route("/accounts/{login}/settings", get(settings_page))
-        .route("/accounts/{login}/audit", get(audit_page))
+        .route("/console/accounts/{login}/settings", get(settings_page))
+        .route("/console/accounts/{login}/audit", get(audit_page))
         .route(
-            "/accounts/{login}/{*rest}",
+            "/console/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
         )
+}
+
+async fn console_index(tower: tower_sessions::Session) -> impl IntoResponse {
+    let session = session::load(&tower).await.unwrap_or_default();
+    if !session.is_authenticated() {
+        return login_redirect("/console").into_response();
+    }
+    crate::error::WebError::NotFound.into_response()
+}
+
+fn login_redirect(return_to: &str) -> axum::response::Redirect {
+    let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
+    axum::response::Redirect::to(&format!("/login?return_to={encoded}"))
 }
 
 fn console_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
@@ -242,7 +262,7 @@ async fn create_link(
             )
             .await;
             return axum::response::Redirect::to(&format!(
-                "/accounts/{}/links/new",
+                "/console/accounts/{}/links/new",
                 admin.account.account_login
             ))
             .into_response();
@@ -259,7 +279,7 @@ async fn create_link(
     )
     .await;
     axum::response::Redirect::to(&format!(
-        "/accounts/{}/links/{}",
+        "/console/accounts/{}/links/{}",
         admin.account.account_login, link_id
     ))
     .into_response()
@@ -347,7 +367,7 @@ async fn revoke_link(
         )
         .await;
         return axum::response::Redirect::to(&format!(
-            "/accounts/{}/links/{}",
+            "/console/accounts/{}/links/{}",
             admin.account.account_login, link_id_str
         ))
         .into_response();
@@ -361,8 +381,11 @@ async fn revoke_link(
         },
     )
     .await;
-    axum::response::Redirect::to(&format!("/accounts/{}", admin.account.account_login))
-        .into_response()
+    axum::response::Redirect::to(&format!(
+        "/console/accounts/{}",
+        admin.account.account_login
+    ))
+    .into_response()
 }
 
 async fn requests_queue(
@@ -477,7 +500,7 @@ async fn approve_request(
         }
     }
     axum::response::Redirect::to(&format!(
-        "/accounts/{}/requests",
+        "/console/accounts/{}/requests",
         admin.account.account_login
     ))
     .into_response()
@@ -540,7 +563,7 @@ async fn decline_request(
         }
     }
     axum::response::Redirect::to(&format!(
-        "/accounts/{}/requests",
+        "/console/accounts/{}/requests",
         admin.account.account_login
     ))
     .into_response()

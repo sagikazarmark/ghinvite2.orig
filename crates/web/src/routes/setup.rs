@@ -96,7 +96,7 @@ async fn handle_github_setup(
     )
     .await?;
 
-    Ok(Redirect::to(&format!("/accounts/{account_login}")).into_response())
+    Ok(Redirect::to(&format!("/console/accounts/{account_login}")).into_response())
 }
 
 fn account_type_for(installation: &GhUserInstallation) -> Result<AccountType> {

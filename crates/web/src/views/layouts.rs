@@ -78,15 +78,15 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
             div { class: "console-frame",
                 aside { class: "console-sidebar hidden shrink-0 flex-col md:flex",
                     nav { class: "flex-1 space-y-1 p-3 text-sm",
-                        a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                        a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
-                        a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
-                        a { class: "{audit_side}", href: "/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
-                        a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                        a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                        a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                        a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
+                        a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
+                        a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                     }
                     div { class: "sidebar-account-switcher border-t border-base-300 p-3",
                         p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Active account" }
-                        a { class: "mt-2 flex min-w-0 items-center gap-2 rounded-box px-2 py-2 text-sm hover:bg-base-100", href: "/accounts/{login}/settings",
+                        a { class: "mt-2 flex min-w-0 items-center gap-2 rounded-box px-2 py-2 text-sm hover:bg-base-100", href: "/console/accounts/{login}/settings",
                             span { class: "grid size-7 shrink-0 place-items-center rounded-lg bg-base-300 text-xs font-semibold", "@" }
                             span { class: "min-w-0 flex-1 truncate font-medium", "{login}" }
                         }
@@ -96,11 +96,11 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                 div { class: "min-w-0 flex-1",
                     nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
                         div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
-                            a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                            a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
-                            a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
-                            a { class: "{audit_side}", href: "/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
-                            a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                            a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                            a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                            a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
+                            a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
+                            a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
                     }
                     main { class: "console-main",
@@ -175,7 +175,7 @@ mod tests {
         assert!(html.contains("app-nav-row-active"));
         assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
         assert!(html.contains("app-nav-row flex w-full items-center"));
-        assert!(html.contains("href=\"/accounts/acme/audit\""));
+        assert!(html.contains("href=\"/console/accounts/acme/audit\""));
         assert!(html.contains("Audit log"));
         assert!(html.contains("Pending requests"));
         assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
@@ -196,7 +196,7 @@ mod tests {
             }
         });
 
-        assert!(html.contains("href=\"/accounts/acme/audit\""));
+        assert!(html.contains("href=\"/console/accounts/acme/audit\""));
         assert!(html.contains("Audit log"));
         assert!(html.contains("aria-current=\"page\""));
         assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
