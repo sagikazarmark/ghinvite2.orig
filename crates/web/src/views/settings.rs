@@ -1,7 +1,7 @@
 //! Settings page (read-only in v1).
 
 use crate::session::Flash;
-use crate::views::layouts::DashboardLayout;
+use crate::views::layouts::ConsoleLayout;
 use dioxus::prelude::*;
 use domain::{Account, SelectedRepos};
 
@@ -22,7 +22,7 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
     };
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "Settings · {login}",
             account_login: Some(login.clone()),

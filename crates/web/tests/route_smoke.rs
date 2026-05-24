@@ -141,7 +141,7 @@ async fn static_styles_returns_css() {
     assert!(text.contains(".home-hero"));
     assert!(text.contains(".home-feature-item"));
     assert!(text.contains(".home-feature-kicker"));
-    assert!(text.contains(".dashboard-sidebar"));
+    assert!(text.contains(".console-sidebar"));
     assert!(text.contains(".mac-panel"));
     assert!(text.contains(".compact-table"));
 }
@@ -195,7 +195,7 @@ async fn public_unknown_get_returns_html_404() {
     assert!(text.contains("The link may be incorrect or no longer available."));
     assert!(text.contains("Go home"));
     assert!(text.contains("app-header"));
-    assert!(!text.contains("dashboard-frame"));
+    assert!(!text.contains("console-frame"));
 }
 
 #[tokio::test]

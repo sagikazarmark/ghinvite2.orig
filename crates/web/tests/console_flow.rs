@@ -1,4 +1,4 @@
-//! Dashboard route integration tests.
+//! Console route integration tests.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -127,7 +127,7 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
 }
 
 #[tokio::test]
-async fn dashboard_overview_unauthenticated_returns_404() {
+async fn console_overview_unauthenticated_returns_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -144,7 +144,7 @@ async fn dashboard_overview_unauthenticated_returns_404() {
 }
 
 #[tokio::test]
-async fn dashboard_unknown_route_unauthenticated_stays_plain_404() {
+async fn console_unknown_route_unauthenticated_stays_plain_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -162,7 +162,7 @@ async fn dashboard_unknown_route_unauthenticated_stays_plain_404() {
 }
 
 #[tokio::test]
-async fn dashboard_trailing_slash_unauthenticated_stays_plain_404() {
+async fn console_trailing_slash_unauthenticated_stays_plain_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -180,7 +180,7 @@ async fn dashboard_trailing_slash_unauthenticated_stays_plain_404() {
 }
 
 #[tokio::test]
-async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
+async fn console_unknown_route_for_admin_renders_console_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
         .oneshot(
@@ -196,7 +196,7 @@ async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("dashboard-frame"));
+    assert!(text.contains("console-frame"));
     assert!(text.contains("Page not found"));
     assert!(text.contains("This page is not available in the current account."));
     assert!(text.contains("Go to account overview"));
@@ -205,7 +205,7 @@ async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
 }
 
 #[tokio::test]
-async fn dashboard_trailing_slash_for_admin_renders_dashboard_404() {
+async fn console_trailing_slash_for_admin_renders_console_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
         .oneshot(
@@ -221,7 +221,7 @@ async fn dashboard_trailing_slash_for_admin_renders_dashboard_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("dashboard-frame"));
+    assert!(text.contains("console-frame"));
     assert!(text.contains("Page not found"));
     assert!(text.contains("This page is not available in the current account."));
     assert!(text.contains("Go to account overview"));
@@ -229,7 +229,7 @@ async fn dashboard_trailing_slash_for_admin_renders_dashboard_404() {
 }
 
 #[tokio::test]
-async fn dashboard_audit_page_for_admin_renders_coming_soon_state() {
+async fn console_audit_page_for_admin_renders_coming_soon_state() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
         .oneshot(
@@ -245,7 +245,7 @@ async fn dashboard_audit_page_for_admin_renders_coming_soon_state() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("dashboard-frame"));
+    assert!(text.contains("console-frame"));
     assert!(text.contains("Audit log coming soon"));
     assert!(text.contains("ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."));
     assert!(text.contains("Back to overview"));
@@ -260,7 +260,7 @@ async fn dashboard_audit_page_for_admin_renders_coming_soon_state() {
 }
 
 #[tokio::test]
-async fn dashboard_unknown_post_route_stays_plain_404() {
+async fn console_unknown_post_route_stays_plain_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -279,7 +279,7 @@ async fn dashboard_unknown_post_route_stays_plain_404() {
 }
 
 #[tokio::test]
-async fn dashboard_post_missing_resource_stays_plain_404() {
+async fn console_post_missing_resource_stays_plain_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
         .oneshot(

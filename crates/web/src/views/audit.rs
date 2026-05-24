@@ -1,7 +1,7 @@
 //! Audit Log coming-soon page.
 
 use crate::session::Flash;
-use crate::views::layouts::DashboardLayout;
+use crate::views::layouts::ConsoleLayout;
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -16,7 +16,7 @@ pub fn AuditLogPage(props: AuditLogPageProps) -> Element {
     let login = props.account_login.clone();
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "Audit log · {login}",
             account_login: Some(props.account_login.clone()),

@@ -1,7 +1,7 @@
-//! Dashboard overview page (Dioxus).
+//! Console overview page (Dioxus).
 
 use crate::session::Flash;
-use crate::views::layouts::DashboardLayout;
+use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use domain::ShareLink;
@@ -80,7 +80,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
     });
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "{login} · ghinvite",
             account_login: Some(props.account_login.clone()),

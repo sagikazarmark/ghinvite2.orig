@@ -1,6 +1,6 @@
 pub mod audit;
 pub mod components;
-pub mod dashboard;
+pub mod console;
 pub mod home;
 pub mod invitation;
 pub mod layouts;

@@ -141,19 +141,19 @@
     place-items: center;
   }
 
-  .dashboard-frame {
+  .console-frame {
     display: flex;
     min-height: calc(100vh - 3rem);
     background: var(--color-base-200);
   }
 
-  .dashboard-sidebar {
+  .console-sidebar {
     width: 15rem;
     border-right: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
     background: color-mix(in oklch, var(--color-base-100) 56%, var(--color-base-200));
   }
 
-  .dashboard-main {
+  .console-main {
     min-width: 0;
     flex: 1 1 auto;
     padding: 1.25rem;

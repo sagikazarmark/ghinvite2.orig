@@ -46,7 +46,7 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-fn dashboard_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
+fn console_not_found_response(admin: &RequireAdminOf) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
     let html = render(move || {
@@ -91,7 +91,7 @@ async fn overview(
 
     let html = render(move || {
         rsx! {
-            crate::views::dashboard::OverviewPage {
+            crate::views::console::OverviewPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -274,7 +274,7 @@ async fn link_detail(
 
     let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
         Ok(id) => id,
-        Err(_) => return dashboard_not_found_response(&admin),
+        Err(_) => return console_not_found_response(&admin),
     };
     let link = match find_account_admin_share_link(
         state.storage.as_ref(),
@@ -284,7 +284,7 @@ async fn link_detail(
     .await
     {
         Ok(link) => link,
-        Err(crate::error::WebError::NotFound) => return dashboard_not_found_response(&admin),
+        Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
         Err(e) => return e.into_response(),
     };
 
@@ -564,7 +564,7 @@ async fn settings_page(admin: RequireAdminOf) -> impl IntoResponse {
 }
 
 async fn not_found(admin: RequireAdminOf) -> impl IntoResponse {
-    dashboard_not_found_response(&admin)
+    console_not_found_response(&admin)
 }
 
 async fn plain_not_found() -> impl IntoResponse {

@@ -1,7 +1,7 @@
 //! Approval queue page (Dioxus).
 
 use crate::session::Flash;
-use crate::views::layouts::DashboardLayout;
+use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
@@ -114,7 +114,7 @@ pub struct RequestsQueueProps {
 pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
     let login = props.account_login.clone();
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "Pending requests · {login}",
             account_login: Some(props.account_login.clone()),

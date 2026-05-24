@@ -1,4 +1,4 @@
-//! Three Dioxus layouts: HomeLayout, DashboardLayout, InvitationLayout.
+//! Three Dioxus layouts: HomeLayout, ConsoleLayout, InvitationLayout.
 //! Each wraps page content in zone-specific chrome (per spec §12).
 
 use crate::views::components::{Footer, Nav};
@@ -8,10 +8,10 @@ use dioxus::prelude::*;
 pub struct LayoutProps {
     pub signed_in_login: Option<String>,
     pub title: String,
-    /// `Some(login)` when rendered under account dashboard routes. `None` for
+    /// `Some(login)` when rendered under account console routes. `None` for
     /// HomeLayout / InvitationLayout.
     pub account_login: Option<String>,
-    /// The current dashboard section for active navigation styling.
+    /// The current console section for active navigation styling.
     pub active_nav: Option<String>,
     /// One-shot status message rendered above `children`.
     pub flash: Option<crate::session::Flash>,
@@ -37,7 +37,7 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
 }
 
 #[component]
-pub fn DashboardLayout(props: LayoutProps) -> Element {
+pub fn ConsoleLayout(props: LayoutProps) -> Element {
     let login = props.account_login.clone().unwrap_or_default();
     let active_nav = props.active_nav.clone().unwrap_or_default();
     let overview_side = if active_nav == "overview" {
@@ -75,8 +75,8 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            div { class: "dashboard-frame",
-                aside { class: "dashboard-sidebar hidden shrink-0 flex-col md:flex",
+            div { class: "console-frame",
+                aside { class: "console-sidebar hidden shrink-0 flex-col md:flex",
                     nav { class: "flex-1 space-y-1 p-3 text-sm",
                         a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                         a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
@@ -94,7 +94,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                     }
                 }
                 div { class: "min-w-0 flex-1",
-                    nav { class: "mobile-dashboard-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
+                    nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
                         div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
                             a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                             a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
@@ -103,7 +103,7 @@ pub fn DashboardLayout(props: LayoutProps) -> Element {
                             a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
                     }
-                    main { class: "dashboard-main",
+                    main { class: "console-main",
                         {match &props.flash {
                             Some(f) => {
                                 let alert_class = match f.level {
@@ -150,10 +150,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_layout_renders_real_sidebar_and_account_control() {
+    fn console_layout_renders_real_sidebar_and_account_control() {
         let html = crate::views::render::render(|| {
             rsx! {
-                DashboardLayout {
+                ConsoleLayout {
                     signed_in_login: Some("admin".to_string()),
                     title: "Requests".to_string(),
                     account_login: Some("acme".to_string()),
@@ -166,9 +166,9 @@ mod tests {
 
         assert!(html.contains("data-theme=\"ghinvite\""));
         assert!(html.contains("app-header"));
-        assert!(html.contains("dashboard-frame"));
-        assert!(html.contains("dashboard-sidebar"));
-        assert!(html.contains("mobile-dashboard-nav"));
+        assert!(html.contains("console-frame"));
+        assert!(html.contains("console-sidebar"));
+        assert!(html.contains("mobile-console-nav"));
         assert!(html.contains("sidebar-account-switcher"));
         assert!(html.contains("Install another account"));
         assert!(html.contains("aria-current=\"page\""));
@@ -182,10 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_layout_marks_audit_navigation_active() {
+    fn console_layout_marks_audit_navigation_active() {
         let html = crate::views::render::render(|| {
             rsx! {
-                DashboardLayout {
+                ConsoleLayout {
                     signed_in_login: Some("admin".to_string()),
                     title: "Audit log".to_string(),
                     account_login: Some("acme".to_string()),

@@ -1,6 +1,6 @@
 //! Web binary core. axum app builder + tower-sessions + OAuth flow + Dioxus
 //! layouts. Plan 7 wraps `build_app()` in a Workers `#[event(fetch)]`; Plans 5
-//! and 6 fill in the dashboard and recipient routes.
+//! and 6 fill in the console and recipient routes.
 
 pub(crate) mod account_admin_reads;
 pub mod commands;
@@ -48,7 +48,7 @@ where
         .merge(routes::home::router())
         .merge(routes::oauth::router())
         .merge(routes::setup::router())
-        .merge(routes::dashboard::router())
+        .merge(routes::console::router())
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
         .route("/static/styles.css", axum::routing::get(serve_styles_css))

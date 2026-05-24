@@ -1,4 +1,4 @@
-pub mod dashboard;
+pub mod console;
 pub mod health;
 pub mod home;
 pub mod invitation;

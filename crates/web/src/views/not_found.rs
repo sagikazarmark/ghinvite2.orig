@@ -1,6 +1,6 @@
 //! Route-aware 404 page views.
 
-use crate::views::layouts::{DashboardLayout, HomeLayout, InvitationLayout};
+use crate::views::layouts::{ConsoleLayout, HomeLayout, InvitationLayout};
 use dioxus::prelude::*;
 
 const PUBLIC_NOT_FOUND_MESSAGE: &str = "The link may be incorrect or no longer available.";
@@ -102,7 +102,7 @@ pub fn DashboardNotFoundPage(props: DashboardNotFoundPageProps) -> Element {
     let overview_href = format!("/accounts/{}", props.account_login);
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "Page not found - ghinvite".to_string(),
             account_login: Some(props.account_login.clone()),
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_not_found_page_has_no_active_sidebar_item() {
+    fn console_not_found_page_has_no_active_sidebar_item() {
         let html = crate::views::render::render(|| {
             rsx! {
                 DashboardNotFoundPage {
@@ -161,7 +161,7 @@ mod tests {
             }
         });
 
-        assert!(html.contains("dashboard-frame"));
+        assert!(html.contains("console-frame"));
         assert!(html.contains(DASHBOARD_NOT_FOUND_MESSAGE));
         assert!(html.contains("Go to account overview"));
         assert!(html.contains("href=\"/accounts/acme\""));

@@ -1,7 +1,7 @@
 //! Share-link views: create form + detail page.
 
 use crate::session::Flash;
-use crate::views::layouts::DashboardLayout;
+use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use domain::{Permission, ShareLink};
@@ -45,7 +45,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     let perms = ["pull", "triage", "push", "maintain", "admin"];
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "New share link · {login}",
             account_login: Some(props.account_login.clone()),
@@ -200,7 +200,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     });
 
     rsx! {
-        DashboardLayout {
+        ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "{slug} · {login}",
             account_login: Some(props.account_login.clone()),
