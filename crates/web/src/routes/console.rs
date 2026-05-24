@@ -9,6 +9,7 @@ use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
+use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
@@ -53,12 +54,95 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-async fn console_index(tower: tower_sessions::Session) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
+async fn console_index(
+    State(state): State<AppState>,
+    tower: tower_sessions::Session,
+) -> impl IntoResponse {
+    let mut session = session::load(&tower).await.unwrap_or_default();
     if !session.is_authenticated() {
         return login_redirect("/console").into_response();
     }
-    crate::error::WebError::NotFound.into_response()
+
+    let accounts = match load_console_accounts(&state, &mut session).await {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(error = ?error, "failed to load console accounts");
+            let signed_in_login = Some(session.login.clone());
+            let html = render(move || {
+                rsx! {
+                    crate::views::console::ConsoleIndexPage {
+                        signed_in_login: signed_in_login.clone(),
+                        state: crate::views::console::ConsoleIndexState::LoadError,
+                    }
+                }
+            });
+            return Html(html).into_response();
+        }
+    };
+
+    let _ = session::save(&tower, &session).await;
+
+    if accounts.len() == 1 {
+        return axum::response::Redirect::to(&format!("/console/accounts/{}", accounts[0].login))
+            .into_response();
+    }
+
+    let state_view = if accounts.is_empty() {
+        crate::views::console::ConsoleIndexState::Empty
+    } else {
+        crate::views::console::ConsoleIndexState::AccountPicker { accounts }
+    };
+    let signed_in_login = Some(session.login.clone());
+    let html = render(move || {
+        rsx! {
+            crate::views::console::ConsoleIndexPage {
+                signed_in_login: signed_in_login.clone(),
+                state: state_view.clone(),
+            }
+        }
+    });
+    Html(html).into_response()
+}
+
+async fn load_console_accounts(
+    state: &AppState,
+    session: &mut session::Session,
+) -> Result<Vec<crate::views::console::ConsoleAccountChoice>, crate::error::WebError> {
+    let user_api = github::oauth::UserApiClient::new(
+        state.github_transport.clone(),
+        session.access_token.clone(),
+    );
+    let visible = user_api.list_user_installations().await?;
+    let mut accounts = Vec::new();
+
+    for installation in visible.installations {
+        let Some(account) = state
+            .storage
+            .get_active_installation_by_account_id(installation.account.id)
+            .await?
+        else {
+            continue;
+        };
+
+        let is_admin = if account.account_type == domain::AccountType::User {
+            session.login == account.account_login
+        } else {
+            crate::middleware::auth::check_admin(state, session, &account.account_login).await?
+        };
+
+        if is_admin {
+            accounts.push(crate::views::console::ConsoleAccountChoice {
+                login: account.account_login,
+                account_type: match account.account_type {
+                    domain::AccountType::User => "Personal account".to_string(),
+                    domain::AccountType::Organization => "Organization".to_string(),
+                },
+            });
+        }
+    }
+
+    accounts.sort_by(|a, b| a.login.cmp(&b.login));
+    Ok(accounts)
 }
 
 fn login_redirect(return_to: &str) -> axum::response::Redirect {

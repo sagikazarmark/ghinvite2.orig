@@ -6,6 +6,86 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use domain::ShareLink;
 
+#[derive(Clone, PartialEq)]
+pub struct ConsoleAccountChoice {
+    pub login: String,
+    pub account_type: String,
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ConsoleIndexState {
+    AccountPicker { accounts: Vec<ConsoleAccountChoice> },
+    Empty,
+    LoadError,
+}
+
+#[derive(Clone, PartialEq, Props)]
+pub struct ConsoleIndexPageProps {
+    pub signed_in_login: Option<String>,
+    pub state: ConsoleIndexState,
+}
+
+#[component]
+pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
+    rsx! {
+        crate::views::layouts::HomeLayout {
+            signed_in_login: props.signed_in_login.clone(),
+            title: "Console · ghinvite".to_string(),
+            account_login: None,
+            active_nav: None,
+            flash: None,
+            children: rsx! {
+                section { class: "mx-auto w-full max-w-3xl py-8 sm:py-12",
+                    {match props.state.clone() {
+                        ConsoleIndexState::AccountPicker { accounts } => rsx! {
+                            h1 { class: "text-2xl font-semibold tracking-tight", "Choose an account" }
+                            p { class: "mt-2 text-sm text-base-content/65", "Select the account console you want to manage." }
+                            div { class: "mac-panel mt-5 divide-y divide-base-300 overflow-hidden",
+                                {accounts.into_iter().map(|account| {
+                                    let href = format!("/console/accounts/{}", account.login);
+                                    rsx! {
+                                        a { class: "flex items-center justify-between gap-3 px-4 py-3 hover:bg-base-200/60", href: "{href}",
+                                            span { class: "min-w-0",
+                                                span { class: "block truncate text-sm font-medium", "{account.login}" }
+                                                span { class: "mt-0.5 block text-xs text-base-content/60", "{account.account_type}" }
+                                            }
+                                            span { class: "text-sm text-primary", "Open" }
+                                        }
+                                    }
+                                })}
+                            }
+                            a { class: "btn btn-ghost btn-sm mt-4", href: "/install", "Install another account" }
+                        },
+                        ConsoleIndexState::Empty => rsx! {
+                            div { class: "mac-panel p-6",
+                                p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45", "Console" }
+                                h1 { class: "mt-3 text-2xl font-semibold tracking-tight", "No accounts connected" }
+                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating share links." }
+                                div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
+                                    a { class: "btn btn-primary", href: "/install", "Install GitHub App" }
+                                    a { class: "btn btn-ghost", href: "/", "Go home" }
+                                }
+                            }
+                        },
+                        ConsoleIndexState::LoadError => rsx! {
+                            div { class: "mac-panel p-6",
+                                p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-error", "Account loading failed" }
+                                h1 { class: "mt-3 text-2xl font-semibold tracking-tight", dangerous_inner_html: "We couldn't load your accounts" }
+                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "GitHub account discovery did not complete. Try again before changing installation settings." }
+                                div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
+                                    a { class: "btn btn-primary", href: "/console", "Try again" }
+                                    a { class: "btn btn-ghost", href: "/install", "Install GitHub App" }
+                                    a { class: "btn btn-ghost", href: "/", "Go home" }
+                                }
+                            }
+                        },
+                    }}
+                }
+            },
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 pub struct OverviewProps {
     pub signed_in_login: Option<String>,
@@ -48,6 +128,64 @@ mod tests {
         assert!(html.contains("mac-panel"));
         assert!(html.contains("compact-table"));
         assert!(!html.contains("text-3xl"));
+    }
+
+    #[test]
+    fn console_index_renders_account_picker() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                ConsoleIndexPage {
+                    signed_in_login: Some("admin".to_string()),
+                    state: ConsoleIndexState::AccountPicker { accounts: vec![
+                        ConsoleAccountChoice { login: "acme".to_string(), account_type: "Organization".to_string() },
+                        ConsoleAccountChoice { login: "octocat".to_string(), account_type: "Personal account".to_string() },
+                    ] },
+                }
+            }
+        });
+
+        assert!(html.contains("Choose an account"));
+        assert!(html.contains("Select the account console you want to manage."));
+        assert!(html.contains("href=\"/console/accounts/acme\""));
+        assert!(html.contains("Organization"));
+        assert!(html.contains("Personal account"));
+        assert!(html.contains("Install another account"));
+    }
+
+    #[test]
+    fn console_index_renders_empty_state() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                ConsoleIndexPage {
+                    signed_in_login: Some("admin".to_string()),
+                    state: ConsoleIndexState::Empty,
+                }
+            }
+        });
+
+        assert!(html.contains("No accounts connected"));
+        assert!(html.contains("Install GitHub App"));
+        assert!(html.contains("href=\"/install\""));
+        assert!(html.contains("Go home"));
+        assert!(html.contains("href=\"/\""));
+    }
+
+    #[test]
+    fn console_index_renders_load_error() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                ConsoleIndexPage {
+                    signed_in_login: Some("admin".to_string()),
+                    state: ConsoleIndexState::LoadError,
+                }
+            }
+        });
+
+        assert!(html.contains("We couldn't load your accounts"));
+        assert!(html.contains("Try again"));
+        assert!(html.contains("href=\"/console\""));
+        assert!(html.contains("Install GitHub App"));
+        assert!(html.contains("Go home"));
     }
 }
 
