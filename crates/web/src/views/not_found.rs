@@ -4,7 +4,7 @@ use crate::views::layouts::{ConsoleLayout, HomeLayout, InvitationLayout};
 use dioxus::prelude::*;
 
 const PUBLIC_NOT_FOUND_MESSAGE: &str = "The link may be incorrect or no longer available.";
-const DASHBOARD_NOT_FOUND_MESSAGE: &str = "This page is not available in the current account.";
+const CONSOLE_NOT_FOUND_MESSAGE: &str = "This page is not available in the current account.";
 
 #[derive(Clone, PartialEq, Props)]
 pub struct NotFoundContentProps {
@@ -92,13 +92,13 @@ pub fn InvitationNotFoundPage(props: InvitationNotFoundPageProps) -> Element {
 }
 
 #[derive(Clone, PartialEq, Props)]
-pub struct DashboardNotFoundPageProps {
+pub struct ConsoleNotFoundPageProps {
     pub signed_in_login: Option<String>,
     pub account_login: String,
 }
 
 #[component]
-pub fn DashboardNotFoundPage(props: DashboardNotFoundPageProps) -> Element {
+pub fn ConsoleNotFoundPage(props: ConsoleNotFoundPageProps) -> Element {
     let overview_href = format!("/accounts/{}", props.account_login);
 
     rsx! {
@@ -110,7 +110,7 @@ pub fn DashboardNotFoundPage(props: DashboardNotFoundPageProps) -> Element {
             flash: None,
             children: rsx! {
                 NotFoundContent {
-                    message: DASHBOARD_NOT_FOUND_MESSAGE.to_string(),
+                    message: CONSOLE_NOT_FOUND_MESSAGE.to_string(),
                     primary_href: overview_href,
                     primary_label: "Go to account overview".to_string(),
                     secondary_href: Some("/".to_string()),
@@ -135,7 +135,7 @@ mod tests {
         assert!(html.contains(PUBLIC_NOT_FOUND_MESSAGE));
         assert!(html.contains("Go home"));
         assert!(html.contains("app-header"));
-        assert!(!html.contains(DASHBOARD_NOT_FOUND_MESSAGE));
+        assert!(!html.contains(CONSOLE_NOT_FOUND_MESSAGE));
     }
 
     #[test]
@@ -154,7 +154,7 @@ mod tests {
     fn console_not_found_page_has_no_active_sidebar_item() {
         let html = crate::views::render::render(|| {
             rsx! {
-                DashboardNotFoundPage {
+                ConsoleNotFoundPage {
                     signed_in_login: Some("admin".to_string()),
                     account_login: "acme".to_string(),
                 }
@@ -162,7 +162,7 @@ mod tests {
         });
 
         assert!(html.contains("console-frame"));
-        assert!(html.contains(DASHBOARD_NOT_FOUND_MESSAGE));
+        assert!(html.contains(CONSOLE_NOT_FOUND_MESSAGE));
         assert!(html.contains("Go to account overview"));
         assert!(html.contains("href=\"/accounts/acme\""));
         assert!(!html.contains("app-nav-row-active"));

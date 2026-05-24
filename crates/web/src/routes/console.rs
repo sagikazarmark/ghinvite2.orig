@@ -51,7 +51,7 @@ fn console_not_found_response(admin: &RequireAdminOf) -> axum::response::Respons
     let account_login = admin.account.account_login.clone();
     let html = render(move || {
         rsx! {
-            crate::views::not_found::DashboardNotFoundPage {
+            crate::views::not_found::ConsoleNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
                 account_login: account_login.clone(),
             }
