@@ -3,6 +3,7 @@ pub mod dashboard;
 pub mod home;
 pub mod invitation;
 pub mod layouts;
+pub mod not_found;
 pub mod links;
 pub mod render;
 pub mod requests;
