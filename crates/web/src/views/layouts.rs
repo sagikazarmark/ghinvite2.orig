@@ -8,9 +8,11 @@ use dioxus::prelude::*;
 pub struct LayoutProps {
     pub signed_in_login: Option<String>,
     pub title: String,
-    /// `Some(login)` when rendered under `/accounts/{login}/...`. `None` for
+    /// `Some(login)` when rendered under account dashboard routes. `None` for
     /// HomeLayout / InvitationLayout.
     pub account_login: Option<String>,
+    /// The current dashboard section for active navigation styling.
+    pub active_nav: Option<String>,
     /// One-shot status message rendered above `children`.
     pub flash: Option<crate::session::Flash>,
     /// The page content rendered inside the layout.
@@ -25,10 +27,10 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
-            class: "min-h-screen bg-base-100 flex flex-col",
-            "data-theme": "light",
+            class: "min-h-screen bg-base-200 text-base-content antialiased",
+            "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            main { class: "flex-1 container mx-auto px-4 py-8", {props.children} }
+            main { class: "min-h-[calc(100vh-3rem)] px-4 py-6", {props.children} }
             Footer {}
         }
     }
@@ -37,44 +39,79 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
 #[component]
 pub fn DashboardLayout(props: LayoutProps) -> Element {
     let login = props.account_login.clone().unwrap_or_default();
+    let active_nav = props.active_nav.clone().unwrap_or_default();
+    let overview_side = if active_nav == "overview" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
+    let new_link_side = if active_nav == "new-link" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
+    let requests_side = if active_nav == "requests" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
+    let settings_side = if active_nav == "settings" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
+
     rsx! {
         head {
             title { "{props.title}" }
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
-            class: "min-h-screen bg-base-200 flex flex-col",
-            "data-theme": "light",
+            class: "min-h-screen bg-base-200 text-base-content antialiased",
+            "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
-            div {
-                class: "flex flex-1 container mx-auto px-4 py-6 gap-6",
-                aside {
-                    class: "w-56 hidden md:block",
-                    nav {
-                        class: "menu bg-base-100 rounded-box p-2",
-                        li { a { href: "/accounts/{login}", "Overview" } }
-                        li { a { href: "/accounts/{login}/links/new", "New link" } }
-                        li { a { href: "/accounts/{login}/requests", "Pending requests" } }
-                        li { a { href: "/accounts/{login}/audit", "Audit log" } }
-                        li { a { href: "/accounts/{login}/settings", "Settings" } }
+            div { class: "dashboard-frame",
+                aside { class: "dashboard-sidebar hidden shrink-0 flex-col md:flex",
+                    nav { class: "flex-1 space-y-1 p-3 text-sm",
+                        a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                        a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                        a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
+                        a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit log" }
+                        a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                    }
+                    div { class: "sidebar-account-switcher border-t border-base-300 p-3",
+                        p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Active account" }
+                        a { class: "mt-2 flex min-w-0 items-center gap-2 rounded-box px-2 py-2 text-sm hover:bg-base-100", href: "/accounts/{login}/settings",
+                            span { class: "grid size-7 shrink-0 place-items-center rounded-lg bg-base-300 text-xs font-semibold", "@" }
+                            span { class: "min-w-0 flex-1 truncate font-medium", "{login}" }
+                        }
+                        a { class: "btn btn-ghost btn-xs mt-2 h-7 min-h-0 w-full justify-start px-2", href: "/install", "Install another account" }
                     }
                 }
-                main {
-                    class: "flex-1",
-                    {match &props.flash {
-                        Some(f) => {
-                            let alert_class = match f.level {
-                                crate::session::FlashLevel::Success => "alert alert-success mb-4",
-                                crate::session::FlashLevel::Error => "alert alert-error mb-4",
-                                crate::session::FlashLevel::Info => "alert alert-info mb-4",
-                            };
-                            rsx! {
-                                div { class: "{alert_class}", span { "{f.message}" } }
-                            }
+                div { class: "min-w-0 flex-1",
+                    nav { class: "mobile-dashboard-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
+                        div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
+                            a { class: "{overview_side}", href: "/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
+                            a { class: "{new_link_side}", href: "/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New link" }
+                            a { class: "{requests_side}", href: "/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
+                            a { class: "app-nav-row flex w-full items-center", href: "/accounts/{login}/audit", "Audit" }
+                            a { class: "{settings_side}", href: "/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
-                        None => rsx! {},
-                    }}
-                    {props.children}
+                    }
+                    main { class: "dashboard-main",
+                        {match &props.flash {
+                            Some(f) => {
+                                let alert_class = match f.level {
+                                    crate::session::FlashLevel::Success => "alert alert-success mb-4 shadow-sm",
+                                    crate::session::FlashLevel::Error => "alert alert-error mb-4 shadow-sm",
+                                    crate::session::FlashLevel::Info => "alert alert-info mb-4 shadow-sm",
+                                };
+                                rsx! { div { class: "{alert_class}", span { "{f.message}" } } }
+                            }
+                            None => rsx! {},
+                        }}
+                        {props.children}
+                    }
                 }
             }
         }
@@ -89,12 +126,80 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
-            class: "min-h-screen bg-base-100 flex items-center justify-center",
-            "data-theme": "light",
-            div {
-                class: "card w-full max-w-md bg-base-100 shadow-xl",
-                div { class: "card-body", {props.children} }
+            class: "min-h-screen bg-base-200 text-base-content antialiased",
+            "data-theme": "ghinvite",
+            Nav { signed_in_login: props.signed_in_login.clone() }
+            main { class: "min-h-[calc(100vh-3rem)] px-4 py-6",
+                div { class: "mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-lg items-center",
+                    div { class: "mac-panel w-full",
+                        div { class: "p-6", {props.children} }
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_layout_renders_real_sidebar_and_account_control() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                DashboardLayout {
+                    signed_in_login: Some("admin".to_string()),
+                    title: "Requests".to_string(),
+                    account_login: Some("acme".to_string()),
+                    active_nav: Some("requests".to_string()),
+                    flash: None,
+                    children: rsx! { p { "Queue" } },
+                }
+            }
+        });
+
+        assert!(html.contains("data-theme=\"ghinvite\""));
+        assert!(html.contains("app-header"));
+        assert!(html.contains("dashboard-frame"));
+        assert!(html.contains("dashboard-sidebar"));
+        assert!(html.contains("mobile-dashboard-nav"));
+        assert!(html.contains("sidebar-account-switcher"));
+        assert!(html.contains("Install another account"));
+        assert!(html.contains("aria-current=\"page\""));
+        assert!(html.contains("app-nav-row-active"));
+        assert!(html.contains("app-nav-row app-nav-row-active flex w-full items-center"));
+        assert!(html.contains("app-nav-row flex w-full items-center"));
+        assert!(
+            html.contains(
+                "class=\"app-nav-row flex w-full items-center\" href=\"/accounts/acme/audit\""
+            ) || html.contains(
+                "href=\"/accounts/acme/audit\" class=\"app-nav-row flex w-full items-center\""
+            )
+        );
+        assert!(html.contains("Pending requests"));
+        assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
+    }
+
+    #[test]
+    fn invitation_layout_uses_product_theme() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                InvitationLayout {
+                    signed_in_login: None,
+                    title: "Invite".to_string(),
+                    account_login: None,
+                    active_nav: None,
+                    flash: None,
+                    children: rsx! { p { "Invitation" } },
+                }
+            }
+        });
+
+        assert!(html.contains("data-theme=\"ghinvite\""));
+        assert!(html.contains("theme-toggle"));
+        assert!(html.contains("ghinvite-theme"));
+        assert!(html.contains("Invitation"));
+        assert!(html.contains("mac-panel"));
     }
 }

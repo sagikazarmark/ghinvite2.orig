@@ -116,7 +116,12 @@ impl RestateClient {
                     status.as_u16()
                 )));
             }
-            resp.json::<O>().await.map_err(|e| {
+            let body = resp.bytes().await.map_err(|e| {
+                WebError::Restate(format!("reading {service}/{method} response: {e}"))
+            })?;
+            // Restate may return an empty body for unit-returning handlers.
+            let body: &[u8] = if body.is_empty() { b"null" } else { &body };
+            serde_json::from_slice::<O>(body).map_err(|e| {
                 WebError::Restate(format!("decoding {service}/{method} response: {e}"))
             })
         })

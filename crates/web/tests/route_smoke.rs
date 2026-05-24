@@ -129,6 +129,21 @@ async fn static_styles_returns_css() {
         .to_str()
         .unwrap();
     assert!(ct.contains("text/css"));
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("ghinvite"));
+    assert!(text.contains("--color-primary"));
+    assert!(text.contains("oklch("));
+    assert!(text.contains("ghinvite-dark"));
+    assert!(text.contains("color-scheme:dark"));
+    assert!(text.contains(".app-header"));
+    assert!(text.contains(".theme-toggle"));
+    assert!(text.contains(".home-hero"));
+    assert!(text.contains(".home-feature-item"));
+    assert!(text.contains(".home-feature-kicker"));
+    assert!(text.contains(".dashboard-sidebar"));
+    assert!(text.contains(".mac-panel"));
+    assert!(text.contains(".compact-table"));
 }
 
 #[tokio::test]
@@ -149,7 +164,15 @@ async fn home_returns_html() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("ghinvite"));
+    assert!(text.contains("home-hero"));
+    assert!(text.contains("home-hero-action"));
     assert!(text.contains("Sign in with GitHub"));
+    assert!(text.contains("Controlled GitHub invitations without access guesswork"));
+    assert!(text.contains("home-features"));
+    assert!(text.contains("Controlled share links"));
+    assert!(text.contains("Review requests before invitations"));
+    assert!(text.contains("Operational history"));
+    assert!(!text.contains(concat!("class=\"he", "ro")));
 }
 
 #[tokio::test]

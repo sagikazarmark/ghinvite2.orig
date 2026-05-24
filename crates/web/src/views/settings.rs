@@ -26,25 +26,70 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "Settings · {login}".to_string(),
             account_login: Some(login.clone()),
+            active_nav: Some("settings".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6", h1 { class: "text-2xl font-bold", "Settings" } }
-                p { class: "opacity-60 mb-6", "Settings are read-only in v1. Edits coming in v1.1." }
-                div { class: "space-y-4 max-w-lg",
-                    div { class: "card bg-base-100 shadow",
-                        div { class: "card-body",
-                            h2 { class: "card-title text-base", "Account" }
-                            p { strong { "{login}" } " ({account_type})" }
+                header { class: "mb-6",
+                    p { class: "text-sm font-medium text-primary", "Settings" }
+                    h1 { class: "text-2xl font-semibold tracking-tight", "Account status" }
+                    p { class: "mt-1 text-sm text-base-content/65", "Current GitHub App installation state for {login}." }
+                }
+                section { class: "mac-panel max-w-3xl overflow-hidden",
+                    dl { class: "property-list",
+                        div { class: "property-row",
+                            dt { class: "property-label", "Account" }
+                            dd {
+                                p { class: "text-sm font-medium", "{login}" }
+                                p { class: "mt-0.5 text-xs text-base-content/60", "{account_type}" }
+                            }
                         }
-                    }
-                    div { class: "card bg-base-100 shadow",
-                        div { class: "card-body",
-                            h2 { class: "card-title text-base", "Repository access" }
-                            p { "{repos_label}" }
+                        div { class: "property-row",
+                            dt { class: "property-label", "Installation scope" }
+                            dd {
+                                p { class: "text-sm font-medium", "{repos_label}" }
+                                p { class: "mt-0.5 text-xs text-base-content/60", "Change repository selection in the GitHub App settings in this version." }
+                            }
                         }
                     }
                 }
+                div { class: "alert mt-4 max-w-3xl shadow-sm",
+                    span { "Editable settings are planned for v1.1. This page reflects the active installation state." }
+                }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use domain::{Account, AccountType, SelectedRepos};
+
+    #[test]
+    fn settings_page_renders_account_status_panels() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                SettingsPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account: Account {
+                        installation_id: 77,
+                        account_id: 9001,
+                        account_login: "acme".to_string(),
+                        account_type: AccountType::Organization,
+                        installed_at: Utc::now(),
+                        uninstalled_at: None,
+                        selected_repos: SelectedRepos::All,
+                    },
+                }
+            }
+        });
+
+        assert!(html.contains("Account status"));
+        assert!(html.contains("Installation scope"));
+        assert!(html.contains("GitHub App settings"));
+        assert!(html.contains("property-list"));
+        assert!(html.contains("mac-panel"));
     }
 }

@@ -814,6 +814,38 @@ mod tests {
         (format!("http://{addr}"), calls)
     }
 
+    async fn spawn_restate_empty_call_recorder() -> (String, Arc<Mutex<Vec<RecordedCall>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let call_recorder = calls.clone();
+
+        let app = axum::Router::new().route(
+            "/{service}/{key}/{method}",
+            post(
+                move |Path((service, key, method)): Path<(String, String, String)>,
+                      axum::Json(body): axum::Json<Value>| {
+                    let calls = call_recorder.clone();
+                    async move {
+                        calls.lock().unwrap().push(RecordedCall {
+                            service,
+                            key,
+                            method,
+                            send: false,
+                            body,
+                        });
+                        axum::http::StatusCode::OK.into_response()
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{addr}"), calls)
+    }
+
     fn at(iso: &str) -> chrono::DateTime<Utc> {
         chrono::DateTime::parse_from_rfc3339(iso)
             .unwrap()
@@ -1510,6 +1542,35 @@ mod tests {
         assert_eq!(call.body["actor_user_id"], 42);
         assert_eq!(call.body["account_type"], "Organization");
         assert_eq!(call.body["selected_repos"], "all");
+    }
+
+    #[tokio::test]
+    async fn onboard_installation_accepts_empty_restate_response_body() {
+        let (base, calls) = spawn_restate_empty_call_recorder().await;
+        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+
+        let result = commands
+            .onboard_installation(OnboardInstallation {
+                installation_id: 77,
+                actor_user_id: 42,
+                account_id: 9001,
+                account_login: "acme".into(),
+                account_type: domain::AccountType::Organization,
+                selected_repos: domain::SelectedRepos::All,
+                installed_at: at("2026-05-20T11:50:00Z"),
+            })
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "empty success response should not fail decode: {result:?}"
+        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].service, "Installation");
+        assert_eq!(calls[0].key, "77");
+        assert_eq!(calls[0].method, "onboard");
+        assert!(!calls[0].send);
     }
 
     #[tokio::test]

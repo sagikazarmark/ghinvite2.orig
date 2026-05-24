@@ -11,6 +11,10 @@ pub(crate) struct AccountAdminPendingRequestRow {
     pub(crate) requester_login: String,
     pub(crate) justification: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
+    pub(crate) permission: Option<domain::Permission>,
+    pub(crate) repos: Vec<String>,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) approval_required: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,9 +82,30 @@ fn pending_request_row(
     share_link: Option<ShareLink>,
     requester: Option<domain::User>,
 ) -> AccountAdminPendingRequestRow {
-    let (link_slug, link_id) = match share_link {
-        Some(link) => (link.slug.as_str().to_string(), Some(link.id)),
-        None => ("(deleted link)".to_string(), None),
+    let (link_slug, link_id, permission, repos, expires_at, approval_required) = match share_link {
+        Some(link) => {
+            let repos = link
+                .repos
+                .into_iter()
+                .map(|repo| repo.repo_full_name)
+                .collect();
+            (
+                link.slug.as_str().to_string(),
+                Some(link.id),
+                Some(link.permission),
+                repos,
+                link.expires_at,
+                Some(link.approval_required),
+            )
+        }
+        None => (
+            "(deleted link)".to_string(),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+        ),
     };
     let requester_login = requester
         .map(|user| user.login)
@@ -93,6 +118,10 @@ fn pending_request_row(
         requester_login,
         justification: request.justification,
         created_at: request.created_at,
+        permission,
+        repos,
+        expires_at,
+        approval_required,
     }
 }
 
@@ -501,6 +530,10 @@ mod tests {
             Some("need repository access")
         );
         assert_eq!(rows[0].created_at, dt("2026-05-04T12:30:00Z"));
+        assert_eq!(rows[0].permission, Some(Permission::Pull));
+        assert_eq!(rows[0].repos, vec!["acme/api".to_string()]);
+        assert_eq!(rows[0].expires_at, None);
+        assert_eq!(rows[0].approval_required, Some(true));
         assert_eq!(rows[1].request_id, newer.id);
         assert_eq!(rows[1].requester_login, "alice");
         assert_eq!(rows[1].created_at, dt("2026-05-04T12:40:00Z"));
@@ -531,6 +564,10 @@ mod tests {
         assert_eq!(rows[0].link_slug, "(deleted link)");
         assert_eq!(rows[0].link_id, None);
         assert_eq!(rows[0].requester_login, "user-999999");
+        assert_eq!(rows[0].permission, None);
+        assert!(rows[0].repos.is_empty());
+        assert_eq!(rows[0].expires_at, None);
+        assert_eq!(rows[0].approval_required, None);
     }
 
     #[tokio::test]
