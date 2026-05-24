@@ -162,6 +162,24 @@ async fn dashboard_unknown_route_unauthenticated_stays_plain_404() {
 }
 
 #[tokio::test]
+async fn dashboard_trailing_slash_unauthenticated_stays_plain_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/accounts/acme/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
+}
+
+#[tokio::test]
 async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
@@ -183,6 +201,30 @@ async fn dashboard_unknown_route_for_admin_renders_dashboard_404() {
     assert!(text.contains("This page is not available in the current account."));
     assert!(text.contains("Go to account overview"));
     assert!(text.contains("href=\"/accounts/acme\""));
+    assert!(!text.contains("app-nav-row-active"));
+}
+
+#[tokio::test]
+async fn dashboard_trailing_slash_for_admin_renders_dashboard_404() {
+    let (app, cookie) = build_signed_in_admin_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/accounts/acme/")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("dashboard-frame"));
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("This page is not available in the current account."));
+    assert!(text.contains("Go to account overview"));
     assert!(!text.contains("app-nav-row-active"));
 }
 

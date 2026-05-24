@@ -302,6 +302,25 @@ async fn invitation_unknown_nested_route_returns_recipient_404() {
 }
 
 #[tokio::test]
+async fn invitation_unknown_nested_post_returns_plain_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/i/AAAAAAAAAAAAAAAA/anything")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
+}
+
+#[tokio::test]
 async fn invitation_request_form_unauthenticated_redirects_to_login() {
     // GET /i/{slug}/request is now implemented:
     // unauthenticated request → 303 to /login with return_to.

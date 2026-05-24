@@ -19,6 +19,10 @@ use serde::Deserialize;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/accounts/{login}", get(overview))
+        .route(
+            "/accounts/{login}/",
+            get(not_found).fallback(plain_not_found),
+        )
         .route("/accounts/{login}/links/new", get(new_link_form))
         .route("/accounts/{login}/links", axum::routing::post(create_link))
         .route("/accounts/{login}/links/{link_id}", get(link_detail))
