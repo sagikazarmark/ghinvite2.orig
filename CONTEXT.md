@@ -26,6 +26,9 @@ The public share-link journey where a GitHub user reviews and submits an invitat
 ### Account Console
 The account-scoped workspace where account admins manage share links, requests, and settings.
 
+### Audit Log
+An account-scoped history of access workflow events that account admins use to understand what happened in the account.
+
 ### Invitation Request
 A recipient's request for access through a share link. It may be auto-approved or wait for an account admin decision. A recipient may have at most one pending invitation request for a given share link at a time.
 
