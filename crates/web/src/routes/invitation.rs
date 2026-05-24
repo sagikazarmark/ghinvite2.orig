@@ -31,12 +31,33 @@ pub fn router() -> Router<AppState> {
         .route("/i/{slug}/pending/{request_id}", get(pending))
 }
 
+fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
+    let html = render(move || {
+        rsx! {
+            crate::views::not_found::InvitationNotFoundPage {
+                signed_in_login: signed_in_login.clone(),
+            }
+        }
+    });
+    (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
+}
+
+fn signed_in_login_from_session(session: &session::Session) -> Option<String> {
+    if session.is_authenticated() {
+        Some(session.login.clone())
+    } else {
+        None
+    }
+}
+
 async fn landing(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let now = Utc::now();
+    let session = session::load(&tower).await.unwrap_or_default();
+    let signed_in_login = signed_in_login_from_session(&session);
     let (slug, link) = match resolve_public_share_link(
         state.storage.as_ref(),
         &slug,
@@ -47,17 +68,11 @@ async fn landing(
     {
         Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
         Ok(PublicShareLinkResolution::PendingRequest { .. }) => {
-            return crate::error::WebError::NotFound.into_response();
+            return invitation_not_found_response(signed_in_login);
         }
-        Err(error) => return error.into_public_error().into_response(),
+        Err(_) => return invitation_not_found_response(signed_in_login),
     };
     let slug = slug.as_str().to_string();
-    let session = session::load(&tower).await.unwrap_or_default();
-    let signed_in_login = if session.is_authenticated() {
-        Some(session.login.clone())
-    } else {
-        None
-    };
     let html = render(move || {
         rsx! {
             crate::views::invitation::LandingPage {
@@ -96,7 +111,7 @@ async fn request_form(
             return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
                 .into_response();
         }
-        Err(error) => return error.into_public_error().into_response(),
+        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
     };
 
     let slug = slug.as_str().to_string();
@@ -208,15 +223,15 @@ async fn pending(
 
     let request_id = match domain::RequestId::from_str(&request_id_str) {
         Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
+        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
     };
 
     // Load request. None = workflow just started, not yet in DB — show "processing" state.
     let request_state = match state.storage.get_invitation_request(request_id).await {
         Ok(Some(r)) if r.requester_id == session.user_id => Some(r.state),
-        Ok(Some(_)) => return crate::error::WebError::NotFound.into_response(), // wrong user
-        Ok(None) => None,                                                       // not yet committed
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
+        Ok(Some(_)) => return invitation_not_found_response(Some(session.login.clone())),
+        Ok(None) => None,
+        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
     };
 
     let signed_in_login = Some(session.login.clone());
