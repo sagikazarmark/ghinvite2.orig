@@ -48,6 +48,8 @@ pub fn validate_return_to(raw: &str) -> Option<String> {
         None
     } else if raw.starts_with("/i/") {
         Some(raw.to_string())
+    } else if raw == "/console" || raw.starts_with("/console/") {
+        Some(raw.to_string())
     } else if raw == "/setup/github" || raw.starts_with("/setup/github?") {
         Some(raw.to_string())
     } else {
@@ -175,11 +177,18 @@ mod tests {
             validate_return_to("/setup/github?installation_id=77&setup_action=install"),
             Some("/setup/github?installation_id=77&setup_action=install".to_string())
         );
+        assert_eq!(validate_return_to("/console"), Some("/console".to_string()));
+        assert_eq!(
+            validate_return_to("/console/accounts/acme/links/new"),
+            Some("/console/accounts/acme/links/new".to_string())
+        );
         assert_eq!(validate_return_to("/"), None);
         assert_eq!(validate_return_to("/setup"), None);
         assert_eq!(validate_return_to("/setup/github/extra"), None);
         assert_eq!(validate_return_to("https://evil.com"), None);
         assert_eq!(validate_return_to("//evil.com/i/foo"), None);
+        assert_eq!(validate_return_to("/console/../admin"), None);
+        assert_eq!(validate_return_to("//evil.com/console"), None);
         assert_eq!(validate_return_to("/i/../../admin"), None); // path traversal
         assert_eq!(
             validate_return_to("/setup/github?installation_id=77/../admin"),

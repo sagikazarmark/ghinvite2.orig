@@ -19,11 +19,6 @@ struct LoginQuery {
     return_to: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct LogoutQuery {
-    return_to: Option<String>,
-}
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", get(login))
@@ -58,17 +53,9 @@ async fn login(
     Ok(Redirect::to(&authorize.url))
 }
 
-async fn logout(
-    tower: TowerSession,
-    axum::extract::Query(q): axum::extract::Query<LogoutQuery>,
-) -> impl IntoResponse {
+async fn logout(tower: TowerSession) -> impl IntoResponse {
     session::clear(&tower).await;
-    let destination = q
-        .return_to
-        .as_deref()
-        .and_then(crate::session::validate_return_to)
-        .unwrap_or_else(|| "/".to_string());
-    Redirect::to(&destination)
+    Redirect::to("/")
 }
 
 async fn install(State(state): State<AppState>) -> impl IntoResponse {

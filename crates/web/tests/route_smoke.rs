@@ -98,7 +98,7 @@ async fn logout_clears_session_and_redirects_home() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/logout")
+                .uri("/logout?return_to=/console/accounts/acme")
                 .body(Body::empty())
                 .unwrap(),
         )
