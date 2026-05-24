@@ -52,6 +52,7 @@ where
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
         .route("/static/styles.css", axum::routing::get(serve_styles_css))
+        .fallback(routes::not_found::public)
         .layer(session_layer)
         .with_state(state)
 }
