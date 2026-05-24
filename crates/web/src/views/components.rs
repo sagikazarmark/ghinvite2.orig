@@ -18,16 +18,45 @@ const THEME_SYNC_SCRIPT: &str = r#"
     return value === light || value === dark;
   }
 
+  function toggleLabel(theme) {
+    return theme === dark ? 'Switch to light theme' : 'Switch to dark theme';
+  }
+
+  function nextTheme(theme) {
+    return theme === dark ? light : dark;
+  }
+
+  var moonPath = 'M20.25 14.15A7.5 7.5 0 0 1 9.85 3.75a8.25 8.25 0 1 0 10.4 10.4Z';
+  var sunPath = 'M12 4.5V3m0 18v-1.5M4.5 12H3m18 0h-1.5M6.34 6.34 5.28 5.28m13.44 13.44-1.06-1.06m0-11.32 1.06-1.06M5.28 18.72l1.06-1.06M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z';
+
+  function syncToggle(button, theme) {
+    var label = toggleLabel(theme);
+    var darkActive = theme === dark;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    button.setAttribute('aria-pressed', darkActive ? 'true' : 'false');
+    button.setAttribute('data-current-theme', theme);
+    button.setAttribute('data-theme-value', nextTheme(theme));
+
+    var icon = button.querySelector('[data-theme-icon]');
+    if (icon) {
+      icon.setAttribute('data-current-icon', darkActive ? 'sun' : 'moon');
+    }
+    var path = button.querySelector('[data-theme-icon-path]');
+    if (path) {
+      path.setAttribute('d', darkActive ? sunPath : moonPath);
+    }
+  }
+
   function apply(value) {
     var theme = valid(value) ? value : light;
     document.documentElement.setAttribute('data-theme', theme);
     if (document.body) {
       document.body.setAttribute('data-theme', theme);
     }
-    var buttons = document.querySelectorAll('[data-theme-value]');
-    for (var i = 0; i < buttons.length; i += 1) {
-      var active = buttons[i].getAttribute('data-theme-value') === theme;
-      buttons[i].setAttribute('aria-pressed', active ? 'true' : 'false');
+    var toggles = document.querySelectorAll('[data-theme-toggle]');
+    for (var i = 0; i < toggles.length; i += 1) {
+      syncToggle(toggles[i], theme);
     }
   }
 
@@ -44,11 +73,12 @@ const THEME_SYNC_SCRIPT: &str = r#"
   });
 
   document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-theme-value]');
+    var button = event.target.closest('[data-theme-toggle]');
     if (!button) {
       return;
     }
-    var next = valid(button.getAttribute('data-theme-value')) ? button.getAttribute('data-theme-value') : light;
+    var next = valid(button.getAttribute('data-theme-value')) ? button.getAttribute('data-theme-value') : nextTheme(stored);
+    stored = next;
     apply(next);
     try {
       window.localStorage.setItem(key, next);
@@ -71,25 +101,18 @@ pub fn Nav(props: NavProps) -> Element {
                 }
             }
             div { class: "flex flex-none items-center justify-end gap-2",
-                div { class: "theme-toggle", role: "group", aria_label: "Theme",
-                    button {
-                        r#type: "button",
-                        class: "btn btn-ghost btn-xs",
-                        aria_label: "Use light theme",
-                        aria_pressed: "true",
-                        "data-theme-value": "ghinvite",
-                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", class: "size-4", "aria-hidden": "true",
-                            path { stroke_linecap: "round", stroke_linejoin: "round", d: "M12 4.5V3m0 18v-1.5M4.5 12H3m18 0h-1.5M6.34 6.34 5.28 5.28m13.44 13.44-1.06-1.06m0-11.32 1.06-1.06M5.28 18.72l1.06-1.06M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z" }
-                        }
-                    }
-                    button {
-                        r#type: "button",
-                        class: "btn btn-ghost btn-xs",
-                        aria_label: "Use dark theme",
-                        aria_pressed: "false",
-                        "data-theme-value": "ghinvite-dark",
-                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", class: "size-4", "aria-hidden": "true",
-                            path { stroke_linecap: "round", stroke_linejoin: "round", d: "M20.25 14.15A7.5 7.5 0 0 1 9.85 3.75a8.25 8.25 0 1 0 10.4 10.4Z" }
+                button {
+                    r#type: "button",
+                    class: "theme-toggle btn btn-ghost btn-sm h-8 min-h-0",
+                    aria_label: "Switch to dark theme",
+                    aria_pressed: "false",
+                    title: "Switch to dark theme",
+                    "data-theme-toggle": "true",
+                    "data-theme-value": "ghinvite-dark",
+                    "data-current-theme": "ghinvite",
+                    span { class: "theme-icon", "data-theme-icon": "true", "data-current-icon": "moon", "aria-hidden": "true",
+                        svg { xmlns: "http://www.w3.org/2000/svg", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.8", class: "size-4",
+                            path { "data-theme-icon-path": "true", stroke_linecap: "round", stroke_linejoin: "round", d: "M20.25 14.15A7.5 7.5 0 0 1 9.85 3.75a8.25 8.25 0 1 0 10.4 10.4Z" }
                         }
                     }
                 }
@@ -127,18 +150,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nav_renders_compact_header_theme_icons_and_signed_in_controls() {
+    fn nav_renders_single_theme_toggle_and_signed_in_controls() {
         let html = crate::views::render::render(|| {
             rsx! { Nav { signed_in_login: Some("admin".to_string()) } }
         });
 
         assert!(html.contains("app-header"));
         assert!(html.contains("theme-toggle"));
-        assert!(html.contains("aria-label=\"Use light theme\""));
-        assert!(html.contains("aria-label=\"Use dark theme\""));
-        assert!(html.contains("data-theme-value=\"ghinvite\""));
+        assert!(html.contains("data-theme-toggle=\"true\""));
+        assert_eq!(html.matches("data-theme-value=").count(), 1);
         assert!(html.contains("data-theme-value=\"ghinvite-dark\""));
-        assert!(html.contains("aria-pressed=\"true\""));
+        assert!(html.contains("aria-label=\"Switch to dark theme\""));
+        assert!(html.contains("data-current-theme=\"ghinvite\""));
+        assert_eq!(html.matches("data-theme-icon=").count(), 1);
+        assert!(html.contains("data-theme-icon=\"true\""));
+        assert!(html.contains("data-theme-icon-path=\"true\""));
+        assert!(html.contains("data-current-icon=\"moon\""));
+        assert!(!html.contains("aria-label=\"Use light theme\""));
+        assert!(!html.contains("aria-label=\"Use dark theme\""));
+        assert!(!html.contains("role=\"group\""));
         assert!(html.contains("Sign out"));
         assert!(html.contains("@admin"));
         assert!(html.contains("window.localStorage.getItem(key)"));
