@@ -141,6 +141,9 @@ async fn static_styles_returns_css() {
     assert!(text.contains(".console-sidebar"));
     assert!(text.contains(".mac-panel"));
     assert!(text.contains(".compact-table"));
+    assert!(!text.contains(".home-hero"));
+    assert!(!text.contains(".home-feature-item"));
+    assert!(!text.contains(".home-feature-kicker"));
 }
 
 #[tokio::test]
