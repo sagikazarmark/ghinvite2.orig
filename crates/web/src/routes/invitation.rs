@@ -29,6 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/i/{slug}", get(landing))
         .route("/i/{slug}/request", get(request_form).post(submit_request))
         .route("/i/{slug}/pending/{request_id}", get(pending))
+        .route("/i/{slug}/{*rest}", get(unknown_nested))
 }
 
 fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
@@ -84,6 +85,11 @@ async fn landing(
         }
     });
     Html(html).into_response()
+}
+
+async fn unknown_nested(tower: TowerSession) -> impl IntoResponse {
+    let session = session::load(&tower).await.unwrap_or_default();
+    invitation_not_found_response(signed_in_login_from_session(&session))
 }
 
 async fn request_form(

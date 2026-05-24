@@ -10,7 +10,7 @@ pub async fn public(method: Method, uri: Uri) -> Response {
         return plain_not_found();
     }
 
-    if uri.path().starts_with("/static/") {
+    if is_asset_like_miss(uri.path()) {
         return plain_not_found();
     }
 
@@ -35,4 +35,43 @@ pub async fn public(method: Method, uri: Uri) -> Response {
 
 fn plain_not_found() -> Response {
     WebError::NotFound.into_response()
+}
+
+fn is_asset_like_miss(path: &str) -> bool {
+    if path.starts_with("/static/")
+        || matches!(path, "/favicon.ico" | "/robots.txt" | "/site.webmanifest")
+    {
+        return true;
+    }
+
+    let Some(extension) = path.rsplit_once('.').map(|(_, extension)| extension) else {
+        return false;
+    };
+
+    matches!(
+        extension,
+        "avif"
+            | "css"
+            | "eot"
+            | "gif"
+            | "ico"
+            | "jpeg"
+            | "jpg"
+            | "js"
+            | "json"
+            | "map"
+            | "mjs"
+            | "otf"
+            | "pdf"
+            | "png"
+            | "svg"
+            | "ttf"
+            | "txt"
+            | "wasm"
+            | "webmanifest"
+            | "webp"
+            | "woff"
+            | "woff2"
+            | "xml"
+    )
 }

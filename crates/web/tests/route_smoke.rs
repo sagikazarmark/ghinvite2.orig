@@ -217,6 +217,24 @@ async fn missing_static_asset_returns_plain_404() {
 }
 
 #[tokio::test]
+async fn favicon_returns_plain_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/favicon.ico")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"Not Found");
+}
+
+#[tokio::test]
 async fn dashboard_routes_return_501() {
     let app = build_test_app().await;
     for path in ["/accounts/acme/audit"] {
@@ -258,6 +276,29 @@ async fn invitation_landing_unknown_slug_returns_404() {
     assert!(text.contains("mac-panel"));
     assert!(!text.contains("expired"));
     assert!(!text.contains("revoked"));
+}
+
+#[tokio::test]
+async fn invitation_unknown_nested_route_returns_recipient_404() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/i/AAAAAAAAAAAAAAAA/anything")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("The link may be incorrect or no longer available."));
+    assert!(text.contains("Go home"));
+    assert!(text.contains("mac-panel"));
+    assert!(!text.contains("home-hero"));
 }
 
 #[tokio::test]
