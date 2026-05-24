@@ -22,7 +22,8 @@ async fn home(State(state): State<AppState>, tower: TowerSession) -> impl IntoRe
         // Find the first active installation and redirect to its dashboard.
         if let Ok(accounts) = state.storage.list_active_installations().await {
             if let Some(first) = accounts.into_iter().next() {
-                return Redirect::to(&format!("/accounts/{}", first.account_login)).into_response();
+                return Redirect::to(&format!("/console/accounts/{}", first.account_login))
+                    .into_response();
             }
         }
         // No installation found: fall through to home page with install CTA.

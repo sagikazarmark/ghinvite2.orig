@@ -286,7 +286,7 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/accounts/acme"
+        "/console/accounts/acme"
     );
 
     let calls = calls.lock().unwrap();
@@ -336,7 +336,7 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/accounts/octocat"
+        "/console/accounts/octocat"
     );
 
     let calls = calls.lock().unwrap();
@@ -396,7 +396,7 @@ async fn setup_update_calls_repos_changed_and_redirects() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         resp.headers().get("location").unwrap().to_str().unwrap(),
-        "/accounts/acme"
+        "/console/accounts/acme"
     );
 
     let calls = calls.lock().unwrap();
