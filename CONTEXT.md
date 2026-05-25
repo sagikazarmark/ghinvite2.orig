@@ -36,8 +36,12 @@ User-facing UI should describe invitation-link expiration as stopping acceptance
 
 `Revoke` is the canonical invitation link lifecycle verb. User-facing UI should describe the effect as stopping acceptance of new invitation requests.
 
+Every invitation link has a description. An invitation link's description is admin-only context that identifies the purpose or audience of the invitation link. It is not visible in the invitation request flow. Descriptions are short single-line text, up to 120 characters, and may change after the invitation link is created.
+
+Admin-facing invitation-link lists should use the description as the primary identifier and the invitation code as secondary metadata.
+
 ### Internal Note
-Admin-only context attached to an invitation link. An internal note is not visible in the invitation request flow and may change after the invitation link is created.
+Optional freeform admin-only context attached to an invitation link. An internal note is not visible in the invitation request flow and may change after the invitation link is created.
 
 ### Invitation Code
 The short code from an invitation link that a GitHub user can enter to open the invitation request flow. An invitation code is the code segment only, not the full invitation link URL. UI may use `code` alone when nearby context clearly establishes `invitation code`. Do not use `slug` in domain or UI language for this value.
