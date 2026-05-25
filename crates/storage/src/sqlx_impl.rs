@@ -817,7 +817,8 @@ mod tests {
             INSERT INTO invitation_links (id, slug, internal_note)
             VALUES
               ('legacy-note', 'codeFromNote1234', '  AI' || char(10) || char(10) || ' coding' || char(9) || 'workshop   '),
-              ('legacy-code', 'codeFallback5678', '   ')
+              ('legacy-code', 'codeFallback5678', '   '),
+              ('legacy-whitespace', 'codeWhitespace9012', char(10) || char(9) || char(13))
             "#,
         )
         .execute(&pool)
@@ -845,6 +846,10 @@ mod tests {
             vec![
                 ("legacy-code".to_string(), "codeFallback5678".to_string()),
                 ("legacy-note".to_string(), "AI coding workshop".to_string()),
+                (
+                    "legacy-whitespace".to_string(),
+                    "codeWhitespace9012".to_string()
+                ),
             ]
         );
     }

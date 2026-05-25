@@ -1,20 +1,32 @@
 ALTER TABLE invitation_links ADD COLUMN description TEXT NOT NULL DEFAULT '';
 
-WITH RECURSIVE normalized(id, value) AS (
+WITH RECURSIVE note_normalized(id, value, slug) AS (
   SELECT
     id,
     trim(
       replace(
         replace(
-          replace(coalesce(nullif(trim(internal_note), ''), slug), char(13), ' '),
+          replace(coalesce(internal_note, ''), char(13), ' '),
           char(10),
           ' '
         ),
         char(9),
         ' '
       )
-    )
+    ),
+    slug
   FROM invitation_links
+  UNION ALL
+  SELECT id, replace(value, '  ', ' '), slug
+  FROM note_normalized
+  WHERE instr(value, '  ') > 0
+), note_final AS (
+  SELECT id, coalesce(nullif(value, ''), slug) AS value
+  FROM note_normalized
+  WHERE instr(value, '  ') = 0
+), normalized(id, value) AS (
+  SELECT id, value
+  FROM note_final
   UNION ALL
   SELECT id, replace(value, '  ', ' ')
   FROM normalized
