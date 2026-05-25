@@ -96,13 +96,16 @@
 
 @layer components {
   .app-header {
-    position: sticky;
-    top: 0;
-    z-index: 20;
     min-height: 3rem;
     height: 3rem;
     border-bottom: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
     background: color-mix(in oklch, var(--color-base-100) 92%, var(--color-base-200));
+  }
+
+  .console-page .app-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
   }
 
   .app-header .btn {

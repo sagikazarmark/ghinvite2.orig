@@ -72,7 +72,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
-            class: "min-h-screen bg-base-200 text-base-content antialiased",
+            class: "console-page min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
             Nav { signed_in_login: props.signed_in_login.clone() }
             div { class: "console-frame",
@@ -171,6 +171,7 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
+        assert!(html.contains("console-page min-h-screen bg-base-200 text-base-content antialiased"));
         assert!(html.contains("app-header"));
         assert!(html.contains("console-frame"));
         assert!(html.contains("console-sidebar"));

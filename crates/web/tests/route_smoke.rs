@@ -136,10 +136,11 @@ async fn static_styles_returns_css() {
     assert!(text.contains("oklch("));
     assert!(text.contains("ghinvite-dark"));
     assert!(text.contains("color-scheme:dark"));
-    assert!(text.contains(".app-header"));
+    assert!(text.contains(".console-page .app-header"));
     assert!(text.contains("position:sticky"));
     assert!(text.contains("top:0"));
     assert!(text.contains("z-index:20"));
+    assert!(!text.contains(".app-header{position:sticky"));
     assert!(text.contains(".theme-toggle"));
     assert!(text.contains(".console-frame"));
     assert!(text.contains("height:calc(100vh - 3rem)"));
@@ -175,6 +176,7 @@ async fn home_returns_html() {
     assert!(text.contains("ghinvite"));
     assert!(text.contains("Sign in with GitHub"));
     assert!(text.contains("GitHub repository access"));
+    assert!(!text.contains("console-page"));
     assert!(!text.contains("home-features"));
     assert!(!text.contains("home-feature-item"));
     assert!(!text.contains(concat!("class=\"he", "ro")));
@@ -200,6 +202,7 @@ async fn public_unknown_get_returns_html_404() {
     assert!(text.contains("The link may be incorrect or no longer available."));
     assert!(text.contains("Go home"));
     assert!(text.contains("app-header"));
+    assert!(!text.contains("console-page"));
     assert!(!text.contains("console-frame"));
 }
 
