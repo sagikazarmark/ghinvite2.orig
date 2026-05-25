@@ -311,6 +311,7 @@ impl Storage for D1Storage {
         let uses_count = link.uses_count;
         let permission_str = link.permission.to_string();
         let approval_required = link.approval_required;
+        let description = link.description.clone();
         let internal_note = link
             .internal_note
             .as_deref()
@@ -339,8 +340,8 @@ impl Storage for D1Storage {
                         "INSERT INTO invitation_links
                            (id, slug, installation_id, account_id, created_by, created_at,
                             expires_at, max_uses, uses_count, permission, approval_required,
-                            internal_note, revoked_at, revoked_by)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                            description, internal_note, revoked_at, revoked_by)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     )
                     .bind(&[
                         JsValue::from_str(&id_str),
@@ -354,6 +355,7 @@ impl Storage for D1Storage {
                         JsValue::from_f64(uses_count as f64),
                         JsValue::from_str(&permission_str),
                         JsValue::from_f64(if approval_required { 1.0 } else { 0.0 }),
+                        JsValue::from_str(&description),
                         internal_note,
                         revoked_at,
                         revoked_by,
@@ -426,7 +428,7 @@ impl Storage for D1Storage {
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
-                            l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
+                            l.approval_required, l.description, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
                      FROM invitation_links l
                      LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
@@ -453,7 +455,7 @@ impl Storage for D1Storage {
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
-                            l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
+                            l.approval_required, l.description, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
                      FROM invitation_links l
                      LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
@@ -482,7 +484,7 @@ impl Storage for D1Storage {
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
-                            l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
+                            l.approval_required, l.description, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
                      FROM invitation_links l
                      LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
