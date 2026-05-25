@@ -26,14 +26,14 @@ pub fn AuditLogPage(props: AuditLogPageProps) -> Element {
                 header { class: "mb-6",
                     p { class: "text-sm font-medium text-primary", "Audit" }
                     h1 { class: "text-2xl font-semibold tracking-tight", "Audit log" }
-                    p { class: "mt-1 text-sm text-base-content/65", "Review account activity for invitation links, requests, and GitHub invitations." }
+                    p { class: "mt-1 text-sm text-base-content/65", "Review account activity for invitation links, invitation requests, and GitHub invitations." }
                 }
                 section { class: "mac-panel max-w-3xl p-6",
                     div { class: "max-w-2xl",
                         p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45", "Coming soon" }
                         h2 { class: "mt-3 text-lg font-semibold tracking-tight", "Audit log coming soon" }
                         p { class: "mt-2 text-sm leading-6 text-base-content/70",
-                            "ghinvite records account activity for invitation links, requests, and GitHub invitations. Console browsing is not available yet."
+                            "ghinvite records account activity for invitation links, invitation requests, and GitHub invitations. Console browsing is not available yet."
                         }
                         a { class: "btn btn-primary btn-sm mt-5", href: "/console/accounts/{login}", "Back to overview" }
                     }
@@ -62,10 +62,10 @@ mod tests {
         assert!(html.contains("Audit log"));
         assert!(html.contains("<title>Audit log · acme</title>"));
         assert!(html.contains(
-            "Review account activity for invitation links, requests, and GitHub invitations."
+            "Review account activity for invitation links, invitation requests, and GitHub invitations."
         ));
         assert!(html.contains("Audit log coming soon"));
-        assert!(html.contains("ghinvite records account activity for invitation links, requests, and GitHub invitations. Console browsing is not available yet."));
+        assert!(html.contains("ghinvite records account activity for invitation links, invitation requests, and GitHub invitations. Console browsing is not available yet."));
         assert!(html.contains("Back to overview"));
         assert!(html.contains("href=\"/console/accounts/acme\""));
         assert!(html.contains("mac-panel"));

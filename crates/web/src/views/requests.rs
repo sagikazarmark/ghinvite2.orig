@@ -57,7 +57,8 @@ mod tests {
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("acme/api"));
         assert!(html.contains("acme/web"));
-        assert!(html.contains("Approving sends GitHub collaborator invitations"));
+        assert!(html.contains("Approving sends GitHub invitations"));
+        assert!(!html.contains("GitHub collaborator invitations"));
         assert!(html.contains("Need access for launch"));
         assert!(html.contains("Decision queue"));
         assert!(html.contains("Approve request"));
@@ -94,9 +95,9 @@ mod tests {
         assert!(html.contains("(deleted link)"));
         assert!(!html.contains("href=\"/console/accounts/acme/links/\""));
         assert!(html.contains("Repository details unavailable"));
-        assert!(!html.contains(
-            "Approving sends GitHub collaborator invitations for the repositories listed here."
-        ));
+        assert!(
+            !html.contains("Approving sends GitHub invitations for the repositories listed here.")
+        );
         assert!(
             !html.contains("/console/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve")
         );
@@ -128,13 +129,13 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                 header { class: "mb-6",
                     p { class: "text-sm font-medium text-primary", "Requests" }
                     h1 { class: "text-2xl font-semibold tracking-tight", "Decision queue" }
-                    p { class: "mt-1 text-sm text-base-content/65", "Review access requests before GitHub invitations are sent." }
+                    p { class: "mt-1 text-sm text-base-content/65", "Review invitation requests before GitHub invitations are sent." }
                 }
                 {if props.rows.is_empty() {
                     rsx! {
                         div { class: "mac-panel p-5 text-base-content/70",
                             h2 { class: "font-medium text-base-content", "No pending requests" }
-                            p { class: "mt-1 text-sm", "Requests that need an admin decision will appear here." }
+                            p { class: "mt-1 text-sm", "Invitation requests that need an account admin decision will appear here." }
                         }
                     }
                 } else {
@@ -157,9 +158,9 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let actions_available = !link_id.is_empty() && repos_available;
                                 let expires = r.expires_at.map(|when| when.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "No expiration".into());
                                 let approval = match r.approval_required {
-                                    Some(true) => "Admin approval required",
-                                    Some(false) => "Auto-approved link",
-                                    None => "Approval mode unavailable",
+                                    Some(true) => "Account admin approval required",
+                                    Some(false) => "Auto-approved invitation link",
+                                    None => "Approval policy unavailable",
                                 };
                                 let repos = if r.repos.is_empty() {
                                     rsx! { p { class: "text-sm text-base-content/65", "Repository details unavailable" } }
@@ -198,9 +199,9 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 _ => rsx! {},
                                             }}
                                             {if repos_available {
-                                                rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub invitations for the repositories listed here." } }
                                             } else {
-                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its invitation link details are available." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "This invitation request cannot be completed until its invitation link details are available." } }
                                             }}
                                         }
                                         {if actions_available {

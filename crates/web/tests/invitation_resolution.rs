@@ -339,7 +339,7 @@ async fn landing_renders_active_link() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("acme/api"));
-    assert!(text.contains("Access request"));
+    assert!(text.contains("Repository access request"));
     assert!(text.contains("GitHub sign-in confirms your identity"));
 }
 

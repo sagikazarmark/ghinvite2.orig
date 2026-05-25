@@ -56,7 +56,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     p { class: "text-sm font-medium text-primary", "Invitation links" }
                     h1 { class: "text-2xl font-semibold tracking-tight", "New invitation link" }
                     p { class: "max-w-2xl text-sm leading-6 text-base-content/70",
-                        "Create a controlled URL that lets GitHub users request collaborator access to selected repositories."
+                        "Create a controlled invitation link that lets GitHub users request repository access to selected repositories."
                     }
                 }
                 form { method: "post", action: "/console/accounts/{login}/links", class: "max-w-3xl space-y-5",
@@ -64,7 +64,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                         div { class: "space-y-4 p-4",
                             div {
                                 h2 { class: "text-base font-semibold", "Access configuration" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and the repositories this link can request." }
+                                p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and repositories included in this invitation link." }
                             }
                             div { class: "form-control gap-2",
                                 label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
@@ -77,7 +77,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 p { class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
                             }
                             div { class: "alert alert-warning shadow-sm",
-                                span { "Review elevated permissions before sharing. Approved requests send GitHub collaborator invitations." }
+                                span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
                             }
                         }
                     }
@@ -90,20 +90,20 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             div { class: "form-control",
                                 label { class: "label cursor-pointer justify-start gap-3",
                                     input { r#type: "checkbox", name: "approval_required", value: "true", checked: props.form.approval_required, class: "checkbox" }
-                                    span { class: "label-text", "Require admin approval before invitations are sent" }
+                                    span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
                                 }
-                                p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve requests that use this link." }
+                                p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
                             }
                             div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
                                 div { class: "form-control gap-2",
                                     label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max use" } }
                                     input { id: "max_uses", r#type: "number", name: "max_uses", value: "{props.form.max_uses}", class: "input input-bordered w-full", min: "1", placeholder: "Unlimited" }
-                                    p { class: "text-sm text-base-content/65", "Blank means unlimited requests." }
+                                    p { class: "text-sm text-base-content/65", "Blank means unlimited invitation requests." }
                                 }
                                 div { class: "form-control gap-2",
                                     label { class: "label", r#for: "expires_in_days", span { class: "label-text font-medium", "Expires in days" } }
                                     input { id: "expires_in_days", r#type: "number", name: "expires_in_days", value: "{props.form.expires_in_days}", class: "input input-bordered w-full", min: "1" }
-                                    p { class: "text-sm text-base-content/65", "Default is 30 days. Blank creates a link with no expiration." }
+                                    p { class: "text-sm text-base-content/65", "Default is 30 days. Blank creates an invitation link with no expiration." }
                                 }
                             }
                             div { class: "form-control gap-2",
@@ -117,7 +117,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                         div { class: "space-y-4 p-4",
                             div {
                                 h2 { class: "text-base font-semibold", "Repository scope" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Select every repository this link may grant access to." }
+                                p { class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
                             }
                             {if props.repos.is_empty() {
                                 rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
@@ -141,7 +141,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                         }
                     }
                     div { class: "flex justify-end",
-                        button { r#type: "submit", class: "btn btn-primary", "Create link" }
+                        button { r#type: "submit", class: "btn btn-primary", "Create invitation link" }
                     }
                 }
             },
@@ -189,7 +189,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
         .map(|when| when.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "No expiration".into());
     let approval = if props.link.approval_required {
-        "Admin approval required"
+        "Account admin approval required"
     } else {
         "Requests are auto-approved"
     };
@@ -216,18 +216,18 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "border-b border-base-300 px-4 py-3",
-                        h2 { class: "text-sm font-semibold", "Invitation URL" }
-                        p { class: "mt-0.5 text-xs text-base-content/60", "Send this URL to recipients who should request access." }
+                        h2 { class: "text-sm font-semibold", "Invitation link" }
+                        p { class: "mt-0.5 text-xs text-base-content/60", "Share this invitation link with GitHub users who should request access." }
                     }
                     div { class: "p-4",
                         input {
                             class: "input input-bordered input-sm w-full font-mono text-xs",
                             readonly: true,
                             value: "{props.invitation_url}",
-                            aria_label: "Invitation URL",
+                            aria_label: "Invitation link",
                         }
                         div { class: "mt-3",
-                            a { class: "btn btn-outline btn-sm h-8 min-h-0", href: "{preview_href}", "Open recipient preview" }
+                            a { class: "btn btn-outline btn-sm h-8 min-h-0", href: "{preview_href}", "Open invitation request flow" }
                         }
                     }
                 }
@@ -277,9 +277,9 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                         section { class: "mac-panel border-error/30 bg-base-100",
                             div { class: "card-body gap-4",
                                 div {
-                                    h2 { class: "text-base font-semibold text-error", "Stop accepting new requests" }
+                                    h2 { class: "text-base font-semibold text-error", "Stop accepting new invitation requests" }
                                     p { class: "mt-1 text-sm text-base-content/70",
-                                        "This prevents new requests through this link. It does not cancel requests or GitHub invitations already in progress."
+                                        "This stops new invitation requests through this invitation link. It does not cancel existing invitation requests or GitHub invitations."
                                     }
                                 }
                                 a { class: "btn btn-error w-fit", href: "#stop-link-modal", "Stop accepting new requests" }
@@ -289,7 +289,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                             div { class: "modal-box",
                                 h3 { id: "stop-link-modal-title", class: "text-lg font-semibold", "Confirm stop" }
                                 p { class: "mt-2 text-sm text-base-content/70",
-                                    "Recipients will no longer be able to create new requests from this invitation link. Existing requests and invitations continue."
+                                    "GitHub users will no longer be able to create invitation requests from this invitation link. Existing invitation requests and GitHub invitations continue."
                                 }
                                 div { class: "modal-action",
                                     a { class: "btn btn-ghost", href: "#", "Cancel" }
@@ -302,7 +302,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                         }
                     }
                 } else {
-                    rsx! { p { class: "text-base-content/70", "This link is no longer accepting requests." } }
+                    rsx! { p { class: "text-base-content/70", "This invitation link is no longer accepting invitation requests." } }
                 }}
             },
         }
@@ -379,6 +379,14 @@ mod tests {
         assert!(html.contains("Access configuration"));
         assert!(html.contains("<title>New invitation link · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
+        assert!(html.contains("Create a controlled invitation link"));
+        assert!(html.contains("Approved invitation requests send GitHub invitations"));
+        assert!(html.contains("Require account admin approval before GitHub invitations are sent"));
+        assert!(html.contains("Blank means unlimited invitation requests"));
+        assert!(html.contains("Create invitation link"));
+        assert!(!html.contains("collaborator access"));
+        assert!(!html.contains("GitHub collaborator invitations"));
+        assert!(!html.contains("before invitations are sent"));
         assert!(html.contains("Max use"));
         assert!(!html.contains("Max uses"));
         assert!(html.contains("Request handling"));
@@ -404,10 +412,15 @@ mod tests {
             }
         });
 
-        assert!(html.contains("Open recipient preview"));
+        assert!(html.contains("Open invitation request flow"));
+        assert!(html.contains("Share this invitation link with GitHub users"));
+        assert!(!html.contains("Invitation URL"));
+        assert!(!html.contains("recipient preview"));
         assert!(html.contains("<title>abcdEFGH01234567 · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
-        assert!(html.contains("Stop accepting new requests"));
+        assert!(html.contains("Stop accepting new invitation requests"));
+        assert!(html.contains("Existing invitation requests and GitHub invitations continue"));
+        assert!(!html.contains("Existing requests and invitations continue"));
         assert!(html.contains("acme/api"));
         assert!(html.contains("acme/web"));
         assert!(html.contains("push"));

@@ -66,7 +66,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                                             class: "btn btn-primary min-h-10",
                                             r#type: "button",
                                             "data-open-invitation-code": "true",
-                                            "Open invitation"
+                                            "Open invitation link"
                                         }
                                     }
                                     p { class: "mt-2 min-h-5 text-sm text-error", aria_live: "polite", "data-invitation-code-message": "true", "" }
@@ -95,5 +95,20 @@ pub fn HomePage(props: HomePageProps) -> Element {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_in_home_uses_invitation_link_language() {
+        let html = crate::views::render::render(|| {
+            rsx! { HomePage { signed_in_login: Some("octocat".to_string()) } }
+        });
+
+        assert!(html.contains("Open invitation link"));
+        assert!(!html.contains("Open invitation</button>"));
     }
 }

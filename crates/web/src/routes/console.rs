@@ -135,10 +135,8 @@ async fn load_console_accounts(
         if is_admin {
             accounts.push(crate::views::console::ConsoleAccountChoice {
                 login: account.account_login,
-                account_type: match account.account_type {
-                    domain::AccountType::User => "Personal account".to_string(),
-                    domain::AccountType::Organization => "Organization".to_string(),
-                },
+                account_type: crate::views::components::account_type_label(account.account_type)
+                    .to_string(),
             });
         }
     }
@@ -206,7 +204,7 @@ async fn overview(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
-    let account_type = admin.account.account_type.to_string();
+    let account_type = admin.account.account_type;
 
     let html = render(move || {
         rsx! {
@@ -356,7 +354,7 @@ async fn create_link(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: "Failed to create link. Please try again.".into(),
+                    message: "Failed to create invitation link. Please try again.".into(),
                 },
             )
             .await;
@@ -373,7 +371,7 @@ async fn create_link(
         &admin.tower,
         session::Flash {
             level: session::FlashLevel::Success,
-            message: "Link created.".into(),
+            message: "Invitation link created.".into(),
         },
     )
     .await;
@@ -464,7 +462,7 @@ async fn revoke_link(
             &admin.tower,
             session::Flash {
                 level: session::FlashLevel::Error,
-                message: "Could not stop this link. Please try again.".into(),
+                message: "Could not stop this invitation link. Please try again.".into(),
             },
         )
         .await;
@@ -479,7 +477,7 @@ async fn revoke_link(
         &admin.tower,
         session::Flash {
             level: session::FlashLevel::Success,
-            message: "Link stopped accepting new requests.".into(),
+            message: "Invitation link stopped accepting new invitation requests.".into(),
         },
     )
     .await;

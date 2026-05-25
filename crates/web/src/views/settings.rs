@@ -1,6 +1,7 @@
 //! Settings page (read-only in v1).
 
 use crate::session::Flash;
+use crate::views::components::account_type_label;
 use crate::views::layouts::ConsoleLayout;
 use dioxus::prelude::*;
 use domain::{Account, SelectedRepos};
@@ -15,10 +16,11 @@ pub struct SettingsProps {
 #[component]
 pub fn SettingsPage(props: SettingsProps) -> Element {
     let login = props.account.account_login.clone();
-    let account_type = props.account.account_type.to_string();
+    let account_type = account_type_label(props.account.account_type).to_string();
     let repos_label = match &props.account.selected_repos {
         SelectedRepos::All => "All repositories".to_string(),
-        SelectedRepos::Subset(ids) => format!("{} selected repository/repositories", ids.len()),
+        SelectedRepos::Subset(ids) if ids.len() == 1 => "1 selected repository".to_string(),
+        SelectedRepos::Subset(ids) => format!("{} selected repositories", ids.len()),
     };
 
     rsx! {
@@ -93,5 +95,31 @@ mod tests {
         assert!(html.contains("GitHub App settings"));
         assert!(html.contains("property-list"));
         assert!(html.contains("mac-panel"));
+    }
+
+    #[test]
+    fn settings_page_uses_glossary_account_type_label() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                SettingsPage {
+                    signed_in_login: Some("octocat".to_string()),
+                    flash: None,
+                    account: Account {
+                        installation_id: 77,
+                        account_id: 9001,
+                        account_login: "octocat".to_string(),
+                        account_type: AccountType::User,
+                        installed_at: Utc::now(),
+                        uninstalled_at: None,
+                        selected_repos: SelectedRepos::Subset(vec![10]),
+                    },
+                }
+            }
+        });
+
+        assert!(html.contains("Personal account"));
+        assert!(html.contains("1 selected repository"));
+        assert!(!html.contains(">User<"));
+        assert!(!html.contains("selected repository/repositories"));
     }
 }

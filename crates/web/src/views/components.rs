@@ -2,6 +2,13 @@
 
 use dioxus::prelude::*;
 
+pub(crate) fn account_type_label(account_type: domain::AccountType) -> &'static str {
+    match account_type {
+        domain::AccountType::User => "Personal account",
+        domain::AccountType::Organization => "Organization",
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 pub struct NavProps {
     /// `Some(login)` if the user is signed in, `None` otherwise.
@@ -145,7 +152,7 @@ pub fn Footer() -> Element {
             class: "footer footer-center p-4 bg-base-200 text-base-content",
             aside {
                 p {
-                    "ghinvite — GitHub repo collaborator invitations made easy"
+                    "ghinvite: controlled GitHub repository access requests"
                 }
             }
         }
@@ -184,5 +191,14 @@ mod tests {
         assert!(html.contains("window.localStorage.setItem(key, next)"));
         assert!(!html.contains("<select"));
         assert!(!html.contains("Install on another account"));
+    }
+
+    #[test]
+    fn footer_uses_glossary_repository_access_language() {
+        let html = crate::views::render::render(|| rsx! { Footer {} });
+
+        assert!(html.contains("controlled GitHub repository access requests"));
+        assert!(!html.contains("repo collaborator invitations"));
+        assert!(!html.contains("—"));
     }
 }

@@ -4,7 +4,7 @@ use crate::session::Flash;
 use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::InvitationLink;
+use domain::{AccountType, InvitationLink};
 
 #[derive(Clone, PartialEq)]
 pub struct ConsoleAccountChoice {
@@ -39,7 +39,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                     {match props.state.clone() {
                         ConsoleIndexState::AccountPicker { accounts } => rsx! {
                             h1 { class: "text-2xl font-semibold tracking-tight", "Choose an account" }
-                            p { class: "mt-2 text-sm text-base-content/65", "Select the account console you want to manage." }
+                            p { class: "mt-2 text-sm text-base-content/65", "Select the account you want to manage in the Console." }
                             div { class: "mac-panel mt-5 divide-y divide-base-300 overflow-hidden",
                                 {accounts.into_iter().map(|account| {
                                     let href = format!("/console/accounts/{}", account.login);
@@ -91,7 +91,7 @@ pub struct OverviewProps {
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
-    pub account_type: String, // "User" / "Organization"
+    pub account_type: AccountType,
     pub pending_requests: u64,
     pub active_links: u64,
     pub recent_links: Vec<InvitationLink>,
@@ -101,7 +101,7 @@ pub struct OverviewProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use domain::{InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+    use domain::{AccountType, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
 
     fn sample_link() -> InvitationLink {
         InvitationLink {
@@ -136,7 +136,7 @@ mod tests {
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
-                    account_type: "Organization".to_string(),
+                    account_type: AccountType::Organization,
                     pending_requests: 2,
                     active_links: 3,
                     recent_links: vec![],
@@ -151,9 +151,34 @@ mod tests {
         assert!(html.contains("Review queue"));
         assert!(html.contains("Create first invitation link"));
         assert!(html.contains("Recent invitation links"));
+        assert!(html.contains("Active invitation links"));
+        assert!(html.contains("active invitation links can accept invitation requests"));
+        assert!(!html.contains("Active access links"));
+        assert!(!html.contains("collaborator requests"));
         assert!(html.contains("mac-panel"));
         assert!(html.contains("compact-table"));
         assert!(!html.contains("text-3xl"));
+    }
+
+    #[test]
+    fn overview_page_uses_glossary_account_type_label() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                OverviewPage {
+                    signed_in_login: Some("octocat".to_string()),
+                    flash: None,
+                    account_login: "octocat".to_string(),
+                    account_type: AccountType::User,
+                    pending_requests: 0,
+                    active_links: 0,
+                    recent_links: vec![],
+                    now: Utc::now(),
+                }
+            }
+        });
+
+        assert!(html.contains("Personal account: octocat"));
+        assert!(!html.contains("User account: octocat"));
     }
 
     #[test]
@@ -164,7 +189,7 @@ mod tests {
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
-                    account_type: "Organization".to_string(),
+                    account_type: AccountType::Organization,
                     pending_requests: 0,
                     active_links: 1,
                     recent_links: vec![sample_link()],
@@ -192,7 +217,8 @@ mod tests {
         });
 
         assert!(html.contains("Choose an account"));
-        assert!(html.contains("Select the account console you want to manage."));
+        assert!(html.contains("Select the account you want to manage in the Console."));
+        assert!(!html.contains("account console"));
         assert!(html.contains("href=\"/console/accounts/acme\""));
         assert!(html.contains("Organization"));
         assert!(html.contains("Personal account"));
@@ -239,6 +265,7 @@ mod tests {
 #[component]
 pub fn OverviewPage(props: OverviewProps) -> Element {
     let login = props.account_login.clone();
+    let account_type = crate::views::components::account_type_label(props.account_type).to_string();
     let recent_links_view = props.recent_links.iter().map(|link| {
         let active = link.is_active(props.now);
         let badge = if active {
@@ -275,7 +302,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                 header { class: "mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
                     div {
                         h1 { class: "text-xl font-semibold tracking-tight", "Console overview" }
-                        p { class: "mt-0.5 text-sm text-base-content/60", "{props.account_type} account: {props.account_login}" }
+                        p { class: "mt-0.5 text-sm text-base-content/60", "{account_type}: {props.account_login}" }
                     }
                     a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}/links/new", "New invitation link" }
                 }
@@ -283,11 +310,11 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                     div { class: "grid divide-y divide-base-300 md:grid-cols-2 md:divide-x md:divide-y-0",
                         a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/requests",
                             p { class: "text-sm font-medium", "Review queue" }
-                            p { class: "mt-1 text-sm text-base-content/65", "{props.pending_requests} pending requests need an admin decision." }
+                            p { class: "mt-1 text-sm text-base-content/65", "{props.pending_requests} pending invitation requests need an account admin decision." }
                         }
                         a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/links/new",
-                            p { class: "text-sm font-medium", "Active access links" }
-                            p { class: "mt-1 text-sm text-base-content/65", "{props.active_links} active links can accept collaborator requests." }
+                            p { class: "text-sm font-medium", "Active invitation links" }
+                            p { class: "mt-1 text-sm text-base-content/65", "{props.active_links} active invitation links can accept invitation requests." }
                         }
                     }
                 }
@@ -300,7 +327,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                         rsx! {
                             div { class: "p-5 text-sm text-base-content/70",
                                 h3 { class: "font-medium text-base-content", "No invitation links yet" }
-                                p { class: "mt-1", "Create a link to let recipients request collaborator access without manual GitHub invites." }
+                                p { class: "mt-1", "Create an invitation link to let GitHub users request repository access without manual GitHub invitations." }
                                 a { class: "btn btn-primary btn-sm mt-4", href: "/console/accounts/{login}/links/new", "Create first invitation link" }
                             }
                         }

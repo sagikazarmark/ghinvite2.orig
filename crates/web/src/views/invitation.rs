@@ -95,16 +95,16 @@ pub fn LandingPage(props: LandingProps) -> Element {
             active_nav: None,
             flash: None,
             children: rsx! {
-                h1 { class: "text-xl font-semibold tracking-tight", "Access request" }
+                h1 { class: "text-xl font-semibold tracking-tight", "Repository access request" }
                 p { class: "mt-2 text-sm text-base-content/70",
-                    "This invitation link requests collaborator access to the following {repo_word}:"
+                    "This invitation link lets you request repository access to the following {repo_word}:"
                 }
                 ul { class: "mt-4 list-inside list-disc space-y-1 rounded-box border border-base-300 bg-base-200 p-4 text-sm", {repos_view} }
                 p { class: "mt-4",
                     span { class: "badge badge-neutral", "Permission: {perm_label}" }
                 }
                 p { class: "mt-3 text-sm text-base-content/70",
-                    "GitHub sign-in confirms your identity before any request is sent."
+                    "GitHub sign-in confirms your identity before the invitation request is submitted."
                 }
                 {expiry_view}
                 div { class: "card-actions justify-end mt-6", {cta_view} }
@@ -130,7 +130,11 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
     let login = props.signed_in_login.clone();
     let perm_label = permission_label(props.link.permission);
     let repo_count = props.link.repos.len();
-    let repo_word = if repo_count == 1 { "repo" } else { "repos" };
+    let repo_word = if repo_count == 1 {
+        "repository"
+    } else {
+        "repositories"
+    };
 
     let flash_view = match &props.flash {
         None => rsx! {},
@@ -178,9 +182,9 @@ pub fn RequestFormPage(props: RequestFormProps) -> Element {
                     }
                 }
                 p { class: "mb-2",
-                    "Requesting "
+                    "Requesting repository access to {repo_count} {repo_word} with "
                     span { class: "badge badge-neutral", "Permission: {perm_label}" }
-                    " access to {repo_count} {repo_word}:"
+                    ":"
                 }
                 ul { class: "list-disc list-inside mb-4", {repos_view} }
                 form {
@@ -236,7 +240,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
         None => rsx! {
             div { class: "alert alert-warning",
                 div {
-                    p { "Your request is being processed." }
+                    p { "Your invitation request is being processed." }
                     a { class: "link", href: "{refresh_href}", "Check again" }
                 }
             }
@@ -244,7 +248,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
         Some(RequestState::Pending) => rsx! {
             div { class: "alert alert-warning",
                 div {
-                    p { "Your request is awaiting admin review." }
+                    p { "Your invitation request is awaiting account admin review." }
                     a { class: "link", href: "{refresh_href}", "Check again" }
                 }
             }
@@ -252,7 +256,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
         Some(RequestState::Approved) => rsx! {
             div { class: "alert alert-success",
                 span {
-                    "Approved! Check your GitHub notifications and email for the repository invitation."
+                    "Approved. Check your GitHub notifications and email for GitHub invitations."
                 }
             }
         },
@@ -260,10 +264,10 @@ pub fn PendingPage(props: PendingProps) -> Element {
             let back_href = format!("/i/{slug}");
             rsx! {
                 div { class: "alert alert-error",
-                    span { "Your request was declined." }
+                    span { "Your invitation request was declined." }
                 }
                 div { class: "mt-4",
-                    a { href: "{back_href}", class: "link", "Back to invitation" }
+                    a { href: "{back_href}", class: "link", "Back to invitation link" }
                 }
             }
         }
@@ -271,16 +275,16 @@ pub fn PendingPage(props: PendingProps) -> Element {
             let new_request_href = format!("/i/{slug}");
             rsx! {
                 div { class: "alert alert-warning",
-                    span { "This request has expired." }
+                    span { "This invitation request has expired." }
                 }
                 div { class: "mt-4",
-                    a { href: "{new_request_href}", class: "link", "Submit a new request" }
+                    a { href: "{new_request_href}", class: "link", "Submit a new invitation request" }
                 }
             }
         }
         Some(RequestState::Cancelled) => rsx! {
             div { class: "alert alert-warning",
-                span { "This request has been cancelled." }
+                span { "This invitation request has been cancelled." }
             }
         },
     };
@@ -296,7 +300,7 @@ pub fn PendingPage(props: PendingProps) -> Element {
                 h1 { class: "mb-4 text-xl font-semibold tracking-tight", "Request status" }
                 {status_view}
                 div { class: "mt-6 flex flex-col gap-2 sm:flex-row",
-                    a { class: "btn btn-primary", href: "/console", "Create your own link" }
+                    a { class: "btn btn-primary", href: "/console", "Create your own invitation link" }
                     a { class: "btn btn-ghost", href: "/", "Go home" }
                 }
             },
@@ -307,7 +311,80 @@ pub fn PendingPage(props: PendingProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use domain::RequestState;
+    use domain::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn sample_link() -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
+            slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
+            installation_id: 1,
+            account_id: 9001,
+            created_by: 701,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: Some(dt("2026-06-03T12:00:00Z")),
+            max_uses: Some(5),
+            uses_count: 2,
+            permission: Permission::Push,
+            approval_required: true,
+            internal_note: None,
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![
+                InvitationLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                },
+                InvitationLinkRepo {
+                    repo_id: 11,
+                    repo_full_name: "acme/web".into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn landing_page_uses_repository_access_language() {
+        let link = sample_link();
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LandingPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    link: link.clone(),
+                    signed_in_login: None::<String>,
+                    now: dt("2026-05-05T12:00:00Z"),
+                }
+            }
+        });
+
+        assert!(html.contains("request repository access"));
+        assert!(html.contains("invitation request is submitted"));
+        assert!(!html.contains("collaborator access"));
+    }
+
+    #[test]
+    fn request_form_uses_repository_words() {
+        let link = sample_link();
+        let html = crate::views::render::render(move || {
+            rsx! {
+                RequestFormPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    link: link.clone(),
+                    signed_in_login: "octocat".to_string(),
+                    flash: None,
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                }
+            }
+        });
+
+        assert!(html.contains("repository access to 2 repositories"));
+        assert!(!html.contains("2 repos:"));
+    }
 
     #[test]
     fn pending_page_renders_refresh_affordance() {
@@ -323,13 +400,44 @@ mod tests {
         });
 
         assert!(html.contains("Check again"));
-        assert!(html.contains("awaiting admin review"));
+        assert!(html.contains("awaiting account admin review"));
         assert!(html.contains("Request status"));
         assert!(!html.contains("card-title"));
         assert!(html.contains("/i/abcdEFGH01234567/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"));
-        assert!(html.contains("Create your own link"));
+        assert!(html.contains("Create your own invitation link"));
+        assert!(!html.contains("Create your own link"));
         assert!(html.contains("href=\"/console\""));
         assert!(html.contains("Go home"));
         assert!(html.contains("href=\"/\""));
+    }
+
+    #[test]
+    fn pending_page_uses_invitation_request_terms() {
+        let declined = crate::views::render::render(|| {
+            rsx! {
+                PendingPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                    request_state: Some(RequestState::Declined),
+                    signed_in_login: Some("octocat".to_string()),
+                }
+            }
+        });
+        assert!(declined.contains("Your invitation request was declined."));
+        assert!(declined.contains("Back to invitation link"));
+        assert!(!declined.contains(">Back to invitation<"));
+
+        let approved = crate::views::render::render(|| {
+            rsx! {
+                PendingPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                    request_state: Some(RequestState::Approved),
+                    signed_in_login: Some("octocat".to_string()),
+                }
+            }
+        });
+        assert!(approved.contains("GitHub invitations"));
+        assert!(!approved.contains("repository invitation"));
     }
 }

@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 pub struct LayoutProps {
     pub signed_in_login: Option<String>,
     pub title: String,
-    /// `Some(login)` when rendered under account console routes. `None` for
+    /// `Some(login)` when rendered under account-scoped Console routes. `None` for
     /// HomeLayout / InvitationLayout.
     pub account_login: Option<String>,
     /// The current console section for active navigation styling.
