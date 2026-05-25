@@ -137,8 +137,17 @@ async fn static_styles_returns_css() {
     assert!(text.contains("ghinvite-dark"));
     assert!(text.contains("color-scheme:dark"));
     assert!(text.contains(".app-header"));
+    assert!(text.contains("position:sticky"));
+    assert!(text.contains("top:0"));
+    assert!(text.contains("z-index:20"));
     assert!(text.contains(".theme-toggle"));
+    assert!(text.contains(".console-frame"));
+    assert!(text.contains("height:calc(100vh - 3rem)"));
+    assert!(text.contains("overflow:hidden"));
     assert!(text.contains(".console-sidebar"));
+    assert!(text.contains("height:100%"));
+    assert!(text.contains(".console-main"));
+    assert!(text.contains("overflow:auto"));
     assert!(text.contains(".mac-panel"));
     assert!(text.contains(".compact-table"));
     assert!(!text.contains(".home-hero"));

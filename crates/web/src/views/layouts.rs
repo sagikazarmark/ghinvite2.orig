@@ -93,7 +93,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                         a { class: "btn btn-ghost btn-xs mt-2 h-7 min-h-0 w-full justify-start px-2", href: "/install", "Install another account" }
                     }
                 }
-                div { class: "min-w-0 flex-1",
+                div { class: "console-content min-w-0 flex flex-1 flex-col",
                     nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
                         div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
                             a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
@@ -174,6 +174,7 @@ mod tests {
         assert!(html.contains("app-header"));
         assert!(html.contains("console-frame"));
         assert!(html.contains("console-sidebar"));
+        assert!(html.contains("console-content min-w-0 flex flex-1 flex-col"));
         assert!(html.contains("mobile-console-nav"));
         assert!(html.contains("sidebar-account-switcher"));
         assert!(html.contains("Install another account"));
