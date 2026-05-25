@@ -263,6 +263,7 @@ async fn new_link_form(
 
 #[derive(Debug, Deserialize)]
 struct CreateLinkForm {
+    description: Option<String>,
     permission: String,
     #[serde(default)]
     approval_required: Option<String>,
@@ -271,6 +272,28 @@ struct CreateLinkForm {
     internal_note: Option<String>,
     #[serde(default)]
     repo_ids: Vec<u64>,
+}
+
+const DESCRIPTION_MAX_CHARS: usize = 120;
+
+fn validate_description(raw: Option<&str>) -> crate::error::Result<String> {
+    let description = raw.unwrap_or("").trim();
+    if description.is_empty() {
+        return Err(crate::error::WebError::BadRequest(
+            "description is required".into(),
+        ));
+    }
+    if description.contains('\n') || description.contains('\r') {
+        return Err(crate::error::WebError::BadRequest(
+            "description must be a single line".into(),
+        ));
+    }
+    if description.chars().count() > DESCRIPTION_MAX_CHARS {
+        return Err(crate::error::WebError::BadRequest(
+            "description must be 120 characters or fewer".into(),
+        ));
+    }
+    Ok(description.to_string())
 }
 
 async fn create_link(
@@ -293,6 +316,10 @@ async fn create_link(
         }
     };
     let approval_required = form.approval_required.is_some();
+    let description = match validate_description(form.description.as_deref()) {
+        Ok(description) => description,
+        Err(e) => return e.into_response(),
+    };
     let max_uses: Option<u32> = form
         .max_uses
         .as_deref()
@@ -342,6 +369,7 @@ async fn create_link(
             max_uses,
             permission,
             approval_required,
+            description,
             internal_note,
             repos,
         })
@@ -692,4 +720,43 @@ async fn not_found(admin: RequireConsoleAdminOf) -> impl IntoResponse {
 
 async fn plain_not_found() -> impl IntoResponse {
     crate::error::WebError::NotFound
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_description;
+
+    #[test]
+    fn description_validation_trims_valid_input() {
+        assert_eq!(
+            validate_description(Some("  AI coding workshop  ")).unwrap(),
+            "AI coding workshop"
+        );
+    }
+
+    #[test]
+    fn description_validation_requires_value() {
+        let err = validate_description(None).unwrap_err().to_string();
+        assert!(err.contains("description is required"));
+
+        let err = validate_description(Some("   ")).unwrap_err().to_string();
+        assert!(err.contains("description is required"));
+    }
+
+    #[test]
+    fn description_validation_rejects_multiline_text() {
+        let err = validate_description(Some("AI\nworkshop"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("description must be a single line"));
+    }
+
+    #[test]
+    fn description_validation_rejects_over_120_characters() {
+        let too_long = "x".repeat(121);
+        let err = validate_description(Some(&too_long))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("description must be 120 characters or fewer"));
+    }
 }
