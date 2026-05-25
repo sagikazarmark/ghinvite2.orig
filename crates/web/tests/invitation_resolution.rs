@@ -134,6 +134,7 @@ fn active_link(slug: &str) -> InvitationLink {
         uses_count: 0,
         permission: Permission::Pull,
         approval_required: true,
+        description: "AI coding workshop".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,

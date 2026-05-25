@@ -332,7 +332,8 @@ mod tests {
             uses_count: 2,
             permission: Permission::Push,
             approval_required: true,
-            internal_note: None,
+            description: "AI coding workshop".into(),
+            internal_note: Some("Only admins should see this note".into()),
             revoked_at: None,
             revoked_by: None,
             repos: vec![
@@ -364,6 +365,8 @@ mod tests {
 
         assert!(html.contains("request repository access"));
         assert!(html.contains("invitation request is submitted"));
+        assert!(!html.contains("AI coding workshop"));
+        assert!(!html.contains("Only admins should see this note"));
         assert!(!html.contains("collaborator access"));
     }
 
@@ -383,6 +386,8 @@ mod tests {
         });
 
         assert!(html.contains("repository access to 2 repositories"));
+        assert!(!html.contains("AI coding workshop"));
+        assert!(!html.contains("Only admins should see this note"));
         assert!(!html.contains("2 repos:"));
     }
 

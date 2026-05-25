@@ -18,6 +18,7 @@ pub struct LinkCreateFormProps {
 
 #[derive(Clone, PartialEq)]
 pub struct LinkFormValues {
+    pub description: String,
     pub permission: String,
     pub approval_required: bool,
     pub max_uses: String,
@@ -29,6 +30,7 @@ pub struct LinkFormValues {
 impl Default for LinkFormValues {
     fn default() -> Self {
         Self {
+            description: String::new(),
             permission: "pull".into(),
             approval_required: false,
             max_uses: String::new(),
@@ -60,6 +62,24 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     }
                 }
                 form { method: "post", action: "/console/accounts/{login}/links", class: "max-w-3xl space-y-5",
+                    section { class: "mac-panel",
+                        div { class: "space-y-4 p-4",
+                            div {
+                                h2 { class: "text-base font-semibold", "Link details" }
+                                p { class: "mt-1 text-sm text-base-content/65", "Name the admin purpose for this invitation link and keep optional notes separate." }
+                            }
+                            div { class: "form-control gap-2",
+                                label { class: "label", r#for: "description", span { class: "label-text font-medium", "Description" } }
+                                input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "input input-bordered w-full", required: true, maxlength: "120", placeholder: "AI coding workshop" }
+                                p { class: "text-sm text-base-content/65", "Visible only to admins. Use a short purpose or audience for this invitation link." }
+                            }
+                            div { class: "form-control gap-2",
+                                label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
+                                textarea { id: "internal_note", name: "internal_note", class: "textarea textarea-bordered w-full", placeholder: "Why this link exists", "{props.form.internal_note}" }
+                                p { class: "text-sm text-base-content/65", "Optional admin-only notes. Not visible in the invitation request flow." }
+                            }
+                        }
+                    }
                     section { class: "mac-panel",
                         div { class: "space-y-4 p-4",
                             div {
@@ -105,11 +125,6 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                     input { id: "expires_in_days", r#type: "number", name: "expires_in_days", value: "{props.form.expires_in_days}", class: "input input-bordered w-full", min: "1" }
                                     p { class: "text-sm text-base-content/65", "Default is 30 days. Blank creates an invitation link with no expiration." }
                                 }
-                            }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
-                                textarea { id: "internal_note", name: "internal_note", class: "textarea textarea-bordered w-full", placeholder: "Why this link exists", "{props.form.internal_note}" }
-                                p { class: "text-sm text-base-content/65", "Visible only to admins." }
                             }
                         }
                     }
@@ -164,6 +179,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     let login = props.account_login.clone();
     let id_str = props.link.id.to_string();
     let slug = props.link.slug.as_str().to_string();
+    let description = props.link.description.clone();
     let active = props.link.is_active(props.now);
     let badge_class = if active {
         "badge badge-success"
@@ -202,15 +218,15 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     rsx! {
         ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "{slug} · {login}",
+            title: "{description} · {login}",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("overview".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
                     div {
-                        h1 { class: "text-2xl font-bold", "{slug}" }
-                        p { class: "text-sm text-base-content/70", "Invitation link details and controls" }
+                        h1 { class: "text-2xl font-bold", "{description}" }
+                        p { class: "text-sm text-base-content/70", "Invitation code: ", span { class: "font-mono", "{slug}" } }
                     }
                     span { class: "{badge_class}", "{badge_label}" }
                 }
@@ -332,6 +348,7 @@ mod tests {
             uses_count: 2,
             permission: Permission::Push,
             approval_required: true,
+            description: "AI coding workshop".into(),
             internal_note: Some("Contractor onboarding".into()),
             revoked_at: None,
             revoked_by: None,
@@ -377,6 +394,12 @@ mod tests {
         });
 
         assert!(html.contains("Access configuration"));
+        assert!(html.contains("Link details"));
+        assert!(html.contains("name=\"description\""));
+        assert!(html.contains("required"));
+        assert!(html.contains("maxlength=\"120\""));
+        assert!(html.contains("AI coding workshop"));
+        assert!(html.find("Link details").unwrap() < html.find("Access configuration").unwrap());
         assert!(html.contains("<title>New invitation link · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Create a controlled invitation link"));
@@ -416,7 +439,10 @@ mod tests {
         assert!(html.contains("Share this invitation link with GitHub users"));
         assert!(!html.contains("Invitation URL"));
         assert!(!html.contains("recipient preview"));
-        assert!(html.contains("<title>abcdEFGH01234567 · acme</title>"));
+        assert!(html.contains("<title>AI coding workshop · acme</title>"));
+        assert!(html.contains("<h1 class=\"text-2xl font-bold\">AI coding workshop</h1>"));
+        assert!(html.contains("Invitation code"));
+        assert!(html.contains("abcdEFGH01234567"));
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Stop accepting new invitation requests"));
         assert!(html.contains("Existing invitation requests and GitHub invitations continue"));

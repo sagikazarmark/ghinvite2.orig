@@ -118,6 +118,7 @@ mod tests {
             uses_count: 2,
             permission: Permission::Pull,
             approval_required: false,
+            description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
@@ -182,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn overview_recent_links_call_link_identifier_code() {
+    fn overview_recent_links_show_description_before_code() {
         let html = crate::views::render::render(|| {
             rsx! {
                 OverviewPage {
@@ -198,8 +199,12 @@ mod tests {
             }
         });
 
-        assert!(html.contains("<th>Code</th>"));
+        assert!(html.contains("<th>Description</th>"));
+        assert!(!html.contains("<th>Code</th>"));
         assert!(!html.contains("<th>Slug</th>"));
+        assert!(html.contains("AI coding workshop"));
+        assert!(html.contains("abcdEFGH01234567"));
+        assert!(html.find("AI coding workshop").unwrap() < html.find("abcdEFGH01234567").unwrap());
     }
 
     #[test]
@@ -278,12 +283,13 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
         let slug_str = link.slug.as_str().to_string();
         rsx! {
             tr { class: "hover:bg-base-200/70",
-                td { class: "font-mono text-xs",
+                td {
                     a {
-                        class: "link link-hover",
+                        class: "link link-hover font-medium",
                         href: "/console/accounts/{login}/links/{id_str}",
-                        "{slug_str}"
+                        "{link.description}"
                     }
+                    p { class: "mt-0.5 font-mono text-xs text-base-content/55", "{slug_str}" }
                 }
                 td { span { class: "{badge} badge-sm", "{label}" } }
                 td { class: "text-right tabular-nums", "{link.uses_count}" }
@@ -335,7 +341,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                         rsx! {
                             div { class: "overflow-x-auto",
                                 table { class: "table compact-table table-sm",
-                                    thead { tr { th { "Code" } th { "State" } th { class: "text-right", "Uses" } } }
+                                    thead { tr { th { "Description" } th { "State" } th { class: "text-right", "Uses" } } }
                                     tbody { {recent_links_view} }
                                 }
                             }
