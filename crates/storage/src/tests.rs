@@ -60,6 +60,7 @@ fn sample_link(
         uses_count: 0,
         permission: Permission::Pull,
         approval_required: false,
+        description: "AI coding workshop".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
@@ -146,6 +147,7 @@ async fn scenario_invitation_link_lifecycle<S: Storage>(s: S) {
         .unwrap()
         .unwrap();
     assert_eq!(by_slug.id, link.id);
+    assert_eq!(by_slug.description, "AI coding workshop");
 
     s.mark_invitation_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z"))
         .await

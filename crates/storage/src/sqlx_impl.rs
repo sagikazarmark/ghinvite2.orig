@@ -293,9 +293,9 @@ impl Storage for SqlxStorage {
             r#"
             INSERT INTO invitation_links
               (id, slug, installation_id, account_id, created_by, created_at, expires_at,
-               max_uses, uses_count, permission, approval_required, internal_note,
+               max_uses, uses_count, permission, approval_required, description, internal_note,
                revoked_at, revoked_by)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
         )
         .bind(link.id.to_string())
@@ -309,6 +309,7 @@ impl Storage for SqlxStorage {
         .bind(i64::from(link.uses_count))
         .bind(link.permission.to_string())
         .bind(if link.approval_required { 1_i64 } else { 0 })
+        .bind(&link.description)
         .bind(link.internal_note.as_deref())
         .bind(link.revoked_at)
         .bind(link.revoked_by.map(u64_to_i64))
@@ -370,7 +371,7 @@ impl Storage for SqlxStorage {
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
-                       l.internal_note, l.revoked_at, l.revoked_by,
+                       l.description, l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
                 FROM invitation_links l
                 LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
@@ -390,7 +391,7 @@ impl Storage for SqlxStorage {
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
-                       l.internal_note, l.revoked_at, l.revoked_by,
+                       l.description, l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
                 FROM invitation_links l
                 LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
@@ -415,7 +416,7 @@ impl Storage for SqlxStorage {
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
-                       l.internal_note, l.revoked_at, l.revoked_by,
+                       l.description, l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
                 FROM invitation_links l
                 LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
@@ -788,6 +789,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn description_migration_backfills_legacy_rows() {
+        let opts = SqliteConnectOptions::new()
+            .in_memory(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            r#"
+            CREATE TABLE invitation_links (
+                id TEXT PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE,
+                internal_note TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            r#"
+            INSERT INTO invitation_links (id, slug, internal_note)
+            VALUES
+              ('legacy-note', 'codeFromNote1234', '  AI' || char(10) || char(10) || ' coding' || char(9) || 'workshop   '),
+              ('legacy-code', 'codeFallback5678', '   ')
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for statement in
+            include_str!("../../../migrations/0002_invitation_link_description.sql").split(';')
+        {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT id, description FROM invitation_links ORDER BY id"#,
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("legacy-code".to_string(), "codeFallback5678".to_string()),
+                ("legacy-note".to_string(), "AI coding workshop".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn insert_and_get_installation() {
         let s = SqlxStorage::in_memory().await.unwrap();
         let acct = sample_account(1, 100, "acme");
@@ -927,6 +989,7 @@ mod tests {
             uses_count: 0,
             permission: Permission::Push,
             approval_required: true,
+            description: "Contractor onboarding".into(),
             internal_note: Some("for the contractor".into()),
             revoked_at: None,
             revoked_by: None,
