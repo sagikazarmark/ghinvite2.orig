@@ -25,6 +25,7 @@ pub struct CreateLinkInput {
     pub max_uses: Option<u32>,
     pub permission: Permission,
     pub approval_required: bool,
+    pub description: String,
     pub internal_note: Option<String>,
     pub repos: Vec<InvitationLinkRepo>,
 }
@@ -146,6 +147,7 @@ async fn create_invitation_link_transition(
         uses_count: 0,
         permission: input.permission,
         approval_required: input.approval_required,
+        description: input.description.clone(),
         internal_note: input.internal_note.clone(),
         revoked_at: None,
         revoked_by: None,
@@ -308,6 +310,7 @@ mod tests {
             max_uses: Some(5),
             permission: Permission::Pull,
             approval_required: true,
+            description: "AI coding workshop".into(),
             internal_note: Some("test".into()),
             repos: vec![InvitationLinkRepo {
                 repo_id: 10,
@@ -343,6 +346,7 @@ mod tests {
         assert_eq!(link.uses_count, 0);
         assert_eq!(link.permission, Permission::Pull);
         assert!(link.approval_required);
+        assert_eq!(link.description, "AI coding workshop");
     }
 
     #[tokio::test]
@@ -386,6 +390,8 @@ mod tests {
             event.metadata.get("repo_count"),
             Some(&serde_json::json!(1))
         );
+        assert_eq!(link.description, "AI coding workshop");
+        assert!(event.metadata.get("description").is_none());
     }
 
     #[tokio::test]

@@ -253,6 +253,7 @@ mod tests {
             uses_count: 0,
             permission: Permission::Push,
             approval_required: false,
+            description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,

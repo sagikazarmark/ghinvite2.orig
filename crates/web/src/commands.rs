@@ -237,6 +237,7 @@ pub struct CreateInvitationLink {
     pub max_uses: Option<u32>,
     pub permission: domain::Permission,
     pub approval_required: bool,
+    pub description: String,
     pub internal_note: Option<String>,
     pub repos: Vec<domain::InvitationLinkRepo>,
 }
@@ -1029,6 +1030,7 @@ mod tests {
                 uses_count: 0,
                 permission: domain::Permission::Pull,
                 approval_required: false,
+                description: "AI coding workshop".into(),
                 internal_note: None,
                 revoked_at: None,
                 revoked_by: None,
@@ -1371,6 +1373,7 @@ mod tests {
                 max_uses: Some(3),
                 permission: domain::Permission::Push,
                 approval_required: true,
+                description: "AI coding workshop".into(),
                 internal_note: Some("team onboarding".into()),
                 repos: vec![domain::InvitationLinkRepo {
                     repo_id: 10,
@@ -1393,6 +1396,7 @@ mod tests {
         assert_eq!(call.body["installation_id"], 77);
         assert_eq!(call.body["account_id"], 9001);
         assert_eq!(call.body["permission"], "push");
+        assert_eq!(call.body["description"], "AI coding workshop");
         assert_eq!(call.body["repos"][0]["repo_full_name"], "acme/api");
     }
 

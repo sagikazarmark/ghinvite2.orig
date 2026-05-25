@@ -608,6 +608,7 @@ mod tests {
             uses_count: 0,
             permission: Permission::Pull,
             approval_required,
+            description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
@@ -1003,6 +1004,7 @@ mod tests {
             uses_count: 0,
             permission: Permission::Push,
             approval_required: false, // auto-approve so the workflow path is exercised
+            description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
