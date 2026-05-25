@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the `crates/restate-svc` library — five Restate services (`Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`) that own every durable state change in ghinvite. Each method is idempotent under Restate's exactly-once-effects guarantee, emits the audit events spec §15.1 mandates, and is unit-tested on native against `SqlxStorage::in_memory` + `MockTransport` from Plans 1 and 2.
+**Goal:** Build the `crates/restate-svc` library — five Restate services (`Installation`, `InvitationLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`) that own every durable state change in ghinvite. Each method is idempotent under Restate's exactly-once-effects guarantee, emits the audit events spec §15.1 mandates, and is unit-tested on native against `SqlxStorage::in_memory` + `MockTransport` from Plans 1 and 2.
 
 **Architecture:** Library crate (rlib) using `restate-sdk = "0.10"` upstream. The service `impl`s are thin: each handler enters Restate's context, calls a pure async function that owns the business logic, exits the context. The pure functions take `&AppState` (`Arc<dyn Storage>` + `Arc<InstallationClient>`) and live in the same module as the service so they're easy to find. Unit tests exercise the pure functions directly with `tokio::test`. The Workers `cdylib` entry point, `D1Storage`, and `wrangler.toml` are explicitly **deferred to Plan 7**; this plan ships handler logic that Plan 7 wraps in a `#[event(fetch)]`.
 
@@ -34,7 +34,7 @@ It does **NOT** implement:
 | `crates/restate-svc/src/error.rs` | `HandlerError` enum + `From<storage::Error>` / `From<github::Error>` / `Into<TerminalError>`. |
 | `crates/restate-svc/src/audit.rs` | `emit(state, account_id, event_type, actor, target, metadata, request_id)` helper. |
 | `crates/restate-svc/src/installation.rs` | `Installation` Virtual Object: `onboard`, `repos_changed`, `uninstall` + their pure-logic fns + tests. |
-| `crates/restate-svc/src/share_link.rs` | `ShareLink` Virtual Object: `create`, `revoke`, `tick_expiration` + pure fns + tests. |
+| `crates/restate-svc/src/invitation_link.rs` | `InvitationLink` Virtual Object: `create`, `revoke`, `tick_expiration` + pure fns + tests. |
 | `crates/restate-svc/src/invitation_request.rs` | `InvitationRequest` Workflow + helper fns + tests. |
 | `crates/restate-svc/src/github_invitation.rs` | `GithubInvitation` Virtual Object: `create`, `on_webhook`, `cancel`, `tick_expire` + pure fns + tests. |
 | `crates/restate-svc/src/reconcile.rs` | `Reconcile` Service: `daily_run` + pure fn + tests. |
@@ -45,7 +45,7 @@ It does **NOT** implement:
 
 ## Task ordering
 
-Tasks 1–5 set up the workspace member, error type, audit helper, and shared state. Tasks 6–8 ship `Installation`. Tasks 9–11 ship `ShareLink`. Tasks 12–15 ship `GithubInvitation` (the most complex Virtual Object — branches on multiple GitHub status codes). Tasks 16–18 ship `InvitationRequest` (the workflow with awakeable + timer race; pure-logic fns are unit-tested, the Restate-runtime parts are validated in integration). Task 19 ships `Reconcile`. Tasks 20–21 add the public `Endpoint` builder helper and a smoke-friendly `Service` schema export so Plan 7 can register the deployment. Tasks 22–23 polish and update the plan map.
+Tasks 1–5 set up the workspace member, error type, audit helper, and shared state. Tasks 6–8 ship `Installation`. Tasks 9–11 ship `InvitationLink`. Tasks 12–15 ship `GithubInvitation` (the most complex Virtual Object — branches on multiple GitHub status codes). Tasks 16–18 ship `InvitationRequest` (the workflow with awakeable + timer race; pure-logic fns are unit-tested, the Restate-runtime parts are validated in integration). Task 19 ships `Reconcile`. Tasks 20–21 add the public `Endpoint` builder helper and a smoke-friendly `Service` schema export so Plan 7 can register the deployment. Tasks 22–23 polish and update the plan map.
 
 A "pure-logic fn" pattern is used throughout: each Restate handler method extracts its body to a free async function that takes `&AppState` and returns `Result<T, HandlerError>`. The `#[restate_sdk::object|service|workflow]` impl wraps the pure fn inside `ctx.run("step_name", async {...})` so Restate captures it as a durable step. Unit tests call the pure fn directly without a Restate context.
 
@@ -60,7 +60,7 @@ A "pure-logic fn" pattern is used throughout: each Restate handler method extrac
 - Create: `crates/restate-svc/src/error.rs` (stub)
 - Create: `crates/restate-svc/src/audit.rs` (stub)
 - Create: `crates/restate-svc/src/installation.rs` (stub)
-- Create: `crates/restate-svc/src/share_link.rs` (stub)
+- Create: `crates/restate-svc/src/invitation_link.rs` (stub)
 - Create: `crates/restate-svc/src/invitation_request.rs` (stub)
 - Create: `crates/restate-svc/src/github_invitation.rs` (stub)
 - Create: `crates/restate-svc/src/reconcile.rs` (stub)
@@ -123,7 +123,7 @@ The dev-dep on `github` enables the `test-mock` feature for `MockTransport`; the
 ```rust
 //! Restate handler services for ghinvite. Five services own every durable
 //! state change: [`installation::Installation`] (Virtual Object),
-//! [`share_link::ShareLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
+//! [`invitation_link::InvitationLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
 //! (Workflow), [`github_invitation::GithubInvitation`] (Virtual Object),
 //! [`reconcile::Reconcile`] (Service).
 //!
@@ -138,7 +138,7 @@ pub mod github_invitation;
 pub mod installation;
 pub mod invitation_request;
 pub mod reconcile;
-pub mod share_link;
+pub mod invitation_link;
 pub mod state;
 
 #[cfg(any(test))]
@@ -150,7 +150,7 @@ pub use state::AppState;
 
 - [ ] **Step 4: Create stub module files**
 
-For each of `state.rs`, `error.rs`, `audit.rs`, `installation.rs`, `share_link.rs`, `invitation_request.rs`, `github_invitation.rs`, `reconcile.rs`, `test_support.rs`, create the file under `crates/restate-svc/src/` containing exactly:
+For each of `state.rs`, `error.rs`, `audit.rs`, `installation.rs`, `invitation_link.rs`, `invitation_request.rs`, `github_invitation.rs`, `reconcile.rs`, `test_support.rs`, create the file under `crates/restate-svc/src/` containing exactly:
 
 ```rust
 // filled in by a later task
@@ -454,7 +454,7 @@ impl Actor {
 }
 
 /// Description of what the change was about. `id` is the natural string id
-/// for the target type (ulid for share_links, requests, github_invitations;
+/// for the target type (ulid for invitation_links, requests, github_invitations;
 /// stringified u64 for installations).
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -470,9 +470,9 @@ impl Target {
         }
     }
 
-    pub fn share_link(link_id: domain::ShareLinkId) -> Self {
+    pub fn invitation_link(link_id: domain::InvitationLinkId) -> Self {
         Self {
-            kind: TargetKind::ShareLink,
+            kind: TargetKind::InvitationLink,
             id: link_id.to_string(),
         }
     }
@@ -531,9 +531,9 @@ mod tests {
         emit(
             &state,
             42,
-            EventType::ShareLinkCreated,
+            EventType::InvitationLinkCreated,
             Actor::User(7),
-            Target::share_link(domain::ShareLinkId::new()),
+            Target::invitation_link(domain::InvitationLinkId::new()),
             serde_json::json!({"slug": "abcdef"}),
             Some("inv-1".into()),
         )
@@ -571,10 +571,10 @@ mod tests {
     }
 
     #[test]
-    fn target_share_link_uses_ulid_string() {
-        let id = domain::ShareLinkId::new();
-        let t = Target::share_link(id);
-        assert_eq!(t.kind, TargetKind::ShareLink);
+    fn target_invitation_link_uses_ulid_string() {
+        let id = domain::InvitationLinkId::new();
+        let t = Target::invitation_link(id);
+        assert_eq!(t.kind, TargetKind::InvitationLink);
         assert_eq!(t.id, id.to_string());
     }
 }
@@ -1054,24 +1054,24 @@ git commit -m "feat(restate-svc): Installation service (onboard, repos_changed, 
 
 ---
 
-### Task 7: `ShareLink` service skeleton
+### Task 7: `InvitationLink` service skeleton
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
 - [ ] **Step 1: Add the trait + types stub**
 
-`crates/restate-svc/src/share_link.rs`:
+`crates/restate-svc/src/invitation_link.rs`:
 
 ```rust
-//! `ShareLink` Virtual Object: create, revoke, tick_expiration.
+//! `InvitationLink` Virtual Object: create, revoke, tick_expiration.
 
 use crate::audit::{Actor, Target};
 use crate::error::{HandlerError, Result};
 use crate::state::AppState;
 use audit::EventType;
 use chrono::{DateTime, Utc};
-use domain::{Permission, ShareLink, ShareLinkId, ShareLinkRepo, Slug};
+use domain::{Permission, InvitationLink, InvitationLinkId, InvitationLinkRepo, Slug};
 use rand::SeedableRng;
 use rand::rngs::OsRng;
 use restate_sdk::prelude::*;
@@ -1088,36 +1088,36 @@ pub struct CreateLinkInput {
     pub permission: Permission,
     pub approval_required: bool,
     pub internal_note: Option<String>,
-    pub repos: Vec<ShareLinkRepo>,
+    pub repos: Vec<InvitationLinkRepo>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct CreateLinkOutput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub slug: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RevokeLinkInput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub by_user: u64,
     pub when: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TickExpirationInput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub at: DateTime<Utc>,
 }
 
 #[restate_sdk::object]
-pub trait ShareLink {
+pub trait InvitationLink {
     async fn create(input: CreateLinkInput) -> Result<CreateLinkOutput, TerminalError>;
     async fn revoke(input: RevokeLinkInput) -> Result<(), TerminalError>;
     async fn tick_expiration(input: TickExpirationInput) -> Result<(), TerminalError>;
 }
 
-pub struct ShareLinkImpl {
+pub struct InvitationLinkImpl {
     pub state: AppState,
 }
 ```
@@ -1130,25 +1130,25 @@ Expected: clean (warnings about unused imports / unimplemented trait are OK; Tas
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/restate-svc/src/share_link.rs
-git commit -m "feat(restate-svc): ShareLink trait + input types"
+git add crates/restate-svc/src/invitation_link.rs
+git commit -m "feat(restate-svc): InvitationLink trait + input types"
 ```
 
 ---
 
-### Task 8: `ShareLink::create`
+### Task 8: `InvitationLink::create`
 
-Per spec §9.1: writes link + repos rows; emits `share_link.created`.
+Per spec §9.1: writes link + repos rows; emits `invitation_link.created`.
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
 - [ ] **Step 1: Add the create logic + handler glue + tests**
 
-Append to `share_link.rs` (add to the existing module — do NOT replace):
+Append to `invitation_link.rs` (add to the existing module — do NOT replace):
 
 ```rust
-impl ShareLink for ShareLinkImpl {
+impl InvitationLink for InvitationLinkImpl {
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
@@ -1188,9 +1188,9 @@ pub async fn create_logic(
 ) -> Result<CreateLinkOutput> {
     let mut rng = OsRng;
     let slug = Slug::generate(&mut rng);
-    let link_id = ShareLinkId::new();
+    let link_id = InvitationLinkId::new();
 
-    let link = ShareLink {
+    let link = InvitationLink {
         id: link_id,
         slug: slug.clone(),
         installation_id: input.installation_id,
@@ -1208,14 +1208,14 @@ pub async fn create_logic(
         repos: input.repos.clone(),
     };
 
-    state.storage.insert_share_link(&link).await?;
+    state.storage.insert_invitation_link(&link).await?;
 
     crate::audit::emit(
         state,
         input.account_id,
-        EventType::ShareLinkCreated,
+        EventType::InvitationLinkCreated,
         Actor::User(input.created_by),
-        Target::share_link(link_id),
+        Target::invitation_link(link_id),
         serde_json::json!({
             "permission": input.permission.to_string(),
             "approval_required": input.approval_required,
@@ -1246,7 +1246,7 @@ mod tests {
     use domain::{AccountType, SelectedRepos};
 
     async fn seed_installation_and_user(state: &AppState) {
-        // Create a parent installation row (FK target for share_link.installation_id).
+        // Create a parent installation row (FK target for invitation_link.installation_id).
         let acct = domain::Account {
             installation_id: 1,
             account_id: 100,
@@ -1277,7 +1277,7 @@ mod tests {
             permission: Permission::Pull,
             approval_required: true,
             internal_note: Some("test".into()),
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
@@ -1294,7 +1294,7 @@ mod tests {
 
         let link = state
             .storage
-            .get_share_link_by_id(out.link_id)
+            .get_invitation_link_by_id(out.link_id)
             .await
             .unwrap()
             .unwrap();
@@ -1326,7 +1326,7 @@ mod tests {
         let out = create_logic(&state, &input, None).await.unwrap();
         let link = state
             .storage
-            .get_share_link_by_id(out.link_id)
+            .get_invitation_link_by_id(out.link_id)
             .await
             .unwrap()
             .unwrap();
@@ -1337,28 +1337,28 @@ mod tests {
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test -p restate-svc --lib share_link`
+Run: `cargo test -p restate-svc --lib invitation_link`
 Expected: 3 tests pass.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/restate-svc/src/share_link.rs
-git commit -m "feat(restate-svc): ShareLink::create"
+git add crates/restate-svc/src/invitation_link.rs
+git commit -m "feat(restate-svc): InvitationLink::create"
 ```
 
 ---
 
-### Task 9: `ShareLink::revoke`
+### Task 9: `InvitationLink::revoke`
 
-Per spec §9.1: sets `revoked_at`; emits `share_link.revoked`. Idempotent: if already revoked, returns `Ok(())` without re-audit.
+Per spec §9.1: sets `revoked_at`; emits `invitation_link.revoked`. Idempotent: if already revoked, returns `Ok(())` without re-audit.
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
 - [ ] **Step 1: Replace the `revoke` stub + add pure fn + tests**
 
-In `crates/restate-svc/src/share_link.rs`, replace the `unimplemented!("Task 9")` body with:
+In `crates/restate-svc/src/invitation_link.rs`, replace the `unimplemented!("Task 9")` body with:
 
 ```rust
     async fn revoke(
@@ -1388,7 +1388,7 @@ pub async fn revoke_logic(
 ) -> Result<()> {
     match state
         .storage
-        .mark_share_link_revoked(input.link_id, input.by_user, input.when)
+        .mark_invitation_link_revoked(input.link_id, input.by_user, input.when)
         .await
     {
         Ok(()) => (),
@@ -1398,16 +1398,16 @@ pub async fn revoke_logic(
 
     let link = state
         .storage
-        .get_share_link_by_id(input.link_id)
+        .get_invitation_link_by_id(input.link_id)
         .await?
         .ok_or_else(|| HandlerError::Invariant(format!("link {} vanished", input.link_id)))?;
 
     crate::audit::emit(
         state,
         link.account_id,
-        EventType::ShareLinkRevoked,
+        EventType::InvitationLinkRevoked,
         Actor::User(input.by_user),
-        Target::share_link(input.link_id),
+        Target::invitation_link(input.link_id),
         serde_json::json!({}),
         request_id,
     )
@@ -1440,7 +1440,7 @@ Append to the test module:
 
         let link = state
             .storage
-            .get_share_link_by_id(out.link_id)
+            .get_invitation_link_by_id(out.link_id)
             .await
             .unwrap()
             .unwrap();
@@ -1483,26 +1483,26 @@ Append to the test module:
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo test -p restate-svc --lib share_link`
+Run: `cargo test -p restate-svc --lib invitation_link`
 Expected: 5 tests pass (3 existing + 2 new).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/restate-svc/src/share_link.rs
-git commit -m "feat(restate-svc): ShareLink::revoke"
+git add crates/restate-svc/src/invitation_link.rs
+git commit -m "feat(restate-svc): InvitationLink::revoke"
 ```
 
 ---
 
-### Task 10: `ShareLink::tick_expiration`
+### Task 10: `InvitationLink::tick_expiration`
 
-Per spec §9.1: scheduled at `expires_at` (the web binary or a separate scheduler enqueues this at link creation time); confirms the link is genuinely past its expiry; emits `share_link.expired`. **Note v1 scope:** this method does NOT cascade to cancel pending requests / pending GitHub invitations — that's v2.
+Per spec §9.1: scheduled at `expires_at` (the web binary or a separate scheduler enqueues this at link creation time); confirms the link is genuinely past its expiry; emits `invitation_link.expired`. **Note v1 scope:** this method does NOT cascade to cancel pending requests / pending GitHub invitations — that's v2.
 
-In v1 the spec leaves the actual scheduling mechanism open. The simplest implementation: when a link has `expires_at` set, the web binary schedules `ShareLink::tick_expiration` to run at that time via Restate's `delayed_send` (or equivalent). When the timer fires, the handler verifies the link is past expiry and emits the audit event — but does NOT mutate state, since `is_active(now)` already reflects the expiry from `expires_at`. The audit emission is the only side effect.
+In v1 the spec leaves the actual scheduling mechanism open. The simplest implementation: when a link has `expires_at` set, the web binary schedules `InvitationLink::tick_expiration` to run at that time via Restate's `delayed_send` (or equivalent). When the timer fires, the handler verifies the link is past expiry and emits the audit event — but does NOT mutate state, since `is_active(now)` already reflects the expiry from `expires_at`. The audit emission is the only side effect.
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
 - [ ] **Step 1: Replace the `tick_expiration` stub + add pure fn + tests**
 
@@ -1528,7 +1528,7 @@ Add the pure function:
 
 ```rust
 /// Pure logic: if the link is past its expiry and not already revoked, emit
-/// `share_link.expired`. No state mutation — `is_active(now)` already reflects
+/// `invitation_link.expired`. No state mutation — `is_active(now)` already reflects
 /// the expiry. Idempotent under repeated calls (multiple emit attempts will
 /// produce duplicate audit rows; acceptable in v1, dedup is v1.1's audit-UI
 /// concern).
@@ -1539,13 +1539,13 @@ pub async fn tick_expiration_logic(
 ) -> Result<()> {
     let link = state
         .storage
-        .get_share_link_by_id(input.link_id)
+        .get_invitation_link_by_id(input.link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
 
     // Only emit if the link is genuinely past expiry. Defensive: an admin
     // may have revoked the link before the timer fired, in which case
-    // `share_link.revoked` already audited and we don't double-audit.
+    // `invitation_link.revoked` already audited and we don't double-audit.
     if link.revoked_at.is_some() {
         return Ok(());
     }
@@ -1564,9 +1564,9 @@ pub async fn tick_expiration_logic(
     crate::audit::emit(
         state,
         link.account_id,
-        EventType::ShareLinkExpired,
+        EventType::InvitationLinkExpired,
         crate::audit::Actor::System,
-        crate::audit::Target::share_link(input.link_id),
+        crate::audit::Target::invitation_link(input.link_id),
         serde_json::json!({}),
         request_id,
     )
@@ -1634,7 +1634,7 @@ Append tests:
         let err = tick_expiration_logic(
             &state,
             &TickExpirationInput {
-                link_id: ShareLinkId::new(),
+                link_id: InvitationLinkId::new(),
                 at: dt("2026-06-03T12:00:00Z"),
             },
             None,
@@ -1670,14 +1670,14 @@ Append tests:
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo test -p restate-svc --lib share_link`
+Run: `cargo test -p restate-svc --lib invitation_link`
 Expected: 9 tests pass.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/restate-svc/src/share_link.rs
-git commit -m "feat(restate-svc): ShareLink::tick_expiration"
+git add crates/restate-svc/src/invitation_link.rs
+git commit -m "feat(restate-svc): InvitationLink::tick_expiration"
 ```
 
 ---
@@ -2017,7 +2017,7 @@ mod tests {
     use super::*;
     use crate::test_support::{dt, fixture_github_client, fixture_storage};
     use audit::EventType;
-    use domain::{AccountType, Permission, SelectedRepos, ShareLinkId};
+    use domain::{AccountType, Permission, SelectedRepos, InvitationLinkId};
     use github::mocks::{Expectation, MockTransport};
     use github::transport::{Method, Response};
     use std::collections::BTreeMap;
@@ -2040,7 +2040,7 @@ mod tests {
         }
     }
 
-    /// Seed installation, user, share_link, request — all FK chain prerequisites
+    /// Seed installation, user, invitation_link, request — all FK chain prerequisites
     /// for inserting a github_invitation.
     async fn seed_chain(state: &AppState) -> RequestId {
         state
@@ -2077,8 +2077,8 @@ mod tests {
             .await
             .unwrap();
         let mut rng = rand::SeedableRng::seed_from_u64(42);
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: domain::Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(42)),
             installation_id: 9,
             account_id: 100,
@@ -2094,11 +2094,11 @@ mod tests {
             revoked_by: None,
             repos: vec![],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,
@@ -2351,7 +2351,7 @@ pub async fn on_webhook_logic(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(request.share_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
 
@@ -2585,7 +2585,7 @@ pub async fn cancel_logic(
         return Ok(());
     }
 
-    // Look up the repo full name from the invitation_request → share_link.repos chain.
+    // Look up the repo full name from the invitation_request → invitation_link.repos chain.
     let request = state
         .storage
         .get_invitation_request(row.invitation_request_id)
@@ -2593,7 +2593,7 @@ pub async fn cancel_logic(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(request.share_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let repo = link
@@ -2681,7 +2681,7 @@ pub async fn tick_expire_logic(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(request.share_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let repo = link
@@ -2779,8 +2779,8 @@ Append to the `tests` module:
             })
             .await
             .unwrap();
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: domain::Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
             installation_id: 9,
             account_id: 100,
@@ -2794,16 +2794,16 @@ Append to the `tests` module:
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![domain::ShareLinkRepo {
+            repos: vec![domain::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,
@@ -3018,7 +3018,7 @@ const MAX_DECISION_WAIT: Duration = Duration::days(7);
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SubmitRequestInput {
     pub request_id: RequestId,
-    pub share_link_id: domain::ShareLinkId,
+    pub invitation_link_id: domain::InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -3087,7 +3087,7 @@ pub enum PreDecisionOutcome {
     PendingDecision { decision_deadline: DateTime<Utc> },
 }
 
-/// Re-read share link, reject if not is_active, insert pending request,
+/// Re-read invitation link, reject if not is_active, insert pending request,
 /// emit `request.created`, return next-step instruction.
 pub async fn pre_decision_logic(
     state: &AppState,
@@ -3097,7 +3097,7 @@ pub async fn pre_decision_logic(
 ) -> Result<PreDecisionOutcome> {
     let link = state
         .storage
-        .get_share_link_by_id(input.share_link_id)
+        .get_invitation_link_by_id(input.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
 
@@ -3107,7 +3107,7 @@ pub async fn pre_decision_logic(
 
     let request = InvitationRequest {
         id: input.request_id,
-        share_link_id: input.share_link_id,
+        invitation_link_id: input.invitation_link_id,
         requester_id: input.requester_id,
         justification: input.justification.clone(),
         state: RequestState::Pending,
@@ -3128,7 +3128,7 @@ pub async fn pre_decision_logic(
         Actor::User(input.requester_id),
         Target::request(input.request_id),
         serde_json::json!({
-            "share_link_id": input.share_link_id.to_string(),
+            "invitation_link_id": input.invitation_link_id.to_string(),
             "auto_approve": !link.approval_required,
         }),
         request_id,
@@ -3214,7 +3214,7 @@ pub async fn apply_decision_logic(
 
     let link = state
         .storage
-        .get_share_link_by_id(req.share_link_id)
+        .get_invitation_link_by_id(req.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
 
@@ -3254,10 +3254,10 @@ mod tests {
     use super::*;
     use crate::test_support::{dt, fixture_state};
     use audit::EventType;
-    use domain::{AccountType, Permission, SelectedRepos, ShareLink, ShareLinkId, Slug};
+    use domain::{AccountType, Permission, SelectedRepos, InvitationLink, InvitationLinkId, Slug};
     use rand::SeedableRng;
 
-    async fn seed_link(state: &AppState, approval_required: bool, expires_at: Option<DateTime<Utc>>) -> ShareLinkId {
+    async fn seed_link(state: &AppState, approval_required: bool, expires_at: Option<DateTime<Utc>>) -> InvitationLinkId {
         state
             .storage
             .insert_installation(&domain::Account {
@@ -3291,8 +3291,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let link = ShareLink {
-            id: ShareLinkId::new(),
+        let link = InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(99)),
             installation_id: 1,
             account_id: 100,
@@ -3308,7 +3308,7 @@ mod tests {
             revoked_by: None,
             repos: vec![],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         link.id
     }
 
@@ -3322,7 +3322,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: req_id,
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3347,7 +3347,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: RequestId::new(),
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3378,7 +3378,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: RequestId::new(),
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3407,7 +3407,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: RequestId::new(),
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3429,7 +3429,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: req_id,
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3467,7 +3467,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: req_id,
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3505,7 +3505,7 @@ mod tests {
             &state,
             &SubmitRequestInput {
                 request_id: req_id,
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
@@ -3596,7 +3596,7 @@ pub async fn build_dispatch_inputs(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(req.share_link_id)
+        .get_invitation_link_by_id(req.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let recipient = state
@@ -3847,7 +3847,7 @@ async fn reconcile_single(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(req.share_link_id)
+        .get_invitation_link_by_id(req.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let repo = link
@@ -3926,7 +3926,7 @@ mod tests {
     use audit::EventType;
     use domain::{
         AccountType, GithubInvitationId, Permission, RequestId, RequestState, SelectedRepos,
-        ShareLink, ShareLinkId, ShareLinkRepo, Slug,
+        InvitationLink, InvitationLinkId, InvitationLinkRepo, Slug,
     };
     use github::mocks::{Expectation, MockTransport};
     use github::transport::{Method, Response};
@@ -3986,8 +3986,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let link = ShareLink {
-            id: ShareLinkId::new(),
+        let link = InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
             installation_id: 9,
             account_id: 100,
@@ -4001,16 +4001,16 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: RequestState::Approved,
@@ -4187,7 +4187,7 @@ use restate_sdk::prelude::Endpoint;
 pub fn build_endpoint(state: AppState) -> Endpoint {
     Endpoint::builder()
         .bind(installation::InstallationImpl { state: state.clone() }.serve())
-        .bind(share_link::ShareLinkImpl { state: state.clone() }.serve())
+        .bind(invitation_link::InvitationLinkImpl { state: state.clone() }.serve())
         .bind(invitation_request::InvitationRequestImpl { state: state.clone() }.serve())
         .bind(github_invitation::GithubInvitationImpl { state: state.clone() }.serve())
         .bind(reconcile::ReconcileImpl { state }.serve())
@@ -4222,7 +4222,7 @@ git commit -m "feat(restate-svc): build_endpoint helper for Plan 7"
 # crates/restate-svc
 
 Restate handler services for ghinvite. Five services own every durable state
-change in the system: `Installation`, `ShareLink`, `InvitationRequest`
+change in the system: `Installation`, `InvitationLink`, `InvitationRequest`
 (workflow), `GithubInvitation`, `Reconcile`. Built on the upstream
 `restate-sdk = "0.10"` Rust SDK.
 
@@ -4243,7 +4243,7 @@ cargo test -p restate-svc
 Each handler module has tests in the same file:
 
 - `crates/restate-svc/src/installation.rs::tests`
-- `crates/restate-svc/src/share_link.rs::tests`
+- `crates/restate-svc/src/invitation_link.rs::tests`
 - `crates/restate-svc/src/github_invitation.rs::tests`
 - `crates/restate-svc/src/invitation_request.rs::tests`
 - `crates/restate-svc/src/reconcile.rs::tests`
@@ -4401,7 +4401,7 @@ Both should be clean.
 
 **Spec coverage check** (each spec section → which task implements it):
 
-- §9.1 (`ShareLink::create/revoke/tick_expiration`) → Tasks 8, 9, 10
+- §9.1 (`InvitationLink::create/revoke/tick_expiration`) → Tasks 8, 9, 10
 - §9.2 (`InvitationRequest::submit` workflow) → Tasks 15, 16, 17
 - §9.3 (`GithubInvitation::create/on_webhook/cancel/tick_expire`) → Tasks 12, 13, 14
 - §9.4 (`Reconcile::daily_run`) → Task 18

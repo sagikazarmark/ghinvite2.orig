@@ -1,6 +1,6 @@
 //! Restate handler services for ghinvite. Five services own every durable
 //! state change: [`installation::Installation`] (Virtual Object),
-//! [`share_link::ShareLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
+//! [`invitation_link::InvitationLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
 //! (Workflow), [`github_invitation::GithubInvitation`] (Virtual Object),
 //! [`reconcile::Reconcile`] (Service).
 //!
@@ -14,9 +14,9 @@ pub mod error;
 pub mod github_invitation;
 pub mod installation;
 pub mod invitation_context;
+pub mod invitation_link;
 pub mod invitation_request;
 pub mod reconcile;
-pub mod share_link;
 pub mod state;
 
 #[cfg(test)]
@@ -47,9 +47,9 @@ pub fn build_endpoint(
 ) -> std::result::Result<Endpoint, String> {
     use github_invitation::GithubInvitation as _;
     use installation::Installation as _;
+    use invitation_link::InvitationLink as _;
     use invitation_request::InvitationRequest as _;
     use reconcile::Reconcile as _;
-    use share_link::ShareLink as _;
 
     let mut builder = Endpoint::builder()
         .bind(
@@ -59,7 +59,7 @@ pub fn build_endpoint(
             .serve(),
         )
         .bind(
-            share_link::ShareLinkImpl {
+            invitation_link::InvitationLinkImpl {
                 state: state.clone(),
             }
             .serve(),

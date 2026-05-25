@@ -207,8 +207,8 @@ mod tests {
     };
     use ::audit::{ActorKind, EventType, TargetKind};
     use domain::{
-        AccountType, GithubInvitationId, Permission, RequestId, RequestState, SelectedRepos,
-        ShareLink, ShareLinkId, ShareLinkRepo, Slug,
+        AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
+        Permission, RequestId, RequestState, SelectedRepos, Slug,
     };
     use github::mocks::{Expectation, MockTransport};
     use github::transport::{Method, Response};
@@ -233,7 +233,7 @@ mod tests {
         }
     }
 
-    /// Seed: one installation, two users, one share_link with one repo, one
+    /// Seed: one installation, two users, one invitation_link with one repo, one
     /// invitation_request, one github_invitation row in `Sent` state.
     /// Returns the inserted invitation id.
     async fn seed_one_pending_with_repo_full_name(
@@ -273,8 +273,8 @@ mod tests {
             })
             .await
             .unwrap();
-        let link = ShareLink {
-            id: ShareLinkId::new(),
+        let link = InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
             installation_id: 9,
             account_id: 100,
@@ -288,16 +288,16 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: repo_full_name.into(),
             }],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: RequestState::Approved,

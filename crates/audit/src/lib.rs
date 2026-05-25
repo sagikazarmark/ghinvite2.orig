@@ -45,7 +45,7 @@ impl fmt::Display for ActorKind {
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
     Installation,
-    ShareLink,
+    InvitationLink,
     InvitationRequest,
     GithubInvitation,
 }
@@ -59,7 +59,7 @@ impl FromStr for TargetKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "installation" => Ok(Self::Installation),
-            "share_link" => Ok(Self::ShareLink),
+            "invitation_link" => Ok(Self::InvitationLink),
             "invitation_request" => Ok(Self::InvitationRequest),
             "github_invitation" => Ok(Self::GithubInvitation),
             other => Err(UnknownTargetKind(other.to_string())),
@@ -71,7 +71,7 @@ impl fmt::Display for TargetKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Installation => "installation",
-            Self::ShareLink => "share_link",
+            Self::InvitationLink => "invitation_link",
             Self::InvitationRequest => "invitation_request",
             Self::GithubInvitation => "github_invitation",
         })
@@ -86,10 +86,10 @@ pub enum EventType {
     InstallationCreated,
     InstallationReposChanged,
     InstallationUninstalled,
-    ShareLinkCreated,
-    ShareLinkRevoked,
-    ShareLinkExpired,
-    ShareLinkExhausted,
+    InvitationLinkCreated,
+    InvitationLinkRevoked,
+    InvitationLinkExpired,
+    InvitationLinkExhausted,
     RequestCreated,
     RequestApproved,
     RequestDeclined,
@@ -108,10 +108,10 @@ impl EventType {
             Self::InstallationCreated => "installation.created",
             Self::InstallationReposChanged => "installation.repos_changed",
             Self::InstallationUninstalled => "installation.uninstalled",
-            Self::ShareLinkCreated => "share_link.created",
-            Self::ShareLinkRevoked => "share_link.revoked",
-            Self::ShareLinkExpired => "share_link.expired",
-            Self::ShareLinkExhausted => "share_link.exhausted",
+            Self::InvitationLinkCreated => "invitation_link.created",
+            Self::InvitationLinkRevoked => "invitation_link.revoked",
+            Self::InvitationLinkExpired => "invitation_link.expired",
+            Self::InvitationLinkExhausted => "invitation_link.exhausted",
             Self::RequestCreated => "request.created",
             Self::RequestApproved => "request.approved",
             Self::RequestDeclined => "request.declined",
@@ -137,10 +137,10 @@ impl FromStr for EventType {
             "installation.created" => Self::InstallationCreated,
             "installation.repos_changed" => Self::InstallationReposChanged,
             "installation.uninstalled" => Self::InstallationUninstalled,
-            "share_link.created" => Self::ShareLinkCreated,
-            "share_link.revoked" => Self::ShareLinkRevoked,
-            "share_link.expired" => Self::ShareLinkExpired,
-            "share_link.exhausted" => Self::ShareLinkExhausted,
+            "invitation_link.created" => Self::InvitationLinkCreated,
+            "invitation_link.revoked" => Self::InvitationLinkRevoked,
+            "invitation_link.expired" => Self::InvitationLinkExpired,
+            "invitation_link.exhausted" => Self::InvitationLinkExhausted,
             "request.created" => Self::RequestCreated,
             "request.approved" => Self::RequestApproved,
             "request.declined" => Self::RequestDeclined,
@@ -200,10 +200,10 @@ mod tests {
         EventType::InstallationCreated,
         EventType::InstallationReposChanged,
         EventType::InstallationUninstalled,
-        EventType::ShareLinkCreated,
-        EventType::ShareLinkRevoked,
-        EventType::ShareLinkExpired,
-        EventType::ShareLinkExhausted,
+        EventType::InvitationLinkCreated,
+        EventType::InvitationLinkRevoked,
+        EventType::InvitationLinkExpired,
+        EventType::InvitationLinkExhausted,
         EventType::RequestCreated,
         EventType::RequestApproved,
         EventType::RequestDeclined,
@@ -227,7 +227,7 @@ mod tests {
     fn target_kind_round_trips() {
         for k in [
             TargetKind::Installation,
-            TargetKind::ShareLink,
+            TargetKind::InvitationLink,
             TargetKind::InvitationRequest,
             TargetKind::GithubInvitation,
         ] {
@@ -247,17 +247,17 @@ mod tests {
     #[test]
     fn event_type_rejects_unknown() {
         assert_eq!(
-            EventType::from_str("share_link.unmade").unwrap_err(),
-            UnknownEventType("share_link.unmade".into())
+            EventType::from_str("invitation_link.unmade").unwrap_err(),
+            UnknownEventType("invitation_link.unmade".into())
         );
     }
 
     #[test]
     fn event_type_serde_is_string() {
-        let json = serde_json::to_string(&EventType::ShareLinkCreated).unwrap();
-        assert_eq!(json, "\"share_link.created\"");
+        let json = serde_json::to_string(&EventType::InvitationLinkCreated).unwrap();
+        assert_eq!(json, "\"invitation_link.created\"");
         let back: EventType = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, EventType::ShareLinkCreated);
+        assert_eq!(back, EventType::InvitationLinkCreated);
     }
 
     #[test]
@@ -266,10 +266,10 @@ mod tests {
             id: AuditEventId::new(),
             account_id: 1,
             occurred_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
-            event_type: EventType::ShareLinkCreated,
+            event_type: EventType::InvitationLinkCreated,
             actor_kind: ActorKind::User,
             actor_id: Some(99),
-            target_kind: TargetKind::ShareLink,
+            target_kind: TargetKind::InvitationLink,
             target_id: "01HFOOBAR".into(),
             metadata: serde_json::json!({"permission": "push"}),
             request_id: None,

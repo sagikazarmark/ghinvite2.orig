@@ -3,7 +3,7 @@
 use crate::views::layouts::InvitationLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::{Permission, RequestState, ShareLink};
+use domain::{InvitationLink, Permission, RequestState};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ fn permission_label(p: Permission) -> &'static str {
 #[derive(Clone, PartialEq, Props)]
 pub struct LandingProps {
     pub slug: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub signed_in_login: Option<String>,
     pub now: DateTime<Utc>,
 }
@@ -97,7 +97,7 @@ pub fn LandingPage(props: LandingProps) -> Element {
             children: rsx! {
                 h1 { class: "text-xl font-semibold tracking-tight", "Access request" }
                 p { class: "mt-2 text-sm text-base-content/70",
-                    "This share link requests collaborator access to the following {repo_word}:"
+                    "This invitation link requests collaborator access to the following {repo_word}:"
                 }
                 ul { class: "mt-4 list-inside list-disc space-y-1 rounded-box border border-base-300 bg-base-200 p-4 text-sm", {repos_view} }
                 p { class: "mt-4",
@@ -118,7 +118,7 @@ pub fn LandingPage(props: LandingProps) -> Element {
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestFormProps {
     pub slug: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub signed_in_login: String,
     pub flash: Option<crate::session::Flash>,
     /// Pre-generated ULID from GET handler for double-submit dedup.

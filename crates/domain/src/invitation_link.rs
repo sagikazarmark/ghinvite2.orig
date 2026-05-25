@@ -1,4 +1,4 @@
-use crate::ids::ShareLinkId;
+use crate::ids::InvitationLinkId;
 use crate::permission::Permission;
 use crate::slug::Slug;
 use chrono::{DateTime, Utc};
@@ -6,8 +6,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ShareLink {
-    pub id: ShareLinkId,
+pub struct InvitationLink {
+    pub id: InvitationLinkId,
     pub slug: Slug,
     pub installation_id: u64,
     pub account_id: u64,
@@ -21,16 +21,16 @@ pub struct ShareLink {
     pub internal_note: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoked_by: Option<u64>,
-    pub repos: Vec<ShareLinkRepo>,
+    pub repos: Vec<InvitationLinkRepo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ShareLinkRepo {
+pub struct InvitationLinkRepo {
     pub repo_id: u64,
     pub repo_full_name: String,
 }
 
-impl ShareLink {
+impl InvitationLink {
     /// `is_active` is the per-spec derived state: not revoked AND not expired AND not exhausted.
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
         if self.revoked_at.is_some() {
@@ -61,10 +61,10 @@ mod tests {
         Utc.with_ymd_and_hms(y, mo, d, 0, 0, 0).unwrap()
     }
 
-    fn base_link() -> ShareLink {
+    fn base_link() -> InvitationLink {
         let mut rng = ChaCha8Rng::seed_from_u64(20_260_504);
-        ShareLink {
-            id: ShareLinkId::new(),
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rng),
             installation_id: 1,
             account_id: 2,

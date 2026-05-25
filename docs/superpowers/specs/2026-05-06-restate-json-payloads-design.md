@@ -13,7 +13,7 @@ This keeps business behavior unchanged while letting the Restate SDK own JSON se
 The macro is used by Restate-framed payload types in:
 
 - `installation.rs`
-- `share_link.rs`
+- `invitation_link.rs`
 - `github_invitation.rs`
 - `invitation_request.rs`
 - `reconcile.rs`
@@ -32,9 +32,9 @@ Add a workspace `schemars` dependency on the same major version used by `restate
 
 Add `schemars` support to `domain` only for types embedded in Restate payloads. The schema must match the existing JSON wire format:
 
-- ULID newtypes (`ShareLinkId`, `RequestId`, `GithubInvitationId`) serialize as 26-character strings, so their schema should be a string, not an object containing `Ulid` internals.
+- ULID newtypes (`InvitationLinkId`, `RequestId`, `GithubInvitationId`) serialize as 26-character strings, so their schema should be a string, not an object containing `Ulid` internals.
 - Enum types such as `Permission`, `AccountType`, and `RequestState` should preserve their existing serde rename rules.
-- `ShareLinkRepo` can derive schema directly once its fields do.
+- `InvitationLinkRepo` can derive schema directly once its fields do.
 - `SelectedRepos` uses custom serde: either the string `"all"` or an array of repo IDs. Its schema must model that untagged union rather than pretending it is an enum object.
 
 Framing flow:
@@ -115,7 +115,7 @@ Run the ignored runtime smoke with local Restate and `github-stub` to confirm ra
 cargo test -p restate-svc --features integration -- --ignored
 ```
 
-The runtime smoke should cover more than `Installation::onboard`. Add or update ignored integration coverage for at least one request/response object method such as `ShareLink::create` and one workflow/shared path such as `InvitationRequest::submit` or `InvitationRequest::decide`. These tests protect the real web invocation path, which sends raw `serde_json::Value` request bodies to Restate rather than generated Rust clients.
+The runtime smoke should cover more than `Installation::onboard`. Add or update ignored integration coverage for at least one request/response object method such as `InvitationLink::create` and one workflow/shared path such as `InvitationRequest::submit` or `InvitationRequest::decide`. These tests protect the real web invocation path, which sends raw `serde_json::Value` request bodies to Restate rather than generated Rust clients.
 
 Add schema-shape tests for domain types whose schema cannot be trusted from a simple derive:
 

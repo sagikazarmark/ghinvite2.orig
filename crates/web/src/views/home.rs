@@ -3,24 +3,24 @@
 use crate::views::layouts::HomeLayout;
 use dioxus::prelude::*;
 
-const SHARE_CODE_SCRIPT: &str = r#"
+const INVITATION_CODE_SCRIPT: &str = r#"
 (function () {
   document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-open-share-code]');
+    var button = event.target.closest('[data-open-invitation-code]');
     if (!button) return;
-    openShareCode();
+    openInvitationCode();
   });
   document.addEventListener('keydown', function (event) {
-    if (event.key !== 'Enter' || !event.target.matches('[data-share-code-input]')) return;
+    if (event.key !== 'Enter' || !event.target.matches('[data-invitation-code-input]')) return;
     event.preventDefault();
-    openShareCode();
+    openInvitationCode();
   });
-  function openShareCode() {
-    var input = document.querySelector('[data-share-code-input]');
-    var message = document.querySelector('[data-share-code-message]');
+  function openInvitationCode() {
+    var input = document.querySelector('[data-invitation-code-input]');
+    var message = document.querySelector('[data-invitation-code-message]');
     var code = input ? input.value.trim() : '';
     if (!code) {
-      if (message) message.textContent = 'Enter a share link code first.';
+      if (message) message.textContent = 'Enter an invitation code first.';
       if (input) input.focus();
       return;
     }
@@ -50,7 +50,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                         {match props.signed_in_login.as_deref() {
                             Some(_) => rsx! {
                                 section { class: "p-6 text-center sm:p-8",
-                                    p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-primary", "Share Link Code" }
+                                    p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-primary", "Invitation code" }
                                     h1 { class: "mt-3 text-2xl font-semibold tracking-tight text-base-content sm:text-3xl", "Open an invitation link" }
                                     p { class: "mt-3 text-sm leading-6 text-base-content/66",
                                         "Enter the code from an invitation link to request repository access."
@@ -59,24 +59,24 @@ pub fn HomePage(props: HomePageProps) -> Element {
                                         input {
                                             class: "input input-bordered min-h-10 flex-1",
                                             r#type: "text",
-                                            placeholder: "Paste code",
-                                            "data-share-code-input": "true",
+                                            placeholder: "Paste invitation code",
+                                            "data-invitation-code-input": "true",
                                         }
                                         button {
                                             class: "btn btn-primary min-h-10",
                                             r#type: "button",
-                                            "data-open-share-code": "true",
+                                            "data-open-invitation-code": "true",
                                             "Open invitation"
                                         }
                                     }
-                                    p { class: "mt-2 min-h-5 text-sm text-error", aria_live: "polite", "data-share-code-message": "true", "" }
+                                    p { class: "mt-2 min-h-5 text-sm text-error", aria_live: "polite", "data-invitation-code-message": "true", "" }
                                     div { class: "divider my-6" }
                                     div { class: "flex flex-col items-center gap-3",
                                         p { class: "text-sm text-base-content/66", "Need to invite someone to a repository?" }
                                         a { class: "btn btn-outline min-h-10", href: "/console", "Create invitation link" }
                                     }
                                 }
-                                script { "{SHARE_CODE_SCRIPT}" }
+                                script { "{INVITATION_CODE_SCRIPT}" }
                             },
                             None => rsx! {
                                 section { class: "p-6 text-center sm:p-8",

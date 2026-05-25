@@ -19,13 +19,13 @@
 
 ---
 
-### Task 1: Share Link Ownership Read
+### Task 1: Invitation Link Ownership Read
 
 **Files:**
 - Create: `crates/web/src/account_admin_reads.rs`
 - Modify: `crates/web/src/lib.rs`
 
-- [ ] **Step 1: Declare the module and write failing Share Link ownership tests**
+- [ ] **Step 1: Declare the module and write failing Invitation Link ownership tests**
 
 In `crates/web/src/lib.rs`, add the module declaration before `pub mod commands;`:
 
@@ -40,7 +40,7 @@ Create `crates/web/src/account_admin_reads.rs` with this test scaffold:
 mod tests {
     use chrono::{DateTime, Utc};
     use domain::{
-        Account, AccountType, Permission, SelectedRepos, ShareLink, ShareLinkId, ShareLinkRepo,
+        Account, AccountType, Permission, SelectedRepos, InvitationLink, InvitationLinkId, InvitationLinkRepo,
         Slug, User,
     };
     use storage::Storage;
@@ -75,9 +75,9 @@ mod tests {
         installation_id: u64,
         created_by: u64,
         slug: &str,
-    ) -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    ) -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::from_string(slug.to_string()).unwrap(),
             installation_id,
             account_id,
@@ -91,7 +91,7 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
@@ -113,12 +113,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_admin_share_link_lookup_returns_owning_accounts_link() {
+    async fn account_admin_invitation_link_lookup_returns_owning_accounts_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9001, 1, 701, "QueueSlug0000001");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
 
-        let found = super::find_account_admin_share_link(&storage, 9001, link.id)
+        let found = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
             .unwrap();
 
@@ -128,12 +128,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_admin_share_link_lookup_hides_wrong_account_link() {
+    async fn account_admin_invitation_link_lookup_hides_wrong_account_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9002, 2, 701, "QueueSlug0000002");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
 
-        let err = super::find_account_admin_share_link(&storage, 9001, link.id)
+        let err = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
             .unwrap_err();
 
@@ -144,25 +144,25 @@ mod tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p web account_admin_share_link_lookup`
+Run: `cargo test -p web account_admin_invitation_link_lookup`
 
-Expected: FAIL because `find_account_admin_share_link` is not defined.
+Expected: FAIL because `find_account_admin_invitation_link` is not defined.
 
-- [ ] **Step 3: Implement the Share Link ownership read**
+- [ ] **Step 3: Implement the Invitation Link ownership read**
 
 Insert this implementation above the existing `#[cfg(test)] mod tests` block in `crates/web/src/account_admin_reads.rs`:
 
 ```rust
 use crate::error::{Result, WebError};
 use chrono::{DateTime, Utc};
-use domain::{InvitationRequest, RequestId, ShareLink, ShareLinkId};
+use domain::{InvitationRequest, RequestId, InvitationLink, InvitationLinkId};
 use storage::Storage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AccountAdminPendingRequestRow {
     pub(crate) request_id: RequestId,
     pub(crate) link_slug: String,
-    pub(crate) link_id: Option<ShareLinkId>,
+    pub(crate) link_id: Option<InvitationLinkId>,
     pub(crate) requester_login: String,
     pub(crate) justification: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -171,16 +171,16 @@ pub(crate) struct AccountAdminPendingRequestRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AccountAdminInvitationRequest {
     pub(crate) request: InvitationRequest,
-    pub(crate) share_link: ShareLink,
+    pub(crate) invitation_link: InvitationLink,
 }
 
-pub(crate) async fn find_account_admin_share_link(
+pub(crate) async fn find_account_admin_invitation_link(
     storage: &dyn Storage,
     account_id: u64,
-    link_id: ShareLinkId,
-) -> Result<ShareLink> {
+    link_id: InvitationLinkId,
+) -> Result<InvitationLink> {
     let link = storage
-        .get_share_link_by_id(link_id)
+        .get_invitation_link_by_id(link_id)
         .await?
         .ok_or(WebError::NotFound)?;
 
@@ -194,15 +194,15 @@ pub(crate) async fn find_account_admin_share_link(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p web account_admin_share_link_lookup`
+Run: `cargo test -p web account_admin_invitation_link_lookup`
 
-Expected: PASS. The read function returns the owning account's Share Link and hides wrong-account access behind `NotFound`.
+Expected: PASS. The read function returns the owning account's Invitation Link and hides wrong-account access behind `NotFound`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/web/src/lib.rs crates/web/src/account_admin_reads.rs
-git commit -m "feat(web): add account admin share link reads"
+git commit -m "feat(web): add account admin invitation link reads"
 ```
 
 ---
@@ -219,7 +219,7 @@ Inside the `#[cfg(test)] mod tests` block in `crates/web/src/account_admin_reads
 ```rust
 use domain::{
     Account, AccountType, InvitationRequest, Permission, RequestId, RequestState, SelectedRepos,
-    ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
+    InvitationLink, InvitationLinkId, InvitationLinkRepo, Slug, User,
 };
 ```
 
@@ -228,13 +228,13 @@ Add this helper below `sample_link`:
 ```rust
 fn sample_request(
     id: RequestId,
-    share_link_id: ShareLinkId,
+    invitation_link_id: InvitationLinkId,
     requester_id: u64,
     created_at: &str,
 ) -> InvitationRequest {
     InvitationRequest {
         id,
-        share_link_id,
+        invitation_link_id,
         requester_id,
         justification: Some("need repository access".into()),
         state: RequestState::Pending,
@@ -246,7 +246,7 @@ fn sample_request(
 }
 ```
 
-Add these tests below the Share Link tests:
+Add these tests below the Invitation Link tests:
 
 ```rust
 #[tokio::test]
@@ -254,7 +254,7 @@ async fn account_admin_request_lookup_returns_request_and_link_for_owner() {
     let storage = storage_with_accounts().await;
     storage.upsert_user(&sample_user(802, "requester")).await.unwrap();
     let link = sample_link(9001, 1, 701, "QueueSlug0000003");
-    storage.insert_share_link(&link).await.unwrap();
+    storage.insert_invitation_link(&link).await.unwrap();
     let request_id = RequestId::new();
     let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
     storage
@@ -267,9 +267,9 @@ async fn account_admin_request_lookup_returns_request_and_link_for_owner() {
         .unwrap();
 
     assert_eq!(found.request.id, request_id);
-    assert_eq!(found.request.share_link_id, link.id);
-    assert_eq!(found.share_link.id, link.id);
-    assert_eq!(found.share_link.account_id, 9001);
+    assert_eq!(found.request.invitation_link_id, link.id);
+    assert_eq!(found.invitation_link.id, link.id);
+    assert_eq!(found.invitation_link.account_id, 9001);
 }
 
 #[tokio::test]
@@ -277,7 +277,7 @@ async fn account_admin_request_lookup_hides_wrong_account_request() {
     let storage = storage_with_accounts().await;
     storage.upsert_user(&sample_user(802, "requester")).await.unwrap();
     let link = sample_link(9002, 2, 701, "QueueSlug0000004");
-    storage.insert_share_link(&link).await.unwrap();
+    storage.insert_invitation_link(&link).await.unwrap();
     let request_id = RequestId::new();
     let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
     storage
@@ -312,7 +312,7 @@ Expected: FAIL because `find_account_admin_request` is not defined.
 
 - [ ] **Step 3: Implement the request ownership read**
 
-Insert this function below `find_account_admin_share_link`:
+Insert this function below `find_account_admin_invitation_link`:
 
 ```rust
 pub(crate) async fn find_account_admin_request(
@@ -324,11 +324,11 @@ pub(crate) async fn find_account_admin_request(
         .get_invitation_request(request_id)
         .await?
         .ok_or(WebError::NotFound)?;
-    let share_link = find_account_admin_share_link(storage, account_id, request.share_link_id).await?;
+    let invitation_link = find_account_admin_invitation_link(storage, account_id, request.invitation_link_id).await?;
 
     Ok(AccountAdminInvitationRequest {
         request,
-        share_link,
+        invitation_link,
     })
 }
 ```
@@ -370,7 +370,7 @@ Add this fake storage below `storage_with_accounts`:
 struct FakeStorage {
     pending_requests: Vec<InvitationRequest>,
     request: Option<InvitationRequest>,
-    share_link: Option<ShareLink>,
+    invitation_link: Option<InvitationLink>,
     user: Option<User>,
 }
 
@@ -426,35 +426,35 @@ impl Storage for FakeStorage {
         Ok(self.user.clone())
     }
 
-    async fn insert_share_link(&self, _link: &ShareLink) -> storage::Result<()> {
-        panic!("insert_share_link is not used by Account Admin read tests")
+    async fn insert_invitation_link(&self, _link: &InvitationLink) -> storage::Result<()> {
+        panic!("insert_invitation_link is not used by Account Admin read tests")
     }
 
-    async fn mark_share_link_revoked(
+    async fn mark_invitation_link_revoked(
         &self,
-        _id: ShareLinkId,
+        _id: InvitationLinkId,
         _by_user: u64,
         _when: DateTime<Utc>,
     ) -> storage::Result<()> {
-        panic!("mark_share_link_revoked is not used by Account Admin read tests")
+        panic!("mark_invitation_link_revoked is not used by Account Admin read tests")
     }
 
-    async fn get_share_link_by_id(
+    async fn get_invitation_link_by_id(
         &self,
-        _id: ShareLinkId,
-    ) -> storage::Result<Option<ShareLink>> {
-        Ok(self.share_link.clone())
+        _id: InvitationLinkId,
+    ) -> storage::Result<Option<InvitationLink>> {
+        Ok(self.invitation_link.clone())
     }
 
-    async fn get_share_link_by_slug(&self, _slug: &str) -> storage::Result<Option<ShareLink>> {
-        panic!("get_share_link_by_slug is not used by Account Admin read tests")
+    async fn get_invitation_link_by_slug(&self, _slug: &str) -> storage::Result<Option<InvitationLink>> {
+        panic!("get_invitation_link_by_slug is not used by Account Admin read tests")
     }
 
-    async fn list_share_links_for_account(
+    async fn list_invitation_links_for_account(
         &self,
         _account_id: u64,
-    ) -> storage::Result<Vec<ShareLink>> {
-        panic!("list_share_links_for_account is not used by Account Admin read tests")
+    ) -> storage::Result<Vec<InvitationLink>> {
+        panic!("list_invitation_links_for_account is not used by Account Admin read tests")
     }
 
     async fn insert_invitation_request_and_increment_uses(
@@ -484,7 +484,7 @@ impl Storage for FakeStorage {
 
     async fn list_requests_for_link(
         &self,
-        _link_id: ShareLinkId,
+        _link_id: InvitationLinkId,
     ) -> storage::Result<Vec<InvitationRequest>> {
         panic!("list_requests_for_link is not used by Account Admin read tests")
     }
@@ -540,8 +540,8 @@ async fn account_admin_pending_request_queue_returns_hydrated_rows_oldest_first(
     storage.upsert_user(&sample_user(803, "bob")).await.unwrap();
     let link_a = sample_link(9001, 1, 701, "QueueSlug0000005");
     let link_b = sample_link(9001, 1, 701, "QueueSlug0000006");
-    storage.insert_share_link(&link_a).await.unwrap();
-    storage.insert_share_link(&link_b).await.unwrap();
+    storage.insert_invitation_link(&link_a).await.unwrap();
+    storage.insert_invitation_link(&link_b).await.unwrap();
     let newer = sample_request(
         RequestId::new(),
         link_a.id,
@@ -577,7 +577,7 @@ async fn account_admin_pending_request_queue_returns_hydrated_rows_oldest_first(
 
 #[tokio::test]
 async fn account_admin_pending_request_queue_uses_missing_related_record_fallbacks() {
-    let missing_link_id = ShareLinkId::new();
+    let missing_link_id = InvitationLinkId::new();
     let request = sample_request(
         RequestId::new(),
         missing_link_id,
@@ -587,7 +587,7 @@ async fn account_admin_pending_request_queue_uses_missing_related_record_fallbac
     let storage = FakeStorage {
         pending_requests: vec![request.clone()],
         request: None,
-        share_link: None,
+        invitation_link: None,
         user: None,
     };
 
@@ -601,17 +601,17 @@ async fn account_admin_pending_request_queue_uses_missing_related_record_fallbac
 }
 
 #[tokio::test]
-async fn account_admin_request_lookup_hides_missing_related_share_link() {
+async fn account_admin_request_lookup_hides_missing_related_invitation_link() {
     let request = sample_request(
         RequestId::new(),
-        ShareLinkId::new(),
+        InvitationLinkId::new(),
         802,
         "2026-05-04T12:30:00Z",
     );
     let storage = FakeStorage {
         pending_requests: Vec::new(),
         request: Some(request.clone()),
-        share_link: None,
+        invitation_link: None,
         user: None,
     };
 
@@ -642,13 +642,13 @@ pub(crate) async fn pending_request_queue(
     let mut rows = Vec::with_capacity(pending.len());
 
     for request in pending {
-        let share_link = storage
-            .get_share_link_by_id(request.share_link_id)
+        let invitation_link = storage
+            .get_invitation_link_by_id(request.invitation_link_id)
             .await
             .ok()
             .flatten();
         let requester = storage.get_user(request.requester_id).await.ok().flatten();
-        rows.push(pending_request_row(request, share_link, requester));
+        rows.push(pending_request_row(request, invitation_link, requester));
     }
 
     rows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -657,10 +657,10 @@ pub(crate) async fn pending_request_queue(
 
 fn pending_request_row(
     request: InvitationRequest,
-    share_link: Option<ShareLink>,
+    invitation_link: Option<InvitationLink>,
     requester: Option<domain::User>,
 ) -> AccountAdminPendingRequestRow {
-    let (link_slug, link_id) = match share_link {
+    let (link_slug, link_id) = match invitation_link {
         Some(link) => (link.slug.as_str().to_string(), Some(link.id)),
         None => ("(deleted link)".to_string(), None),
     };
@@ -711,16 +711,16 @@ In `crates/web/src/routes/dashboard.rs`, add this import after the existing `use
 
 ```rust
 use crate::account_admin_reads::{
-    find_account_admin_request, find_account_admin_share_link, pending_request_queue,
+    find_account_admin_request, find_account_admin_invitation_link, pending_request_queue,
 };
 ```
 
-- [ ] **Step 2: Wire `link_detail` to the shared Share Link lookup**
+- [ ] **Step 2: Wire `link_detail` to the shared Invitation Link lookup**
 
 Replace the inline storage lookup in `link_detail` with:
 
 ```rust
-let link = match find_account_admin_share_link(
+let link = match find_account_admin_invitation_link(
     state.storage.as_ref(),
     admin.account.account_id,
     link_id,
@@ -732,12 +732,12 @@ let link = match find_account_admin_share_link(
 };
 ```
 
-- [ ] **Step 3: Wire `revoke_link` to the shared Share Link lookup**
+- [ ] **Step 3: Wire `revoke_link` to the shared Invitation Link lookup**
 
 Replace the inline storage lookup in `revoke_link` with:
 
 ```rust
-if let Err(e) = find_account_admin_share_link(
+if let Err(e) = find_account_admin_invitation_link(
     state.storage.as_ref(),
     admin.account.account_id,
     link_id,
@@ -868,7 +868,7 @@ Check the implementation against issue #5:
 ```text
 - The pending request queue is assembled through `pending_request_queue` using Account Admin terms.
 - Approve, decline, detail, and revoke flows call shared ownership-sensitive lookup functions.
-- Missing Share Link and GitHub User fallbacks are explicit in `pending_request_row` and tested.
+- Missing Invitation Link and GitHub User fallbacks are explicit in `pending_request_row` and tested.
 - Tests cover queue rows, wrong-account access, missing related records, and successful Account Admin lookups.
 ```
 

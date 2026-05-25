@@ -77,7 +77,7 @@ The overview should feel like a console landing page.
 - Present recent links as operational rows or panels, not marketing cards.
 - Improve empty states so they teach the first admin action.
 
-### New Share Link
+### New Invitation Link
 
 The new-link form should read as a structured settings form.
 
@@ -101,7 +101,7 @@ The link detail page should be an operational hub.
 The queue should feel like an admin decision list.
 
 - Use a denser list or table-like layout rather than a stack of generic cards.
-- Show requester, share link, permission, repositories, justification, and created time before actions.
+- Show requester, invitation link, permission, repositories, justification, and created time before actions.
 - Keep approve and decline actions visually consistent.
 - Consider a confirmation modal for decline only if the final implementation shows the consequence is easy to miss. Do not add modals to every action by default.
 - Preserve responsive stacking on small screens.
@@ -147,7 +147,7 @@ Destructive confirmations are allowed when they improve safety.
 Rules:
 
 - Use DaisyUI modal patterns before writing custom modal CSS.
-- Keep modals limited to consequential destructive actions, especially stopping a share link.
+- Keep modals limited to consequential destructive actions, especially stopping an invitation link.
 - Keep consequence copy visible inline near the triggering action.
 - Avoid JavaScript-only confirmations unless the existing stack already supports them without hydration.
 - Preserve native form submission for POST actions.

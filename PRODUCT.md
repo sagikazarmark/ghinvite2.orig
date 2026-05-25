@@ -6,11 +6,11 @@ product
 
 ## Users
 
-ghinvite serves GitHub account admins who manage repository collaborator access and recipients who request access through share links. Account admins use the app while making access decisions for personal accounts or organizations. Recipients use the public invitation flow to understand what access they are requesting and confirm their GitHub identity.
+ghinvite serves GitHub account admins who manage repository collaborator access and recipients who request access through invitation links. Account admins use the app while making access decisions for personal accounts or organizations. Recipients use the public invitation flow to understand what access they are requesting and confirm their GitHub identity.
 
 ## Product Purpose
 
-ghinvite turns ad-hoc collaborator invitation requests into controlled share-link workflows. Success means admins can create links, review requests, and understand permission consequences without leaving the app unsure about repository access risk. Recipients should know what they are requesting and what happens next.
+ghinvite turns ad-hoc collaborator invitation requests into controlled invitation-link workflows. Success means admins can create links, review requests, and understand permission consequences without leaving the app unsure about repository access risk. Recipients should know what they are requesting and what happens next.
 
 ## Brand Personality
 

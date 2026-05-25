@@ -14,7 +14,7 @@ Those logic functions currently perform storage writes and `crate::audit::emit` 
 
 `crates/restate-svc/src/reconcile.rs` has the same pattern for reconciled accepted and cancelled outcomes after it checks GitHub's current state.
 
-Recent Share Link and Installation work established a local transition-function pattern in `share_link.rs` and `installation.rs`: logic functions remain the handler seam, while private transition functions perform one state write and emit the corresponding audit event.
+Recent Invitation Link and Installation work established a local transition-function pattern in `invitation_link.rs` and `installation.rs`: logic functions remain the handler seam, while private transition functions perform one state write and emit the corresponding audit event.
 
 ## Chosen Approach
 
@@ -25,7 +25,7 @@ Use private transition functions in the existing Restate modules.
 - Existing public handler input and output types remain unchanged.
 - Existing `*_logic` functions remain the testable handler seam and delegate only the storage-plus-audit outcome to transition helpers.
 
-This mirrors the current Share Link and Installation pattern with the least churn. It avoids a generic audited-transition abstraction because GitHub Invitation outcomes have different GitHub API, idempotency, and metadata rules.
+This mirrors the current Invitation Link and Installation pattern with the least churn. It avoids a generic audited-transition abstraction because GitHub Invitation outcomes have different GitHub API, idempotency, and metadata rules.
 
 ## Detailed Design
 
@@ -105,7 +105,7 @@ Reconciliation tests should assert:
 - Collaborator reconciliation marks `Accepted`, clears the upstream id, and emits `invitation.accepted` with system actor and `reconciled: true` metadata.
 - Non-collaborator reconciliation marks `Cancelled`, clears the upstream id, and emits `invitation.cancelled` with system actor and `reconciled: true` metadata.
 
-Use the existing in-memory `SqlxStorage` fixture and `debug_list_audit` helper for audit assertions, following the Share Link and Installation transition tests.
+Use the existing in-memory `SqlxStorage` fixture and `debug_list_audit` helper for audit assertions, following the Invitation Link and Installation transition tests.
 
 Run focused tests first:
 

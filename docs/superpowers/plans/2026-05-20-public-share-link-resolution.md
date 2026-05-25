@@ -1,18 +1,18 @@
-# Public Share Link Resolution Implementation Plan
+# Public Invitation Link Resolution Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Centralize recipient-facing Share Link resolution behind one Web module with explicit outcomes and tests.
+**Goal:** Centralize recipient-facing Invitation Link resolution behind one Web module with explicit outcomes and tests.
 
-**Architecture:** Move resolution from `crates/web/src/routes/share_link_resolution.rs` to `crates/web/src/share_link_resolution.rs`. The resolver parses the raw slug, performs storage lookup, confirms the stored slug in constant time, applies `ShareLink::is_active`, and optionally detects a duplicate pending Invitation Request for a recipient. Routes convert resolver results into HTTP responses while the resolver owns the policy decisions.
+**Architecture:** Move resolution from `crates/web/src/routes/invitation_link_resolution.rs` to `crates/web/src/invitation_link_resolution.rs`. The resolver parses the raw slug, performs storage lookup, confirms the stored slug in constant time, applies `InvitationLink::is_active`, and optionally detects a duplicate pending Invitation Request for a recipient. Routes convert resolver results into HTTP responses while the resolver owns the policy decisions.
 
-**Tech Stack:** Rust, axum, chrono, `storage::Storage`, `domain::{Slug, ShareLink, InvitationRequest, RequestState}`.
+**Tech Stack:** Rust, axum, chrono, `storage::Storage`, `domain::{Slug, InvitationLink, InvitationRequest, RequestState}`.
 
 ---
 
 ## File Structure
 
-- Create: `crates/web/src/share_link_resolution.rs` as the canonical Web resolver module.
+- Create: `crates/web/src/invitation_link_resolution.rs` as the canonical Web resolver module.
 - Modify: `crates/web/src/lib.rs` to declare the top-level module.
 - Modify: `crates/web/src/routes/mod.rs` to remove the route-local module declaration.
 - Modify: `crates/web/src/routes/invitation.rs` to import the top-level resolver and handle distinct outcomes.
@@ -23,13 +23,13 @@
 ### Task 1: Resolver Outcomes And Errors
 
 **Files:**
-- Create: `crates/web/src/share_link_resolution.rs`
+- Create: `crates/web/src/invitation_link_resolution.rs`
 - Modify: `crates/web/src/lib.rs`
 - Modify: `crates/web/src/routes/mod.rs`
 
 - [ ] **Step 1: Write failing resolver unit tests**
 
-Add tests in `crates/web/src/share_link_resolution.rs` for these concrete cases:
+Add tests in `crates/web/src/invitation_link_resolution.rs` for these concrete cases:
 
 ```rust
 #[tokio::test]
@@ -45,12 +45,12 @@ async fn stored_slug_mismatch_returns_slug_mismatch() { /* assert ResolutionErro
 async fn revoked_expired_and_exhausted_links_return_inactive() { /* assert ResolutionError::Inactive */ }
 
 #[tokio::test]
-async fn active_link_returns_available() { /* assert PublicShareLinkResolution::Available */ }
+async fn active_link_returns_available() { /* assert PublicInvitationLinkResolution::Available */ }
 ```
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo test -p web share_link_resolution`
+Run: `cargo test -p web invitation_link_resolution`
 
 Expected: FAIL because the top-level module and result types do not exist.
 
@@ -64,8 +64,8 @@ pub(crate) enum PendingRequestPolicy {
     RedirectForRecipient { recipient_id: u64 },
 }
 
-pub(crate) enum PublicShareLinkResolution {
-    Available { slug: Slug, link: ShareLink },
+pub(crate) enum PublicInvitationLinkResolution {
+    Available { slug: Slug, link: InvitationLink },
     PendingRequest { slug: Slug, request_id: RequestId },
 }
 
@@ -82,7 +82,7 @@ Map every `ResolutionError` to `WebError::NotFound` through a small helper.
 
 - [ ] **Step 4: Run tests green**
 
-Run: `cargo test -p web share_link_resolution`
+Run: `cargo test -p web invitation_link_resolution`
 
 Expected: PASS.
 
@@ -91,7 +91,7 @@ Expected: PASS.
 ### Task 2: Duplicate Pending Policy
 
 **Files:**
-- Modify: `crates/web/src/share_link_resolution.rs`
+- Modify: `crates/web/src/invitation_link_resolution.rs`
 
 - [ ] **Step 1: Write failing duplicate-pending tests**
 
@@ -113,7 +113,7 @@ async fn pending_lookup_storage_error_returns_storage_error() { /* assert Resolu
 
 - [ ] **Step 2: Run failing tests**
 
-Run: `cargo test -p web share_link_resolution`
+Run: `cargo test -p web invitation_link_resolution`
 
 Expected: FAIL because duplicate-pending handling still returns `Available` or ignores storage errors.
 
@@ -123,7 +123,7 @@ Use `Storage::list_requests_for_link(link.id)` only when policy is `RedirectForR
 
 - [ ] **Step 4: Run tests green**
 
-Run: `cargo test -p web share_link_resolution`
+Run: `cargo test -p web invitation_link_resolution`
 
 Expected: PASS.
 
@@ -158,7 +158,7 @@ Expected: FAIL until routes use the top-level resolver result API and the tests 
 
 - [ ] **Step 3: Update routes**
 
-Use `crate::share_link_resolution::{resolve_public_share_link, PendingRequestPolicy, PublicShareLinkResolution}`. Landing handles only `Available`; request form and submit handle both `Available` and `PendingRequest`, converting pending data to `Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))`.
+Use `crate::invitation_link_resolution::{resolve_public_invitation_link, PendingRequestPolicy, PublicInvitationLinkResolution}`. Landing handles only `Available`; request form and submit handle both `Available` and `PendingRequest`, converting pending data to `Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))`.
 
 - [ ] **Step 4: Run route tests green**
 
@@ -181,7 +181,7 @@ Expected: no formatting errors.
 
 - [ ] **Step 2: Focused tests**
 
-Run: `cargo test -p web share_link_resolution && cargo test -p web --test invitation_resolution`
+Run: `cargo test -p web invitation_link_resolution && cargo test -p web --test invitation_resolution`
 
 Expected: PASS.
 

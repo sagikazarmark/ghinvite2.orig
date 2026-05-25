@@ -1,4 +1,4 @@
-use crate::ids::{RequestId, ShareLinkId};
+use crate::ids::{InvitationLinkId, RequestId};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -55,7 +55,7 @@ impl RequestState {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitationRequest {
     pub id: RequestId,
-    pub share_link_id: ShareLinkId,
+    pub invitation_link_id: InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub state: RequestState,

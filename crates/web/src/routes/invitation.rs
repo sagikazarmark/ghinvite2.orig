@@ -1,10 +1,10 @@
 //! `/i/{slug}...` routes. Plan 6: recipient flow.
 
 use crate::commands::SubmitInvitationRequest;
-use crate::session;
-use crate::share_link_resolution::{
-    PendingRequestPolicy, PublicShareLinkResolution, resolve_public_share_link,
+use crate::invitation_link_resolution::{
+    PendingRequestPolicy, PublicInvitationLinkResolution, resolve_public_invitation_link,
 };
+use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
@@ -62,7 +62,7 @@ async fn landing(
     let now = Utc::now();
     let session = session::load(&tower).await.unwrap_or_default();
     let signed_in_login = signed_in_login_from_session(&session);
-    let (slug, link) = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_invitation_link(
         state.storage.as_ref(),
         &slug,
         now,
@@ -70,8 +70,8 @@ async fn landing(
     )
     .await
     {
-        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicShareLinkResolution::PendingRequest { .. }) => {
+        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicInvitationLinkResolution::PendingRequest { .. }) => {
             return invitation_not_found_response(signed_in_login);
         }
         Err(_) => return invitation_not_found_response(signed_in_login),
@@ -109,7 +109,7 @@ async fn request_form(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let (slug, link) = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_invitation_link(
         state.storage.as_ref(),
         &slug,
         now,
@@ -119,8 +119,8 @@ async fn request_form(
     )
     .await
     {
-        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicShareLinkResolution::PendingRequest { slug, request_id }) => {
+        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
             return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
                 .into_response();
         }
@@ -158,7 +158,7 @@ async fn submit_request(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let (slug, link) = match resolve_public_share_link(
+    let (slug, link) = match resolve_public_invitation_link(
         state.storage.as_ref(),
         &slug,
         now,
@@ -168,8 +168,8 @@ async fn submit_request(
     )
     .await
     {
-        Ok(PublicShareLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicShareLinkResolution::PendingRequest { slug, request_id }) => {
+        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
+        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
             return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
                 .into_response();
         }

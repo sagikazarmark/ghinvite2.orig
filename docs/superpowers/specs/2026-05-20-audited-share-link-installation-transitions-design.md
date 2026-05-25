@@ -1,14 +1,14 @@
-# Audited Share Link And Installation Transitions Design
+# Audited Invitation Link And Installation Transitions Design
 
 ## Goal
 
-Deepen Share Link and Installation lifecycle behavior so each transition owns both its state write and its audit-event construction.
+Deepen Invitation Link and Installation lifecycle behavior so each transition owns both its state write and its audit-event construction.
 
 This preserves current product behavior while localizing the event type, actor, target, metadata, and request id rules for each audited transition.
 
 ## Current State
 
-`crates/restate-svc/src/share_link.rs` and `crates/restate-svc/src/installation.rs` already keep Restate SDK-facing handlers thin and delegate to async logic functions.
+`crates/restate-svc/src/invitation_link.rs` and `crates/restate-svc/src/installation.rs` already keep Restate SDK-facing handlers thin and delegate to async logic functions.
 
 Those logic functions currently perform both storage writes and `crate::audit::emit` calls inline. The behavior is correct, but the transition boundary is implicit: callers and tests must read the whole function to see which state change and audit event belong together.
 
@@ -18,7 +18,7 @@ Existing tests cover the state outcome for create, revoke, expire, onboard, repo
 
 Keep the existing Restate modules and public handler input/output types. Add small transition-level functions inside the same module as the Restate service:
 
-- Share Link transitions stay in `crates/restate-svc/src/share_link.rs`.
+- Invitation Link transitions stay in `crates/restate-svc/src/invitation_link.rs`.
 - Installation transitions stay in `crates/restate-svc/src/installation.rs`.
 - Existing `*_logic` functions remain the Restate-handler seam and delegate to the new transition functions.
 
@@ -28,9 +28,9 @@ This gives the desired locality with the least churn. It avoids a new generic au
 
 Add transition functions that perform the state write and emit the corresponding audit event before returning:
 
-- `create_share_link_transition` generates the slug and link id, inserts the share link, and emits `share_link.created`.
-- `revoke_share_link_transition` marks the link revoked, handles the existing idempotent double-revoke behavior, reads the link for its account id, and emits `share_link.revoked` only when a state write occurred.
-- `expire_share_link_transition` reads the link, preserves the existing no-state-mutation expiration model, and emits `share_link.expired` only when the link is expired and not revoked.
+- `create_invitation_link_transition` generates the slug and link id, inserts the invitation link, and emits `invitation_link.created`.
+- `revoke_invitation_link_transition` marks the link revoked, handles the existing idempotent double-revoke behavior, reads the link for its account id, and emits `invitation_link.revoked` only when a state write occurred.
+- `expire_invitation_link_transition` reads the link, preserves the existing no-state-mutation expiration model, and emits `invitation_link.expired` only when the link is expired and not revoked.
 - `onboard_installation_transition` inserts the installation row, preserves duplicate-installation idempotency, and emits `installation.created` only for the first insert.
 - `change_installation_repos_transition` updates selected repositories, reads the installation for its account id, and emits `installation.repos_changed`.
 - `uninstall_installation_transition` marks the installation uninstalled, preserves missing/already-uninstalled idempotency, reads the installation for its account id, and emits `installation.uninstalled` only when a state write occurred.
@@ -49,10 +49,10 @@ The existing `create_logic`, `revoke_logic`, `tick_expiration_logic`, `onboard_l
 
 Preserve existing error semantics:
 
-- Unknown share link on expiration remains terminal `NotFound`.
+- Unknown invitation link on expiration remains terminal `NotFound`.
 - Expiration without `expires_at` remains a terminal invariant error.
 - Early expiration timer remains a no-op.
-- Revoked share-link expiration remains a no-op.
+- Revoked invitation-link expiration remains a no-op.
 - Double revoke remains idempotent and does not emit a second audit event.
 - Duplicate `installation_id` on onboard remains idempotent and does not emit a second audit event.
 - Duplicate active installation for a different installation id remains terminal.
@@ -65,11 +65,11 @@ No new backward-compatibility layer is required because public payloads, storage
 
 Extend Restate service tests to assert both persisted state and audit outcomes for the affected transitions.
 
-For Share Link:
+For Invitation Link:
 
-- Create inserts the link and emits one `share_link.created` event with user actor, share-link target, request id, and metadata for permission, approval requirement, max uses, and repository count.
-- Revoke marks `revoked_at` and `revoked_by`, emits one `share_link.revoked` event with user actor and share-link target, and does not emit a second revoke event on double revoke.
-- Expiration emits `share_link.expired` with system actor, share-link target, request id, and `expired_at` metadata while preserving the no-state-mutation expiration model.
+- Create inserts the link and emits one `invitation_link.created` event with user actor, invitation-link target, request id, and metadata for permission, approval requirement, max uses, and repository count.
+- Revoke marks `revoked_at` and `revoked_by`, emits one `invitation_link.revoked` event with user actor and invitation-link target, and does not emit a second revoke event on double revoke.
+- Expiration emits `invitation_link.expired` with system actor, invitation-link target, request id, and `expired_at` metadata while preserving the no-state-mutation expiration model.
 - Revoked links and early timers do not emit expiration audit events.
 
 For Installation:
@@ -85,12 +85,12 @@ Use the existing in-memory `SqlxStorage` test fixture and `debug_list_audit` hel
 Run:
 
 ```bash
-cargo test -p restate-svc share_link installation
+cargo test -p restate-svc invitation_link installation
 cargo fmt --check
 ```
 
 ## Non-Goals
 
-This change does not modify database schemas, migrations, storage trait methods, Restate payload shapes, web routes, UI text, GitHub API behavior, share-link active-state derivation, or cascade revoke behavior.
+This change does not modify database schemas, migrations, storage trait methods, Restate payload shapes, web routes, UI text, GitHub API behavior, invitation-link active-state derivation, or cascade revoke behavior.
 
-This change also does not introduce a generic audit-event builder. The goal is transition-level locality for the current Share Link and Installation lifecycle slice, not a cross-workflow audit framework.
+This change also does not introduce a generic audit-event builder. The goal is transition-level locality for the current Invitation Link and Installation lifecycle slice, not a cross-workflow audit framework.

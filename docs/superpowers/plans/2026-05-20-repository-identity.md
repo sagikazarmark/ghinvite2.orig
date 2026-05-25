@@ -20,7 +20,7 @@
 
 ## Important Constraints
 
-- Do not change `ShareLinkRepo.repo_full_name: String`.
+- Do not change `InvitationLinkRepo.repo_full_name: String`.
 - Do not change storage schemas, migrations, storage adapters, Restate payload shapes, or UI display behavior.
 - Do not move GitHub URL path encoding into `domain`; keep encoding inside the GitHub adapter.
 - Do not commit unless the maintainer explicitly authorizes commits in the active session.
@@ -145,18 +145,18 @@ pub mod ids;
 pub mod invitation_request;
 pub mod permission;
 pub mod repository_identity;
-pub mod share_link;
+pub mod invitation_link;
 pub mod slug;
 pub mod user;
 
 // Re-exports filled in as each module gains its public types:
 pub use account::{Account, AccountType, SelectedRepos};
 pub use github_invitation::{GithubInvitation, InvitationState};
-pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
+pub use ids::{AuditEventId, GithubInvitationId, RequestId, InvitationLinkId};
 pub use invitation_request::{InvitationRequest, RequestState};
 pub use permission::Permission;
 pub use repository_identity::{RepositoryIdentity, RepositoryIdentityError};
-pub use share_link::{ShareLink, ShareLinkRepo};
+pub use invitation_link::{InvitationLink, InvitationLinkRepo};
 pub use slug::Slug;
 pub use user::User;
 ```
@@ -402,7 +402,7 @@ to:
     ) -> GithubInvitationId {
 ```
 
-Inside that helper, replace the share-link repository literal:
+Inside that helper, replace the invitation-link repository literal:
 
 ```rust
                 repo_full_name: "acme/api".into(),

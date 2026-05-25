@@ -5,7 +5,7 @@
 
 **Goal:** Fill in the `/i/{slug}/...` routes that Plan 4 shipped as 501 stubs, implement the HMAC-verified GitHub webhook receiver, and wire three earlier-plan amendments (webhook secret in WebConfig, `return_to` session field, OAuth callback return-path support). After this plan ships, every recipient can discover a link, sign in, submit an access request, and check its status — and every GitHub event triggers the appropriate Restate workflow.
 
-**Architecture:** The recipient flow lives entirely in `crates/web`. Public routes (`GET /i/{slug}`) load the share link from D1/SQLite via the storage trait and render via Dioxus SSR under `InvitationLayout`. Authenticated routes (`GET /i/{slug}/request`, `POST /i/{slug}/request`, `GET /i/{slug}/pending/{request_id}`) require a valid session (redirect to `/login?return_to=<path>` otherwise). State-changing actions (request submission) call Restate via `RestateClient::send`; the web binary never writes domain state directly. The webhook handler reads the raw request body for HMAC verification, then routes events to Restate via fire-and-forget `.send()` calls using the workflow's internal key (our `GithubInvitationId` or `installation_id`) as the Restate idempotency key; the `X-GitHub-Delivery` header is logged for traceability only.
+**Architecture:** The recipient flow lives entirely in `crates/web`. Public routes (`GET /i/{slug}`) load the invitation link from D1/SQLite via the storage trait and render via Dioxus SSR under `InvitationLayout`. Authenticated routes (`GET /i/{slug}/request`, `POST /i/{slug}/request`, `GET /i/{slug}/pending/{request_id}`) require a valid session (redirect to `/login?return_to=<path>` otherwise). State-changing actions (request submission) call Restate via `RestateClient::send`; the web binary never writes domain state directly. The webhook handler reads the raw request body for HMAC verification, then routes events to Restate via fire-and-forget `.send()` calls using the workflow's internal key (our `GithubInvitationId` or `installation_id`) as the Restate idempotency key; the `X-GitHub-Delivery` header is logged for traceability only.
 
 **Tech stack:** Same as Plans 4–5. No new dependencies.
 
@@ -31,7 +31,7 @@ Three amendments to earlier plans are required to unlock the recipient flow and 
 
 1. **WebConfig (`crates/web/src/config.rs`):** Add `webhook_secret: Vec<u8>`. Per spec §2.1, the webhook secret stays in the web binary only; it is never passed to the Restate binary. The webhook handler reads it from `state.config.webhook_secret`.
 
-2. **Session (`crates/web/src/session.rs`):** Add `return_to: Option<String>`. Stored during `GET /login?return_to=<path>` and consumed (read + cleared) in `oauth_callback` to redirect the user back to the share-link request page after sign-in. Must be validated: only paths starting with `/i/` are accepted (prevents open redirect).
+2. **Session (`crates/web/src/session.rs`):** Add `return_to: Option<String>`. Stored during `GET /login?return_to=<path>` and consumed (read + cleared) in `oauth_callback` to redirect the user back to the invitation-link request page after sign-in. Must be validated: only paths starting with `/i/` are accepted (prevents open redirect).
 
 3. **OAuth routes (`crates/web/src/routes/oauth.rs`):** The `login` handler must accept a `?return_to=` query param and store it in the session after validation. The `oauth_callback` handler must read + consume `session.return_to` and redirect to it (or `/` if absent) after successful sign-in.
 
@@ -98,7 +98,7 @@ Add to the `Session` struct (after `admin_checks`):
 
 ```rust
 /// Stored by `GET /login?return_to=<path>` and consumed by the OAuth callback
-/// to bounce the user back to the share-link request page after sign-in.
+/// to bounce the user back to the invitation-link request page after sign-in.
 /// Only `/i/`-prefixed relative paths are stored (open-redirect prevention).
 #[serde(default)]
 pub return_to: Option<String>,
@@ -259,7 +259,7 @@ async fn logout(
 use crate::views::layouts::InvitationLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::{Permission, RequestState, ShareLink};
+use domain::{Permission, RequestState, InvitationLink};
 ```
 
 **LandingPage** (`GET /i/{slug}` — public):
@@ -268,7 +268,7 @@ use domain::{Permission, RequestState, ShareLink};
 #[derive(Clone, PartialEq, Props)]
 pub struct LandingProps {
     pub slug: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub signed_in_login: Option<String>,
     pub now: DateTime<Utc>,
 }
@@ -329,7 +329,7 @@ pub fn LandingPage(props: LandingProps) -> Element {
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestFormProps {
     pub slug: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub signed_in_login: String,
     pub flash: Option<crate::session::Flash>,
     /// Pre-generated in GET handler for double-submit dedup (Decision #11).
@@ -525,7 +525,7 @@ async fn landing(
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
+    let link = match state.storage.get_invitation_link_by_slug(&slug).await {
         Ok(Some(l)) if l.is_active(now) => l,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -571,7 +571,7 @@ async fn request_form(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
+    let link = match state.storage.get_invitation_link_by_slug(&slug).await {
         Ok(Some(l)) if l.is_active(now) => l,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -642,7 +642,7 @@ async fn submit_request(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let link = match state.storage.get_share_link_by_slug(&slug).await {
+    let link = match state.storage.get_invitation_link_by_slug(&slug).await {
         Ok(Some(l)) if l.is_active(now) => l,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -661,7 +661,7 @@ async fn submit_request(
         .unwrap_or_else(|_| domain::RequestId::new());
     let input = serde_json::json!({
         "request_id": request_id.to_string(),
-        "share_link_id": link.id.to_string(),
+        "invitation_link_id": link.id.to_string(),
         "requester_id": session.user_id,
         "justification": justification,
         "created_at": now,

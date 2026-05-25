@@ -3,9 +3,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Fill in the `/accounts/{login}/...` routes that Plan 4 shipped as 501 stubs — overview page, share-link CRUD form + revoke, approval queue with approve/decline actions, settings page, audit-page placeholder for v1.1. State changes happen via form POST → axum handler → `RestateClient.send` (or `.call` when the handler must read the result). No client-side hydration; no Dioxus server functions.
+**Goal:** Fill in the `/accounts/{login}/...` routes that Plan 4 shipped as 501 stubs — overview page, invitation-link CRUD form + revoke, approval queue with approve/decline actions, settings page, audit-page placeholder for v1.1. State changes happen via form POST → axum handler → `RestateClient.send` (or `.call` when the handler must read the result). No client-side hydration; no Dioxus server functions.
 
-**Architecture:** Each `/accounts/{login}/...` route uses a new `RequireAdminOf` extractor that wraps Plan 4's `RequireSession` + `check_admin` (throttled 60s/login per spec §10.3) and resolves the URL `:login` to a `domain::Account` via `Storage::get_active_installation_by_login`. Failures (no install, not admin, expired session) all surface as 404 — no information leak per spec §10.3. State changes flow as form POST → handler → `RestateClient.send("ShareLink", "<key>", "create"|"revoke", &input)`. Approve/Decline calls into `InvitationRequest::decide` — but to make that work, Plan 3's `decide` shared handler (a no-op stub) is amended to resolve a durable Promise that the workflow waits on (replacing the awakeable). Page rendering uses Plan 4's Dioxus 0.7 SSR, wrapped in `DashboardLayout` (extended in Task 5 with a sidebar nav).
+**Architecture:** Each `/accounts/{login}/...` route uses a new `RequireAdminOf` extractor that wraps Plan 4's `RequireSession` + `check_admin` (throttled 60s/login per spec §10.3) and resolves the URL `:login` to a `domain::Account` via `Storage::get_active_installation_by_login`. Failures (no install, not admin, expired session) all surface as 404 — no information leak per spec §10.3. State changes flow as form POST → handler → `RestateClient.send("InvitationLink", "<key>", "create"|"revoke", &input)`. Approve/Decline calls into `InvitationRequest::decide` — but to make that work, Plan 3's `decide` shared handler (a no-op stub) is amended to resolve a durable Promise that the workflow waits on (replacing the awakeable). Page rendering uses Plan 4's Dioxus 0.7 SSR, wrapped in `DashboardLayout` (extended in Task 5 with a sidebar nav).
 
 **Tech Stack:** Same as Plan 4. Adds nothing — every dependency this plan needs is already in the workspace (`axum 0.8`, `tower-sessions 0.14`, `dioxus 0.7`, `restate-svc`, `storage`, `github`).
 
@@ -580,7 +580,7 @@ git commit -m "feat(web): DashboardLayout sidebar nav + flash banner"
 
 ### Task 6: Dashboard overview page (Dioxus)
 
-`/accounts/{login}` shows: account header (login + type), pending-request counter (links to /requests), active-link counter (links to /links/new), and the 5 most recent share links inline.
+`/accounts/{login}` shows: account header (login + type), pending-request counter (links to /requests), active-link counter (links to /links/new), and the 5 most recent invitation links inline.
 
 **Files:**
 - Create: `crates/web/src/views/dashboard.rs`
@@ -607,7 +607,7 @@ use crate::session::Flash;
 use crate::views::layouts::DashboardLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::ShareLink;
+use domain::InvitationLink;
 
 #[derive(Clone, PartialEq, Props)]
 pub struct OverviewProps {
@@ -617,8 +617,8 @@ pub struct OverviewProps {
     pub account_type: String, // "User" / "Organization"
     pub pending_requests: u64,
     pub active_links: u64,
-    /// Up to 5 most-recently-created share links, regardless of state.
-    pub recent_links: Vec<ShareLink>,
+    /// Up to 5 most-recently-created invitation links, regardless of state.
+    pub recent_links: Vec<InvitationLink>,
     /// Server-rendered "now" so `is_active(now)` calls are deterministic.
     pub now: DateTime<Utc>,
 }
@@ -773,7 +773,7 @@ async fn overview(
         .unwrap_or(0);
     let all_links = state
         .storage
-        .list_share_links_for_account(admin.account.account_id)
+        .list_invitation_links_for_account(admin.account.account_id)
         .await
         .unwrap_or_default();
     let active_links = all_links.iter().filter(|l| l.is_active(now)).count() as u64;
@@ -1055,13 +1055,13 @@ In `crates/web/src/views/mod.rs`, add `pub mod links;` (alphabetical: after `hom
 `crates/web/src/views/links.rs`:
 
 ```rust
-//! Share-link views: create form + detail page.
+//! Invitation-link views: create form + detail page.
 
 use crate::session::Flash;
 use crate::views::layouts::DashboardLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::{Permission, ShareLink};
+use domain::{Permission, InvitationLink};
 use github::payloads::GhRepo;
 
 #[derive(Clone, PartialEq, Props)]
@@ -1094,11 +1094,11 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     rsx! {
         DashboardLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "New share link · {props.account_login}".to_string(),
+            title: "New invitation link · {props.account_login}".to_string(),
             account_login: Some(props.account_login.clone()),
             flash: props.flash.clone(),
             children: rsx! {
-                header { class: "mb-6", h1 { class: "text-2xl font-bold", "New share link" } }
+                header { class: "mb-6", h1 { class: "text-2xl font-bold", "New invitation link" } }
                 form {
                     method: "post",
                     action: "/accounts/{login}/links",
@@ -1199,7 +1199,7 @@ pub struct LinkDetailProps {
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub now: DateTime<Utc>,
     /// Absolute URL of the recipient page (`<base_url>/i/{slug}`). Plan 4's
     /// `WebConfig::base_url` provides the prefix.
@@ -1381,7 +1381,7 @@ git commit -m "feat(web): GET /accounts/{login}/links/new (form render)"
 
 ### Task 10: `POST /accounts/{login}/links` handler
 
-Parse the form, build `CreateLinkInput`, call `RestateClient.call::<CreateLinkInput, CreateLinkOutput>("ShareLink", "<account_id>", "create", ...)`, redirect to `/accounts/{login}/links/{new_link_id}` with a success flash.
+Parse the form, build `CreateLinkInput`, call `RestateClient.call::<CreateLinkInput, CreateLinkOutput>("InvitationLink", "<account_id>", "create", ...)`, redirect to `/accounts/{login}/links/{new_link_id}` with a success flash.
 
 **Files:**
 - Modify: `crates/web/src/routes/dashboard.rs`
@@ -1454,7 +1454,7 @@ async fn create_link(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    // Resolve form's repo_ids → `Vec<ShareLinkRepo>` by re-fetching the
+    // Resolve form's repo_ids → `Vec<InvitationLinkRepo>` by re-fetching the
     // installation repos so we have authoritative full_names.
     let user_api = github::oauth::UserApiClient::new(
         state.github_transport.clone(),
@@ -1465,10 +1465,10 @@ async fn create_link(
         .await
         .map(|r| r.repositories)
         .unwrap_or_default();
-    let repos: Vec<domain::ShareLinkRepo> = installation_repos
+    let repos: Vec<domain::InvitationLinkRepo> = installation_repos
         .into_iter()
         .filter(|r| form.repo_ids.contains(&r.id))
-        .map(|r| domain::ShareLinkRepo {
+        .map(|r| domain::InvitationLinkRepo {
             repo_id: r.id,
             repo_full_name: r.full_name,
         })
@@ -1479,7 +1479,7 @@ async fn create_link(
             .into_response();
     }
 
-    // Call ShareLink::create. Use `.call` (not `.send`) so we get the new
+    // Call InvitationLink::create. Use `.call` (not `.send`) so we get the new
     // link_id back for the redirect.
     let input = serde_json::json!({
         "installation_id": admin.account.installation_id,
@@ -1496,7 +1496,7 @@ async fn create_link(
     let output: serde_json::Value = match state
         .restate
         .call(
-            "ShareLink",
+            "InvitationLink",
             &admin.account.account_id.to_string(),
             "create",
             &input,
@@ -1505,7 +1505,7 @@ async fn create_link(
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = ?e, "ShareLink::create failed");
+            tracing::warn!(error = ?e, "InvitationLink::create failed");
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
@@ -1572,7 +1572,7 @@ Expected: clean.
 
 ```bash
 git add crates/web/src/routes/dashboard.rs crates/web/Cargo.toml Cargo.toml Cargo.lock
-git commit -m "feat(web): POST /accounts/{login}/links (call ShareLink::create via Restate)"
+git commit -m "feat(web): POST /accounts/{login}/links (call InvitationLink::create via Restate)"
 ```
 
 ---
@@ -1603,11 +1603,11 @@ async fn link_detail(
     use chrono::Utc;
     use std::str::FromStr;
 
-    let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
+    let link_id = match domain::InvitationLinkId::from_str(&link_id_str) {
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    let link = match state.storage.get_share_link_by_id(link_id).await {
+    let link = match state.storage.get_invitation_link_by_id(link_id).await {
         Ok(Some(l)) if l.account_id == admin.account.account_id => l,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -1659,7 +1659,7 @@ git commit -m "feat(web): GET /accounts/{login}/links/{link_id} detail page"
 
 ### Task 12: `POST /accounts/{login}/links/{link_id}/revoke` handler
 
-Call `ShareLink::revoke`, redirect to `/accounts/{login}` with a flash.
+Call `InvitationLink::revoke`, redirect to `/accounts/{login}` with a flash.
 
 **Files:**
 - Modify: `crates/web/src/routes/dashboard.rs`
@@ -1684,12 +1684,12 @@ async fn revoke_link(
     use chrono::Utc;
     use std::str::FromStr;
 
-    let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
+    let link_id = match domain::InvitationLinkId::from_str(&link_id_str) {
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
     // Verify the link belongs to this account before sending to Restate.
-    match state.storage.get_share_link_by_id(link_id).await {
+    match state.storage.get_invitation_link_by_id(link_id).await {
         Ok(Some(l)) if l.account_id == admin.account.account_id => {}
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -1702,14 +1702,14 @@ async fn revoke_link(
     if let Err(e) = state
         .restate
         .send(
-            "ShareLink",
+            "InvitationLink",
             &admin.account.account_id.to_string(),
             "revoke",
             &input,
         )
         .await
     {
-        tracing::warn!(error = ?e, "ShareLink::revoke failed");
+        tracing::warn!(error = ?e, "InvitationLink::revoke failed");
         let _ = session::set_flash(
             &admin.tower,
             session::Flash {
@@ -1905,7 +1905,7 @@ async fn requests_queue(
 
     let mut rows: Vec<crate::views::requests::PendingRequestRow> = Vec::new();
     for req in pending {
-        let link = state.storage.get_share_link_by_id(req.share_link_id).await.ok().flatten();
+        let link = state.storage.get_invitation_link_by_id(req.invitation_link_id).await.ok().flatten();
         let user = state.storage.get_user(req.requester_id).await.ok().flatten();
         let (link_slug, link_id) = match link {
             Some(l) => (l.slug.as_str().to_string(), l.id.to_string()),
@@ -1994,12 +1994,12 @@ async fn approve_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    // Confirm the request belongs to this account (via the share link's account_id).
+    // Confirm the request belongs to this account (via the invitation link's account_id).
     let req = match state.storage.get_invitation_request(request_id).await {
         Ok(Some(r)) => r,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
-    let link = match state.storage.get_share_link_by_id(req.share_link_id).await {
+    let link = match state.storage.get_invitation_link_by_id(req.invitation_link_id).await {
         Ok(Some(l)) if l.account_id == admin.account.account_id => l,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -2108,7 +2108,7 @@ async fn decline_request(
         Ok(Some(r)) => r,
         _ => return crate::error::WebError::NotFound.into_response(),
     };
-    match state.storage.get_share_link_by_id(req.share_link_id).await {
+    match state.storage.get_invitation_link_by_id(req.invitation_link_id).await {
         Ok(Some(l)) if l.account_id == admin.account.account_id => {}
         _ => return crate::error::WebError::NotFound.into_response(),
     };
@@ -2572,7 +2572,7 @@ git commit -m "chore(web): apply rustfmt and clippy fixes; mark Plan 5 done"
 - `Flash` / `FlashLevel` (Task 4) are imported from `crate::session` in every page component.
 - `LinkFormValues` (Task 8) is consumed by Task 9's GET handler (default values) and Task 10's POST handler (on validation error, would re-render with parsed values; Plan 5 chose to redirect-with-flash on POST errors instead, so re-render of the form with parsed values is not exercised — `LinkFormValues::default()` is the only call site for now).
 - `Decision::Approve` / `Decision::Decline` JSON shape (Tasks 15, 16) matches `crates/restate-svc/src/invitation_request.rs::Decision` exactly via `#[derive(Serialize, Deserialize, JsonSchema)]` and `restate_sdk::serde::Json<Decision>` framing.
-- The `ShareLink` Dioxus components access `link.id`, `link.slug`, `link.uses_count`, `link.permission`, `link.is_active(now)`, `link.account_id`, `link.created_at`. These are all `pub` per Plan 1's `crates/domain/src/share_link.rs`.
+- The `InvitationLink` Dioxus components access `link.id`, `link.slug`, `link.uses_count`, `link.permission`, `link.is_active(now)`, `link.account_id`, `link.created_at`. These are all `pub` per Plan 1's `crates/domain/src/invitation_link.rs`.
 
 **Audit trail of decisions made while writing this plan:**
 
@@ -2614,7 +2614,7 @@ _Scope: Plan 5 — Dashboard Implementation. Review model: claude-sonnet-4-6 [su
 
 ### CEO Review
 
-**Strategic alignment:** Plan 5 completes the admin-facing half of ghinvite v1. It closes the visible gap between Plans 1–4 (data model + workflows + web skeleton) and the first end-to-end user action (create a share link, approve a request). Without this plan, the system has no user-reachable surface.
+**Strategic alignment:** Plan 5 completes the admin-facing half of ghinvite v1. It closes the visible gap between Plans 1–4 (data model + workflows + web skeleton) and the first end-to-end user action (create an invitation link, approve a request). Without this plan, the system has no user-reachable surface.
 
 **Completeness against spec:**
 - §11 dashboard routes: covered in full (overview, link CRUD, requests queue, settings, audit stub).
@@ -2666,11 +2666,11 @@ _(UI scope confirmed — 7-dimension review follows.)_
 **1. API contract correctness:**
 - `RestateClient.send` URL pattern `{ingress}/{service}/{key}/{method}/send` confirmed against `crates/web/src/restate_client.rs`. All Task 10, 11, 15, 16 calls use correct keyed-send/call form.
 - `Decision` enum serde shape (`{"Approve": {...}}` / `{"Decline": {...}}`) confirmed via external-tagged default — matches what `invitation_request.rs` deserializes.
-- `CreateLinkOutput` shape `{link_id: ShareLinkId, slug: String}` confirmed; Task 10's `output.get("link_id").and_then(|v| v.as_str())` extracts the ULID string correctly.
+- `CreateLinkOutput` shape `{link_id: InvitationLinkId, slug: String}` confirmed; Task 10's `output.get("link_id").and_then(|v| v.as_str())` extracts the ULID string correctly.
 
 **2. Type safety:**
 - `RequireAdminOf` struct fields (`session`, `account`, `tower`) are stable across all 9 consuming handlers — verified by grep.
-- `ulid_newtype!` macro confirms `ShareLinkId` / `RequestId` serialize as strings; call-site extraction via `as_str()` is correct.
+- `ulid_newtype!` macro confirms `InvitationLinkId` / `RequestId` serialize as strings; call-site extraction via `as_str()` is correct.
 - `axum::extract::FromRef<T> for T` reflexive impl in axum-core-0.5.6 confirmed — `AppState: FromRef<AppState>` works without manual impl.
 
 **3. Security:**
@@ -2688,7 +2688,7 @@ _(UI scope confirmed — 7-dimension review follows.)_
 - Plan 5 adds `dashboard_flow.rs` with a 404 smoke test (unauthenticated path).
 - Full happy-path coverage needs a session-seeding helper (noted in plan as follow-up).
 - Task 4 (flash) unit tests are specified inline.
-- N+1 in Task 14: 2 DB queries per pending-request row (`get_share_link_by_id` + `get_user`). Under a large approval queue this is O(n) sequential queries. Acceptable for v1 (approval queues are small); deferred to v1.1 with a TODO comment.
+- N+1 in Task 14: 2 DB queries per pending-request row (`get_invitation_link_by_id` + `get_user`). Under a large approval queue this is O(n) sequential queries. Acceptable for v1 (approval queues are small); deferred to v1.1 with a TODO comment.
 
 **6. Architecture:**
 - Form POST → axum handler → `RestateClient.send/call` → Restate ingress → durable workflow is the correct pattern for state-mutating operations. No server-side rendering shortcuts bypass durability guarantees.
@@ -2704,11 +2704,11 @@ axum handler (create_link)
     │ serde_qs::QsForm: parse CreateLinkForm
     │
     ▼
-RestateClient.call("ShareLink", account_id, "create", input)
-    │ POST {ingress}/ShareLink/{account_id}/create
+RestateClient.call("InvitationLink", account_id, "create", input)
+    │ POST {ingress}/InvitationLink/{account_id}/create
     │
     ▼
-Restate ingress → ShareLink workflow (Plan 3)
+Restate ingress → InvitationLink workflow (Plan 3)
     │ durable, idempotent
     │
     ▼

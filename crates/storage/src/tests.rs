@@ -6,9 +6,9 @@ use crate::{GithubInvitationUpdate, RequestDecision, Storage};
 use audit::{ActorKind, AuditEvent, EventType, TargetKind};
 use chrono::{DateTime, Utc};
 use domain::{
-    Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationRequest,
-    InvitationState, Permission, RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId,
-    ShareLinkRepo, Slug, User,
+    Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationLink,
+    InvitationLinkId, InvitationLinkRepo, InvitationRequest, InvitationState, Permission,
+    RequestId, RequestState, SelectedRepos, Slug, User,
 };
 
 fn dt(s: &str) -> DateTime<Utc> {
@@ -47,9 +47,9 @@ fn sample_link(
     installation_id: u64,
     created_by: u64,
     slug_seed: u64,
-) -> ShareLink {
-    ShareLink {
-        id: ShareLinkId::new(),
+) -> InvitationLink {
+    InvitationLink {
+        id: InvitationLinkId::new(),
         slug: slug_with_seed(slug_seed),
         installation_id,
         account_id,
@@ -63,17 +63,17 @@ fn sample_link(
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![ShareLinkRepo {
+        repos: vec![InvitationLinkRepo {
             repo_id: 10,
             repo_full_name: "acme/api".into(),
         }],
     }
 }
 
-fn sample_request(link: ShareLinkId, requester: u64) -> InvitationRequest {
+fn sample_request(link: InvitationLinkId, requester: u64) -> InvitationRequest {
     InvitationRequest {
         id: RequestId::new(),
-        share_link_id: link,
+        invitation_link_id: link,
         requester_id: requester,
         justification: None,
         state: RequestState::Pending,
@@ -96,7 +96,7 @@ where
     Fut: std::future::Future<Output = S>,
 {
     scenario_install_uninstall_reinstall(make_storage().await).await;
-    scenario_share_link_lifecycle(make_storage().await).await;
+    scenario_invitation_link_lifecycle(make_storage().await).await;
     scenario_request_uses_and_uniqueness(make_storage().await).await;
     scenario_request_decision(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
@@ -131,26 +131,26 @@ async fn scenario_install_uninstall_reinstall<S: Storage>(s: S) {
     assert_eq!(active.installation_id, 2);
 }
 
-async fn scenario_share_link_lifecycle<S: Storage>(s: S) {
+async fn scenario_invitation_link_lifecycle<S: Storage>(s: S) {
     s.insert_installation(&sample_account(1, 9002, "acme2"))
         .await
         .unwrap();
     s.upsert_user(&sample_user(701, "creator")).await.unwrap();
 
     let link = sample_link(9002, 1, 701, 100);
-    s.insert_share_link(&link).await.unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
 
     let by_slug = s
-        .get_share_link_by_slug(link.slug.as_str())
+        .get_invitation_link_by_slug(link.slug.as_str())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(by_slug.id, link.id);
 
-    s.mark_share_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z"))
+    s.mark_invitation_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z"))
         .await
         .unwrap();
-    let revoked = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    let revoked = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(revoked.revoked_by, Some(701));
     assert!(!revoked.is_active(dt("2026-05-04T21:00:00Z")));
 }
@@ -164,14 +164,14 @@ async fn scenario_request_uses_and_uniqueness<S: Storage>(s: S) {
 
     let mut link = sample_link(9003, 1, 702, 200);
     link.max_uses = Some(2);
-    s.insert_share_link(&link).await.unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
 
     let r1 = sample_request(link.id, 802);
     s.insert_invitation_request_and_increment_uses(&r1)
         .await
         .unwrap();
 
-    let after_one = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    let after_one = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(after_one.uses_count, 1);
 
     // Second pending for same (link, requester) should conflict.
@@ -198,7 +198,7 @@ async fn scenario_request_uses_and_uniqueness<S: Storage>(s: S) {
         .await
         .unwrap();
 
-    let after_two = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    let after_two = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(after_two.uses_count, 2);
     assert!(
         !after_two.is_active(dt("2026-05-04T20:00:00Z")),
@@ -214,7 +214,7 @@ async fn scenario_request_decision<S: Storage>(s: S) {
     s.upsert_user(&sample_user(803, "asker")).await.unwrap();
 
     let link = sample_link(9004, 1, 703, 300);
-    s.insert_share_link(&link).await.unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
     let req = sample_request(link.id, 803);
     s.insert_invitation_request_and_increment_uses(&req)
         .await
@@ -254,7 +254,7 @@ async fn scenario_github_invitation_lifecycle<S: Storage>(s: S) {
     s.upsert_user(&sample_user(804, "asker")).await.unwrap();
 
     let link = sample_link(9005, 1, 704, 400);
-    s.insert_share_link(&link).await.unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
     let req = sample_request(link.id, 804);
     s.insert_invitation_request_and_increment_uses(&req)
         .await
@@ -328,10 +328,10 @@ async fn scenario_audit_appends<S: Storage>(s: S) {
         id: AuditEventId::new(),
         account_id: 9999,
         occurred_at: dt("2026-05-04T15:00:00Z"),
-        event_type: EventType::ShareLinkCreated,
+        event_type: EventType::InvitationLinkCreated,
         actor_kind: ActorKind::User,
         actor_id: Some(701),
-        target_kind: TargetKind::ShareLink,
+        target_kind: TargetKind::InvitationLink,
         target_id: "01HFAUDIT1".into(),
         metadata: serde_json::json!({"slug": "ABCD"}),
         request_id: Some("inv-abc".into()),
@@ -350,8 +350,8 @@ async fn scenario_timestamp_precision<S: Storage>(s: S) {
     // 123_456 microseconds added to a zero-second base
     link.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()
         + chrono::Duration::microseconds(123_456);
-    s.insert_share_link(&link).await.unwrap();
-    let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
+    let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(
         got.created_at, link.created_at,
         "microsecond precision lost in round-trip"

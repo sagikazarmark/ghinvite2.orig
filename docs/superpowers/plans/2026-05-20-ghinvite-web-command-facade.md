@@ -20,7 +20,7 @@
 
 Add tests in `crates/web/src/commands.rs` that construct `RestateCommands` with a local axum recorder and assert these mappings:
 
-- `create_share_link` calls `ShareLink/{account_id}/create` and returns typed `{ link_id, slug }`.
+- `create_invitation_link` calls `InvitationLink/{account_id}/create` and returns typed `{ link_id, slug }`.
 - `submit_invitation_request` sends `InvitationRequest/{request_id}/submit`.
 - `route_github_invitation_webhook` sends `GithubInvitation/{invitation_id}/on_webhook` with action values `accepted` and `declined`.
 
@@ -42,8 +42,8 @@ Expected: FAIL because `crate::commands` does not exist yet.
 
 Define `GhinviteCommands: Send + Sync + 'static` with async methods:
 
-- `create_share_link(CreateShareLink) -> Result<CreateShareLinkOutput>`
-- `revoke_share_link(RevokeShareLink) -> Result<()>`
+- `create_invitation_link(CreateInvitationLink) -> Result<CreateInvitationLinkOutput>`
+- `revoke_invitation_link(RevokeInvitationLink) -> Result<()>`
 - `submit_invitation_request(SubmitInvitationRequest) -> Result<()>`
 - `decide_invitation_request(DecideInvitationRequest) -> Result<()>`
 - `onboard_installation(OnboardInstallation) -> Result<()>`

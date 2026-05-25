@@ -1,6 +1,6 @@
 use crate::error::WebError;
 use chrono::{DateTime, Utc};
-use domain::{RequestId, RequestState, ShareLink, Slug};
+use domain::{InvitationLink, RequestId, RequestState, Slug};
 use storage::Storage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,8 +10,8 @@ pub(crate) enum PendingRequestPolicy {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PublicShareLinkResolution {
-    Available { slug: Slug, link: ShareLink },
+pub(crate) enum PublicInvitationLinkResolution {
+    Available { slug: Slug, link: InvitationLink },
     PendingRequest { slug: Slug, request_id: RequestId },
 }
 
@@ -35,15 +35,15 @@ impl ResolutionError {
     }
 }
 
-pub(crate) async fn resolve_public_share_link(
+pub(crate) async fn resolve_public_invitation_link(
     storage: &dyn Storage,
     raw_slug: &str,
     now: DateTime<Utc>,
     pending_policy: PendingRequestPolicy,
-) -> Result<PublicShareLinkResolution, ResolutionError> {
+) -> Result<PublicInvitationLinkResolution, ResolutionError> {
     let slug = Slug::from_string(raw_slug.to_string()).map_err(|_| ResolutionError::InvalidSlug)?;
     let link = storage
-        .get_share_link_by_slug(slug.as_str())
+        .get_invitation_link_by_slug(slug.as_str())
         .await
         .map_err(ResolutionError::Storage)?
         .ok_or(ResolutionError::UnknownSlug)?;
@@ -63,24 +63,24 @@ pub(crate) async fn resolve_public_share_link(
         if let Some(request) = requests.into_iter().find(|request| {
             request.requester_id == recipient_id && request.state == RequestState::Pending
         }) {
-            return Ok(PublicShareLinkResolution::PendingRequest {
+            return Ok(PublicInvitationLinkResolution::PendingRequest {
                 slug,
                 request_id: request.id,
             });
         }
     }
 
-    Ok(PublicShareLinkResolution::Available { slug, link })
+    Ok(PublicInvitationLinkResolution::Available { slug, link })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingRequestPolicy, ResolutionError, resolve_public_share_link};
+    use super::{PendingRequestPolicy, ResolutionError, resolve_public_invitation_link};
     use audit::AuditEvent;
     use chrono::{DateTime, Utc};
     use domain::{
-        Account, GithubInvitation, GithubInvitationId, InvitationRequest, Permission, RequestId,
-        RequestState, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
+        Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
+        InvitationLinkRepo, InvitationRequest, Permission, RequestId, RequestState, Slug, User,
     };
     use storage::{GithubInvitationUpdate, RequestDecision, Storage};
 
@@ -90,16 +90,16 @@ mod tests {
 
     #[derive(Default)]
     struct FakeStorage {
-        link: Option<ShareLink>,
+        link: Option<InvitationLink>,
         requests: Vec<InvitationRequest>,
         fail_link_lookup: bool,
         fail_requests_lookup: bool,
         slug_lookup_count: std::sync::Mutex<usize>,
     }
 
-    fn sample_link(slug: &str) -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    fn sample_link(slug: &str) -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::from_string(slug.to_string()).unwrap(),
             installation_id: 1,
             account_id: 9001,
@@ -113,7 +113,7 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
@@ -122,13 +122,13 @@ mod tests {
 
     fn sample_request(
         id: RequestId,
-        share_link_id: ShareLinkId,
+        invitation_link_id: InvitationLinkId,
         requester_id: u64,
         state: RequestState,
     ) -> InvitationRequest {
         InvitationRequest {
             id,
-            share_link_id,
+            invitation_link_id,
             requester_id,
             justification: None,
             state,
@@ -194,38 +194,43 @@ mod tests {
             unimplemented!()
         }
 
-        async fn insert_share_link(&self, _link: &ShareLink) -> storage::Result<()> {
+        async fn insert_invitation_link(&self, _link: &InvitationLink) -> storage::Result<()> {
             unimplemented!()
         }
 
-        async fn mark_share_link_revoked(
+        async fn mark_invitation_link_revoked(
             &self,
-            _id: ShareLinkId,
+            _id: InvitationLinkId,
             _by_user: u64,
             _when: DateTime<Utc>,
         ) -> storage::Result<()> {
             unimplemented!()
         }
 
-        async fn get_share_link_by_id(
+        async fn get_invitation_link_by_id(
             &self,
-            _id: ShareLinkId,
-        ) -> storage::Result<Option<ShareLink>> {
+            _id: InvitationLinkId,
+        ) -> storage::Result<Option<InvitationLink>> {
             unimplemented!()
         }
 
-        async fn get_share_link_by_slug(&self, _slug: &str) -> storage::Result<Option<ShareLink>> {
+        async fn get_invitation_link_by_slug(
+            &self,
+            _slug: &str,
+        ) -> storage::Result<Option<InvitationLink>> {
             *self.slug_lookup_count.lock().unwrap() += 1;
             if self.fail_link_lookup {
-                return Err(storage::Error::Database("share link lookup failed".into()));
+                return Err(storage::Error::Database(
+                    "invitation link lookup failed".into(),
+                ));
             }
             Ok(self.link.clone())
         }
 
-        async fn list_share_links_for_account(
+        async fn list_invitation_links_for_account(
             &self,
             _account_id: u64,
-        ) -> storage::Result<Vec<ShareLink>> {
+        ) -> storage::Result<Vec<InvitationLink>> {
             unimplemented!()
         }
 
@@ -259,7 +264,7 @@ mod tests {
 
         async fn list_requests_for_link(
             &self,
-            _link_id: ShareLinkId,
+            _link_id: InvitationLinkId,
         ) -> storage::Result<Vec<InvitationRequest>> {
             if self.fail_requests_lookup {
                 return Err(storage::Error::Database("request lookup failed".into()));
@@ -311,7 +316,7 @@ mod tests {
     async fn malformed_slug_returns_invalid_slug_without_storage_lookup() {
         let storage = FakeStorage::default();
 
-        let err = resolve_public_share_link(
+        let err = resolve_public_invitation_link(
             &storage,
             "not-a-valid-slug",
             dt("2026-05-20T12:00:00Z"),
@@ -328,7 +333,7 @@ mod tests {
     async fn unknown_slug_returns_unknown_slug_after_storage_lookup() {
         let storage = FakeStorage::default();
 
-        let err = resolve_public_share_link(
+        let err = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -348,7 +353,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let err = resolve_public_share_link(
+        let err = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -380,7 +385,7 @@ mod tests {
                 ..FakeStorage::default()
             };
 
-            let err = resolve_public_share_link(
+            let err = resolve_public_invitation_link(
                 &storage,
                 "abcdEFGH01234567",
                 now,
@@ -408,7 +413,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let resolved = resolve_public_share_link(
+        let resolved = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -419,7 +424,7 @@ mod tests {
 
         assert!(matches!(
             resolved,
-            super::PublicShareLinkResolution::PendingRequest { request_id: id, .. } if id == request_id
+            super::PublicInvitationLinkResolution::PendingRequest { request_id: id, .. } if id == request_id
         ));
     }
 
@@ -432,7 +437,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let resolved = resolve_public_share_link(
+        let resolved = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -443,7 +448,7 @@ mod tests {
 
         assert!(matches!(
             resolved,
-            super::PublicShareLinkResolution::Available { slug, link }
+            super::PublicInvitationLinkResolution::Available { slug, link }
                 if slug.as_str() == "abcdEFGH01234567" && link.id == link_id
         ));
     }
@@ -462,7 +467,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let resolved = resolve_public_share_link(
+        let resolved = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -473,7 +478,7 @@ mod tests {
 
         assert!(matches!(
             resolved,
-            super::PublicShareLinkResolution::Available { .. }
+            super::PublicInvitationLinkResolution::Available { .. }
         ));
     }
 
@@ -491,7 +496,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let resolved = resolve_public_share_link(
+        let resolved = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -502,18 +507,18 @@ mod tests {
 
         assert!(matches!(
             resolved,
-            super::PublicShareLinkResolution::Available { .. }
+            super::PublicInvitationLinkResolution::Available { .. }
         ));
     }
 
     #[tokio::test]
-    async fn share_link_lookup_storage_error_returns_storage_error() {
+    async fn invitation_link_lookup_storage_error_returns_storage_error() {
         let storage = FakeStorage {
             fail_link_lookup: true,
             ..FakeStorage::default()
         };
 
-        let err = resolve_public_share_link(
+        let err = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),
@@ -533,7 +538,7 @@ mod tests {
             ..FakeStorage::default()
         };
 
-        let err = resolve_public_share_link(
+        let err = resolve_public_invitation_link(
             &storage,
             "abcdEFGH01234567",
             dt("2026-05-20T12:00:00Z"),

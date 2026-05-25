@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use audit::AuditEvent;
 use chrono::{DateTime, Utc};
 use domain::{
-    Account, GithubInvitation, GithubInvitationId, InvitationRequest, RequestId, SelectedRepos,
-    ShareLink, ShareLinkId, User,
+    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
+    InvitationRequest, RequestId, SelectedRepos, User,
 };
 use std::future::Future;
 use std::pin::Pin;
@@ -15,8 +15,8 @@ use wasm_bindgen::JsValue;
 use worker::D1Database;
 
 use crate::bind::{
-    GithubInvitationRow, InstallationRow, InvitationRequestRow, ShareLinkJoinRow, UserRow,
-    classify_d1_error, collect_share_links, encode_selected_repos, try_one_share_link,
+    GithubInvitationRow, InstallationRow, InvitationLinkJoinRow, InvitationRequestRow, UserRow,
+    classify_d1_error, collect_invitation_links, encode_selected_repos, try_one_invitation_link,
 };
 
 /// Wraps a `Future` and unsafely implements `Send`.
@@ -290,9 +290,9 @@ impl Storage for D1Storage {
         .await
     }
 
-    // -------- share links --------
+    // -------- invitation links --------
 
-    async fn insert_share_link(&self, link: &ShareLink) -> Result<()> {
+    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()> {
         // Pre-compute all values that need references to `link` before entering wasm_send.
         let id_str = link.id.to_string();
         let slug_str = link.slug.as_str().to_string();
@@ -336,7 +336,7 @@ impl Storage for D1Storage {
             stmts.push(
                 self.db
                     .prepare(
-                        "INSERT INTO share_links
+                        "INSERT INTO invitation_links
                            (id, slug, installation_id, account_id, created_by, created_at,
                             expires_at, max_uses, uses_count, permission, approval_required,
                             internal_note, revoked_at, revoked_by)
@@ -365,7 +365,7 @@ impl Storage for D1Storage {
                 stmts.push(
                     self.db
                         .prepare(
-                            "INSERT INTO share_link_repos (share_link_id, repo_id, repo_full_name)
+                            "INSERT INTO invitation_link_repos (invitation_link_id, repo_id, repo_full_name)
                              VALUES (?1, ?2, ?3)",
                         )
                         .bind(&[
@@ -383,9 +383,9 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn mark_share_link_revoked(
+    async fn mark_invitation_link_revoked(
         &self,
-        id: ShareLinkId,
+        id: InvitationLinkId,
         by_user: u64,
         when: DateTime<Utc>,
     ) -> Result<()> {
@@ -395,7 +395,7 @@ impl Storage for D1Storage {
             let result = self
                 .db
                 .prepare(
-                    "UPDATE share_links SET revoked_at = ?1, revoked_by = ?2
+                    "UPDATE invitation_links SET revoked_at = ?1, revoked_by = ?2
                      WHERE id = ?3 AND revoked_at IS NULL",
                 )
                 .bind(&[
@@ -415,18 +415,21 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>> {
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>> {
         let id_str = id.to_string();
         wasm_send(async {
-            let rows: Vec<ShareLinkJoinRow> = self
+            let rows: Vec<InvitationLinkJoinRow> = self
                 .db
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
                             l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
-                     FROM share_links l
-                     LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                     FROM invitation_links l
+                     LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                      WHERE l.id = ?1
                      ORDER BY r.repo_id",
                 )
@@ -435,25 +438,25 @@ impl Storage for D1Storage {
                 .all()
                 .await
                 .map_err(classify_d1_error)?
-                .results::<ShareLinkJoinRow>()
+                .results::<InvitationLinkJoinRow>()
                 .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
-            try_one_share_link(rows)
+            try_one_invitation_link(rows)
         })
         .await
     }
 
-    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>> {
+    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
         let slug = slug.to_string();
         wasm_send(async {
-            let rows: Vec<ShareLinkJoinRow> = self
+            let rows: Vec<InvitationLinkJoinRow> = self
                 .db
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
                             l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
-                     FROM share_links l
-                     LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                     FROM invitation_links l
+                     LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                      WHERE l.slug = ?1
                      ORDER BY r.repo_id",
                 )
@@ -462,24 +465,27 @@ impl Storage for D1Storage {
                 .all()
                 .await
                 .map_err(classify_d1_error)?
-                .results::<ShareLinkJoinRow>()
+                .results::<InvitationLinkJoinRow>()
                 .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
-            try_one_share_link(rows)
+            try_one_invitation_link(rows)
         })
         .await
     }
 
-    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>> {
         wasm_send(async {
-            let rows: Vec<ShareLinkJoinRow> = self
+            let rows: Vec<InvitationLinkJoinRow> = self
                 .db
                 .prepare(
                     "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
                             l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
                             l.approval_required, l.internal_note, l.revoked_at, l.revoked_by,
                             r.repo_id, r.repo_full_name
-                     FROM share_links l
-                     LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                     FROM invitation_links l
+                     LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                      WHERE l.account_id = ?1
                      ORDER BY l.created_at DESC, l.id, r.repo_id",
                 )
@@ -488,9 +494,9 @@ impl Storage for D1Storage {
                 .all()
                 .await
                 .map_err(classify_d1_error)?
-                .results::<ShareLinkJoinRow>()
+                .results::<InvitationLinkJoinRow>()
                 .map_err(|e| storage::Error::Corrupt(e.to_string()))?;
-            collect_share_links(rows)
+            collect_invitation_links(rows)
         })
         .await
     }
@@ -502,7 +508,7 @@ impl Storage for D1Storage {
         request: &InvitationRequest,
     ) -> Result<()> {
         let id_str = request.id.to_string();
-        let share_link_id_str = request.share_link_id.to_string();
+        let invitation_link_id_str = request.invitation_link_id.to_string();
         let requester_id = request.requester_id;
         let justification = request
             .justification
@@ -530,13 +536,13 @@ impl Storage for D1Storage {
                 .db
                 .prepare(
                     "INSERT INTO invitation_requests
-                       (id, share_link_id, requester_id, justification, state,
+                       (id, invitation_link_id, requester_id, justification, state,
                         decided_by, decided_at, decline_reason, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 )
                 .bind(&[
                     JsValue::from_str(&id_str),
-                    JsValue::from_str(&share_link_id_str),
+                    JsValue::from_str(&invitation_link_id_str),
                     JsValue::from_f64(requester_id as f64),
                     justification,
                     JsValue::from_str(&state_str),
@@ -549,8 +555,8 @@ impl Storage for D1Storage {
 
             let stmt2 = self
                 .db
-                .prepare("UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1")
-                .bind(&[JsValue::from_str(&share_link_id_str)])
+                .prepare("UPDATE invitation_links SET uses_count = uses_count + 1 WHERE id = ?1")
+                .bind(&[JsValue::from_str(&invitation_link_id_str)])
                 .map_err(bind_err)?;
 
             let results = self
@@ -558,7 +564,7 @@ impl Storage for D1Storage {
                 .batch(vec![stmt1, stmt2])
                 .await
                 .map_err(classify_d1_error)?;
-            // results[1] is the UPDATE on share_links; 0 rows_changed means link not found.
+            // results[1] is the UPDATE on invitation_links; 0 rows_changed means link not found.
             if let Some(update_result) = results.get(1) {
                 if rows_changed(update_result)? == 0 {
                     return Err(storage::Error::NotFound);
@@ -616,7 +622,7 @@ impl Storage for D1Storage {
             let row: Option<InvitationRequestRow> = self
                 .db
                 .prepare(
-                    "SELECT id, share_link_id, requester_id, justification, state,
+                    "SELECT id, invitation_link_id, requester_id, justification, state,
                             decided_by, decided_at, decline_reason, created_at
                      FROM invitation_requests WHERE id = ?1",
                 )
@@ -638,10 +644,10 @@ impl Storage for D1Storage {
             let rows: Vec<InvitationRequestRow> = self
                 .db
                 .prepare(
-                    "SELECT r.id, r.share_link_id, r.requester_id, r.justification, r.state,
+                    "SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
                             r.decided_by, r.decided_at, r.decline_reason, r.created_at
                      FROM invitation_requests r
-                     JOIN share_links l ON l.id = r.share_link_id
+                     JOIN invitation_links l ON l.id = r.invitation_link_id
                      WHERE l.account_id = ?1 AND r.state = 'pending'
                      ORDER BY r.created_at",
                 )
@@ -657,15 +663,18 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> {
+    async fn list_requests_for_link(
+        &self,
+        link_id: InvitationLinkId,
+    ) -> Result<Vec<InvitationRequest>> {
         let link_id_str = link_id.to_string();
         wasm_send(async {
             let rows: Vec<InvitationRequestRow> = self
                 .db
                 .prepare(
-                    "SELECT id, share_link_id, requester_id, justification, state,
+                    "SELECT id, invitation_link_id, requester_id, justification, state,
                             decided_by, decided_at, decline_reason, created_at
-                     FROM invitation_requests WHERE share_link_id = ?1
+                     FROM invitation_requests WHERE invitation_link_id = ?1
                      ORDER BY created_at DESC",
                 )
                 .bind(&[JsValue::from_str(&link_id_str)])
@@ -827,7 +836,7 @@ impl Storage for D1Storage {
                             g.state, g.error_message, g.created_at, g.updated_at
                      FROM github_invitations g
                      JOIN invitation_requests r ON r.id = g.invitation_request_id
-                     JOIN share_links l ON l.id = r.share_link_id
+                     JOIN invitation_links l ON l.id = r.invitation_link_id
                      WHERE l.installation_id = ?1
                        AND g.state IN ('sending', 'sent')
                      ORDER BY g.created_at",

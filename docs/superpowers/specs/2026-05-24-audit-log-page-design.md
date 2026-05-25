@@ -45,7 +45,7 @@ Audit log
 Header subtext:
 
 ```text
-Review account activity for share links, requests, and GitHub invitations.
+Review account activity for invitation links, requests, and GitHub invitations.
 ```
 
 Empty-state title:
@@ -57,7 +57,7 @@ Audit log coming soon
 Empty-state body:
 
 ```text
-ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet.
+ghinvite records account activity for invitation links, requests, and GitHub invitations. Console browsing is not available yet.
 ```
 
 Primary action:

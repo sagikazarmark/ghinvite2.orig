@@ -36,12 +36,12 @@ In `crates/web/src/commands.rs`, replace the existing `submit_invitation_request
         let (restate, calls) = RecordingRestateClient::new(Value::Null);
         let commands = RestateCommands::new(Arc::new(restate));
         let request_id = domain::RequestId::new();
-        let share_link_id = domain::ShareLinkId::new();
+        let invitation_link_id = domain::InvitationLinkId::new();
 
         commands
             .submit_invitation_request(SubmitInvitationRequest::new(
                 request_id,
-                share_link_id,
+                invitation_link_id,
                 42,
                 Some("need access".into()),
                 at("2026-05-20T11:00:00Z"),
@@ -60,7 +60,7 @@ In `crates/web/src/commands.rs`, replace the existing `submit_invitation_request
             call.body,
             serde_json::json!({
                 "request_id": request_id.to_string(),
-                "share_link_id": share_link_id.to_string(),
+                "invitation_link_id": invitation_link_id.to_string(),
                 "requester_id": 42,
                 "justification": "need access",
                 "created_at": "2026-05-20T11:00:00Z"
@@ -150,7 +150,7 @@ Expected: FAIL to compile because `SubmitInvitationRequest::new`, `DecideInvitat
 
 - [ ] **Step 1: Add Invitation Request Restate constants**
 
-In `crates/web/src/commands.rs`, add these constants after the existing Share Link constants:
+In `crates/web/src/commands.rs`, add these constants after the existing Invitation Link constants:
 
 ```rust
 const INVITATION_REQUEST_SERVICE: &str = "InvitationRequest";
@@ -160,7 +160,7 @@ const DECIDE_INVITATION_REQUEST_METHOD: &str = "decide";
 
 - [ ] **Step 2: Add an Invitation Request workflow key helper**
 
-In `crates/web/src/commands.rs`, add this helper after `share_link_command_key`:
+In `crates/web/src/commands.rs`, add this helper after `invitation_link_command_key`:
 
 ```rust
 fn invitation_request_command_key(request_id: domain::RequestId) -> String {
@@ -210,7 +210,7 @@ In `crates/web/src/commands.rs`, replace the existing `SubmitInvitationRequest`,
 #[derive(Clone, Debug)]
 pub struct SubmitInvitationRequest {
     pub request_id: domain::RequestId,
-    pub share_link_id: domain::ShareLinkId,
+    pub invitation_link_id: domain::InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -219,14 +219,14 @@ pub struct SubmitInvitationRequest {
 impl SubmitInvitationRequest {
     pub fn new(
         request_id: domain::RequestId,
-        share_link_id: domain::ShareLinkId,
+        invitation_link_id: domain::InvitationLinkId,
         requester_id: u64,
         justification: Option<String>,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             request_id,
-            share_link_id,
+            invitation_link_id,
             requester_id,
             justification,
             created_at,
@@ -237,7 +237,7 @@ impl SubmitInvitationRequest {
 #[derive(Clone, Debug, Serialize)]
 struct SubmitInvitationRequestPayload {
     request_id: domain::RequestId,
-    share_link_id: domain::ShareLinkId,
+    invitation_link_id: domain::InvitationLinkId,
     requester_id: u64,
     justification: Option<String>,
     created_at: DateTime<Utc>,
@@ -247,7 +247,7 @@ impl From<SubmitInvitationRequest> for SubmitInvitationRequestPayload {
     fn from(command: SubmitInvitationRequest) -> Self {
         Self {
             request_id: command.request_id,
-            share_link_id: command.share_link_id,
+            invitation_link_id: command.invitation_link_id,
             requester_id: command.requester_id,
             justification: command.justification,
             created_at: command.created_at,
@@ -391,7 +391,7 @@ In the same error branch, replace the warning log message with this code:
 In `crates/web/src/routes/dashboard.rs`, replace the command import block with this code:
 
 ```rust
-use crate::commands::{CreateShareLink, DecideInvitationRequest, RevokeShareLink};
+use crate::commands::{CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink};
 ```
 
 - [ ] **Step 3: Update approve route**

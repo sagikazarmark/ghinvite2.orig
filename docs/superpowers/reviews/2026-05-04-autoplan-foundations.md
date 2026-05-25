@@ -67,7 +67,7 @@ Also dismissed without serious treatment:
 - **Audit UI deferred to v1.1.** Wrong call. The spec literally claims audit-log-as-system-of-record is a *core differentiator*. Shipping v1 with no way to view it means v1's differentiator is invisible. Move audit UI into v1. **Severity: High.**
 - **Notifications deferred to v2.** Wrong call. "Admin approval required" with no notification means approvals sit for hours/days because the admin doesn't know. The product is *broken without email* the moment `approval_required=true` is set, which the spec implies will be the common case. Either ship email in v1 or remove approval-required from v1 entirely. **Severity: Critical.**
 - **Auto-refresh of recipient pending page deferred to v1.1.** The recipient sees "manual refresh." This is a 2008 UX. **Severity: Medium** — fine if you ship in 6 weeks, terrible if you're benchmarking against modern tools.
-- **Editing share links deferred to v2.** Defensible. Keep deferred.
+- **Editing invitation links deferred to v2.** Defensible. Keep deferred.
 - **Cascade revoke deferred to v2.** Means "revoke" doesn't actually revoke pending downstream invitations. The word "revoke" is misleading. **Severity: High** — either rename it to "stop accepting new requests" or implement cascade in v1.
 - **Quorum / multi-approver to v2.** Defensible.
 
@@ -105,9 +105,9 @@ Also dismissed without serious treatment:
 
 **Trait ↔ impl signature match.** The `Storage` trait declared in Task 13 and the methods implemented across Tasks 16–21 line up cleanly. All 24 methods including parameter order and types verified: `insert_installation(&Account)`, `mark_installation_uninstalled(u64, DateTime<Utc>)`, `update_installation_repos(u64, &SelectedRepos)`, `record_request_decision(&RequestDecision)`, etc. The `unimplemented!` stubs in Task 16 reference the right future task numbers and all get filled in.
 
-**Schema ↔ record types match.** The 8 tables in Task 12 each map 1:1 to a `*Row` in Task 14. Column counts and orders match. Subtle: `share_links` has 14 columns and the `INSERT` in Task 18 binds 14 placeholders; verified.
+**Schema ↔ record types match.** The 8 tables in Task 12 each map 1:1 to a `*Row` in Task 14. Column counts and orders match. Subtle: `invitation_links` has 14 columns and the `INSERT` in Task 18 binds 14 placeholders; verified.
 
-**Suite ↔ trait signature match.** `run_suite` (Task 22) calls every method via the `Storage: 'static + Send + Sync` bound and uses the same newtype wrappers (`NewShareLink`, `NewInvitationRequest`, `RequestDecision`, `GithubInvitationUpdate`). The signature `pub async fn run_suite<S: Storage>(s: S)` is fine.
+**Suite ↔ trait signature match.** `run_suite` (Task 22) calls every method via the `Storage: 'static + Send + Sync` bound and uses the same newtype wrappers (`NewInvitationLink`, `NewInvitationRequest`, `RequestDecision`, `GithubInvitationUpdate`). The signature `pub async fn run_suite<S: Storage>(s: S)` is fine.
 
 **`sqlx::migrate!("../../migrations")` path.** Correct. The macro resolves relative to `CARGO_MANIFEST_DIR` of the *invoking* crate, which is `crates/storage/Cargo.toml`, so `../../migrations` lands at the workspace-root `migrations/` directory.
 
@@ -139,7 +139,7 @@ Also dismissed without serious treatment:
 
 1. **Timestamp precision round-trip.** No test asserts microsecond/nanosecond fidelity. RFC3339 with sqlx-chrono *does* preserve nanoseconds, but nothing in the plan proves that — and D1's text column won't necessarily round-trip the same way.
 
-2. **Foreign-key violations.** The plan enables `foreign_keys(true)` (Task 15) but never tests that, e.g., inserting a `share_link` with `installation_id = 999` fails. Without this test, a regression that turns FKs off goes undetected.
+2. **Foreign-key violations.** The plan enables `foreign_keys(true)` (Task 15) but never tests that, e.g., inserting a `invitation_link` with `installation_id = 999` fails. Without this test, a regression that turns FKs off goes undetected.
 
 3. **Cascade-on-delete-of-user.** What happens if a user_id is referenced by `audit_events.actor_id` and the user row is later deleted? Schema has no `ON DELETE` policy on `audit_events` (and `actor_id` isn't even a `REFERENCES` constraint), so deletion would orphan. Intentional (audit must survive user deletion) but not asserted.
 
@@ -153,11 +153,11 @@ Also dismissed without serious treatment:
 
 **Method grain.** Mostly right. Two concerns:
 
-- `get_share_link_by_id` and `get_share_link_by_slug` both call `list_repos_for_link` after fetching the row → 2 round trips per link. `list_share_links_for_account` is `1 + N` round-trips. **Worth fixing now**, since changing this later requires re-doing the whole storage crate's query layer.
+- `get_invitation_link_by_id` and `get_invitation_link_by_slug` both call `list_repos_for_link` after fetching the row → 2 round trips per link. `list_invitation_links_for_account` is `1 + N` round-trips. **Worth fixing now**, since changing this later requires re-doing the whole storage crate's query layer.
 
 - `insert_invitation_request_and_increment_uses` is the right grain — one transaction, one method. Good.
 
-**Newtype wrappers.** `NewShareLink { link: ShareLink }` and `NewInvitationRequest { request: InvitationRequest }` are essentially noise — they wrap exactly one field of an already-public type. They add ceremony at every call site without conveying additional invariants. `RequestDecision` and `GithubInvitationUpdate` *do* earn their keep: they group fields the impl writes atomically and exclude fields the caller shouldn't touch.
+**Newtype wrappers.** `NewInvitationLink { link: InvitationLink }` and `NewInvitationRequest { request: InvitationRequest }` are essentially noise — they wrap exactly one field of an already-public type. They add ceremony at every call site without conveying additional invariants. `RequestDecision` and `GithubInvitationUpdate` *do* earn their keep: they group fields the impl writes atomically and exclude fields the caller shouldn't touch.
 
 **`audit(&AuditEvent)` write-only-by-design.** Yes — there is no `update_audit`, no `delete_audit`, and no `list_audit` on the trait. A caller cannot misuse it through the public API. *But*: Task 21 adds `debug_list_audit` as `#[cfg(test)] pub async fn` on the inherent impl. This compiles only in test profile, so it can't be misused from production code.
 
@@ -178,7 +178,7 @@ The plan calls itself "TDD-style" but Tasks 3–10 are not TDD. Each task writes
 
 ### 7. Hidden complexity
 
-1. **`ulid::Ulid::from_str` 5× per share link list.** `try_into_domain` parses the ID strings on every read. For a 100-link account dashboard this is 100 ulid parses + 100 sub-list ulid parses. Cheap but real.
+1. **`ulid::Ulid::from_str` 5× per invitation link list.** `try_into_domain` parses the ID strings on every read. For a 100-link account dashboard this is 100 ulid parses + 100 sub-list ulid parses. Cheap but real.
 
 2. **`selected_repos` JSON encoding.** `#[serde(untagged)] enum SelectedRepos { All, Subset(Vec<u64>) }` — but the `encode_selected_repos` helper writes `"all"` (literal string) or a JSON array. That is *not* what `serde_json::to_string` of the untagged enum would produce: serde would emit `"All"` (capitalized) for the unit variant or the array for the tuple variant. The encoder is hand-rolled and the serde derivation is unused for storage. Latent bug if anyone serializes `SelectedRepos` for an audit event.
 
@@ -198,13 +198,13 @@ The plan calls itself "TDD-style" but Tasks 3–10 are not TDD. Each task writes
 
 **High (fix before merging Plan 1's PR):**
 1. `SelectedRepos` serde derivation is broken vs. storage encoding.
-2. N+1 query on share-link reads.
+2. N+1 query on invitation-link reads.
 3. Tests don't verify foreign-key enforcement.
 4. `run_suite` doesn't run on a fresh database per scenario.
 
 **Medium (follow-up issues):**
 1. `max_uses` invariant not enforced at DB level.
-2. `NewShareLink`/`NewInvitationRequest` newtypes are noise.
+2. `NewInvitationLink`/`NewInvitationRequest` newtypes are noise.
 3. `debug_list_audit` lives in the impl, not on the trait.
 4. D1 vs. sqlx FK-default mismatch.
 5. `tests` module is `pub`.
@@ -226,13 +226,13 @@ The plan calls itself "TDD-style" but Tasks 3–10 are not TDD. Each task writes
 
 #### A1. Storage trait ergonomics — **5/10**
 
-The trait surface is honest but uneven. Method-name guessability ranges from "obvious" (`get_user`, `upsert_user`, `audit`) to "you must read the source" (`insert_invitation_request_and_increment_uses`, `list_pending_github_invitations_for_installation`, `mark_share_link_revoked`). The 4-word-plus method names broadcast that the trait is doing more than a CRUD interface — that's correct, but they're hard to type and hard to grep. A future Plan 3 engineer writing a Restate handler will autocomplete `storage.get_share_link_…` and have to choose between `_by_id` and `_by_slug` — fine — but there is no `get_share_link_by_slug_active_only` so they'll forget to filter on `revoked_at IS NULL`/`expires_at` themselves. **High** — recipient lookups will routinely call `is_active` correctly only because that's the only obvious thing to do, but a half-asleep handler could skip it.
+The trait surface is honest but uneven. Method-name guessability ranges from "obvious" (`get_user`, `upsert_user`, `audit`) to "you must read the source" (`insert_invitation_request_and_increment_uses`, `list_pending_github_invitations_for_installation`, `mark_invitation_link_revoked`). The 4-word-plus method names broadcast that the trait is doing more than a CRUD interface — that's correct, but they're hard to type and hard to grep. A future Plan 3 engineer writing a Restate handler will autocomplete `storage.get_invitation_link_…` and have to choose between `_by_id` and `_by_slug` — fine — but there is no `get_invitation_link_by_slug_active_only` so they'll forget to filter on `revoked_at IS NULL`/`expires_at` themselves. **High** — recipient lookups will routinely call `is_active` correctly only because that's the only obvious thing to do, but a half-asleep handler could skip it.
 
-The wrapper types — `NewShareLink { link: ShareLink }`, `NewInvitationRequest { request: InvitationRequest }` — are pure noise. **Medium**: collapse to passing `&ShareLink` directly. `RequestDecision` and `GithubInvitationUpdate` are better — they actually reshape the data, not just box it.
+The wrapper types — `NewInvitationLink { link: InvitationLink }`, `NewInvitationRequest { request: InvitationRequest }` — are pure noise. **Medium**: collapse to passing `&InvitationLink` directly. `RequestDecision` and `GithubInvitationUpdate` are better — they actually reshape the data, not just box it.
 
-The domain/storage boundary leaks: `ShareLink` carries `pub slug: String` instead of the typed `Slug` from `domain::slug`. So a handler reading a share link gets back `String` and has no compile-time guarantee it's a valid base62 slug — undermining the whole point of `Slug` having a `from_string` validator. **High**: change `ShareLink::slug` to `Slug`. The plan implicitly admits this with the comment "Slug stored as String here so the type can travel without rng-tied checks" — but `Slug::from_string` doesn't need an RNG.
+The domain/storage boundary leaks: `InvitationLink` carries `pub slug: String` instead of the typed `Slug` from `domain::slug`. So a handler reading an invitation link gets back `String` and has no compile-time guarantee it's a valid base62 slug — undermining the whole point of `Slug` having a `from_string` validator. **High**: change `InvitationLink::slug` to `Slug`. The plan implicitly admits this with the comment "Slug stored as String here so the type can travel without rng-tied checks" — but `Slug::from_string` doesn't need an RNG.
 
-The `Error` enum is **actionable for `NotFound` and `Conflict`**, but `Database(sqlx::Error)` and `Corrupt(String)` aren't. A handler catching `Conflict("share_link with that id or slug already exists")` has to string-match to know whether to retry with a fresh slug or surface a duplicate-id error. **Medium**: `Conflict` should be `Conflict { kind: ConflictKind }` with `DuplicateSlug`, `DuplicatePendingRequest`, `DuplicateId` variants.
+The `Error` enum is **actionable for `NotFound` and `Conflict`**, but `Database(sqlx::Error)` and `Corrupt(String)` aren't. A handler catching `Conflict("invitation_link with that id or slug already exists")` has to string-match to know whether to retry with a fresh slug or surface a duplicate-id error. **Medium**: `Conflict` should be `Conflict { kind: ConflictKind }` with `DuplicateSlug`, `DuplicatePendingRequest`, `DuplicateId` variants.
 
 #### A2. Domain enum DX — **6/10**
 
@@ -244,7 +244,7 @@ The bigger risk is forgetting to update the `EVENT_TYPES` const when a new event
 
 #### A3. Documentation completeness — **4/10**
 
-This is the weakest area. Public types have docstrings only when they're load-bearing: `Slug` has a 1-line doc — does NOT explain why constant-time compare matters, why the alphabet is the GitHub-allowed set, what entropy it provides. `ShareLink::is_active` has zero docs. `SelectedRepos::All` vs `Subset` — no doc on what "all" means at the GitHub level. The `Storage` trait itself has a 3-line module doc; *no method has a docstring*. A future Plan 3 engineer opening rust-doc for `insert_invitation_request_and_increment_uses` sees a signature and nothing else. **Critical**: every `Storage` method needs a 1-paragraph doc explaining preconditions, error cases, and idempotency.
+This is the weakest area. Public types have docstrings only when they're load-bearing: `Slug` has a 1-line doc — does NOT explain why constant-time compare matters, why the alphabet is the GitHub-allowed set, what entropy it provides. `InvitationLink::is_active` has zero docs. `SelectedRepos::All` vs `Subset` — no doc on what "all" means at the GitHub level. The `Storage` trait itself has a 3-line module doc; *no method has a docstring*. A future Plan 3 engineer opening rust-doc for `insert_invitation_request_and_increment_uses` sees a signature and nothing else. **Critical**: every `Storage` method needs a 1-paragraph doc explaining preconditions, error cases, and idempotency.
 
 #### A4. Test discoverability — **5/10**
 

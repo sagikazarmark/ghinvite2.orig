@@ -12,7 +12,7 @@ The work is a product UI hardening pass, not a visual redesign or design-system 
 
 ## 2. Design Principles
 
-- **Access decisions must feel consequential.** Creating a share link, approving a request, and stopping a link all affect GitHub repository access. The UI must make those consequences visible before the user acts.
+- **Access decisions must feel consequential.** Creating an invitation link, approving a request, and stopping a link all affect GitHub repository access. The UI must make those consequences visible before the user acts.
 - **Keep familiar product affordances.** Use standard forms, tables, buttons, alerts, and navigation. Do not invent custom interaction patterns for basic admin workflows.
 - **Prefer clear copy over decorative styling.** The interface should gain specificity through labels, helper text, summaries, and state copy rather than heavy visual treatment.
 - **Make mobile structurally usable.** The dashboard can remain denser on desktop, but all primary navigation and actions must remain reachable on small screens.
@@ -55,7 +55,7 @@ The form should become a guided access setup rather than a raw config list:
 
 ## 5. Link Detail
 
-The link detail page should become the operational hub for a share link.
+The link detail page should become the operational hub for an invitation link.
 
 ### Required Content
 
@@ -70,7 +70,7 @@ Show these facts without requiring admins to remember what the slug means:
 - Repository list
 - Internal note when present
 
-The existing `ShareLink` domain object already includes most of this data. Render it directly from `LinkDetailPage` where possible rather than introducing a new read model.
+The existing `InvitationLink` domain object already includes most of this data. Render it directly from `LinkDetailPage` where possible rather than introducing a new read model.
 
 ### Actions
 
@@ -93,14 +93,14 @@ The approval queue must give admins enough context to approve safely.
 
 ### Data
 
-Extend `AccountAdminPendingRequestRow` to include share-link context needed by the queue:
+Extend `AccountAdminPendingRequestRow` to include invitation-link context needed by the queue:
 
 - Permission
 - Repositories, or at minimum repository count plus names when available
 - Link expiration
 - Approval mode if useful for clarity
 
-This data is already available while hydrating each pending row from the associated `ShareLink`. Prefer extending the existing row over adding a second storage query path.
+This data is already available while hydrating each pending row from the associated `InvitationLink`. Prefer extending the existing row over adding a second storage query path.
 
 ### UI
 
@@ -199,7 +199,7 @@ Keep the current simple marketing page, but avoid promising an admin-facing audi
 
 ## 13. Acceptance Criteria
 
-- New share links render with `pull` and `30` day expiration defaults.
+- New invitation links render with `pull` and `30` day expiration defaults.
 - The link detail page no longer uses "revoke" in user-facing copy.
 - Link detail shows permission, usage, expiration, approval mode, repositories, and a recipient preview action.
 - Pending request rows include permission and repository context before approve/decline actions.

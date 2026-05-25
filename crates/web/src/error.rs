@@ -24,7 +24,7 @@ pub enum WebError {
     Restate(String),
 
     /// Resource not found / not authorized — surfaced as a generic 404 so we
-    /// don't leak whether the resource exists. Used for share-link routes,
+    /// don't leak whether the resource exists. Used for invitation-link routes,
     /// account routes the user isn't an admin of, etc.
     #[error("not found")]
     NotFound,

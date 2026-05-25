@@ -23,7 +23,7 @@ CREATE TABLE users (
   last_seen_at TEXT NOT NULL
 );
 
-CREATE TABLE share_links (
+CREATE TABLE invitation_links (
   id                 TEXT    PRIMARY KEY,
   slug               TEXT    NOT NULL UNIQUE,
   installation_id    INTEGER NOT NULL REFERENCES installations(installation_id),
@@ -40,18 +40,18 @@ CREATE TABLE share_links (
   revoked_by         INTEGER REFERENCES users(user_id)
 );
 
-CREATE INDEX idx_share_links_account ON share_links(account_id);
+CREATE INDEX idx_invitation_links_account ON invitation_links(account_id);
 
-CREATE TABLE share_link_repos (
-  share_link_id   TEXT    NOT NULL REFERENCES share_links(id),
+CREATE TABLE invitation_link_repos (
+  invitation_link_id   TEXT    NOT NULL REFERENCES invitation_links(id),
   repo_id         INTEGER NOT NULL,
   repo_full_name  TEXT    NOT NULL,
-  PRIMARY KEY (share_link_id, repo_id)
+  PRIMARY KEY (invitation_link_id, repo_id)
 );
 
 CREATE TABLE invitation_requests (
   id              TEXT    PRIMARY KEY,
-  share_link_id   TEXT    NOT NULL REFERENCES share_links(id),
+  invitation_link_id   TEXT    NOT NULL REFERENCES invitation_links(id),
   requester_id    INTEGER NOT NULL REFERENCES users(user_id),
   justification   TEXT,
   state           TEXT    NOT NULL,
@@ -62,9 +62,9 @@ CREATE TABLE invitation_requests (
 );
 
 CREATE UNIQUE INDEX idx_one_pending_per_link_per_user
-  ON invitation_requests(share_link_id, requester_id) WHERE state = 'pending';
+  ON invitation_requests(invitation_link_id, requester_id) WHERE state = 'pending';
 
-CREATE INDEX idx_requests_link ON invitation_requests(share_link_id);
+CREATE INDEX idx_requests_link ON invitation_requests(invitation_link_id);
 
 CREATE TABLE github_invitations (
   id                     TEXT    PRIMARY KEY,

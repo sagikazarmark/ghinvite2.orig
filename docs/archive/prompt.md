@@ -21,13 +21,13 @@ If it was expired, invitation is marked as expired.
 
 An invitation can also be revoked (is this the right word?) by an admin (while it's still pending). (THis may be problematic, because we may not have up-to-date information if an invitation was accepted or not, more about this later)
 
-A share link can also be revoked (is this the right word?) by an admin. In the future, the admin may also select cancelling/revoking any pending invitations that haven't been accepted yet. Probably not needed in v1.
+An invitation link can also be revoked (is this the right word?) by an admin. In the future, the admin may also select cancelling/revoking any pending invitations that haven't been accepted yet. Probably not needed in v1.
 
 In v1, I don't think editing links (eg. updating max use, updating expiration) is necessary (may even be less secure). Admins can always create new links.
 
-Technically, there is no difference between admins and users: everyone can use the platform for invitation. There is an "admin" dashboard for authorizing the app and managing share links. When users go to a share link, they only see that, no dashboard is involved.
+Technically, there is no difference between admins and users: everyone can use the platform for invitation. There is an "admin" dashboard for authorizing the app and managing invitation links. When users go to an invitation link, they only see that, no dashboard is involved.
 
-Speaking of managing share links: admins can create and revoke. But they can also see who used those links (in some view).
+Speaking of managing invitation links: admins can create and revoke. But they can also see who used those links (in some view).
 
 Also (and this is very important): there needs to be an audit log in the app to see when someone requested an invite, who and when approved it (if approval was necessary), when the invitation was accepted (if we have that info), etc.
 
@@ -46,17 +46,17 @@ I have two concrete ideas:
 
 Most of the invitation logic explained above can be implemented using Restate.
 
-A share link can be modeled as a virtual object tracking uses, expiration, etc.
+An invitation link can be modeled as a virtual object tracking uses, expiration, etc.
 
 An invitation request can be a call on that object that kicks off a workflow: listens for external events (revocation, approval, GitHub webhook)
 
-The biggest question: Should Restate be the single source of truth for information for the frontend (ie. talk to restate directly to list share links), or maybe have a database that tracks a projection state (written by restate exclusively). (A database is necessary anyway for audit logs)
+The biggest question: Should Restate be the single source of truth for information for the frontend (ie. talk to restate directly to list invitation links), or maybe have a database that tracks a projection state (written by restate exclusively). (A database is necessary anyway for audit logs)
 
 For the frontend: I'd like to use dioxus with tailwindcss and daisyUI, combined with tower-sessions for user login, octocrab for talking to the github API, oauth2 crate for gh oauth login.
 
-User gets do the dashboard. At the top, org selector. In empty state: authorize? Otherwise a global list of share links?
+User gets do the dashboard. At the top, org selector. In empty state: authorize? Otherwise a global list of invitation links?
 
-Select an org, get to share links. Be able to go to audit log.
+Select an org, get to invitation links. Be able to go to audit log.
 
 
 Help me turn these ideas into:

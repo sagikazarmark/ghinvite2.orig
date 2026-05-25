@@ -659,7 +659,7 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("console-frame"));
     assert!(text.contains("Audit log coming soon"));
-    assert!(text.contains("ghinvite records account activity for share links, requests, and GitHub invitations. Console browsing is not available yet."));
+    assert!(text.contains("ghinvite records account activity for invitation links, requests, and GitHub invitations. Console browsing is not available yet."));
     assert!(text.contains("Back to overview"));
     assert!(text.contains("href=\"/console/accounts/acme\""));
     assert!(text.contains("href=\"/console/accounts/acme/audit\""));

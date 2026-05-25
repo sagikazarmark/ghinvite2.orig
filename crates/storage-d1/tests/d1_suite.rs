@@ -37,8 +37,8 @@ fn d1_schema_tables_exist() {
     for table in [
         "installations",
         "users",
-        "share_links",
-        "share_link_repos",
+        "invitation_links",
+        "invitation_link_repos",
         "invitation_requests",
         "github_invitations",
         "audit_events",

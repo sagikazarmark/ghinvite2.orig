@@ -721,7 +721,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                             div { class: "mac-panel p-6",
                                 p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45", "Console" }
                                 h1 { class: "mt-3 text-2xl font-semibold tracking-tight", "No accounts connected" }
-                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating share links." }
+                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating invitation links." }
                                 div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
                                     a { class: "btn btn-primary", href: "/install", "Install GitHub App" }
                                     a { class: "btn btn-ghost", href: "/", "Go home" }
@@ -1073,7 +1073,7 @@ async fn signed_in_admin_with_existing_installation_stays_on_home() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Share Link Code"));
+    assert!(text.contains("Invitation Code"));
     assert!(text.contains("Create invitation link"));
     assert!(text.contains("href=\"/console\""));
     assert!(text.contains("Console"));
@@ -1166,7 +1166,7 @@ const SHARE_CODE_SCRIPT: &str = r#"
     var message = document.querySelector('[data-share-code-message]');
     var code = input ? input.value.trim() : '';
     if (!code) {
-      if (message) message.textContent = 'Enter a share link code first.';
+      if (message) message.textContent = 'Enter an invitation code first.';
       if (input) input.focus();
       return;
     }
@@ -1202,9 +1202,9 @@ Some(_) => rsx! {
                 h1 { class: "text-2xl font-semibold tracking-tight", "Open an invitation" }
                 p { class: "mt-2 text-sm leading-6 text-base-content/70", "Enter the code from an invitation link to request repository access." }
                 div { class: "form-control mt-5 gap-2",
-                    label { class: "label", r#for: "share-link-code", span { class: "label-text font-medium", "Share Link Code" } }
+                    label { class: "label", r#for: "invitation-link-code", span { class: "label-text font-medium", "Invitation Code" } }
                     div { class: "flex flex-col gap-2 sm:flex-row",
-                        input { id: "share-link-code", class: "input input-bordered flex-1", placeholder: "Paste code", "data-share-code-input": "true" }
+                        input { id: "invitation-link-code", class: "input input-bordered flex-1", placeholder: "Paste code", "data-share-code-input": "true" }
                         button { r#type: "button", class: "btn btn-primary", "data-open-share-code": "true", "Open invitation" }
                     }
                     p { class: "min-h-5 text-sm text-error", "aria-live": "polite", "data-share-code-message": "true" }
@@ -1214,7 +1214,7 @@ Some(_) => rsx! {
             div { class: "flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between",
                 div {
                     h2 { class: "text-base font-semibold", "Create an invitation link" }
-                    p { class: "mt-1 text-sm text-base-content/65", "Open the console to create a share link for your account." }
+                    p { class: "mt-1 text-sm text-base-content/65", "Open the console to create an invitation link for your account." }
                 }
                 a { class: "btn btn-outline", href: "/console", "Create invitation link" }
             }

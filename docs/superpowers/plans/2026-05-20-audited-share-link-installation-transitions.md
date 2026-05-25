@@ -1,10 +1,10 @@
-# Audited Share Link And Installation Transitions Implementation Plan
+# Audited Invitation Link And Installation Transitions Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Move Share Link and Installation audit-event construction behind transition-level behavior while preserving existing lifecycle semantics.
+**Goal:** Move Invitation Link and Installation audit-event construction behind transition-level behavior while preserving existing lifecycle semantics.
 
-**Architecture:** Keep the existing Restate service modules and public handler payloads. Add small transition functions inside `share_link.rs` and `installation.rs` that own the state write plus audit event for each lifecycle transition, then keep the existing `*_logic` functions as thin delegates. Tests assert both persisted state and audit events through the existing in-memory SQLite storage fixture.
+**Architecture:** Keep the existing Restate service modules and public handler payloads. Add small transition functions inside `invitation_link.rs` and `installation.rs` that own the state write plus audit event for each lifecycle transition, then keep the existing `*_logic` functions as thin delegates. Tests assert both persisted state and audit events through the existing in-memory SQLite storage fixture.
 
 **Tech Stack:** Rust 2024 workspace, Restate SDK handler modules, `storage::SqlxStorage::in_memory`, `audit::AuditEvent`, `cargo test`, `cargo fmt`.
 
@@ -12,7 +12,7 @@
 
 ## Scope Check
 
-This plan covers one coherent Restate-side architecture-deepening slice: audited Share Link transitions and audited Installation transitions. It does not include Invitation Request, GitHub Invitation, Reconcile, web routes, storage schema changes, or UI changes.
+This plan covers one coherent Restate-side architecture-deepening slice: audited Invitation Link transitions and audited Installation transitions. It does not include Invitation Request, GitHub Invitation, Reconcile, web routes, storage schema changes, or UI changes.
 
 Do not commit unless the maintainer explicitly authorizes commits in the active session.
 
@@ -21,9 +21,9 @@ Execution note: checklist items below are reusable task instructions. The active
 ## File Structure
 
 - Modify `crates/restate-svc/src/test_support.rs`: add a test fixture that returns both `AppState` and the concrete `SqlxStorage` so tests can read audit events without changing production `AppState`.
-- Modify `crates/restate-svc/src/share_link.rs`: add Share Link transition tests, add `create_share_link_transition`, `revoke_share_link_transition`, and `expire_share_link_transition`, then delegate existing logic functions to them.
+- Modify `crates/restate-svc/src/invitation_link.rs`: add Invitation Link transition tests, add `create_invitation_link_transition`, `revoke_invitation_link_transition`, and `expire_invitation_link_transition`, then delegate existing logic functions to them.
 - Modify `crates/restate-svc/src/installation.rs`: add Installation transition tests, add `onboard_installation_transition`, `change_installation_repos_transition`, and `uninstall_installation_transition`, then delegate existing logic functions to them.
-- Verify `docs/superpowers/specs/2026-05-20-audited-share-link-installation-transitions-design.md`: no code changes needed, but use it as the source of acceptance criteria.
+- Verify `docs/superpowers/specs/2026-05-20-audited-invitation-link-installation-transitions-design.md`: no code changes needed, but use it as the source of acceptance criteria.
 
 ### Task 1: Concrete Audit-Readable Test Fixture
 
@@ -61,14 +61,14 @@ Run: `git diff -- crates/restate-svc/src/test_support.rs`
 
 Expected: Diff contains only `fixture_state_with_storage` and no production code changes.
 
-### Task 2: Share Link Transition Tests
+### Task 2: Invitation Link Transition Tests
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
 - [ ] **Step 1: Update test imports**
 
-In the `#[cfg(test)] mod tests` block in `crates/restate-svc/src/share_link.rs`, replace the existing test support import:
+In the `#[cfg(test)] mod tests` block in `crates/restate-svc/src/invitation_link.rs`, replace the existing test support import:
 
 ```rust
 use crate::test_support::{dt, fixture_state};
@@ -81,7 +81,7 @@ use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
 use ::audit::{ActorKind, EventType, TargetKind};
 ```
 
-- [ ] **Step 2: Add an audit-read helper to Share Link tests**
+- [ ] **Step 2: Add an audit-read helper to Invitation Link tests**
 
 In the same test module, add this helper after `sample_input()`:
 
@@ -104,13 +104,13 @@ async fn create_transition_inserts_link_and_audits() {
     let (state, storage) = fixture_state_with_storage().await;
     seed_installation_and_user(&state).await;
 
-    let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+    let out = create_invitation_link_transition(&state, &sample_input(), Some("req-create".into()))
         .await
         .unwrap();
 
     let link = state
         .storage
-        .get_share_link_by_id(out.link_id)
+        .get_invitation_link_by_id(out.link_id)
         .await
         .unwrap()
         .unwrap();
@@ -120,10 +120,10 @@ async fn create_transition_inserts_link_and_audits() {
     let audits = audit_events(&storage, 100).await;
     assert_eq!(audits.len(), 1);
     let event = &audits[0];
-    assert_eq!(event.event_type, EventType::ShareLinkCreated);
+    assert_eq!(event.event_type, EventType::InvitationLinkCreated);
     assert_eq!(event.actor_kind, ActorKind::User);
     assert_eq!(event.actor_id, Some(7));
-    assert_eq!(event.target_kind, TargetKind::ShareLink);
+    assert_eq!(event.target_kind, TargetKind::InvitationLink);
     assert_eq!(event.target_id, out.link_id.to_string());
     assert_eq!(event.request_id.as_deref(), Some("req-create"));
     assert_eq!(event.metadata.get("permission"), Some(&serde_json::json!("pull")));
@@ -145,11 +145,11 @@ Add this test after `revoke_marks_and_audits`:
 async fn revoke_transition_marks_and_audits_once() {
     let (state, storage) = fixture_state_with_storage().await;
     seed_installation_and_user(&state).await;
-    let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+    let out = create_invitation_link_transition(&state, &sample_input(), Some("req-create".into()))
         .await
         .unwrap();
 
-    revoke_share_link_transition(
+    revoke_invitation_link_transition(
         &state,
         &RevokeLinkInput {
             link_id: out.link_id,
@@ -163,14 +163,14 @@ async fn revoke_transition_marks_and_audits_once() {
 
     let link = state
         .storage
-        .get_share_link_by_id(out.link_id)
+        .get_invitation_link_by_id(out.link_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(link.revoked_by, Some(7));
     assert_eq!(link.revoked_at, Some(dt("2026-05-04T13:00:00Z")));
 
-    revoke_share_link_transition(
+    revoke_invitation_link_transition(
         &state,
         &RevokeLinkInput {
             link_id: out.link_id,
@@ -185,13 +185,13 @@ async fn revoke_transition_marks_and_audits_once() {
     let audits = audit_events(&storage, 100).await;
     let revoked: Vec<_> = audits
         .iter()
-        .filter(|event| event.event_type == EventType::ShareLinkRevoked)
+        .filter(|event| event.event_type == EventType::InvitationLinkRevoked)
         .collect();
     assert_eq!(revoked.len(), 1);
     let event = revoked[0];
     assert_eq!(event.actor_kind, ActorKind::User);
     assert_eq!(event.actor_id, Some(7));
-    assert_eq!(event.target_kind, TargetKind::ShareLink);
+    assert_eq!(event.target_kind, TargetKind::InvitationLink);
     assert_eq!(event.target_id, out.link_id.to_string());
     assert_eq!(event.request_id.as_deref(), Some("req-revoke"));
     assert_eq!(event.metadata.get("by_user"), Some(&serde_json::json!(7)));
@@ -207,12 +207,12 @@ Add this test after `tick_expiration_emits_when_past_expiry`:
 async fn expire_transition_emits_audit_without_state_mutation() {
     let (state, storage) = fixture_state_with_storage().await;
     seed_installation_and_user(&state).await;
-    let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+    let out = create_invitation_link_transition(&state, &sample_input(), Some("req-create".into()))
         .await
         .unwrap();
     let expired_at = dt("2026-06-03T12:00:00Z");
 
-    expire_share_link_transition(
+    expire_invitation_link_transition(
         &state,
         &TickExpirationInput {
             link_id: out.link_id,
@@ -225,7 +225,7 @@ async fn expire_transition_emits_audit_without_state_mutation() {
 
     let link = state
         .storage
-        .get_share_link_by_id(out.link_id)
+        .get_invitation_link_by_id(out.link_id)
         .await
         .unwrap()
         .unwrap();
@@ -236,11 +236,11 @@ async fn expire_transition_emits_audit_without_state_mutation() {
     let audits = audit_events(&storage, 100).await;
     let event = audits
         .iter()
-        .find(|event| event.event_type == EventType::ShareLinkExpired)
+        .find(|event| event.event_type == EventType::InvitationLinkExpired)
         .expect("expiration should emit audit event");
     assert_eq!(event.actor_kind, ActorKind::System);
     assert_eq!(event.actor_id, None);
-    assert_eq!(event.target_kind, TargetKind::ShareLink);
+    assert_eq!(event.target_kind, TargetKind::InvitationLink);
     assert_eq!(event.target_id, out.link_id.to_string());
     assert_eq!(event.request_id.as_deref(), Some("req-expire"));
     assert_eq!(
@@ -259,11 +259,11 @@ Add this test after `tick_expiration_skips_revoked_link`:
 async fn expire_transition_skips_early_and_revoked_links_without_audit() {
     let (state, storage) = fixture_state_with_storage().await;
     seed_installation_and_user(&state).await;
-    let out = create_share_link_transition(&state, &sample_input(), Some("req-create".into()))
+    let out = create_invitation_link_transition(&state, &sample_input(), Some("req-create".into()))
         .await
         .unwrap();
 
-    expire_share_link_transition(
+    expire_invitation_link_transition(
         &state,
         &TickExpirationInput {
             link_id: out.link_id,
@@ -274,7 +274,7 @@ async fn expire_transition_skips_early_and_revoked_links_without_audit() {
     .await
     .unwrap();
 
-    revoke_share_link_transition(
+    revoke_invitation_link_transition(
         &state,
         &RevokeLinkInput {
             link_id: out.link_id,
@@ -286,7 +286,7 @@ async fn expire_transition_skips_early_and_revoked_links_without_audit() {
     .await
     .unwrap();
 
-    expire_share_link_transition(
+    expire_invitation_link_transition(
         &state,
         &TickExpirationInput {
             link_id: out.link_id,
@@ -300,26 +300,26 @@ async fn expire_transition_skips_early_and_revoked_links_without_audit() {
     let audits = audit_events(&storage, 100).await;
     let expired_count = audits
         .iter()
-        .filter(|event| event.event_type == EventType::ShareLinkExpired)
+        .filter(|event| event.event_type == EventType::InvitationLinkExpired)
         .count();
     assert_eq!(expired_count, 0);
 }
 ```
 
-- [ ] **Step 7: Run Share Link tests and verify RED**
+- [ ] **Step 7: Run Invitation Link tests and verify RED**
 
-Run: `cargo test -p restate-svc share_link::tests::create_transition_inserts_link_and_audits`
+Run: `cargo test -p restate-svc invitation_link::tests::create_transition_inserts_link_and_audits`
 
-Expected: FAIL because `create_share_link_transition` is not defined yet.
+Expected: FAIL because `create_invitation_link_transition` is not defined yet.
 
-### Task 3: Share Link Transition Implementation
+### Task 3: Invitation Link Transition Implementation
 
 **Files:**
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 
-- [ ] **Step 1: Add Share Link transition functions and delegate existing logic**
+- [ ] **Step 1: Add Invitation Link transition functions and delegate existing logic**
 
-In `crates/restate-svc/src/share_link.rs`, replace the current `create_logic`, `revoke_logic`, and `tick_expiration_logic` function bodies with this transition section:
+In `crates/restate-svc/src/invitation_link.rs`, replace the current `create_logic`, `revoke_logic`, and `tick_expiration_logic` function bodies with this transition section:
 
 ```rust
 /// Pure logic: generate a slug, write the link + repos rows, emit audit.
@@ -328,19 +328,19 @@ pub async fn create_logic(
     input: &CreateLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<CreateLinkOutput> {
-    create_share_link_transition(state, input, request_id).await
+    create_invitation_link_transition(state, input, request_id).await
 }
 
-async fn create_share_link_transition(
+async fn create_invitation_link_transition(
     state: &AppState,
     input: &CreateLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<CreateLinkOutput> {
     let mut rng = OsRng;
     let slug = Slug::generate(&mut rng);
-    let link_id = ShareLinkId::new();
+    let link_id = InvitationLinkId::new();
 
-    let link = DomainShareLink {
+    let link = DomainInvitationLink {
         id: link_id,
         slug: slug.clone(),
         installation_id: input.installation_id,
@@ -358,14 +358,14 @@ async fn create_share_link_transition(
         repos: input.repos.clone(),
     };
 
-    state.storage.insert_share_link(&link).await?;
+    state.storage.insert_invitation_link(&link).await?;
 
     crate::audit::emit(
         state,
         input.account_id,
-        EventType::ShareLinkCreated,
+        EventType::InvitationLinkCreated,
         Actor::User(input.created_by),
-        Target::share_link(link_id),
+        Target::invitation_link(link_id),
         serde_json::json!({
             "permission": input.permission.to_string(),
             "approval_required": input.approval_required,
@@ -389,17 +389,17 @@ pub async fn revoke_logic(
     input: &RevokeLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
-    revoke_share_link_transition(state, input, request_id).await
+    revoke_invitation_link_transition(state, input, request_id).await
 }
 
-async fn revoke_share_link_transition(
+async fn revoke_invitation_link_transition(
     state: &AppState,
     input: &RevokeLinkInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
     match state
         .storage
-        .mark_share_link_revoked(input.link_id, input.by_user, input.when)
+        .mark_invitation_link_revoked(input.link_id, input.by_user, input.when)
         .await
     {
         Ok(()) => (),
@@ -409,7 +409,7 @@ async fn revoke_share_link_transition(
 
     let link = state
         .storage
-        .get_share_link_by_id(input.link_id)
+        .get_invitation_link_by_id(input.link_id)
         .await?
         .ok_or(crate::error::HandlerError::Storage(
             storage::Error::NotFound,
@@ -418,9 +418,9 @@ async fn revoke_share_link_transition(
     crate::audit::emit(
         state,
         link.account_id,
-        EventType::ShareLinkRevoked,
+        EventType::InvitationLinkRevoked,
         Actor::User(input.by_user),
-        Target::share_link(input.link_id),
+        Target::invitation_link(input.link_id),
         serde_json::json!({"by_user": input.by_user}),
         request_id,
     )
@@ -428,24 +428,24 @@ async fn revoke_share_link_transition(
 }
 
 /// Pure logic: if the link is past its expiry and not already revoked, emit
-/// `share_link.expired`. No state mutation — `is_active(now)` already reflects
+/// `invitation_link.expired`. No state mutation — `is_active(now)` already reflects
 /// the expiry. Idempotent under repeated calls.
 pub async fn tick_expiration_logic(
     state: &AppState,
     input: &TickExpirationInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
-    expire_share_link_transition(state, input, request_id).await
+    expire_invitation_link_transition(state, input, request_id).await
 }
 
-async fn expire_share_link_transition(
+async fn expire_invitation_link_transition(
     state: &AppState,
     input: &TickExpirationInput,
     request_id: Option<String>,
 ) -> crate::error::Result<()> {
     let link = state
         .storage
-        .get_share_link_by_id(input.link_id)
+        .get_invitation_link_by_id(input.link_id)
         .await?
         .ok_or(crate::error::HandlerError::Storage(
             storage::Error::NotFound,
@@ -467,9 +467,9 @@ async fn expire_share_link_transition(
     crate::audit::emit(
         state,
         link.account_id,
-        EventType::ShareLinkExpired,
+        EventType::InvitationLinkExpired,
         Actor::System,
-        Target::share_link(input.link_id),
+        Target::invitation_link(input.link_id),
         serde_json::json!({"expired_at": input.at.to_rfc3339()}),
         request_id,
     )
@@ -477,33 +477,33 @@ async fn expire_share_link_transition(
 }
 ```
 
-- [ ] **Step 2: Run focused Share Link transition tests**
+- [ ] **Step 2: Run focused Invitation Link transition tests**
 
-Run: `cargo test -p restate-svc share_link::tests::create_transition_inserts_link_and_audits`
-
-Expected: PASS.
-
-Run: `cargo test -p restate-svc share_link::tests::revoke_transition_marks_and_audits_once`
+Run: `cargo test -p restate-svc invitation_link::tests::create_transition_inserts_link_and_audits`
 
 Expected: PASS.
 
-Run: `cargo test -p restate-svc share_link::tests::expire_transition_emits_audit_without_state_mutation`
+Run: `cargo test -p restate-svc invitation_link::tests::revoke_transition_marks_and_audits_once`
 
 Expected: PASS.
 
-Run: `cargo test -p restate-svc share_link::tests::expire_transition_skips_early_and_revoked_links_without_audit`
+Run: `cargo test -p restate-svc invitation_link::tests::expire_transition_emits_audit_without_state_mutation`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run all Share Link tests**
+Run: `cargo test -p restate-svc invitation_link::tests::expire_transition_skips_early_and_revoked_links_without_audit`
 
-Run: `cargo test -p restate-svc share_link`
+Expected: PASS.
 
-Expected: PASS. Existing Share Link behavior remains unchanged and new transition-level audit assertions pass.
+- [ ] **Step 3: Run all Invitation Link tests**
 
-- [ ] **Step 4: Inspect Share Link diff**
+Run: `cargo test -p restate-svc invitation_link`
 
-Run: `git diff -- crates/restate-svc/src/share_link.rs`
+Expected: PASS. Existing Invitation Link behavior remains unchanged and new transition-level audit assertions pass.
+
+- [ ] **Step 4: Inspect Invitation Link diff**
+
+Run: `git diff -- crates/restate-svc/src/invitation_link.rs`
 
 Expected: Diff adds transition tests, adds transition functions, and keeps existing `*_logic` functions as the public async seam.
 
@@ -909,14 +909,14 @@ Expected: Diff adds transition tests, adds transition functions, and keeps exist
 
 **Files:**
 - Verify: `crates/restate-svc/src/test_support.rs`
-- Verify: `crates/restate-svc/src/share_link.rs`
+- Verify: `crates/restate-svc/src/invitation_link.rs`
 - Verify: `crates/restate-svc/src/installation.rs`
-- Verify: `docs/superpowers/specs/2026-05-20-audited-share-link-installation-transitions-design.md`
-- Verify: `docs/superpowers/plans/2026-05-20-audited-share-link-installation-transitions.md`
+- Verify: `docs/superpowers/specs/2026-05-20-audited-invitation-link-installation-transitions-design.md`
+- Verify: `docs/superpowers/plans/2026-05-20-audited-invitation-link-installation-transitions.md`
 
-- [ ] **Step 1: Run targeted Share Link tests**
+- [ ] **Step 1: Run targeted Invitation Link tests**
 
-Run: `cargo test -p restate-svc share_link`
+Run: `cargo test -p restate-svc invitation_link`
 
 Expected: PASS.
 
@@ -940,18 +940,18 @@ Expected: PASS. If formatting fails, run `cargo fmt`, then rerun `cargo fmt --ch
 
 - [ ] **Step 5: Search for direct audit construction in the affected lifecycle functions**
 
-Run: `rg "crate::audit::emit" crates/restate-svc/src/share_link.rs crates/restate-svc/src/installation.rs`
+Run: `rg "crate::audit::emit" crates/restate-svc/src/invitation_link.rs crates/restate-svc/src/installation.rs`
 
 Expected: The remaining `crate::audit::emit` calls in these two files appear inside `*_transition` functions, not inside `*_logic` function bodies.
 
 - [ ] **Step 6: Review final diff**
 
-Run: `git diff -- crates/restate-svc/src/test_support.rs crates/restate-svc/src/share_link.rs crates/restate-svc/src/installation.rs docs/superpowers/specs/2026-05-20-audited-share-link-installation-transitions-design.md docs/superpowers/plans/2026-05-20-audited-share-link-installation-transitions.md`
+Run: `git diff -- crates/restate-svc/src/test_support.rs crates/restate-svc/src/invitation_link.rs crates/restate-svc/src/installation.rs docs/superpowers/specs/2026-05-20-audited-invitation-link-installation-transitions-design.md docs/superpowers/plans/2026-05-20-audited-invitation-link-installation-transitions.md`
 
-Expected: Diff is limited to the spec, this plan, test support, Share Link transition tests and functions, and Installation transition tests and functions. No storage schema, migration, web, GitHub adapter, or UI files are changed.
+Expected: Diff is limited to the spec, this plan, test support, Invitation Link transition tests and functions, and Installation transition tests and functions. No storage schema, migration, web, GitHub adapter, or UI files are changed.
 
 ## Self-Review Notes
 
-- Spec coverage: Task 2 and Task 3 cover Share Link create, revoke, and expiration transitions with audit event assertions. Task 4 and Task 5 cover Installation onboarding, repository-selection changes, and uninstall transitions with audit event assertions. Task 6 verifies formatting, tests, and audit-call locality.
+- Spec coverage: Task 2 and Task 3 cover Invitation Link create, revoke, and expiration transitions with audit event assertions. Task 4 and Task 5 cover Installation onboarding, repository-selection changes, and uninstall transitions with audit event assertions. Task 6 verifies formatting, tests, and audit-call locality.
 - Open-item scan: The plan contains no deferred implementation items. Every code-changing step includes the exact code block to add or replace.
 - Type consistency: Transition names, input types, event types, actor kinds, target kinds, metadata keys, and request id assertions match the current `restate-svc`, `audit`, `domain`, and `storage` APIs.

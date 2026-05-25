@@ -10,7 +10,7 @@ The decomposition was agreed during brainstorming on 2026-05-04. Order is fixed:
 |---|------|----------|--------|----------|------------|
 | 1 | **Foundations** | `2026-05-04-ghinvite-foundations.md` | Implemented | `crates/domain` (types, IDs, slug, state machines), `crates/audit` (event types), `crates/storage` (trait + sqlx impl), migrations, parameterized test suite | none |
 | 2 | **GitHub clients** | `2026-05-04-ghinvite-github-clients.md` | Implemented | `crates/github` — user-OAuth client (oauth2 crate), installation-token client (JWT signing + token cache), HMAC verification helper, mock transport for tests | 1 |
-| 3 | **Restate handlers** | `2026-05-04-ghinvite-restate-handlers.md` | Implemented | `crates/restate-svc` — `Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile` services with full workflows + tests | 1, 2 |
+| 3 | **Restate handlers** | `2026-05-04-ghinvite-restate-handlers.md` | Implemented | `crates/restate-svc` — `Installation`, `InvitationLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile` services with full workflows + tests | 1, 2 |
 | 4 | **Web binary core** | `2026-05-04-ghinvite-web-binary.md` | Implemented | `crates/web` — axum 0.8 app, tower-sessions, OAuth login + install flow, three Dioxus 0.7 SSR layouts (Home / Dashboard / Invitation), Tailwind v4 + DaisyUI v5 build, home page, 501 stubs for Plans 5–6 | 1, 2 |
 | 5 | **Dashboard** | `2026-05-04-ghinvite-dashboard.md` | Implemented | Account dashboard + link CRUD form + revoke + approval queue + settings page; form POSTs routed to Restate via ingress | 4, 3 |
 | 6 | **Recipient flow** | `2026-05-04-ghinvite-recipient-flow.md` | Implemented | `/i/:slug` landing + request submission + pending page + webhook HMAC-verified receiver; route smoke tests including valid/bad HMAC coverage | 4, 3 |
@@ -27,7 +27,7 @@ If you'd rather speculate further out — for example to estimate total effort, 
 
 These follow the spec (see `../specs/2026-05-04-ghinvite-v1-design.md`):
 
-- **In v1**: GitHub App login + install (org and personal account), repo-collaborator invites with permission level, share-link creation with expiration / max-uses / approval-required, recipient flow with optional justification, admin approval queue, webhook reconciliation primary + daily polling failsafe, audit *capture* (no UI), 5 terminal states.
+- **In v1**: GitHub App login + install (org and personal account), repo-collaborator invites with permission level, invitation-link creation with expiration / max-uses / approval-required, recipient flow with optional justification, admin approval queue, webhook reconciliation primary + daily polling failsafe, audit *capture* (no UI), 5 terminal states.
 - **v1.1**: audit log UI + CSV, auto-refresh recipient pending page.
 - **v2+**: notifications, cascade revoke, link editing, quorum approval, team/org membership, app-internal admin roles, GDPR redaction tooling.
 

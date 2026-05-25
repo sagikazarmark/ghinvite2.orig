@@ -4,7 +4,9 @@ pub use wasm_impl::*;
 
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_impl {
-    use domain::{Account, AccountType, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User};
+    use domain::{
+        Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, Slug, User,
+    };
     use serde::Deserialize;
     use std::collections::BTreeMap;
     use std::str::FromStr;
@@ -15,12 +17,12 @@ pub mod wasm_impl {
     pub fn classify_d1_error(e: worker::Error) -> Error {
         let msg = e.to_string();
         if msg.contains("UNIQUE constraint failed") {
-            if msg.contains("share_links.slug") {
+            if msg.contains("invitation_links.slug") {
                 return Error::Conflict(ConflictKind::DuplicateSlug);
             }
             // DuplicatePendingRequest: partial unique index covers BOTH columns.
             // Check both to avoid misclassifying PK collisions on invitation_requests.id.
-            if msg.contains("invitation_requests.share_link_id")
+            if msg.contains("invitation_requests.invitation_link_id")
                 && msg.contains("invitation_requests.requester_id")
             {
                 return Error::Conflict(ConflictKind::DuplicatePendingRequest);
@@ -85,7 +87,7 @@ pub mod wasm_impl {
     }
 
     #[derive(Deserialize)]
-    pub struct ShareLinkJoinRow {
+    pub struct InvitationLinkJoinRow {
         pub id: String,
         pub slug: String,
         pub installation_id: i64,
@@ -104,12 +106,12 @@ pub mod wasm_impl {
         pub repo_full_name: Option<String>,
     }
 
-    fn row_to_share_link(
-        row: &ShareLinkJoinRow,
-        repos: Vec<ShareLinkRepo>,
-    ) -> storage::Result<ShareLink> {
-        Ok(ShareLink {
-            id: ShareLinkId::from_ulid(
+    fn row_to_invitation_link(
+        row: &InvitationLinkJoinRow,
+        repos: Vec<InvitationLinkRepo>,
+    ) -> storage::Result<InvitationLink> {
+        Ok(InvitationLink {
+            id: InvitationLinkId::from_ulid(
                 Ulid::from_str(&row.id).map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
             slug: Slug::from_string(row.slug.clone())
@@ -132,46 +134,50 @@ pub mod wasm_impl {
         })
     }
 
-    /// Collapse a flat `LEFT JOIN` result into a single `ShareLink`. Returns `None`
+    /// Collapse a flat `LEFT JOIN` result into a single `InvitationLink`. Returns `None`
     /// if the result set was empty.
-    pub fn try_one_share_link(rows: Vec<ShareLinkJoinRow>) -> storage::Result<Option<ShareLink>> {
+    pub fn try_one_invitation_link(
+        rows: Vec<InvitationLinkJoinRow>,
+    ) -> storage::Result<Option<InvitationLink>> {
         let mut iter = rows.into_iter();
         let Some(first) = iter.next() else {
             return Ok(None);
         };
         let mut repos = Vec::new();
         if let (Some(rid), Some(name)) = (first.repo_id, first.repo_full_name.clone()) {
-            repos.push(ShareLinkRepo {
+            repos.push(InvitationLinkRepo {
                 repo_id: rid as u64,
                 repo_full_name: name,
             });
         }
         for row in iter {
             if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name) {
-                repos.push(ShareLinkRepo {
+                repos.push(InvitationLinkRepo {
                     repo_id: rid as u64,
                     repo_full_name: name,
                 });
             }
         }
-        Ok(Some(row_to_share_link(&first, repos)?))
+        Ok(Some(row_to_invitation_link(&first, repos)?))
     }
 
-    /// Collapse a flat `LEFT JOIN` result into a list of `ShareLink`s, preserving
+    /// Collapse a flat `LEFT JOIN` result into a list of `InvitationLink`s, preserving
     /// the SQL ORDER BY ordering.
-    pub fn collect_share_links(rows: Vec<ShareLinkJoinRow>) -> storage::Result<Vec<ShareLink>> {
+    pub fn collect_invitation_links(
+        rows: Vec<InvitationLinkJoinRow>,
+    ) -> storage::Result<Vec<InvitationLink>> {
         // We preserve the SQL ordering (created_at DESC, id) by tracking insertion order.
         let mut order: Vec<String> = Vec::new();
         // Map from id → (first row for the link, accumulated repos)
-        let mut by_link: BTreeMap<String, (usize, Vec<ShareLinkRepo>)> = BTreeMap::new();
+        let mut by_link: BTreeMap<String, (usize, Vec<InvitationLinkRepo>)> = BTreeMap::new();
         // We also need to keep the first row per link for conversion.
-        let mut first_rows: Vec<ShareLinkJoinRow> = Vec::new();
+        let mut first_rows: Vec<InvitationLinkJoinRow> = Vec::new();
 
         for row in rows {
             let key = row.id.clone();
             if let std::collections::btree_map::Entry::Vacant(e) = by_link.entry(key.clone()) {
                 let idx = first_rows.len();
-                first_rows.push(ShareLinkJoinRow {
+                first_rows.push(InvitationLinkJoinRow {
                     id: row.id.clone(),
                     slug: row.slug.clone(),
                     installation_id: row.installation_id,
@@ -194,7 +200,7 @@ pub mod wasm_impl {
             }
             let (idx, repos_vec) = by_link.get_mut(&key).expect("just inserted or existed");
             if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name) {
-                repos_vec.push(ShareLinkRepo {
+                repos_vec.push(InvitationLinkRepo {
                     repo_id: rid as u64,
                     repo_full_name: name,
                 });
@@ -206,7 +212,7 @@ pub mod wasm_impl {
             .into_iter()
             .map(|k| {
                 let (idx, repos) = by_link.remove(&k).expect("inserted above");
-                row_to_share_link(&first_rows[idx], repos)
+                row_to_invitation_link(&first_rows[idx], repos)
             })
             .collect()
     }
@@ -214,7 +220,7 @@ pub mod wasm_impl {
     #[derive(Deserialize)]
     pub struct InvitationRequestRow {
         pub id: String,
-        pub share_link_id: String,
+        pub invitation_link_id: String,
         pub requester_id: i64,
         pub justification: Option<String>,
         pub state: String,
@@ -232,8 +238,8 @@ pub mod wasm_impl {
                     ulid::Ulid::from_str(&self.id)
                         .map_err(|e| Error::Corrupt(format!("req id: {e}")))?,
                 ),
-                share_link_id: ShareLinkId::from_ulid(
-                    ulid::Ulid::from_str(&self.share_link_id)
+                invitation_link_id: InvitationLinkId::from_ulid(
+                    ulid::Ulid::from_str(&self.invitation_link_id)
                         .map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
                 ),
                 requester_id: self.requester_id as u64,

@@ -50,7 +50,7 @@ Content:
 
 - Eyebrow: `GitHub access operations`.
 - Heading: concise, product-focused access control message.
-- Body: one short paragraph explaining share links, review queues, and controlled repository invitations.
+- Body: one short paragraph explaining invitation links, review queues, and controlled repository invitations.
 - Primary action: `Sign in with GitHub`, centered at the bottom of the hero for signed-out users.
 - Signed-in fallback, if this component renders with a signed-in login: use `Install on another account` in the same centered primary action position.
 
@@ -64,7 +64,7 @@ Layout:
 
 Below the hero, add a features section with three differentiated product capabilities:
 
-- Controlled share links: admins define repository access, permission level, expiration, and usage limits.
+- Controlled invitation links: admins define repository access, permission level, expiration, and usage limits.
 - Request review: admins review GitHub identities and access consequences before invitations are sent.
 - Operational history: access workflows leave an understandable record for follow-up and auditing.
 

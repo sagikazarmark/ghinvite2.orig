@@ -19,11 +19,11 @@
 | `crates/domain/src/ids.rs` | Implement string JSON schema for ULID newtypes and add schema-shape tests. |
 | `crates/domain/src/account.rs` | Add `JsonSchema` for `AccountType`; manually implement string-or-array schema for `SelectedRepos`; add schema-shape test. |
 | `crates/domain/src/permission.rs` | Derive `JsonSchema` for `Permission`. |
-| `crates/domain/src/share_link.rs` | Derive `JsonSchema` for `ShareLinkRepo`. |
+| `crates/domain/src/invitation_link.rs` | Derive `JsonSchema` for `InvitationLinkRepo`. |
 | `crates/domain/src/invitation_request.rs` | Derive `JsonSchema` for `RequestState`. |
 | `crates/restate-svc/Cargo.toml` | Add workspace `schemars`; remove direct `bytes` after deleting the manual macro. |
 | `crates/restate-svc/src/installation.rs` | Convert `Installation` handler payloads to `Json<T>`. |
-| `crates/restate-svc/src/share_link.rs` | Convert `ShareLink` handler payloads and output to `Json<T>`. |
+| `crates/restate-svc/src/invitation_link.rs` | Convert `InvitationLink` handler payloads and output to `Json<T>`. |
 | `crates/restate-svc/src/reconcile.rs` | Convert `Reconcile::daily_run` payload to `Json<T>`. |
 | `crates/restate-svc/src/github_invitation.rs` | Convert `GithubInvitation` handler payloads to `Json<T>` and derive nested schema for `WebhookAction`. |
 | `crates/restate-svc/src/invitation_request.rs` | Convert workflow payloads, promises, `ctx.run` outputs, and generated client call; remove obsolete wrapper newtypes where direct `Json<T>` works. |
@@ -42,7 +42,7 @@
 - Modify: `crates/domain/src/ids.rs`
 - Modify: `crates/domain/src/account.rs`
 - Modify: `crates/domain/src/permission.rs`
-- Modify: `crates/domain/src/share_link.rs`
+- Modify: `crates/domain/src/invitation_link.rs`
 - Modify: `crates/domain/src/invitation_request.rs`
 
 - [ ] **Step 1: Add the workspace `schemars` dependency**
@@ -85,7 +85,7 @@ In the `#[cfg(test)] mod tests` block, add this test:
 ```rust
     #[test]
     fn id_schema_matches_ulid_string_wire_format() {
-        let schema = schemars::schema_for!(ShareLinkId).to_value();
+        let schema = schemars::schema_for!(InvitationLinkId).to_value();
         assert_eq!(schema.get("type").and_then(serde_json::Value::as_str), Some("string"));
         assert_eq!(
             schema.get("pattern").and_then(serde_json::Value::as_str),
@@ -133,7 +133,7 @@ In the `#[cfg(test)] mod tests` block, add this test:
 
 Run: `cargo test -p domain schema_matches`
 
-Expected: FAIL with errors that `ShareLinkId` and `SelectedRepos` do not implement `schemars::JsonSchema`.
+Expected: FAIL with errors that `InvitationLinkId` and `SelectedRepos` do not implement `schemars::JsonSchema`.
 
 - [ ] **Step 5: Implement string schema for ULID newtypes**
 
@@ -221,11 +221,11 @@ pub enum Permission {
 }
 ```
 
-In `crates/domain/src/share_link.rs`, add `use schemars::JsonSchema;` and update only `ShareLinkRepo`:
+In `crates/domain/src/invitation_link.rs`, add `use schemars::JsonSchema;` and update only `InvitationLinkRepo`:
 
 ```rust
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ShareLinkRepo {
+pub struct InvitationLinkRepo {
     pub repo_id: u64,
     pub repo_full_name: String,
 }
@@ -255,7 +255,7 @@ Expected: PASS. The new schema tests and existing serde tests pass.
 - [ ] **Step 8: Commit domain schema support**
 
 ```bash
-git add Cargo.toml Cargo.lock crates/domain/Cargo.toml crates/domain/src/ids.rs crates/domain/src/account.rs crates/domain/src/permission.rs crates/domain/src/share_link.rs crates/domain/src/invitation_request.rs
+git add Cargo.toml Cargo.lock crates/domain/Cargo.toml crates/domain/src/ids.rs crates/domain/src/account.rs crates/domain/src/permission.rs crates/domain/src/invitation_link.rs crates/domain/src/invitation_request.rs
 git commit -m "refactor(domain): add Restate payload schema support"
 ```
 
@@ -266,7 +266,7 @@ git commit -m "refactor(domain): add Restate payload schema support"
 **Files:**
 - Modify: `crates/restate-svc/Cargo.toml`
 - Modify: `crates/restate-svc/src/installation.rs`
-- Modify: `crates/restate-svc/src/share_link.rs`
+- Modify: `crates/restate-svc/src/invitation_link.rs`
 - Modify: `crates/restate-svc/src/reconcile.rs`
 
 - [ ] **Step 1: Add `schemars` to `restate-svc`**
@@ -406,9 +406,9 @@ impl Installation for InstallationImpl {
 }
 ```
 
-- [ ] **Step 3: Convert `ShareLink`**
+- [ ] **Step 3: Convert `InvitationLink`**
 
-In `crates/restate-svc/src/share_link.rs`, remove `use crate::impl_restate_json_payload;`, add these imports, and add `JsonSchema` to each local payload derive:
+In `crates/restate-svc/src/invitation_link.rs`, remove `use crate::impl_restate_json_payload;`, add these imports, and add `JsonSchema` to each local payload derive:
 
 ```rust
 use restate_sdk::serde::Json;
@@ -425,25 +425,25 @@ pub struct CreateLinkInput {
     pub permission: Permission,
     pub approval_required: bool,
     pub internal_note: Option<String>,
-    pub repos: Vec<ShareLinkRepo>,
+    pub repos: Vec<InvitationLinkRepo>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct CreateLinkOutput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub slug: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct RevokeLinkInput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub by_user: u64,
     pub when: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct TickExpirationInput {
-    pub link_id: ShareLinkId,
+    pub link_id: InvitationLinkId,
     pub at: DateTime<Utc>,
 }
 ```
@@ -457,18 +457,18 @@ impl_restate_json_payload!(RevokeLinkInput);
 impl_restate_json_payload!(TickExpirationInput);
 ```
 
-Replace the `ShareLink` trait and impl methods with this shape, preserving the existing pure logic functions below it:
+Replace the `InvitationLink` trait and impl methods with this shape, preserving the existing pure logic functions below it:
 
 ```rust
 #[restate_sdk::object]
-pub trait ShareLink {
+pub trait InvitationLink {
     async fn create(input: Json<CreateLinkInput>)
     -> std::result::Result<Json<CreateLinkOutput>, TerminalError>;
     async fn revoke(input: Json<RevokeLinkInput>) -> std::result::Result<(), TerminalError>;
     async fn tick_expiration(input: Json<TickExpirationInput>) -> std::result::Result<(), TerminalError>;
 }
 
-impl ShareLink for ShareLinkImpl {
+impl InvitationLink for InvitationLinkImpl {
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
@@ -577,7 +577,7 @@ Expected: PASS. If it fails in `github_invitation.rs` or `invitation_request.rs`
 - [ ] **Step 6: Commit simple service conversion**
 
 ```bash
-git add crates/restate-svc/Cargo.toml crates/restate-svc/src/installation.rs crates/restate-svc/src/share_link.rs crates/restate-svc/src/reconcile.rs Cargo.lock
+git add crates/restate-svc/Cargo.toml crates/restate-svc/src/installation.rs crates/restate-svc/src/invitation_link.rs crates/restate-svc/src/reconcile.rs Cargo.lock
 git commit -m "refactor(restate-svc): use Json payloads for simple services"
 ```
 
@@ -789,7 +789,7 @@ Update derives for local Restate-framed payloads and journaled values:
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct SubmitRequestInput {
     pub request_id: RequestId,
-    pub share_link_id: domain::ShareLinkId,
+    pub invitation_link_id: domain::InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -1139,7 +1139,7 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
     assert_eq!(onboard_resp.status(), 200, "Installation::onboard failed");
 
     let create_link_resp = client
-        .post("http://localhost:8080/ShareLink/raw-json-smoke/create")
+        .post("http://localhost:8080/InvitationLink/raw-json-smoke/create")
         .json(&serde_json::json!({
             "installation_id": 1,
             "account_id": 42,
@@ -1155,19 +1155,19 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
         .send()
         .await
         .unwrap();
-    assert_eq!(create_link_resp.status(), 200, "ShareLink::create failed");
+    assert_eq!(create_link_resp.status(), 200, "InvitationLink::create failed");
     let create_link_body: serde_json::Value = create_link_resp.json().await.unwrap();
     let link_id = create_link_body
         .get("link_id")
         .and_then(serde_json::Value::as_str)
-        .expect("ShareLink::create response should contain link_id")
+        .expect("InvitationLink::create response should contain link_id")
         .to_string();
     assert!(
         create_link_body
             .get("slug")
             .and_then(serde_json::Value::as_str)
             .is_some(),
-        "ShareLink::create response should contain slug"
+        "InvitationLink::create response should contain slug"
     );
 
     let request_id = RequestId::new().to_string();
@@ -1177,7 +1177,7 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
         ))
         .json(&serde_json::json!({
             "request_id": request_id,
-            "share_link_id": link_id,
+            "invitation_link_id": link_id,
             "requester_id": 8,
             "justification": null,
             "created_at": "2026-05-04T12:00:00Z"

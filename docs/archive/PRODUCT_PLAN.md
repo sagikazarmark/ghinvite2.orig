@@ -2,7 +2,7 @@
 
 ## Product Thesis
 
-Build a share-link based access workflow for GitHub repositories. A trusted user installs a GitHub App on an org or user account, creates restricted invitation links, and lets recipients request access with their own GitHub identity. The app handles approval, sends GitHub invitations, tracks status, and provides an audit trail.
+Build an invitation-link-based access workflow for GitHub repositories. A trusted user installs a GitHub App on an org or user account, creates restricted invitation links, and lets recipients request access with their own GitHub identity. The app handles approval, sends GitHub invitations, tracks status, and provides an audit trail.
 
 The sharp v1 promise should be: "Give a contractor, student, candidate, or partner access to the right GitHub repositories without sharing PATs, manually re-inviting people, or losing the approval/audit trail."
 
@@ -13,7 +13,7 @@ Include:
 - GitHub login for all users.
 - GitHub App installation for repository access management.
 - Dashboard for installed accounts and repositories visible to the installation.
-- Create share links with selected repositories, permission level, expiration, max uses, and approval policy.
+- Create invitation links with selected repositories, permission level, expiration, max uses, and approval policy.
 - Recipient page that requires GitHub login before request submission.
 - Manual approval queue.
 - GitHub repository invitations through the Collaborators API.
@@ -25,7 +25,7 @@ Exclude from v1:
 
 - Notifications beyond GitHub's own invitation notification.
 - Editing existing links.
-- Automatic cascade-cancel of pending GitHub invitations when a share link is revoked.
+- Automatic cascade-cancel of pending GitHub invitations when an invitation link is revoked.
 - Team membership and organization membership as first-class grant types.
 - SCIM or Enterprise Managed User support.
 - JIT time-bound automatic removal after access is accepted.
@@ -85,7 +85,7 @@ Recommended default permission choices:
 
 ## Link Security Recommendation
 
-Treat share links as bearer capabilities, but not as sufficient authorization to receive access.
+Treat invitation links as bearer capabilities, but not as sufficient authorization to receive access.
 
 Required controls:
 
@@ -113,7 +113,7 @@ Max-use decision:
 
 There are two kinds of users:
 
-- Installers/admins: users who can install the GitHub App and manage share links for an installed account.
+- Installers/admins: users who can install the GitHub App and manage invitation links for an installed account.
 - Recipients: users who only land on a link and request access.
 
 V1 admin authorization should be based on GitHub-side authority, not an app-local manual role system.
@@ -216,7 +216,7 @@ Recommended split:
 
 Restate services:
 
-- `ShareLinkObject(link_id)`: serializes link use checks, max-use accounting, revocation, and request creation.
+- `InvitationLinkObject(link_id)`: serializes link use checks, max-use accounting, revocation, and request creation.
 - `InvitationWorkflow(request_id)`: handles approval wait, GitHub invitation creation, polling/reconciliation, and terminal state.
 - `InstallationObject(installation_id)`: serializes installation metadata refresh, repository selection changes, and sync jobs.
 - `GithubWebhookService`: validates webhook requests and signals workflows or installation objects. Optional in v1.
@@ -228,8 +228,8 @@ Tables:
 - `users`: GitHub user id, login, avatar, last login.
 - `github_app_installations`: installation id, account id, account login, account type, repository selection, permissions JSON, suspended/deleted flags.
 - `installation_repositories`: installation id, repo id, owner, name, full name, private, archived, current access flag.
-- `share_links`: id, installation id, creator user id, token hash, name, expires_at, max_uses, uses_count, approval_required, revoked_at, created_at.
-- `share_link_repositories`: link id, repo id, permission.
+- `invitation_links`: id, installation id, creator user id, token hash, name, expires_at, max_uses, uses_count, approval_required, revoked_at, created_at.
+- `invitation_link_repositories`: link id, repo id, permission.
 - `access_requests`: id, link id, requester user id, status, requested_at, approved_at, approved_by, denied_at, denied_by, terminal_at.
 - `request_repository_invitations`: request id, repo id, permission, GitHub invitation id, GitHub html url, status, created_at, last_checked_at, terminal_at, failure_code, failure_message.
 - `audit_events`: id, actor user id nullable, installation id, link id nullable, request id nullable, repo id nullable, event_type, event_time, ip, user_agent, metadata JSON.
@@ -261,7 +261,7 @@ Admin onboarding:
 - Dashboard shows install/connect GitHub App CTA.
 - User installs app on org/user account and selects repositories.
 - App receives installation webhook or callback and syncs repositories.
-- User selects installed account and sees share links.
+- User selects installed account and sees invitation links.
 
 Create link:
 
@@ -323,7 +323,7 @@ GitHub reinvite scripts/tools:
 Opal, Apono, Entitle/BeyondTrust, ConductorOne, access-management tools:
 
 - Strength: approval workflows, time-bound access, auditability, broader identity integrations.
-- Weakness: heavier enterprise model, often less suited to simple share-link distribution, may require significant setup.
+- Weakness: heavier enterprise model, often less suited to simple invitation-link distribution, may require significant setup.
 
 GitHub Entitlements and Terraform-style access management:
 

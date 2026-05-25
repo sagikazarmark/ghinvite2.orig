@@ -4,15 +4,15 @@
 
 Introduce a Restate service module that loads the common Invitation Context used by GitHub Invitation workflow and reconciliation paths.
 
-The module should centralize the lookup chain for GitHub Invitation, Invitation Request, Share Link, repository, requester, installation, and Account facts while preserving existing create, cancel, expire, webhook, and reconciliation behavior.
+The module should centralize the lookup chain for GitHub Invitation, Invitation Request, Invitation Link, repository, requester, installation, and Account facts while preserving existing create, cancel, expire, webhook, and reconciliation behavior.
 
 ## Current State
 
 `crates/restate-svc/src/github_invitation.rs`, `crates/restate-svc/src/invitation_request.rs`, and `crates/restate-svc/src/reconcile.rs` repeatedly reconstruct overlapping lookup chains:
 
 - `GithubInvitation` row to `InvitationRequest` row.
-- `InvitationRequest` row to `ShareLink` row.
-- `ShareLink` row to selected repository metadata.
+- `InvitationRequest` row to `InvitationLink` row.
+- `InvitationLink` row to selected repository metadata.
 - `InvitationRequest.requester_id` to requester `User`.
 - Installation id to `Account` / installation row.
 
@@ -30,9 +30,9 @@ This is the smallest change that gives one classification boundary without chang
 
 Add result structs for the contexts currently needed:
 
-- `InvitationRequestContext` loads an `InvitationRequest`, its `ShareLink`, and the requester `User`.
-- `GithubInvitationContext` loads a `GithubInvitation`, its `InvitationRequest`, its `ShareLink`, the matching `ShareLinkRepo`, the parsed `RepositoryIdentity`, the requester `User`, and the installation `Account`.
-- `GithubInvitationAccountContext` loads a `GithubInvitation`, its `InvitationRequest`, its `ShareLink`, the requester `User`, and the installation `Account` without resolving repository metadata. This preserves webhook behavior, because webhook audit only needs the account chain and historically did not require `ShareLink.repos` to contain the GitHub Invitation repo.
+- `InvitationRequestContext` loads an `InvitationRequest`, its `InvitationLink`, and the requester `User`.
+- `GithubInvitationContext` loads a `GithubInvitation`, its `InvitationRequest`, its `InvitationLink`, the matching `InvitationLinkRepo`, the parsed `RepositoryIdentity`, the requester `User`, and the installation `Account`.
+- `GithubInvitationAccountContext` loads a `GithubInvitation`, its `InvitationRequest`, its `InvitationLink`, the requester `User`, and the installation `Account` without resolving repository metadata. This preserves webhook behavior, because webhook audit only needs the account chain and historically did not require `InvitationLink.repos` to contain the GitHub Invitation repo.
 
 The module should provide loaders shaped around existing callers:
 
@@ -48,10 +48,10 @@ Each loader should return owned domain rows. This keeps call sites simple, avoid
 
 The module owns classification for the repeated lookup chain:
 
-- Missing `GithubInvitation`, `InvitationRequest`, `ShareLink`, requester `User`, or installation row returns `HandlerError::Storage(storage::Error::NotFound)`.
-- A GitHub Invitation whose `repo_id` is not present in the Share Link repository set returns `HandlerError::Invariant` in full GitHub Invitation context loaders.
+- Missing `GithubInvitation`, `InvitationRequest`, `InvitationLink`, requester `User`, or installation row returns `HandlerError::Storage(storage::Error::NotFound)`.
+- A GitHub Invitation whose `repo_id` is not present in the Invitation Link repository set returns `HandlerError::Invariant` in full GitHub Invitation context loaders.
 - An invalid `repo_full_name` returns `HandlerError::Invariant` from full GitHub Invitation context loaders.
-- A mismatched expected installation id returns `HandlerError::Invariant` because it means the workflow input is pointing at a different installation than the loaded Share Link/Account chain.
+- A mismatched expected installation id returns `HandlerError::Invariant` because it means the workflow input is pointing at a different installation than the loaded Invitation Link/Account chain.
 - A mismatched expected account id returns `HandlerError::Invariant` because reconciliation is iterating one active installation account and must not audit against another account's link.
 
 Storage database errors and corrupt rows should continue to propagate through `HandlerError::Storage` unchanged so terminal/transient behavior remains controlled by `HandlerError::is_terminal`.
@@ -65,7 +65,7 @@ Update `github_invitation.rs` so:
 - `tick_expire_logic` uses the context loader for request, link, repository, and account information before listing GitHub invitations and emitting expiration audit.
 - `create_logic` keeps its input-driven GitHub call path and replaces `lookup_account_id_for_installation` with `load_installation_account`.
 
-Update `invitation_request.rs` so `build_dispatch_inputs` uses the request context loader to build one `CreateInvitationInput` per Share Link repo.
+Update `invitation_request.rs` so `build_dispatch_inputs` uses the request context loader to build one `CreateInvitationInput` per Invitation Link repo.
 
 Update `reconcile.rs` so `reconcile_single` uses the account-aware context loader and keeps the existing reconciliation behavior: no change when the invitation is still pending, accepted when the requester is a collaborator, cancelled otherwise, terminal errors logged and skipped by the daily sweep.
 
@@ -74,11 +74,11 @@ Update `reconcile.rs` so `reconcile_single` uses the account-aware context loade
 Add focused unit tests in `invitation_context.rs` covering:
 
 - Complete GitHub Invitation context loads the expected invitation, request, link, repo, requester, and account.
-- Webhook account context loads without requiring a matching Share Link repository.
+- Webhook account context loads without requiring a matching Invitation Link repository.
 - Missing Invitation Request returns `Storage(NotFound)`.
-- Missing Share Link returns `Storage(NotFound)`.
+- Missing Invitation Link returns `Storage(NotFound)`.
 - Missing requester returns `Storage(NotFound)`.
-- Missing repository in the Share Link returns `Invariant`.
+- Missing repository in the Invitation Link returns `Invariant`.
 - Invalid repository full name returns `Invariant`.
 - Missing installation returns `Storage(NotFound)`.
 - Wrong expected installation or account returns `Invariant`.

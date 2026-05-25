@@ -1,14 +1,14 @@
 use crate::error::{HandlerError, Result};
 use crate::state::AppState;
 use domain::{
-    Account, GithubInvitation, GithubInvitationId, InvitationRequest, RepositoryIdentity,
-    RequestId, ShareLink, ShareLinkRepo, User,
+    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkRepo,
+    InvitationRequest, RepositoryIdentity, RequestId, User,
 };
 
 #[derive(Clone, Debug)]
 pub(crate) struct InvitationRequestContext {
     pub request: InvitationRequest,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub requester: User,
 }
 
@@ -16,8 +16,8 @@ pub(crate) struct InvitationRequestContext {
 pub(crate) struct GithubInvitationContext {
     pub invitation: GithubInvitation,
     pub request: InvitationRequest,
-    pub link: ShareLink,
-    pub repo: ShareLinkRepo,
+    pub link: InvitationLink,
+    pub repo: InvitationLinkRepo,
     pub repository: RepositoryIdentity,
     pub requester: User,
     pub account: Account,
@@ -27,7 +27,7 @@ pub(crate) struct GithubInvitationContext {
 pub(crate) struct GithubInvitationAccountContext {
     pub invitation: GithubInvitation,
     pub request: InvitationRequest,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub requester: User,
     pub account: Account,
 }
@@ -91,13 +91,13 @@ pub(crate) async fn load_github_invitation_context_for_account(
     Ok(context)
 }
 
-async fn load_share_link_for_request(
+async fn load_invitation_link_for_request(
     state: &AppState,
     request: &InvitationRequest,
-) -> Result<ShareLink> {
+) -> Result<InvitationLink> {
     state
         .storage
-        .get_share_link_by_id(request.share_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))
 }
@@ -119,7 +119,7 @@ pub(crate) async fn load_invitation_request_context(
         .get_invitation_request(request_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
-    let link = load_share_link_for_request(state, &request).await?;
+    let link = load_invitation_link_for_request(state, &request).await?;
     let requester = load_requester_for_request(state, &request).await?;
 
     Ok(InvitationRequestContext {
@@ -198,14 +198,15 @@ mod tests {
     use crate::HandlerError;
     use crate::test_support::{dt, fixture_state};
     use domain::{
-        AccountType, InvitationState, Permission, RequestState, SelectedRepos, ShareLinkId, Slug,
+        AccountType, InvitationLinkId, InvitationState, Permission, RequestState, SelectedRepos,
+        Slug,
     };
     use rand::SeedableRng;
 
     async fn seed_request_chain_with_repos(
         state: &AppState,
-        repos: Vec<domain::ShareLinkRepo>,
-    ) -> (RequestId, ShareLinkId) {
+        repos: Vec<domain::InvitationLinkRepo>,
+    ) -> (RequestId, InvitationLinkId) {
         state
             .storage
             .insert_installation(&domain::Account {
@@ -240,8 +241,8 @@ mod tests {
             .await
             .unwrap();
 
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(21)),
             installation_id: 9,
             account_id: 100,
@@ -257,14 +258,14 @@ mod tests {
             revoked_by: None,
             repos,
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
 
         let request_id = RequestId::new();
         state
             .storage
             .insert_invitation_request_and_increment_uses(&domain::InvitationRequest {
                 id: request_id,
-                share_link_id: link.id,
+                invitation_link_id: link.id,
                 requester_id: 8,
                 justification: None,
                 state: RequestState::Approved,
@@ -279,10 +280,10 @@ mod tests {
         (request_id, link.id)
     }
 
-    async fn seed_request_chain(state: &AppState) -> (RequestId, ShareLinkId) {
+    async fn seed_request_chain(state: &AppState) -> (RequestId, InvitationLinkId) {
         seed_request_chain_with_repos(
             state,
-            vec![domain::ShareLinkRepo {
+            vec![domain::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
@@ -377,11 +378,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_share_link_returns_not_found() {
+    async fn missing_invitation_link_returns_not_found() {
         let state = fixture_state().await;
         let request = domain::InvitationRequest {
             id: RequestId::new(),
-            share_link_id: ShareLinkId::new(),
+            invitation_link_id: InvitationLinkId::new(),
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,
@@ -391,7 +392,7 @@ mod tests {
             created_at: dt("2026-05-04T12:30:00Z"),
         };
 
-        let err = load_share_link_for_request(&state, &request)
+        let err = load_invitation_link_for_request(&state, &request)
             .await
             .unwrap_err();
 
@@ -406,7 +407,7 @@ mod tests {
         let state = fixture_state().await;
         let request = domain::InvitationRequest {
             id: RequestId::new(),
-            share_link_id: ShareLinkId::new(),
+            invitation_link_id: InvitationLinkId::new(),
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,
@@ -461,7 +462,7 @@ mod tests {
         let state = fixture_state().await;
         let (request_id, _) = seed_request_chain_with_repos(
             &state,
-            vec![domain::ShareLinkRepo {
+            vec![domain::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/team/api".into(),
             }],

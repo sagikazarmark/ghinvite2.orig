@@ -1,9 +1,9 @@
 //! `/console/accounts/{login}/...` routes. Plan 5.
 
 use crate::account_admin_reads::{
-    find_account_admin_request, find_account_admin_share_link, pending_request_queue,
+    find_account_admin_invitation_link, find_account_admin_request, pending_request_queue,
 };
-use crate::commands::{CreateShareLink, DecideInvitationRequest, RevokeShareLink};
+use crate::commands::{CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
@@ -192,7 +192,7 @@ async fn overview(
         .unwrap_or(0);
     let all_links = state
         .storage
-        .list_share_links_for_account(admin.account.account_id)
+        .list_invitation_links_for_account(admin.account.account_id)
         .await
         .unwrap_or_default();
     let active_links = all_links.iter().filter(|l| l.is_active(now)).count() as u64;
@@ -319,10 +319,10 @@ async fn create_link(
         .await
         .map(|r| r.repositories)
         .unwrap_or_default();
-    let repos: Vec<domain::ShareLinkRepo> = installation_repos
+    let repos: Vec<domain::InvitationLinkRepo> = installation_repos
         .into_iter()
         .filter(|r| form.repo_ids.contains(&r.id))
-        .map(|r| domain::ShareLinkRepo {
+        .map(|r| domain::InvitationLinkRepo {
             repo_id: r.id,
             repo_full_name: r.full_name,
         })
@@ -335,7 +335,7 @@ async fn create_link(
 
     let output = match state
         .commands
-        .create_share_link(CreateShareLink {
+        .create_invitation_link(CreateInvitationLink {
             installation_id: admin.account.installation_id,
             account_id: admin.account.account_id,
             created_by: admin.session.user_id,
@@ -351,7 +351,7 @@ async fn create_link(
     {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(error = ?e, "create share link command failed");
+            tracing::warn!(error = ?e, "create invitation link command failed");
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
@@ -391,11 +391,11 @@ async fn link_detail(
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
-    let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
+    let link_id = match domain::InvitationLinkId::from_str(&link_id_str) {
         Ok(id) => id,
         Err(_) => return console_not_found_response(&admin),
     };
-    let link = match find_account_admin_share_link(
+    let link = match find_account_admin_invitation_link(
         state.storage.as_ref(),
         admin.account.account_id,
         link_id,
@@ -411,7 +411,7 @@ async fn link_detail(
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
     let now = Utc::now();
-    let share_url = format!("{}/i/{}", state.config.base_url, link.slug.as_str());
+    let invitation_url = format!("{}/i/{}", state.config.base_url, link.slug.as_str());
 
     let html = render(move || {
         rsx! {
@@ -421,7 +421,7 @@ async fn link_detail(
                 account_login: account_login.clone(),
                 link: link.clone(),
                 now,
-                share_url: share_url.clone(),
+                invitation_url: invitation_url.clone(),
             }
         }
     });
@@ -435,20 +435,23 @@ async fn revoke_link(
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
-    let link_id = match domain::ShareLinkId::from_str(&link_id_str) {
+    let link_id = match domain::InvitationLinkId::from_str(&link_id_str) {
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    if let Err(e) =
-        find_account_admin_share_link(state.storage.as_ref(), admin.account.account_id, link_id)
-            .await
+    if let Err(e) = find_account_admin_invitation_link(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        link_id,
+    )
+    .await
     {
         return e.into_response();
     }
 
     if let Err(e) = state
         .commands
-        .revoke_share_link(RevokeShareLink {
+        .revoke_invitation_link(RevokeInvitationLink {
             account_id: admin.account.account_id,
             link_id,
             by_user: admin.session.user_id,
@@ -456,7 +459,7 @@ async fn revoke_link(
         })
         .await
     {
-        tracing::warn!(error = ?e, "revoke share link command failed");
+        tracing::warn!(error = ?e, "revoke invitation link command failed");
         let _ = session::set_flash(
             &admin.tower,
             session::Flash {

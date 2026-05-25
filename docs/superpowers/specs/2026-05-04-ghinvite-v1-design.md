@@ -42,7 +42,7 @@
 
 **Three deployable artifacts:**
 
-1. **Web Worker** (Cloudflare Worker, `wasm32-unknown-unknown`). Hosts the dashboard (Dioxus SSR + hydration), public share-link pages, OAuth callback, GitHub webhook receiver. Reads D1 directly. Initiates state changes by calling Restate Cloud's invocation API. Does not write D1 except for OAuth/session tables.
+1. **Web Worker** (Cloudflare Worker, `wasm32-unknown-unknown`). Hosts the dashboard (Dioxus SSR + hydration), public invitation-link pages, OAuth callback, GitHub webhook receiver. Reads D1 directly. Initiates state changes by calling Restate Cloud's invocation API. Does not write D1 except for OAuth/session tables.
 2. **Restate Service Worker** (Cloudflare Worker, `wasm32-unknown-unknown`). Hosts Restate handler endpoints. Called only by Restate Cloud over HTTPS. All domain-state writes happen here. Holds the GitHub App private key, mints installation tokens, calls the GitHub API.
 3. **Restate Cloud** (managed). Durable journal, timers, retries, exactly-once-effects.
 
@@ -114,7 +114,7 @@ App-admin authority is derived from GitHub authority. There is no app-internal r
 
 **Re-checked at every state-changing action**, so a demoted org owner cannot continue to act through a stale session.
 
-**Recipients** (people clicking share links) need only a valid GitHub login. The link itself is the authorization to *request*. There is no app-internal recipient authorization beyond GitHub OAuth identity.
+**Recipients** (people clicking invitation links) need only a valid GitHub login. The link itself is the authorization to *request*. There is no app-internal recipient authorization beyond GitHub OAuth identity.
 
 **Self-approve allowed.** An admin who happens to also be a recipient (e.g., testing their own link) may approve their own request. There is no security boundary they are crossing.
 
@@ -124,7 +124,7 @@ App-admin authority is derived from GitHub authority. There is no app-internal r
 
 v1 supports exactly one form of invitation: **repo-collaborator** invitations via `PUT /repos/{owner}/{repo}/collaborators/{user}` with one of the five GitHub permission levels: `pull` / `triage` / `push` / `maintain` / `admin`.
 
-A share link grants the recipient access to **N selected repos at one permission level**. (Multi-repo, single-level-per-link is the v1 shape.)
+An invitation link grants the recipient access to **N selected repos at one permission level**. (Multi-repo, single-level-per-link is the v1 shape.)
 
 Not in v1:
 - Org-membership invitations (would consume seats).
@@ -165,7 +165,7 @@ CREATE TABLE users (
 
 -- tower-sessions backing store. Schema owned by tower-sessions.
 
-CREATE TABLE share_links (
+CREATE TABLE invitation_links (
   id                 TEXT PRIMARY KEY,                -- ulid
   slug               TEXT NOT NULL UNIQUE,            -- 16 base62 chars
   installation_id    INTEGER NOT NULL REFERENCES installations(installation_id),
@@ -181,18 +181,18 @@ CREATE TABLE share_links (
   revoked_at         TEXT,
   revoked_by         INTEGER REFERENCES users(user_id)
 );
-CREATE INDEX idx_share_links_account ON share_links(account_id);
+CREATE INDEX idx_invitation_links_account ON invitation_links(account_id);
 
-CREATE TABLE share_link_repos (
-  share_link_id   TEXT    NOT NULL REFERENCES share_links(id),
+CREATE TABLE invitation_link_repos (
+  invitation_link_id   TEXT    NOT NULL REFERENCES invitation_links(id),
   repo_id         INTEGER NOT NULL,
   repo_full_name  TEXT    NOT NULL,
-  PRIMARY KEY (share_link_id, repo_id)
+  PRIMARY KEY (invitation_link_id, repo_id)
 );
 
 CREATE TABLE invitation_requests (
   id              TEXT PRIMARY KEY,
-  share_link_id   TEXT NOT NULL REFERENCES share_links(id),
+  invitation_link_id   TEXT NOT NULL REFERENCES invitation_links(id),
   requester_id    INTEGER NOT NULL REFERENCES users(user_id),
   justification   TEXT,
   state           TEXT NOT NULL,                       -- validated by domain enum; not CHECKed in SQL (see §7.2)
@@ -203,8 +203,8 @@ CREATE TABLE invitation_requests (
 );
 -- One pending request per (link, requester) at a time:
 CREATE UNIQUE INDEX idx_one_pending_per_link_per_user
-  ON invitation_requests(share_link_id, requester_id) WHERE state = 'pending';
-CREATE INDEX idx_requests_link ON invitation_requests(share_link_id);
+  ON invitation_requests(invitation_link_id, requester_id) WHERE state = 'pending';
+CREATE INDEX idx_requests_link ON invitation_requests(invitation_link_id);
 
 -- One row per (request, repo) — the GitHub-side invitation.
 CREATE TABLE github_invitations (
@@ -246,8 +246,8 @@ Validation lives one level up: the Rust enums in `crates/domain` are the canonic
 ### 7.3 Storage trait
 
 The storage trait exposes:
-- Read methods returning typed records (`list_share_links`, `get_share_link_by_slug`, `list_pending_requests_for_account`, etc.).
-- Write methods scoped to specific transitions (`insert_share_link`, `mark_share_link_revoked`, `insert_invitation_request`, `mark_request_decided`, `insert_github_invitation`, `update_github_invitation_state`).
+- Read methods returning typed records (`list_invitation_links`, `get_invitation_link_by_slug`, `list_pending_requests_for_account`, etc.).
+- Write methods scoped to specific transitions (`insert_invitation_link`, `mark_invitation_link_revoked`, `insert_invitation_request`, `mark_request_decided`, `insert_github_invitation`, `update_github_invitation_state`).
 - A single `audit(event)` method. **No `update_audit` or `delete_audit` exists in the trait.**
 
 This shape makes "update audit" a compile-time impossibility, not a runtime check.
@@ -260,7 +260,7 @@ Two impls:
 
 ## 8. Domain state machines
 
-### 8.1 share_link
+### 8.1 invitation_link
 
 States are mostly **derived** rather than stored:
 
@@ -302,17 +302,17 @@ The 7-day expiration timer is GitHub's hard limit on repository invitations — 
 
 All durable-state changes flow through these handlers. They are idempotent, and Restate's exactly-once-effects guarantee combines with our ulid-based deterministic IDs to give safe retries.
 
-### 9.1 `ShareLink` (Virtual Object, key = `share_link_id`)
+### 9.1 `InvitationLink` (Virtual Object, key = `invitation_link_id`)
 
-- `create(input)` — writes link + repos rows; emits `share_link.created` audit.
-- `revoke(actor)` — sets `revoked_at`; emits `share_link.revoked`.
-- `tick_expiration()` — scheduled at `expires_at` if set; emits `share_link.expired` audit. (v2 will additionally cascade to cancel still-pending requests and still-pending GitHub invitations created via this link.)
+- `create(input)` — writes link + repos rows; emits `invitation_link.created` audit.
+- `revoke(actor)` — sets `revoked_at`; emits `invitation_link.revoked`.
+- `tick_expiration()` — scheduled at `expires_at` if set; emits `invitation_link.expired` audit. (v2 will additionally cascade to cancel still-pending requests and still-pending GitHub invitations created via this link.)
 
 ### 9.2 `InvitationRequest` (Workflow, key = `request_id`)
 
 ```
-1. Re-read share_link; reject if not is_active
-2. Insert row state='pending'; emit request.created; increment share_links.uses_count
+1. Re-read invitation_link; reject if not is_active
+2. Insert row state='pending'; emit request.created; increment invitation_links.uses_count
 3. If link.approval_required == false: jump to step 5 with auto-approve
 4. Else: race awakeable<Decision>  vs.  timer min(link.expires_at - now, 7d)
 5. On approved:
@@ -423,7 +423,7 @@ Three Dioxus layouts, each with its own DaisyUI theme zone:
 
 **Link create form (`/accounts/:login/links/new`)** defaults: `permission = pull` (least privilege), `expires_at = now + 30 days`, `max_uses = unlimited`, `approval_required = false`. Admins must consciously opt out of these defaults. Justification: a never-expiring `admin`-level link is exactly the misuse this product is positioned against; defaults should make that the harder path.
 
-**Action label.** A revoked share link is described to admins as "stop accepting new requests" rather than "revoke." In v1 link revocation does *not* cascade to pending downstream invitations (that's a v2 feature); calling the action "revoke" would mislead admins into thinking it does. The internal terminology in code (`revoked_at`, `mark_share_link_revoked`) is unchanged — only the UI label is adjusted.
+**Action label.** A revoked invitation link is described to admins as "stop accepting new requests" rather than "revoke." In v1 link revocation does *not* cascade to pending downstream invitations (that's a v2 feature); calling the action "revoke" would mislead admins into thinking it does. The internal terminology in code (`revoked_at`, `mark_invitation_link_revoked`) is unchanged — only the UI label is adjusted.
 
 **Server functions** (`#[server]`) are used for every state-changing action. Server-side errors return `Result` via Dioxus's standard pattern; client renders inline error states.
 
@@ -484,10 +484,10 @@ GitHub App private key (RS256) is held only by the Restate Service Worker. The w
 | `installation.created` | user (installer) | installation |
 | `installation.repos_changed` | github | installation |
 | `installation.uninstalled` | github | installation |
-| `share_link.created` | user (admin) | share_link |
-| `share_link.revoked` | user (admin) | share_link |
-| `share_link.expired` | system | share_link |
-| `share_link.exhausted` | system | share_link |
+| `invitation_link.created` | user (admin) | invitation_link |
+| `invitation_link.revoked` | user (admin) | invitation_link |
+| `invitation_link.expired` | system | invitation_link |
+| `invitation_link.exhausted` | system | invitation_link |
 | `request.created` | user (requester) | invitation_request |
 | `request.approved` | user (admin) or system (auto-approve) | invitation_request |
 | `request.declined` | user (admin) | invitation_request |
@@ -568,7 +568,7 @@ GitHub App private key (RS256) is held only by the Restate Service Worker. The w
 
 - Notifications (email and/or Slack) on request created / approved / declined / accepted.
 - Cascade revoke: when a link is revoked, cancel still-pending requests and still-pending GitHub invitations downstream.
-- Editing share links (max-uses, expiration).
+- Editing invitation links (max-uses, expiration).
 - Quorum / multi-approver requirements.
 - Per-link approver list.
 - Per-repo permission within a single link.
@@ -578,7 +578,7 @@ GitHub App private key (RS256) is held only by the Restate Service Worker. The w
 - Soft-delete / GDPR redaction tooling.
 - Multi-language / i18n.
 - Webhook delivery retries / dead-letter queue beyond what GitHub does for us natively.
-- Read receipts on share links.
+- Read receipts on invitation links.
 - Custom per-install branding.
 
 ---

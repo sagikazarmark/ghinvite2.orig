@@ -1,13 +1,13 @@
 use crate::error::{Result, WebError};
 use chrono::{DateTime, Utc};
-use domain::{InvitationRequest, RequestId, ShareLink, ShareLinkId};
+use domain::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId};
 use storage::Storage;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AccountAdminPendingRequestRow {
     pub(crate) request_id: RequestId,
     pub(crate) link_slug: String,
-    pub(crate) link_id: Option<ShareLinkId>,
+    pub(crate) link_id: Option<InvitationLinkId>,
     pub(crate) requester_login: String,
     pub(crate) justification: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -20,16 +20,16 @@ pub(crate) struct AccountAdminPendingRequestRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AccountAdminInvitationRequest {
     pub(crate) request: InvitationRequest,
-    pub(crate) share_link: ShareLink,
+    pub(crate) invitation_link: InvitationLink,
 }
 
-pub(crate) async fn find_account_admin_share_link(
+pub(crate) async fn find_account_admin_invitation_link(
     storage: &dyn Storage,
     account_id: u64,
-    link_id: ShareLinkId,
-) -> Result<ShareLink> {
+    link_id: InvitationLinkId,
+) -> Result<InvitationLink> {
     let link = storage
-        .get_share_link_by_id(link_id)
+        .get_invitation_link_by_id(link_id)
         .await?
         .ok_or(WebError::NotFound)?;
 
@@ -49,12 +49,12 @@ pub(crate) async fn find_account_admin_request(
         .get_invitation_request(request_id)
         .await?
         .ok_or(WebError::NotFound)?;
-    let share_link =
-        find_account_admin_share_link(storage, account_id, request.share_link_id).await?;
+    let invitation_link =
+        find_account_admin_invitation_link(storage, account_id, request.invitation_link_id).await?;
 
     Ok(AccountAdminInvitationRequest {
         request,
-        share_link,
+        invitation_link,
     })
 }
 
@@ -68,9 +68,11 @@ pub(crate) async fn pending_request_queue(
     let mut rows = Vec::with_capacity(pending.len());
 
     for request in pending {
-        let share_link = storage.get_share_link_by_id(request.share_link_id).await?;
+        let invitation_link = storage
+            .get_invitation_link_by_id(request.invitation_link_id)
+            .await?;
         let requester = storage.get_user(request.requester_id).await?;
-        rows.push(pending_request_row(request, share_link, requester));
+        rows.push(pending_request_row(request, invitation_link, requester));
     }
 
     rows.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -79,34 +81,35 @@ pub(crate) async fn pending_request_queue(
 
 fn pending_request_row(
     request: InvitationRequest,
-    share_link: Option<ShareLink>,
+    invitation_link: Option<InvitationLink>,
     requester: Option<domain::User>,
 ) -> AccountAdminPendingRequestRow {
-    let (link_slug, link_id, permission, repos, expires_at, approval_required) = match share_link {
-        Some(link) => {
-            let repos = link
-                .repos
-                .into_iter()
-                .map(|repo| repo.repo_full_name)
-                .collect();
-            (
-                link.slug.as_str().to_string(),
-                Some(link.id),
-                Some(link.permission),
-                repos,
-                link.expires_at,
-                Some(link.approval_required),
-            )
-        }
-        None => (
-            "(deleted link)".to_string(),
-            None,
-            None,
-            Vec::new(),
-            None,
-            None,
-        ),
-    };
+    let (link_slug, link_id, permission, repos, expires_at, approval_required) =
+        match invitation_link {
+            Some(link) => {
+                let repos = link
+                    .repos
+                    .into_iter()
+                    .map(|repo| repo.repo_full_name)
+                    .collect();
+                (
+                    link.slug.as_str().to_string(),
+                    Some(link.id),
+                    Some(link.permission),
+                    repos,
+                    link.expires_at,
+                    Some(link.approval_required),
+                )
+            }
+            None => (
+                "(deleted link)".to_string(),
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+            ),
+        };
     let requester_login = requester
         .map(|user| user.login)
         .unwrap_or_else(|| format!("user-{}", request.requester_id));
@@ -130,8 +133,9 @@ mod tests {
     use audit::AuditEvent;
     use chrono::{DateTime, Utc};
     use domain::{
-        Account, AccountType, GithubInvitation, GithubInvitationId, InvitationRequest, Permission,
-        RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
+        Account, AccountType, GithubInvitation, GithubInvitationId, InvitationLink,
+        InvitationLinkId, InvitationLinkRepo, InvitationRequest, Permission, RequestId,
+        RequestState, SelectedRepos, Slug, User,
     };
     use storage::{GithubInvitationUpdate, RequestDecision, Storage};
 
@@ -165,9 +169,9 @@ mod tests {
         installation_id: u64,
         created_by: u64,
         slug: &str,
-    ) -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    ) -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::from_string(slug.to_string()).unwrap(),
             installation_id,
             account_id,
@@ -181,7 +185,7 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![ShareLinkRepo {
+            repos: vec![InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
@@ -190,13 +194,13 @@ mod tests {
 
     fn sample_request(
         id: RequestId,
-        share_link_id: ShareLinkId,
+        invitation_link_id: InvitationLinkId,
         requester_id: u64,
         created_at: &str,
     ) -> InvitationRequest {
         InvitationRequest {
             id,
-            share_link_id,
+            invitation_link_id,
             requester_id,
             justification: Some("need repository access".into()),
             state: RequestState::Pending,
@@ -228,9 +232,9 @@ mod tests {
     struct FakeStorage {
         pending_requests: Vec<InvitationRequest>,
         request: Option<InvitationRequest>,
-        share_link: Option<ShareLink>,
+        invitation_link: Option<InvitationLink>,
         user: Option<User>,
-        fail_share_link_lookup: bool,
+        fail_invitation_link_lookup: bool,
         fail_user_lookup: bool,
     }
 
@@ -293,39 +297,44 @@ mod tests {
             Ok(self.user.clone())
         }
 
-        async fn insert_share_link(&self, _link: &ShareLink) -> storage::Result<()> {
-            panic!("insert_share_link is not used by Account Admin read tests")
+        async fn insert_invitation_link(&self, _link: &InvitationLink) -> storage::Result<()> {
+            panic!("insert_invitation_link is not used by Account Admin read tests")
         }
 
-        async fn mark_share_link_revoked(
+        async fn mark_invitation_link_revoked(
             &self,
-            _id: ShareLinkId,
+            _id: InvitationLinkId,
             _by_user: u64,
             _when: DateTime<Utc>,
         ) -> storage::Result<()> {
-            panic!("mark_share_link_revoked is not used by Account Admin read tests")
+            panic!("mark_invitation_link_revoked is not used by Account Admin read tests")
         }
 
-        async fn get_share_link_by_id(
+        async fn get_invitation_link_by_id(
             &self,
-            _id: ShareLinkId,
-        ) -> storage::Result<Option<ShareLink>> {
-            if self.fail_share_link_lookup {
-                return Err(storage::Error::Database("share link lookup failed".into()));
+            _id: InvitationLinkId,
+        ) -> storage::Result<Option<InvitationLink>> {
+            if self.fail_invitation_link_lookup {
+                return Err(storage::Error::Database(
+                    "invitation link lookup failed".into(),
+                ));
             }
 
-            Ok(self.share_link.clone())
+            Ok(self.invitation_link.clone())
         }
 
-        async fn get_share_link_by_slug(&self, _slug: &str) -> storage::Result<Option<ShareLink>> {
-            panic!("get_share_link_by_slug is not used by Account Admin read tests")
+        async fn get_invitation_link_by_slug(
+            &self,
+            _slug: &str,
+        ) -> storage::Result<Option<InvitationLink>> {
+            panic!("get_invitation_link_by_slug is not used by Account Admin read tests")
         }
 
-        async fn list_share_links_for_account(
+        async fn list_invitation_links_for_account(
             &self,
             _account_id: u64,
-        ) -> storage::Result<Vec<ShareLink>> {
-            panic!("list_share_links_for_account is not used by Account Admin read tests")
+        ) -> storage::Result<Vec<InvitationLink>> {
+            panic!("list_invitation_links_for_account is not used by Account Admin read tests")
         }
 
         async fn insert_invitation_request_and_increment_uses(
@@ -360,7 +369,7 @@ mod tests {
 
         async fn list_requests_for_link(
             &self,
-            _link_id: ShareLinkId,
+            _link_id: InvitationLinkId,
         ) -> storage::Result<Vec<InvitationRequest>> {
             panic!("list_requests_for_link is not used by Account Admin read tests")
         }
@@ -408,12 +417,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_admin_share_link_lookup_returns_owning_accounts_link() {
+    async fn account_admin_invitation_link_lookup_returns_owning_accounts_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9001, 1, 701, "QueueSlug0000001");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
 
-        let found = super::find_account_admin_share_link(&storage, 9001, link.id)
+        let found = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
             .unwrap();
 
@@ -423,12 +432,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn account_admin_share_link_lookup_hides_wrong_account_link() {
+    async fn account_admin_invitation_link_lookup_hides_wrong_account_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9002, 2, 701, "QueueSlug0000002");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
 
-        let err = super::find_account_admin_share_link(&storage, 9001, link.id)
+        let err = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
             .unwrap_err();
 
@@ -443,7 +452,7 @@ mod tests {
             .await
             .unwrap();
         let link = sample_link(9001, 1, 701, "QueueSlug0000003");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
         let request_id = RequestId::new();
         let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
         storage
@@ -456,9 +465,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(found.request.id, request_id);
-        assert_eq!(found.request.share_link_id, link.id);
-        assert_eq!(found.share_link.id, link.id);
-        assert_eq!(found.share_link.account_id, 9001);
+        assert_eq!(found.request.invitation_link_id, link.id);
+        assert_eq!(found.invitation_link.id, link.id);
+        assert_eq!(found.invitation_link.account_id, 9001);
     }
 
     #[tokio::test]
@@ -469,7 +478,7 @@ mod tests {
             .await
             .unwrap();
         let link = sample_link(9002, 2, 701, "QueueSlug0000004");
-        storage.insert_share_link(&link).await.unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
         let request_id = RequestId::new();
         let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
         storage
@@ -505,8 +514,8 @@ mod tests {
         storage.upsert_user(&sample_user(803, "bob")).await.unwrap();
         let link_a = sample_link(9001, 1, 701, "QueueSlug0000005");
         let link_b = sample_link(9001, 1, 701, "QueueSlug0000006");
-        storage.insert_share_link(&link_a).await.unwrap();
-        storage.insert_share_link(&link_b).await.unwrap();
+        storage.insert_invitation_link(&link_a).await.unwrap();
+        storage.insert_invitation_link(&link_b).await.unwrap();
         let newer = sample_request(RequestId::new(), link_a.id, 802, "2026-05-04T12:40:00Z");
         let older = sample_request(RequestId::new(), link_b.id, 803, "2026-05-04T12:30:00Z");
         storage
@@ -541,7 +550,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_admin_pending_request_queue_uses_missing_related_record_fallbacks() {
-        let missing_link_id = ShareLinkId::new();
+        let missing_link_id = InvitationLinkId::new();
         let request = sample_request(
             RequestId::new(),
             missing_link_id,
@@ -551,9 +560,9 @@ mod tests {
         let storage = FakeStorage {
             pending_requests: vec![request.clone()],
             request: None,
-            share_link: None,
+            invitation_link: None,
             user: None,
-            fail_share_link_lookup: false,
+            fail_invitation_link_lookup: false,
             fail_user_lookup: false,
         };
 
@@ -574,16 +583,16 @@ mod tests {
     async fn account_admin_pending_request_queue_propagates_related_record_storage_errors() {
         let request = sample_request(
             RequestId::new(),
-            ShareLinkId::new(),
+            InvitationLinkId::new(),
             802,
             "2026-05-04T12:30:00Z",
         );
         let storage = FakeStorage {
             pending_requests: vec![request],
             request: None,
-            share_link: None,
+            invitation_link: None,
             user: None,
-            fail_share_link_lookup: true,
+            fail_invitation_link_lookup: true,
             fail_user_lookup: false,
         };
 
@@ -594,24 +603,24 @@ mod tests {
         assert!(matches!(
             err,
             crate::WebError::Storage(storage::Error::Database(message))
-                if message == "share link lookup failed"
+                if message == "invitation link lookup failed"
         ));
     }
 
     #[tokio::test]
-    async fn account_admin_request_lookup_hides_missing_related_share_link() {
+    async fn account_admin_request_lookup_hides_missing_related_invitation_link() {
         let request = sample_request(
             RequestId::new(),
-            ShareLinkId::new(),
+            InvitationLinkId::new(),
             802,
             "2026-05-04T12:30:00Z",
         );
         let storage = FakeStorage {
             pending_requests: Vec::new(),
             request: Some(request.clone()),
-            share_link: None,
+            invitation_link: None,
             user: None,
-            fail_share_link_lookup: false,
+            fail_invitation_link_lookup: false,
             fail_user_lookup: false,
         };
 

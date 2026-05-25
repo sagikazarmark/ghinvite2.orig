@@ -4,7 +4,7 @@
 
 Issue #10 continues the web command facade work for Invitation Request flows. The existing facade already routes recipient request submission and Account Admin approve or decline actions through `GhinviteCommands`, but route callers still construct serialization-shaped command payloads and log Restate-style target names.
 
-The completed Share Link command deepening in commit `3e70c24` established the local pattern: Restate service names, method names, object keys, send-versus-call choices, and payload serialization belong inside `crates/web/src/commands.rs`; routes should speak in ghinvite domain commands.
+The completed Invitation Link command deepening in commit `3e70c24` established the local pattern: Restate service names, method names, object keys, send-versus-call choices, and payload serialization belong inside `crates/web/src/commands.rs`; routes should speak in ghinvite domain commands.
 
 ## Goals
 
@@ -32,7 +32,7 @@ Keep the existing route-facing trait methods:
 
 Add route-facing constructors so routes build domain commands instead of serialization-shaped payloads:
 
-- `SubmitInvitationRequest::new(request_id, share_link_id, requester_id, justification, created_at)`
+- `SubmitInvitationRequest::new(request_id, invitation_link_id, requester_id, justification, created_at)`
 - `DecideInvitationRequest::approve(request_id, decided_by, decided_at)`
 - `DecideInvitationRequest::decline(request_id, decided_by, decided_at, reason)`
 
@@ -54,11 +54,11 @@ The command module becomes the only web crate location that knows the Invitation
 
 `DecideInvitationRequest` remains public with a public `request_id` and a private route-facing decision value. `InvitationRequestDecision` should become private to the command module. `RestateCommands` converts that private value to a private serializable Restate decision payload. Routes should use the approve and decline constructors instead of selecting serialized enum variants directly.
 
-The existing generic `RestateCommandAdapter` is reused for fake-adapter tests, matching the Share Link command pattern.
+The existing generic `RestateCommandAdapter` is reused for fake-adapter tests, matching the Invitation Link command pattern.
 
 ### `crates/web/src/routes/invitation.rs`
 
-The submit route keeps current responsibilities: session loading, auth redirect, share-link resolution, duplicate-pending redirect, justification trimming, request id parsing, command dispatch, flash on failure, and pending redirect on success.
+The submit route keeps current responsibilities: session loading, auth redirect, invitation-link resolution, duplicate-pending redirect, justification trimming, request id parsing, command dispatch, flash on failure, and pending redirect on success.
 
 The route changes only its command construction and warning log message:
 
@@ -79,8 +79,8 @@ The routes change only their command construction and warning log messages:
 
 Recipient submission:
 
-1. `POST /i/{slug}/request` resolves an active share link and checks pending duplicate state.
-2. The route constructs `SubmitInvitationRequest` with the domain request id, share link id, requester id, justification, and timestamp.
+1. `POST /i/{slug}/request` resolves an active invitation link and checks pending duplicate state.
+2. The route constructs `SubmitInvitationRequest` with the domain request id, invitation link id, requester id, justification, and timestamp.
 3. `RestateCommands::submit_invitation_request` converts it to a private Restate submit payload.
 4. The adapter sends `InvitationRequest/{request_id}/submit`.
 5. The route redirects to `/i/{slug}/pending/{request_id}`.

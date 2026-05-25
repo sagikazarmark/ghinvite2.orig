@@ -1,7 +1,7 @@
 # crates/restate-svc
 
 Restate handler services for ghinvite. Five services own every durable state
-change in the system: `Installation`, `ShareLink`, `InvitationRequest`
+change in the system: `Installation`, `InvitationLink`, `InvitationRequest`
 (workflow), `GithubInvitation`, `Reconcile`. Built on the upstream
 `restate-sdk = "0.10"` Rust SDK.
 
@@ -21,7 +21,7 @@ cargo test -p restate-svc
 Each handler module has tests in the same file:
 
 - `crates/restate-svc/src/installation.rs::tests`
-- `crates/restate-svc/src/share_link.rs::tests`
+- `crates/restate-svc/src/invitation_link.rs::tests`
 - `crates/restate-svc/src/github_invitation.rs::tests`
 - `crates/restate-svc/src/invitation_request.rs::tests`
 - `crates/restate-svc/src/reconcile.rs::tests`

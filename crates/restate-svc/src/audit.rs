@@ -28,7 +28,7 @@ impl Actor {
 }
 
 /// Description of what the change was about. `id` is the natural string id
-/// for the target type (ulid for share_links, requests, github_invitations;
+/// for the target type (ulid for invitation_links, requests, github_invitations;
 /// stringified u64 for installations).
 #[derive(Clone, Debug)]
 pub struct Target {
@@ -44,9 +44,9 @@ impl Target {
         }
     }
 
-    pub fn share_link(link_id: domain::ShareLinkId) -> Self {
+    pub fn invitation_link(link_id: domain::InvitationLinkId) -> Self {
         Self {
-            kind: TargetKind::ShareLink,
+            kind: TargetKind::InvitationLink,
             id: link_id.to_string(),
         }
     }
@@ -105,9 +105,9 @@ mod tests {
         let result = emit(
             &state,
             42,
-            EventType::ShareLinkCreated,
+            EventType::InvitationLinkCreated,
             Actor::User(7),
-            Target::share_link(domain::ShareLinkId::new()),
+            Target::invitation_link(domain::InvitationLinkId::new()),
             serde_json::json!({"slug": "abcdef"}),
             Some("inv-1".into()),
         )
@@ -130,10 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn target_share_link_uses_ulid_string() {
-        let id = domain::ShareLinkId::new();
-        let t = Target::share_link(id);
-        assert_eq!(t.kind, TargetKind::ShareLink);
+    fn target_invitation_link_uses_ulid_string() {
+        let id = domain::InvitationLinkId::new();
+        let t = Target::invitation_link(id);
+        assert_eq!(t.kind, TargetKind::InvitationLink);
         assert_eq!(t.id, id.to_string());
     }
 }

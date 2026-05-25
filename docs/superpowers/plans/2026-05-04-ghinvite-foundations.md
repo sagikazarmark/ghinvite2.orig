@@ -23,19 +23,19 @@ This plan implements §7.1 (data model), §7.2 (no SQL CHECK constraints), §7.3
 | `.gitignore` | Ignore `target/`, `.sqlite*`, `.env*`, `node_modules/`, `dist/` |
 | `crates/domain/Cargo.toml` | Domain crate manifest |
 | `crates/domain/src/lib.rs` | Module declarations + re-exports |
-| `crates/domain/src/ids.rs` | Typed Ulid newtypes: `ShareLinkId`, `RequestId`, `GithubInvitationId`, `AuditEventId` |
+| `crates/domain/src/ids.rs` | Typed Ulid newtypes: `InvitationLinkId`, `RequestId`, `GithubInvitationId`, `AuditEventId` |
 | `crates/domain/src/slug.rs` | `Slug::generate(&mut rng)`, `Slug::from_str`, constant-time `eq` |
 | `crates/domain/src/account.rs` | `AccountType` enum (`User`/`Organization`), `Account` struct |
 | `crates/domain/src/user.rs` | `User` struct |
 | `crates/domain/src/permission.rs` | `Permission` enum + parse/display |
-| `crates/domain/src/share_link.rs` | `ShareLink` struct + `is_active(now)` |
+| `crates/domain/src/invitation_link.rs` | `InvitationLink` struct + `is_active(now)` |
 | `crates/domain/src/invitation_request.rs` | `RequestState` enum + `InvitationRequest` struct |
 | `crates/domain/src/github_invitation.rs` | `InvitationState` enum + `GithubInvitation` struct |
 | `crates/audit/Cargo.toml` | Audit crate manifest |
 | `crates/audit/src/lib.rs` | `AuditEvent`, `ActorKind`, `TargetKind`, `EventType` enum |
 | `crates/storage/Cargo.toml` | Storage crate manifest |
 | `crates/storage/src/lib.rs` | `Storage` async trait, `Error` type, `Result` alias |
-| `crates/storage/src/records.rs` | Stored record types: `InstallationRecord`, `ShareLinkRecord`, `InvitationRequestRecord`, `GithubInvitationRecord`, helpers |
+| `crates/storage/src/records.rs` | Stored record types: `InstallationRecord`, `InvitationLinkRecord`, `InvitationRequestRecord`, `GithubInvitationRecord`, helpers |
 | `crates/storage/src/sqlx_impl.rs` | `SqlxStorage` impl |
 | `crates/storage/src/tests.rs` | `pub async fn run_suite<S: Storage>(storage: S)` — parameterized scenarios |
 | `crates/storage/tests/sqlx_suite.rs` | Wires `run_suite` to `SqlxStorage` (in-memory SQLite) |
@@ -173,23 +173,23 @@ pub mod github_invitation;
 pub mod ids;
 pub mod invitation_request;
 pub mod permission;
-pub mod share_link;
+pub mod invitation_link;
 pub mod slug;
 pub mod user;
 
 pub use account::{Account, AccountType};
 pub use github_invitation::{GithubInvitation, InvitationState};
-pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
+pub use ids::{AuditEventId, GithubInvitationId, RequestId, InvitationLinkId};
 pub use invitation_request::{InvitationRequest, RequestState};
 pub use permission::Permission;
-pub use share_link::ShareLink;
+pub use invitation_link::InvitationLink;
 pub use slug::Slug;
 pub use user::User;
 ```
 
 - [ ] **Step 3: Add stub module files so the crate compiles**
 
-For each of `account.rs`, `github_invitation.rs`, `ids.rs`, `invitation_request.rs`, `permission.rs`, `share_link.rs`, `slug.rs`, `user.rs` under `crates/domain/src/`, create the file with a single line:
+For each of `account.rs`, `github_invitation.rs`, `ids.rs`, `invitation_request.rs`, `permission.rs`, `invitation_link.rs`, `slug.rs`, `user.rs` under `crates/domain/src/`, create the file with a single line:
 
 ```rust
 // filled in by a later task
@@ -208,17 +208,17 @@ pub mod github_invitation;
 pub mod ids;
 pub mod invitation_request;
 pub mod permission;
-pub mod share_link;
+pub mod invitation_link;
 pub mod slug;
 pub mod user;
 
 // Re-exports filled in as each module gains its public types:
 // pub use account::{Account, AccountType};
 // pub use github_invitation::{GithubInvitation, InvitationState};
-// pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
+// pub use ids::{AuditEventId, GithubInvitationId, RequestId, InvitationLinkId};
 // pub use invitation_request::{InvitationRequest, RequestState};
 // pub use permission::Permission;
-// pub use share_link::ShareLink;
+// pub use invitation_link::InvitationLink;
 // pub use slug::Slug;
 // pub use user::User;
 ```
@@ -236,7 +236,7 @@ git commit -m "feat(domain): scaffold crate skeleton"
 
 ### Task 3: Typed ID newtypes
 
-Each domain ID is a Ulid wrapped in a distinct newtype so the type system prevents passing a `RequestId` where a `ShareLinkId` is expected.
+Each domain ID is a Ulid wrapped in a distinct newtype so the type system prevents passing a `RequestId` where a `InvitationLinkId` is expected.
 
 **Files:**
 - Modify: `crates/domain/src/ids.rs`
@@ -285,7 +285,7 @@ macro_rules! ulid_newtype {
     };
 }
 
-ulid_newtype!(ShareLinkId);
+ulid_newtype!(InvitationLinkId);
 ulid_newtype!(RequestId);
 ulid_newtype!(GithubInvitationId);
 ulid_newtype!(AuditEventId);
@@ -296,19 +296,19 @@ mod tests {
 
     #[test]
     fn ids_roundtrip_through_string() {
-        let id = ShareLinkId::new();
+        let id = InvitationLinkId::new();
         let s = id.to_string();
-        let parsed: ShareLinkId = s.parse().expect("roundtrip");
+        let parsed: InvitationLinkId = s.parse().expect("roundtrip");
         assert_eq!(id, parsed);
     }
 
     #[test]
     fn distinct_id_types_are_not_interchangeable() {
         // This is a compile-time guarantee; we just check the types differ at runtime.
-        let _link: ShareLinkId = ShareLinkId::new();
+        let _link: InvitationLinkId = InvitationLinkId::new();
         let _req: RequestId = RequestId::new();
         // Uncommenting this line should cause a compile error:
-        // let _: ShareLinkId = _req;
+        // let _: InvitationLinkId = _req;
     }
 
     #[test]
@@ -332,7 +332,7 @@ Expected: 3 tests pass. Because the macro defines the types in the same edit, th
 Replace the commented re-exports list line for ids with the active line:
 
 ```rust
-pub use ids::{AuditEventId, GithubInvitationId, RequestId, ShareLinkId};
+pub use ids::{AuditEventId, GithubInvitationId, RequestId, InvitationLinkId};
 ```
 
 Run: `cargo build -p domain`
@@ -369,7 +369,7 @@ const SLUG_LEN: usize = 16;
 const ALPHABET: &[u8; 62] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// 16-character base62 secret used in share-link URLs.
+/// 16-character base62 secret used in invitation-link URLs.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Slug(String);
@@ -822,27 +822,27 @@ git commit -m "feat(domain): Permission enum"
 
 ---
 
-### Task 8: ShareLink with derived `is_active`
+### Task 8: InvitationLink with derived `is_active`
 
 Per spec §8.1: most state is derived, not stored. Only `revoked_at` and `uses_count` are stored.
 
 **Files:**
-- Modify: `crates/domain/src/share_link.rs`
+- Modify: `crates/domain/src/invitation_link.rs`
 - Modify: `crates/domain/src/lib.rs`
 
 - [ ] **Step 1: Write impl + tests**
 
-`crates/domain/src/share_link.rs`:
+`crates/domain/src/invitation_link.rs`:
 
 ```rust
-use crate::ids::ShareLinkId;
+use crate::ids::InvitationLinkId;
 use crate::permission::Permission;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ShareLink {
-    pub id: ShareLinkId,
+pub struct InvitationLink {
+    pub id: InvitationLinkId,
     pub slug: String, // Slug stored as String here so the type can travel without rng-tied checks
     pub installation_id: u64,
     pub account_id: u64,
@@ -856,16 +856,16 @@ pub struct ShareLink {
     pub internal_note: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoked_by: Option<u64>,
-    pub repos: Vec<ShareLinkRepo>,
+    pub repos: Vec<InvitationLinkRepo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ShareLinkRepo {
+pub struct InvitationLinkRepo {
     pub repo_id: u64,
     pub repo_full_name: String,
 }
 
-impl ShareLink {
+impl InvitationLink {
     /// `is_active` is the per-spec derived state: not revoked AND not expired AND not exhausted.
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
         if self.revoked_at.is_some() {
@@ -894,9 +894,9 @@ mod tests {
         Utc.with_ymd_and_hms(y, mo, d, 0, 0, 0).unwrap()
     }
 
-    fn base_link() -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    fn base_link() -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: "0123456789ABCDEF".into(),
             installation_id: 1,
             account_id: 2,
@@ -961,20 +961,20 @@ mod tests {
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo test -p domain --lib share_link`
+Run: `cargo test -p domain --lib invitation_link`
 Expected: 5 tests pass.
 
-- [ ] **Step 3: Un-comment `share_link` re-export**
+- [ ] **Step 3: Un-comment `invitation_link` re-export**
 
 ```rust
-pub use share_link::{ShareLink, ShareLinkRepo};
+pub use invitation_link::{InvitationLink, InvitationLinkRepo};
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/domain/src/share_link.rs crates/domain/src/lib.rs
-git commit -m "feat(domain): ShareLink with derived is_active"
+git add crates/domain/src/invitation_link.rs crates/domain/src/lib.rs
+git commit -m "feat(domain): InvitationLink with derived is_active"
 ```
 
 ---
@@ -990,7 +990,7 @@ git commit -m "feat(domain): ShareLink with derived is_active"
 `crates/domain/src/invitation_request.rs`:
 
 ```rust
-use crate::ids::{RequestId, ShareLinkId};
+use crate::ids::{RequestId, InvitationLinkId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -1046,7 +1046,7 @@ impl RequestState {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InvitationRequest {
     pub id: RequestId,
-    pub share_link_id: ShareLinkId,
+    pub invitation_link_id: InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub state: RequestState,
@@ -1337,7 +1337,7 @@ impl fmt::Display for ActorKind {
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
     Installation,
-    ShareLink,
+    InvitationLink,
     InvitationRequest,
     GithubInvitation,
 }
@@ -1351,7 +1351,7 @@ impl FromStr for TargetKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "installation" => Ok(Self::Installation),
-            "share_link" => Ok(Self::ShareLink),
+            "invitation_link" => Ok(Self::InvitationLink),
             "invitation_request" => Ok(Self::InvitationRequest),
             "github_invitation" => Ok(Self::GithubInvitation),
             other => Err(UnknownTargetKind(other.to_string())),
@@ -1363,7 +1363,7 @@ impl fmt::Display for TargetKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Installation => "installation",
-            Self::ShareLink => "share_link",
+            Self::InvitationLink => "invitation_link",
             Self::InvitationRequest => "invitation_request",
             Self::GithubInvitation => "github_invitation",
         })
@@ -1377,10 +1377,10 @@ pub const EVENT_TYPES: &[&str] = &[
     "installation.created",
     "installation.repos_changed",
     "installation.uninstalled",
-    "share_link.created",
-    "share_link.revoked",
-    "share_link.expired",
-    "share_link.exhausted",
+    "invitation_link.created",
+    "invitation_link.revoked",
+    "invitation_link.expired",
+    "invitation_link.exhausted",
     "request.created",
     "request.approved",
     "request.declined",
@@ -1428,7 +1428,7 @@ mod tests {
     fn target_kind_round_trips() {
         for k in [
             TargetKind::Installation,
-            TargetKind::ShareLink,
+            TargetKind::InvitationLink,
             TargetKind::InvitationRequest,
             TargetKind::GithubInvitation,
         ] {
@@ -1438,9 +1438,9 @@ mod tests {
 
     #[test]
     fn known_event_types_recognized() {
-        assert!(is_known_event_type("share_link.created"));
+        assert!(is_known_event_type("invitation_link.created"));
         assert!(is_known_event_type("invitation.sent"));
-        assert!(!is_known_event_type("share_link.unmade"));
+        assert!(!is_known_event_type("invitation_link.unmade"));
     }
 
     #[test]
@@ -1449,10 +1449,10 @@ mod tests {
             id: AuditEventId::new(),
             account_id: 1,
             occurred_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
-            event_type: "share_link.created".into(),
+            event_type: "invitation_link.created".into(),
             actor_kind: ActorKind::User,
             actor_id: Some(99),
-            target_kind: TargetKind::ShareLink,
+            target_kind: TargetKind::InvitationLink,
             target_id: "01HFOOBAR".into(),
             metadata: serde_json::json!({"permission": "push"}),
             request_id: None,
@@ -1516,7 +1516,7 @@ CREATE TABLE users (
   last_seen_at TEXT NOT NULL
 );
 
-CREATE TABLE share_links (
+CREATE TABLE invitation_links (
   id                 TEXT    PRIMARY KEY,
   slug               TEXT    NOT NULL UNIQUE,
   installation_id    INTEGER NOT NULL REFERENCES installations(installation_id),
@@ -1533,18 +1533,18 @@ CREATE TABLE share_links (
   revoked_by         INTEGER REFERENCES users(user_id)
 );
 
-CREATE INDEX idx_share_links_account ON share_links(account_id);
+CREATE INDEX idx_invitation_links_account ON invitation_links(account_id);
 
-CREATE TABLE share_link_repos (
-  share_link_id   TEXT    NOT NULL REFERENCES share_links(id),
+CREATE TABLE invitation_link_repos (
+  invitation_link_id   TEXT    NOT NULL REFERENCES invitation_links(id),
   repo_id         INTEGER NOT NULL,
   repo_full_name  TEXT    NOT NULL,
-  PRIMARY KEY (share_link_id, repo_id)
+  PRIMARY KEY (invitation_link_id, repo_id)
 );
 
 CREATE TABLE invitation_requests (
   id              TEXT    PRIMARY KEY,
-  share_link_id   TEXT    NOT NULL REFERENCES share_links(id),
+  invitation_link_id   TEXT    NOT NULL REFERENCES invitation_links(id),
   requester_id    INTEGER NOT NULL REFERENCES users(user_id),
   justification   TEXT,
   state           TEXT    NOT NULL,
@@ -1555,9 +1555,9 @@ CREATE TABLE invitation_requests (
 );
 
 CREATE UNIQUE INDEX idx_one_pending_per_link_per_user
-  ON invitation_requests(share_link_id, requester_id) WHERE state = 'pending';
+  ON invitation_requests(invitation_link_id, requester_id) WHERE state = 'pending';
 
-CREATE INDEX idx_requests_link ON invitation_requests(share_link_id);
+CREATE INDEX idx_requests_link ON invitation_requests(invitation_link_id);
 
 CREATE TABLE github_invitations (
   id                     TEXT    PRIMARY KEY,
@@ -1670,7 +1670,7 @@ use audit::AuditEvent;
 use chrono::{DateTime, Utc};
 use domain::{
     Account, GithubInvitation, GithubInvitationId, InvitationRequest, InvitationState, RequestId,
-    RequestState, SelectedRepos, ShareLink, ShareLinkId, User,
+    RequestState, SelectedRepos, InvitationLink, InvitationLinkId, User,
 };
 use thiserror::Error;
 
@@ -1697,10 +1697,10 @@ pub enum Error {
     Corrupt(String),
 }
 
-/// Inputs for creating a share link with its repo set in one transaction.
+/// Inputs for creating an invitation link with its repo set in one transaction.
 #[derive(Clone, Debug)]
-pub struct NewShareLink {
-    pub link: ShareLink,
+pub struct NewInvitationLink {
+    pub link: InvitationLink,
 }
 
 /// Inputs for creating an invitation request and atomically incrementing the link's
@@ -1756,17 +1756,17 @@ pub trait Storage: Send + Sync + 'static {
     async fn upsert_user(&self, user: &User) -> Result<()>;
     async fn get_user(&self, user_id: u64) -> Result<Option<User>>;
 
-    // -------- share links --------
-    async fn insert_share_link(&self, new: &NewShareLink) -> Result<()>;
-    async fn mark_share_link_revoked(
+    // -------- invitation links --------
+    async fn insert_invitation_link(&self, new: &NewInvitationLink) -> Result<()>;
+    async fn mark_invitation_link_revoked(
         &self,
-        id: ShareLinkId,
+        id: InvitationLinkId,
         by_user: u64,
         when: DateTime<Utc>,
     ) -> Result<()>;
-    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>>;
-    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>>;
-    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>>;
+    async fn get_invitation_link_by_id(&self, id: InvitationLinkId) -> Result<Option<InvitationLink>>;
+    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>>;
+    async fn list_invitation_links_for_account(&self, account_id: u64) -> Result<Vec<InvitationLink>>;
 
     // -------- invitation requests --------
     async fn insert_invitation_request_and_increment_uses(
@@ -1779,7 +1779,7 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         account_id: u64,
     ) -> Result<Vec<InvitationRequest>>;
-    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>>;
+    async fn list_requests_for_link(&self, link_id: InvitationLinkId) -> Result<Vec<InvitationRequest>>;
 
     // -------- github invitations --------
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
@@ -1874,8 +1874,8 @@ use audit::{ActorKind, AuditEvent, TargetKind};
 use chrono::{DateTime, Utc};
 use domain::{
     Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationRequest,
-    InvitationState, RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId,
-    ShareLinkRepo, User,
+    InvitationState, RequestId, RequestState, SelectedRepos, InvitationLink, InvitationLinkId,
+    InvitationLinkRepo, User,
 };
 use sqlx::FromRow;
 use std::str::FromStr;
@@ -1943,7 +1943,7 @@ impl UserRow {
 }
 
 #[derive(FromRow, Debug)]
-pub struct ShareLinkRow {
+pub struct InvitationLinkRow {
     pub id: String,
     pub slug: String,
     pub installation_id: i64,
@@ -1960,10 +1960,10 @@ pub struct ShareLinkRow {
     pub revoked_by: Option<i64>,
 }
 
-impl ShareLinkRow {
-    pub fn try_into_domain(self, repos: Vec<ShareLinkRepo>) -> Result<ShareLink, Error> {
-        Ok(ShareLink {
-            id: ShareLinkId::from_ulid(
+impl InvitationLinkRow {
+    pub fn try_into_domain(self, repos: Vec<InvitationLinkRepo>) -> Result<InvitationLink, Error> {
+        Ok(InvitationLink {
+            id: InvitationLinkId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
             slug: self.slug,
@@ -1988,15 +1988,15 @@ impl ShareLinkRow {
 }
 
 #[derive(FromRow, Debug)]
-pub struct ShareLinkRepoRow {
-    pub share_link_id: String,
+pub struct InvitationLinkRepoRow {
+    pub invitation_link_id: String,
     pub repo_id: i64,
     pub repo_full_name: String,
 }
 
-impl ShareLinkRepoRow {
-    pub fn into_domain(self) -> ShareLinkRepo {
-        ShareLinkRepo {
+impl InvitationLinkRepoRow {
+    pub fn into_domain(self) -> InvitationLinkRepo {
+        InvitationLinkRepo {
             repo_id: self.repo_id as u64,
             repo_full_name: self.repo_full_name,
         }
@@ -2006,7 +2006,7 @@ impl ShareLinkRepoRow {
 #[derive(FromRow, Debug)]
 pub struct InvitationRequestRow {
     pub id: String,
-    pub share_link_id: String,
+    pub invitation_link_id: String,
     pub requester_id: i64,
     pub justification: Option<String>,
     pub state: String,
@@ -2022,8 +2022,8 @@ impl InvitationRequestRow {
             id: RequestId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("req id: {e}")))?,
             ),
-            share_link_id: ShareLinkId::from_ulid(
-                Ulid::from_str(&self.share_link_id)
+            invitation_link_id: InvitationLinkId::from_ulid(
+                Ulid::from_str(&self.invitation_link_id)
                     .map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
             requester_id: self.requester_id as u64,
@@ -2251,8 +2251,8 @@ mod tests {
         for table in [
             "installations",
             "users",
-            "share_links",
-            "share_link_repos",
+            "invitation_links",
+            "invitation_link_repos",
             "invitation_requests",
             "github_invitations",
             "audit_events",
@@ -2307,7 +2307,7 @@ use audit::AuditEvent;
 use chrono::{DateTime, Utc};
 use domain::{
     Account, AccountType, GithubInvitation, GithubInvitationId, InvitationRequest, InvitationState,
-    RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId, User,
+    RequestId, RequestState, SelectedRepos, InvitationLink, InvitationLinkId, User,
 };
 
 #[async_trait]
@@ -2427,16 +2427,16 @@ impl Storage for SqlxStorage {
     // --- stubs for the rest of the trait, filled in by later tasks ---
     async fn upsert_user(&self, _user: &User) -> Result<()> { unimplemented!("Task 17") }
     async fn get_user(&self, _user_id: u64) -> Result<Option<User>> { unimplemented!("Task 17") }
-    async fn insert_share_link(&self, _new: &crate::NewShareLink) -> Result<()> { unimplemented!("Task 18") }
-    async fn mark_share_link_revoked(&self, _id: ShareLinkId, _by_user: u64, _when: DateTime<Utc>) -> Result<()> { unimplemented!("Task 18") }
-    async fn get_share_link_by_id(&self, _id: ShareLinkId) -> Result<Option<ShareLink>> { unimplemented!("Task 18") }
-    async fn get_share_link_by_slug(&self, _slug: &str) -> Result<Option<ShareLink>> { unimplemented!("Task 18") }
-    async fn list_share_links_for_account(&self, _account_id: u64) -> Result<Vec<ShareLink>> { unimplemented!("Task 18") }
+    async fn insert_invitation_link(&self, _new: &crate::NewInvitationLink) -> Result<()> { unimplemented!("Task 18") }
+    async fn mark_invitation_link_revoked(&self, _id: InvitationLinkId, _by_user: u64, _when: DateTime<Utc>) -> Result<()> { unimplemented!("Task 18") }
+    async fn get_invitation_link_by_id(&self, _id: InvitationLinkId) -> Result<Option<InvitationLink>> { unimplemented!("Task 18") }
+    async fn get_invitation_link_by_slug(&self, _slug: &str) -> Result<Option<InvitationLink>> { unimplemented!("Task 18") }
+    async fn list_invitation_links_for_account(&self, _account_id: u64) -> Result<Vec<InvitationLink>> { unimplemented!("Task 18") }
     async fn insert_invitation_request_and_increment_uses(&self, _new: &crate::NewInvitationRequest) -> Result<()> { unimplemented!("Task 19") }
     async fn record_request_decision(&self, _decision: &crate::RequestDecision) -> Result<()> { unimplemented!("Task 19") }
     async fn get_invitation_request(&self, _id: RequestId) -> Result<Option<InvitationRequest>> { unimplemented!("Task 19") }
     async fn list_pending_requests_for_account(&self, _account_id: u64) -> Result<Vec<InvitationRequest>> { unimplemented!("Task 19") }
-    async fn list_requests_for_link(&self, _link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> { unimplemented!("Task 19") }
+    async fn list_requests_for_link(&self, _link_id: InvitationLinkId) -> Result<Vec<InvitationRequest>> { unimplemented!("Task 19") }
     async fn insert_github_invitation(&self, _invitation: &GithubInvitation) -> Result<()> { unimplemented!("Task 20") }
     async fn update_github_invitation(&self, _update: &crate::GithubInvitationUpdate) -> Result<()> { unimplemented!("Task 20") }
     async fn get_github_invitation(&self, _id: GithubInvitationId) -> Result<Option<GithubInvitation>> { unimplemented!("Task 20") }
@@ -2639,22 +2639,22 @@ git commit -m "feat(storage): SqlxStorage users methods"
 
 ---
 
-### Task 18: SqlxStorage — share_links + share_link_repos methods
+### Task 18: SqlxStorage — invitation_links + invitation_link_repos methods
 
 Insert is transactional: link row + N repo rows in one transaction.
 
 **Files:**
 - Modify: `crates/storage/src/sqlx_impl.rs`
 
-- [ ] **Step 1: Replace the share-link stubs**
+- [ ] **Step 1: Replace the invitation-link stubs**
 
 ```rust
-    async fn insert_share_link(&self, new: &crate::NewShareLink) -> Result<()> {
+    async fn insert_invitation_link(&self, new: &crate::NewInvitationLink) -> Result<()> {
         let link = &new.link;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
-            INSERT INTO share_links
+            INSERT INTO invitation_links
               (id, slug, installation_id, account_id, created_by, created_at, expires_at,
                max_uses, uses_count, permission, approval_required, internal_note,
                revoked_at, revoked_by)
@@ -2679,14 +2679,14 @@ Insert is transactional: link row + N repo rows in one transaction.
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(db) if db.is_unique_violation() => {
-                Error::Conflict("share_link with that id or slug already exists".into())
+                Error::Conflict("invitation_link with that id or slug already exists".into())
             }
             other => Error::Database(other),
         })?;
 
         for repo in &link.repos {
             sqlx::query(
-                r#"INSERT INTO share_link_repos (share_link_id, repo_id, repo_full_name)
+                r#"INSERT INTO invitation_link_repos (invitation_link_id, repo_id, repo_full_name)
                    VALUES (?1, ?2, ?3)"#,
             )
             .bind(link.id.to_string())
@@ -2699,14 +2699,14 @@ Insert is transactional: link row + N repo rows in one transaction.
         Ok(())
     }
 
-    async fn mark_share_link_revoked(
+    async fn mark_invitation_link_revoked(
         &self,
-        id: ShareLinkId,
+        id: InvitationLinkId,
         by_user: u64,
         when: DateTime<Utc>,
     ) -> Result<()> {
         let res = sqlx::query(
-            r#"UPDATE share_links SET revoked_at = ?1, revoked_by = ?2
+            r#"UPDATE invitation_links SET revoked_at = ?1, revoked_by = ?2
                WHERE id = ?3 AND revoked_at IS NULL"#,
         )
         .bind(when)
@@ -2720,12 +2720,12 @@ Insert is transactional: link row + N repo rows in one transaction.
         Ok(())
     }
 
-    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>> {
-        let row: Option<crate::records::ShareLinkRow> = sqlx::query_as(
+    async fn get_invitation_link_by_id(&self, id: InvitationLinkId) -> Result<Option<InvitationLink>> {
+        let row: Option<crate::records::InvitationLinkRow> = sqlx::query_as(
             r#"SELECT id, slug, installation_id, account_id, created_by, created_at, expires_at,
                       max_uses, uses_count, permission, approval_required, internal_note,
                       revoked_at, revoked_by
-               FROM share_links WHERE id = ?1"#,
+               FROM invitation_links WHERE id = ?1"#,
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -2735,12 +2735,12 @@ Insert is transactional: link row + N repo rows in one transaction.
         Ok(Some(row.try_into_domain(repos)?))
     }
 
-    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>> {
-        let row: Option<crate::records::ShareLinkRow> = sqlx::query_as(
+    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
+        let row: Option<crate::records::InvitationLinkRow> = sqlx::query_as(
             r#"SELECT id, slug, installation_id, account_id, created_by, created_at, expires_at,
                       max_uses, uses_count, permission, approval_required, internal_note,
                       revoked_at, revoked_by
-               FROM share_links WHERE slug = ?1"#,
+               FROM invitation_links WHERE slug = ?1"#,
         )
         .bind(slug)
         .fetch_optional(&self.pool)
@@ -2750,12 +2750,12 @@ Insert is transactional: link row + N repo rows in one transaction.
         Ok(Some(row.try_into_domain(repos)?))
     }
 
-    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
-        let rows: Vec<crate::records::ShareLinkRow> = sqlx::query_as(
+    async fn list_invitation_links_for_account(&self, account_id: u64) -> Result<Vec<InvitationLink>> {
+        let rows: Vec<crate::records::InvitationLinkRow> = sqlx::query_as(
             r#"SELECT id, slug, installation_id, account_id, created_by, created_at, expires_at,
                       max_uses, uses_count, permission, approval_required, internal_note,
                       revoked_at, revoked_by
-               FROM share_links WHERE account_id = ?1 ORDER BY created_at DESC"#,
+               FROM invitation_links WHERE account_id = ?1 ORDER BY created_at DESC"#,
         )
         .bind(account_id as i64)
         .fetch_all(&self.pool)
@@ -2774,10 +2774,10 @@ Insert is transactional: link row + N repo rows in one transaction.
 In the `impl SqlxStorage { ... }` block (the `pub`-method block, *not* the trait impl), add:
 
 ```rust
-    async fn list_repos_for_link(&self, link_id: &str) -> Result<Vec<domain::ShareLinkRepo>> {
-        let rows: Vec<crate::records::ShareLinkRepoRow> = sqlx::query_as(
-            r#"SELECT share_link_id, repo_id, repo_full_name
-               FROM share_link_repos WHERE share_link_id = ?1
+    async fn list_repos_for_link(&self, link_id: &str) -> Result<Vec<domain::InvitationLinkRepo>> {
+        let rows: Vec<crate::records::InvitationLinkRepoRow> = sqlx::query_as(
+            r#"SELECT invitation_link_id, repo_id, repo_full_name
+               FROM invitation_link_repos WHERE invitation_link_id = ?1
                ORDER BY repo_id"#,
         )
         .bind(link_id)
@@ -2790,11 +2790,11 @@ In the `impl SqlxStorage { ... }` block (the `pub`-method block, *not* the trait
 - [ ] **Step 3: Add tests**
 
 ```rust
-    use domain::{Permission, ShareLinkId, ShareLinkRepo};
+    use domain::{Permission, InvitationLinkId, InvitationLinkRepo};
 
-    fn sample_link(account_id: u64, installation_id: u64, created_by: u64) -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    fn sample_link(account_id: u64, installation_id: u64, created_by: u64) -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: "0123456789ABCDEF".into(),
             installation_id,
             account_id,
@@ -2809,43 +2809,43 @@ In the `impl SqlxStorage { ... }` block (the `pub`-method block, *not* the trait
             revoked_at: None,
             revoked_by: None,
             repos: vec![
-                ShareLinkRepo { repo_id: 10, repo_full_name: "acme/api".into() },
-                ShareLinkRepo { repo_id: 11, repo_full_name: "acme/web".into() },
+                InvitationLinkRepo { repo_id: 10, repo_full_name: "acme/api".into() },
+                InvitationLinkRepo { repo_id: 11, repo_full_name: "acme/web".into() },
             ],
         }
     }
 
     #[tokio::test]
-    async fn insert_and_get_share_link_round_trips_with_repos() {
+    async fn insert_and_get_invitation_link_round_trips_with_repos() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme")).await.unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() })
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() })
             .await
             .unwrap();
 
-        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(got, link);
 
-        let by_slug = s.get_share_link_by_slug(&link.slug).await.unwrap().unwrap();
+        let by_slug = s.get_invitation_link_by_slug(&link.slug).await.unwrap().unwrap();
         assert_eq!(by_slug.id, link.id);
     }
 
     #[tokio::test]
-    async fn share_link_slug_is_unique() {
+    async fn invitation_link_slug_is_unique() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme")).await.unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let mut a = sample_link(100, 1, 7);
         let mut b = sample_link(100, 1, 7);
-        b.id = ShareLinkId::new();
+        b.id = InvitationLinkId::new();
         // same slug
-        s.insert_share_link(&crate::NewShareLink { link: a.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: a.clone() }).await.unwrap();
         let err = s
-            .insert_share_link(&crate::NewShareLink { link: b.clone() })
+            .insert_invitation_link(&crate::NewInvitationLink { link: b.clone() })
             .await
             .unwrap_err();
         assert!(matches!(err, crate::Error::Conflict(_)), "got {err:?}");
@@ -2859,46 +2859,46 @@ In the `impl SqlxStorage { ... }` block (the `pub`-method block, *not* the trait
         s.insert_installation(&sample_account(1, 100, "acme")).await.unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() })
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() })
             .await
             .unwrap();
 
-        s.mark_share_link_revoked(link.id, 7, dt("2026-05-04T13:00:00Z"))
+        s.mark_invitation_link_revoked(link.id, 7, dt("2026-05-04T13:00:00Z"))
             .await
             .unwrap();
 
-        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(got.revoked_by, Some(7));
         assert_eq!(got.revoked_at, Some(dt("2026-05-04T13:00:00Z")));
 
         // Idempotent revoke returns NotFound second time:
         let err = s
-            .mark_share_link_revoked(link.id, 7, dt("2026-05-04T14:00:00Z"))
+            .mark_invitation_link_revoked(link.id, 7, dt("2026-05-04T14:00:00Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, crate::Error::NotFound));
     }
 
     #[tokio::test]
-    async fn list_share_links_for_account_returns_in_descending_created_at() {
+    async fn list_invitation_links_for_account_returns_in_descending_created_at() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme")).await.unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let mut older = sample_link(100, 1, 7);
-        older.id = ShareLinkId::new();
+        older.id = InvitationLinkId::new();
         older.slug = "AAAAAAAAAAAAAAAA".into();
         older.created_at = dt("2026-05-01T00:00:00Z");
 
         let mut newer = sample_link(100, 1, 7);
-        newer.id = ShareLinkId::new();
+        newer.id = InvitationLinkId::new();
         newer.slug = "BBBBBBBBBBBBBBBB".into();
         newer.created_at = dt("2026-05-04T00:00:00Z");
 
-        s.insert_share_link(&crate::NewShareLink { link: older.clone() }).await.unwrap();
-        s.insert_share_link(&crate::NewShareLink { link: newer.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: older.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: newer.clone() }).await.unwrap();
 
-        let list = s.list_share_links_for_account(100).await.unwrap();
+        let list = s.list_invitation_links_for_account(100).await.unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, newer.id);
         assert_eq!(list[1].id, older.id);
@@ -2914,14 +2914,14 @@ Expected: 13 tests pass (9 prior + 4 new).
 
 ```bash
 git add crates/storage/src/sqlx_impl.rs
-git commit -m "feat(storage): SqlxStorage share_links + repos methods"
+git commit -m "feat(storage): SqlxStorage invitation_links + repos methods"
 ```
 
 ---
 
 ### Task 19: SqlxStorage — invitation_requests methods
 
-The key insight here: `insert_invitation_request_and_increment_uses` does both writes in one transaction so the `uses_count` is always consistent with the requests table. The partial unique index on `(share_link_id, requester_id) WHERE state = 'pending'` enforces "one pending per recipient per link" at the DB level.
+The key insight here: `insert_invitation_request_and_increment_uses` does both writes in one transaction so the `uses_count` is always consistent with the requests table. The partial unique index on `(invitation_link_id, requester_id) WHERE state = 'pending'` enforces "one pending per recipient per link" at the DB level.
 
 **Files:**
 - Modify: `crates/storage/src/sqlx_impl.rs`
@@ -2939,13 +2939,13 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         let res = sqlx::query(
             r#"
             INSERT INTO invitation_requests
-              (id, share_link_id, requester_id, justification, state,
+              (id, invitation_link_id, requester_id, justification, state,
                decided_by, decided_at, decline_reason, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(r.id.to_string())
-        .bind(r.share_link_id.to_string())
+        .bind(r.invitation_link_id.to_string())
         .bind(r.requester_id as i64)
         .bind(r.justification.as_deref())
         .bind(r.state.to_string())
@@ -2969,9 +2969,9 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         // Increment uses_count atomically. Caller has already verified is_active(now);
         // here we trust that and do the bump.
         let updated = sqlx::query(
-            r#"UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1"#,
+            r#"UPDATE invitation_links SET uses_count = uses_count + 1 WHERE id = ?1"#,
         )
-        .bind(r.share_link_id.to_string())
+        .bind(r.invitation_link_id.to_string())
         .execute(&mut *tx)
         .await?;
         if updated.rows_affected() == 0 {
@@ -3003,7 +3003,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
 
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         let row: Option<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT id, share_link_id, requester_id, justification, state,
+            r#"SELECT id, invitation_link_id, requester_id, justification, state,
                       decided_by, decided_at, decline_reason, created_at
                FROM invitation_requests WHERE id = ?1"#,
         )
@@ -3018,10 +3018,10 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         account_id: u64,
     ) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT r.id, r.share_link_id, r.requester_id, r.justification, r.state,
+            r#"SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
                       r.decided_by, r.decided_at, r.decline_reason, r.created_at
                FROM invitation_requests r
-               JOIN share_links l ON l.id = r.share_link_id
+               JOIN invitation_links l ON l.id = r.invitation_link_id
                WHERE l.account_id = ?1 AND r.state = 'pending'
                ORDER BY r.created_at"#,
         )
@@ -3031,11 +3031,11 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
-    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> {
+    async fn list_requests_for_link(&self, link_id: InvitationLinkId) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT id, share_link_id, requester_id, justification, state,
+            r#"SELECT id, invitation_link_id, requester_id, justification, state,
                       decided_by, decided_at, decline_reason, created_at
-               FROM invitation_requests WHERE share_link_id = ?1
+               FROM invitation_requests WHERE invitation_link_id = ?1
                ORDER BY created_at DESC"#,
         )
         .bind(link_id.to_string())
@@ -3050,10 +3050,10 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
 ```rust
     use domain::{InvitationRequest, RequestId, RequestState};
 
-    fn sample_request(link_id: ShareLinkId, requester: u64) -> InvitationRequest {
+    fn sample_request(link_id: InvitationLinkId, requester: u64) -> InvitationRequest {
         InvitationRequest {
             id: RequestId::new(),
-            share_link_id: link_id,
+            invitation_link_id: link_id,
             requester_id: requester,
             justification: Some("contractor for q2".into()),
             state: RequestState::Pending,
@@ -3071,7 +3071,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() }).await.unwrap();
 
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(
@@ -3083,7 +3083,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         let got = s.get_invitation_request(req.id).await.unwrap().unwrap();
         assert_eq!(got, req);
 
-        let updated_link = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let updated_link = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(updated_link.uses_count, 1);
     }
 
@@ -3094,7 +3094,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() }).await.unwrap();
 
         let req_a = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(
@@ -3120,7 +3120,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() }).await.unwrap();
 
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(
@@ -3152,7 +3152,7 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() }).await.unwrap();
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(
             &crate::NewInvitationRequest { request: req.clone() },
@@ -3188,11 +3188,11 @@ The key insight here: `insert_invitation_request_and_increment_uses` does both w
         let mut link_a = sample_link(100, 1, 7);
         link_a.slug = "AAAAAAAAAAAAAAAA".into();
         let mut link_b = sample_link(200, 2, 7);
-        link_b.id = ShareLinkId::new();
+        link_b.id = InvitationLinkId::new();
         link_b.slug = "BBBBBBBBBBBBBBBB".into();
 
-        s.insert_share_link(&crate::NewShareLink { link: link_a.clone() }).await.unwrap();
-        s.insert_share_link(&crate::NewShareLink { link: link_b.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link_a.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link_b.clone() }).await.unwrap();
 
         let r_a = sample_request(link_a.id, 8);
         let r_b = sample_request(link_b.id, 8);
@@ -3322,7 +3322,7 @@ git commit -m "feat(storage): SqlxStorage invitation_requests methods"
                       g.error_message, g.created_at, g.updated_at
                FROM github_invitations g
                JOIN invitation_requests r ON r.id = g.invitation_request_id
-               JOIN share_links l ON l.id = r.share_link_id
+               JOIN invitation_links l ON l.id = r.invitation_link_id
                WHERE l.installation_id = ?1
                  AND g.state IN ('sending', 'sent')
                ORDER BY g.created_at"#,
@@ -3359,7 +3359,7 @@ git commit -m "feat(storage): SqlxStorage invitation_requests methods"
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link.clone() }).await.unwrap();
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(
             &crate::NewInvitationRequest { request: req.clone() }
@@ -3395,12 +3395,12 @@ git commit -m "feat(storage): SqlxStorage invitation_requests methods"
 
         // link in installation 1
         let link_a = sample_link(100, 1, 7);
-        s.insert_share_link(&crate::NewShareLink { link: link_a.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link_a.clone() }).await.unwrap();
         // link in installation 2
         let mut link_b = sample_link(200, 2, 7);
-        link_b.id = ShareLinkId::new();
+        link_b.id = InvitationLinkId::new();
         link_b.slug = "BBBBBBBBBBBBBBBB".into();
-        s.insert_share_link(&crate::NewShareLink { link: link_b.clone() }).await.unwrap();
+        s.insert_invitation_link(&crate::NewInvitationLink { link: link_b.clone() }).await.unwrap();
 
         // request + invitation in each
         let req_a = sample_request(link_a.id, 8);
@@ -3521,7 +3521,7 @@ This requires `use audit::AuditEvent;` (already imported earlier) and `use crate
             event_type: event_type.into(),
             actor_kind: ActorKind::User,
             actor_id: Some(7),
-            target_kind: TargetKind::ShareLink,
+            target_kind: TargetKind::InvitationLink,
             target_id: target.into(),
             metadata: serde_json::json!({"k": "v"}),
             request_id: Some("inv-abc".into()),
@@ -3531,10 +3531,10 @@ This requires `use audit::AuditEvent;` (already imported earlier) and `use crate
     #[tokio::test]
     async fn audit_append_then_read_back() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        let e1 = sample_audit(100, "share_link.created", "01HFLINK1");
+        let e1 = sample_audit(100, "invitation_link.created", "01HFLINK1");
         let e2 = AuditEvent {
             occurred_at: dt("2026-05-04T13:01:00Z"),
-            ..sample_audit(100, "share_link.revoked", "01HFLINK1")
+            ..sample_audit(100, "invitation_link.revoked", "01HFLINK1")
         };
         s.audit(&e1).await.unwrap();
         s.audit(&e2).await.unwrap();
@@ -3548,8 +3548,8 @@ This requires `use audit::AuditEvent;` (already imported earlier) and `use crate
     #[tokio::test]
     async fn audit_scoped_per_account() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.audit(&sample_audit(100, "share_link.created", "x")).await.unwrap();
-        s.audit(&sample_audit(200, "share_link.created", "y")).await.unwrap();
+        s.audit(&sample_audit(100, "invitation_link.created", "x")).await.unwrap();
+        s.audit(&sample_audit(200, "invitation_link.created", "y")).await.unwrap();
 
         let a = s.debug_list_audit(100).await.unwrap();
         let b = s.debug_list_audit(200).await.unwrap();
@@ -3560,7 +3560,7 @@ This requires `use audit::AuditEvent;` (already imported earlier) and `use crate
     #[tokio::test]
     async fn audit_metadata_null_is_preserved() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        let mut e = sample_audit(100, "share_link.created", "x");
+        let mut e = sample_audit(100, "invitation_link.created", "x");
         e.metadata = serde_json::Value::Null;
         s.audit(&e).await.unwrap();
         let got = s.debug_list_audit(100).await.unwrap();
@@ -3598,14 +3598,14 @@ This is the big payoff: `tests::run_suite::<S: Storage>(s: S)` runs all the cros
 //! Per-impl test files (e.g. `tests/sqlx_suite.rs`) call `run_suite(impl)`.
 
 use crate::{
-    GithubInvitationUpdate, NewInvitationRequest, NewShareLink, RequestDecision, Storage,
+    GithubInvitationUpdate, NewInvitationRequest, NewInvitationLink, RequestDecision, Storage,
 };
 use audit::{ActorKind, AuditEvent, TargetKind};
 use chrono::{DateTime, Utc};
 use domain::{
     Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationRequest,
-    InvitationState, Permission, RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId,
-    ShareLinkRepo, User,
+    InvitationState, Permission, RequestId, RequestState, SelectedRepos, InvitationLink, InvitationLinkId,
+    InvitationLinkRepo, User,
 };
 
 fn dt(s: &str) -> DateTime<Utc> {
@@ -3633,9 +3633,9 @@ fn sample_user(user_id: u64, login: &str) -> User {
     }
 }
 
-fn sample_link(account_id: u64, installation_id: u64, created_by: u64, slug: &str) -> ShareLink {
-    ShareLink {
-        id: ShareLinkId::new(),
+fn sample_link(account_id: u64, installation_id: u64, created_by: u64, slug: &str) -> InvitationLink {
+    InvitationLink {
+        id: InvitationLinkId::new(),
         slug: slug.into(),
         installation_id,
         account_id,
@@ -3649,17 +3649,17 @@ fn sample_link(account_id: u64, installation_id: u64, created_by: u64, slug: &st
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![ShareLinkRepo {
+        repos: vec![InvitationLinkRepo {
             repo_id: 10,
             repo_full_name: "acme/api".into(),
         }],
     }
 }
 
-fn sample_request(link: ShareLinkId, requester: u64) -> InvitationRequest {
+fn sample_request(link: InvitationLinkId, requester: u64) -> InvitationRequest {
     InvitationRequest {
         id: RequestId::new(),
-        share_link_id: link,
+        invitation_link_id: link,
         requester_id: requester,
         justification: None,
         state: RequestState::Pending,
@@ -3674,7 +3674,7 @@ fn sample_request(link: ShareLinkId, requester: u64) -> InvitationRequest {
 /// independent; we don't reset between scenarios (they use disjoint IDs / accounts).
 pub async fn run_suite<S: Storage>(s: S) {
     scenario_install_uninstall_reinstall(&s).await;
-    scenario_share_link_lifecycle(&s).await;
+    scenario_invitation_link_lifecycle(&s).await;
     scenario_request_uses_and_uniqueness(&s).await;
     scenario_request_decision(&s).await;
     scenario_github_invitation_lifecycle(&s).await;
@@ -3695,18 +3695,18 @@ async fn scenario_install_uninstall_reinstall<S: Storage>(s: &S) {
     assert_eq!(active.installation_id, 1002);
 }
 
-async fn scenario_share_link_lifecycle<S: Storage>(s: &S) {
+async fn scenario_invitation_link_lifecycle<S: Storage>(s: &S) {
     s.insert_installation(&sample_account(2001, 9002, "acme2")).await.unwrap();
     s.upsert_user(&sample_user(701, "creator")).await.unwrap();
 
     let link = sample_link(9002, 2001, 701, "0000111122223333");
-    s.insert_share_link(&NewShareLink { link: link.clone() }).await.unwrap();
+    s.insert_invitation_link(&NewInvitationLink { link: link.clone() }).await.unwrap();
 
-    let by_slug = s.get_share_link_by_slug("0000111122223333").await.unwrap().unwrap();
+    let by_slug = s.get_invitation_link_by_slug("0000111122223333").await.unwrap().unwrap();
     assert_eq!(by_slug.id, link.id);
 
-    s.mark_share_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z")).await.unwrap();
-    let revoked = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    s.mark_invitation_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z")).await.unwrap();
+    let revoked = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(revoked.revoked_by, Some(701));
     assert!(!revoked.is_active(dt("2026-05-04T21:00:00Z")));
 }
@@ -3718,14 +3718,14 @@ async fn scenario_request_uses_and_uniqueness<S: Storage>(s: &S) {
 
     let mut link = sample_link(9003, 3001, 702, "1111222233334444");
     link.max_uses = Some(2);
-    s.insert_share_link(&NewShareLink { link: link.clone() }).await.unwrap();
+    s.insert_invitation_link(&NewInvitationLink { link: link.clone() }).await.unwrap();
 
     let r1 = sample_request(link.id, 802);
     s.insert_invitation_request_and_increment_uses(
         &NewInvitationRequest { request: r1.clone() },
     ).await.unwrap();
 
-    let after_one = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    let after_one = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(after_one.uses_count, 1);
 
     // Second pending for same (link, requester) should conflict.
@@ -3749,7 +3749,7 @@ async fn scenario_request_uses_and_uniqueness<S: Storage>(s: &S) {
         &NewInvitationRequest { request: r3.clone() },
     ).await.unwrap();
 
-    let after_two = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    let after_two = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(after_two.uses_count, 2);
     assert!(!after_two.is_active(dt("2026-05-04T20:00:00Z")), "max_uses exhausted");
 }
@@ -3760,7 +3760,7 @@ async fn scenario_request_decision<S: Storage>(s: &S) {
     s.upsert_user(&sample_user(803, "asker")).await.unwrap();
 
     let link = sample_link(9004, 4001, 703, "AAAA111122223333");
-    s.insert_share_link(&NewShareLink { link: link.clone() }).await.unwrap();
+    s.insert_invitation_link(&NewInvitationLink { link: link.clone() }).await.unwrap();
     let req = sample_request(link.id, 803);
     s.insert_invitation_request_and_increment_uses(
         &NewInvitationRequest { request: req.clone() },
@@ -3793,7 +3793,7 @@ async fn scenario_github_invitation_lifecycle<S: Storage>(s: &S) {
     s.upsert_user(&sample_user(804, "asker")).await.unwrap();
 
     let link = sample_link(9005, 5001, 704, "AAAA222233334444");
-    s.insert_share_link(&NewShareLink { link: link.clone() }).await.unwrap();
+    s.insert_invitation_link(&NewInvitationLink { link: link.clone() }).await.unwrap();
     let req = sample_request(link.id, 804);
     s.insert_invitation_request_and_increment_uses(
         &NewInvitationRequest { request: req.clone() },
@@ -3845,10 +3845,10 @@ async fn scenario_audit_appends<S: Storage>(s: &S) {
         id: AuditEventId::new(),
         account_id: 9999,
         occurred_at: dt("2026-05-04T15:00:00Z"),
-        event_type: "share_link.created".into(),
+        event_type: "invitation_link.created".into(),
         actor_kind: ActorKind::User,
         actor_id: Some(701),
-        target_kind: TargetKind::ShareLink,
+        target_kind: TargetKind::InvitationLink,
         target_id: "01HFAUDIT1".into(),
         metadata: serde_json::json!({"slug": "ABCD"}),
         request_id: Some("inv-abc".into()),
@@ -3952,7 +3952,7 @@ If there's nothing to commit, skip this step.
 - §7.1 (8 tables) → Task 12 (migration) + Tasks 16–21 (CRUD)
 - §7.2 (no SQL CHECKs except `account_type`) → Task 12
 - §7.3 (Storage trait with explicit transitions, audit-write-only) → Task 13 (trait), Tasks 16–21 (impls)
-- §8.1 (`is_active` derivation) → Task 8 (`ShareLink::is_active` + 5 tests)
+- §8.1 (`is_active` derivation) → Task 8 (`InvitationLink::is_active` + 5 tests)
 - §8.2 (RequestState) → Task 9
 - §8.3 (InvitationState, 7 states) → Task 10
 - §15.1 (event types as a known list) → Task 11 (`EVENT_TYPES` constant + `is_known_event_type`)
@@ -3968,7 +3968,7 @@ If there's nothing to commit, skip this step.
 - §18 Security (HMAC, CSP, etc.) → Plans 2, 4, 6
 - D1Storage → Plan 7
 
-**Type consistency check:** `ShareLinkId`, `RequestId`, `GithubInvitationId`, `AuditEventId` are defined identically in Task 3 and used identically across tasks. `Permission`, `RequestState`, `InvitationState`, `AccountType`, `ActorKind`, `TargetKind` all use lowercase `to_string()`/`FromStr` round-trips and the SQL stores those exact strings. The `Storage` trait method signatures in Task 13 match the impls in Tasks 16–21 (and the `tests::run_suite` calls in Task 22).
+**Type consistency check:** `InvitationLinkId`, `RequestId`, `GithubInvitationId`, `AuditEventId` are defined identically in Task 3 and used identically across tasks. `Permission`, `RequestState`, `InvitationState`, `AccountType`, `ActorKind`, `TargetKind` all use lowercase `to_string()`/`FromStr` round-trips and the SQL stores those exact strings. The `Storage` trait method signatures in Task 13 match the impls in Tasks 16–21 (and the `tests::run_suite` calls in Task 22).
 
 **Placeholder check:** No `TBD`, `TODO`, `// implement later`, or "similar to Task N" references. Every code step shows complete code. Every `unimplemented!` in the trait scaffolding is explicitly tracked to the task that fills it in (16, 17, 18, 19, 20, 21).
 
@@ -3978,18 +3978,18 @@ If there's nothing to commit, skip this step.
 
 These amendments override the corresponding code/text in earlier tasks. They were produced by /autoplan review on 2026-05-04. The original tasks are kept for context; when an amendment conflicts with a task's code block, **the amendment wins**.
 
-### A1. `ShareLink.slug` is `Slug`, not `String` (Task 8)
+### A1. `InvitationLink.slug` is `Slug`, not `String` (Task 8)
 
-In `crates/domain/src/share_link.rs`, change the `ShareLink` struct's `slug` field type from `String` to `crate::slug::Slug`. Update all callers that build a `ShareLink` literal: pass `slug: Slug::generate(&mut rng)` from a creation site, and `slug: Slug::from_string(row.slug)?` from the storage record converter. The plan's "Slug stored as String here so the type can travel without rng-tied checks" comment is incorrect — `Slug::from_string` doesn't need an RNG.
+In `crates/domain/src/invitation_link.rs`, change the `InvitationLink` struct's `slug` field type from `String` to `crate::slug::Slug`. Update all callers that build a `InvitationLink` literal: pass `slug: Slug::generate(&mut rng)` from a creation site, and `slug: Slug::from_string(row.slug)?` from the storage record converter. The plan's "Slug stored as String here so the type can travel without rng-tied checks" comment is incorrect — `Slug::from_string` doesn't need an RNG.
 
-In `crates/storage/src/records.rs`, update `ShareLinkRow::try_into_domain` to parse the slug:
+In `crates/storage/src/records.rs`, update `InvitationLinkRow::try_into_domain` to parse the slug:
 
 ```rust
 slug: domain::Slug::from_string(self.slug)
     .map_err(|e| crate::Error::Corrupt(format!("slug: {e}")))?,
 ```
 
-In tests that build a `ShareLink` literal (Task 18, Task 22), generate a slug from a seeded RNG instead of using a fixed string. Pattern:
+In tests that build a `InvitationLink` literal (Task 18, Task 22), generate a slug from a seeded RNG instead of using a fixed string. Pattern:
 
 ```rust
 use rand::SeedableRng;
@@ -3998,19 +3998,19 @@ let mut rng = ChaCha8Rng::seed_from_u64(/* unique per test */);
 let slug = domain::Slug::generate(&mut rng);
 ```
 
-### A2. Drop `NewShareLink` and `NewInvitationRequest` wrapper structs (Task 13)
+### A2. Drop `NewInvitationLink` and `NewInvitationRequest` wrapper structs (Task 13)
 
 In `crates/storage/src/lib.rs`, remove these struct definitions. Update the trait methods to take the inner type directly:
 
 ```rust
-async fn insert_share_link(&self, link: &ShareLink) -> Result<()>;
+async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()>;
 async fn insert_invitation_request_and_increment_uses(
     &self,
     request: &InvitationRequest,
 ) -> Result<()>;
 ```
 
-Update all `crate::NewShareLink { link: ... }` and `crate::NewInvitationRequest { request: ... }` constructions in Tasks 18, 19, 20, 22, 23 to pass the inner reference directly. **Keep** `RequestDecision` and `GithubInvitationUpdate` — they reshape the data, not just box it.
+Update all `crate::NewInvitationLink { link: ... }` and `crate::NewInvitationRequest { request: ... }` constructions in Tasks 18, 19, 20, 22, 23 to pass the inner reference directly. **Keep** `RequestDecision` and `GithubInvitationUpdate` — they reshape the data, not just box it.
 
 ### A3. Audit `EVENT_TYPES` becomes a typed enum (Task 11)
 
@@ -4022,10 +4022,10 @@ pub enum EventType {
     InstallationCreated,
     InstallationReposChanged,
     InstallationUninstalled,
-    ShareLinkCreated,
-    ShareLinkRevoked,
-    ShareLinkExpired,
-    ShareLinkExhausted,
+    InvitationLinkCreated,
+    InvitationLinkRevoked,
+    InvitationLinkExpired,
+    InvitationLinkExhausted,
     RequestCreated,
     RequestApproved,
     RequestDeclined,
@@ -4044,10 +4044,10 @@ impl EventType {
             Self::InstallationCreated => "installation.created",
             Self::InstallationReposChanged => "installation.repos_changed",
             Self::InstallationUninstalled => "installation.uninstalled",
-            Self::ShareLinkCreated => "share_link.created",
-            Self::ShareLinkRevoked => "share_link.revoked",
-            Self::ShareLinkExpired => "share_link.expired",
-            Self::ShareLinkExhausted => "share_link.exhausted",
+            Self::InvitationLinkCreated => "invitation_link.created",
+            Self::InvitationLinkRevoked => "invitation_link.revoked",
+            Self::InvitationLinkExpired => "invitation_link.expired",
+            Self::InvitationLinkExhausted => "invitation_link.exhausted",
             Self::RequestCreated => "request.created",
             Self::RequestApproved => "request.approved",
             Self::RequestDeclined => "request.declined",
@@ -4073,10 +4073,10 @@ impl std::str::FromStr for EventType {
             "installation.created" => Self::InstallationCreated,
             "installation.repos_changed" => Self::InstallationReposChanged,
             "installation.uninstalled" => Self::InstallationUninstalled,
-            "share_link.created" => Self::ShareLinkCreated,
-            "share_link.revoked" => Self::ShareLinkRevoked,
-            "share_link.expired" => Self::ShareLinkExpired,
-            "share_link.exhausted" => Self::ShareLinkExhausted,
+            "invitation_link.created" => Self::InvitationLinkCreated,
+            "invitation_link.revoked" => Self::InvitationLinkRevoked,
+            "invitation_link.expired" => Self::InvitationLinkExpired,
+            "invitation_link.exhausted" => Self::InvitationLinkExhausted,
             "request.created" => Self::RequestCreated,
             "request.approved" => Self::RequestApproved,
             "request.declined" => Self::RequestDeclined,
@@ -4133,23 +4133,23 @@ impl<'de> Deserialize<'de> for SelectedRepos {
 
 Add a unit test asserting JSON round-trip matches `encode_selected_repos` output for both variants.
 
-### A5. Fix N+1 reads in share-link queries (Task 18)
+### A5. Fix N+1 reads in invitation-link queries (Task 18)
 
-Rewrite `get_share_link_by_id`, `get_share_link_by_slug`, and `list_share_links_for_account` to issue a single query with a `LEFT JOIN share_link_repos`, then group rows in Rust. Pattern for `list_share_links_for_account`:
+Rewrite `get_invitation_link_by_id`, `get_invitation_link_by_slug`, and `list_invitation_links_for_account` to issue a single query with a `LEFT JOIN invitation_link_repos`, then group rows in Rust. Pattern for `list_invitation_links_for_account`:
 
 ```rust
-async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
+async fn list_invitation_links_for_account(&self, account_id: u64) -> Result<Vec<InvitationLink>> {
     use std::collections::BTreeMap;
 
-    let rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)> =
+    let rows: Vec<(crate::records::InvitationLinkRow, Option<i64>, Option<String>)> =
         sqlx::query_as(
             r#"
             SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                    l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
                    l.internal_note, l.revoked_at, l.revoked_by,
                    r.repo_id, r.repo_full_name
-            FROM share_links l
-            LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+            FROM invitation_links l
+            LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
             WHERE l.account_id = ?1
             ORDER BY l.created_at DESC, l.id, r.repo_id
             "#,
@@ -4158,12 +4158,12 @@ async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<Shar
         .fetch_all(&self.pool)
         .await?;
 
-    let mut by_link: BTreeMap<String, (crate::records::ShareLinkRow, Vec<domain::ShareLinkRepo>)> =
+    let mut by_link: BTreeMap<String, (crate::records::InvitationLinkRow, Vec<domain::InvitationLinkRepo>)> =
         BTreeMap::new();
     for (link_row, repo_id, repo_full_name) in rows {
         let entry = by_link.entry(link_row.id.clone()).or_insert((link_row, Vec::new()));
         if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
-            entry.1.push(domain::ShareLinkRepo {
+            entry.1.push(domain::InvitationLinkRepo {
                 repo_id: rid as u64,
                 repo_full_name: name,
             });
@@ -4185,11 +4185,11 @@ Add at least two tests in `crates/storage/tests/sqlx_suite.rs` (or as a new scen
 
 ```rust
 #[tokio::test]
-async fn share_link_with_unknown_installation_fails() {
+async fn invitation_link_with_unknown_installation_fails() {
     let s = SqlxStorage::in_memory().await.unwrap();
     s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
     let mut link = sample_link(100, /* installation_id */ 999, 7);
-    let err = s.insert_share_link(&link).await.unwrap_err();
+    let err = s.insert_invitation_link(&link).await.unwrap_err();
     assert!(matches!(err, crate::Error::Database(_)), "got {err:?}");
 }
 
@@ -4197,7 +4197,7 @@ async fn share_link_with_unknown_installation_fails() {
 async fn invitation_request_with_unknown_link_fails() {
     let s = SqlxStorage::in_memory().await.unwrap();
     s.upsert_user(&sample_user(8, "alice")).await.unwrap();
-    let req = sample_request(domain::ShareLinkId::new(), 8); // bogus link id
+    let req = sample_request(domain::InvitationLinkId::new(), 8); // bogus link id
     let err = s.insert_invitation_request_and_increment_uses(&req).await.unwrap_err();
     assert!(matches!(err, crate::Error::Database(_)) || matches!(err, crate::Error::NotFound), "got {err:?}");
 }
@@ -4217,7 +4217,7 @@ where
     Fut: std::future::Future<Output = S>,
 {
     scenario_install_uninstall_reinstall(make_storage().await).await;
-    scenario_share_link_lifecycle(make_storage().await).await;
+    scenario_invitation_link_lifecycle(make_storage().await).await;
     scenario_request_uses_and_uniqueness(make_storage().await).await;
     scenario_request_decision(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
@@ -4242,17 +4242,17 @@ Add a `///` paragraph to every method on the `Storage` trait. Each docstring cov
 
 ```rust
 /// Insert a new `InvitationRequest` row and atomically increment
-/// `share_links.uses_count` for the link this request was filed against.
+/// `invitation_links.uses_count` for the link this request was filed against.
 ///
-/// **Precondition:** the caller must have just verified that the share link is
-/// `ShareLink::is_active(now)`. This method does *not* re-check active status —
-/// the partial unique index on `(share_link_id, requester_id) WHERE state = 'pending'`
+/// **Precondition:** the caller must have just verified that the invitation link is
+/// `InvitationLink::is_active(now)`. This method does *not* re-check active status —
+/// the partial unique index on `(invitation_link_id, requester_id) WHERE state = 'pending'`
 /// only defends against duplicate pending requests, not against exhaustion or expiry.
 ///
 /// **Errors:**
 /// - `Error::Conflict` if a pending request already exists for this `(link, requester)`,
 ///   or if `request.id` collides with an existing row.
-/// - `Error::NotFound` if `share_link_id` doesn't reference an existing link.
+/// - `Error::NotFound` if `invitation_link_id` doesn't reference an existing link.
 /// - `Error::Database` for any other SQLite/D1 failure.
 ///
 /// **Idempotency:** safe to retry on `Error::Database` (timeout etc.) — the unique
@@ -4272,7 +4272,7 @@ Replace `Conflict(String)` with a structured variant:
 ```rust
 #[derive(Debug, Error, PartialEq)]
 pub enum ConflictKind {
-    #[error("share_link slug already in use")]
+    #[error("invitation_link slug already in use")]
     DuplicateSlug,
     #[error("a pending request already exists for this (link, requester)")]
     DuplicatePendingRequest,
@@ -4300,7 +4300,7 @@ In each impl method that previously raised `Conflict("...")`, classify the uniqu
 ```rust
 fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
     match db.message() {
-        m if m.contains("share_links.slug") => ConflictKind::DuplicateSlug,
+        m if m.contains("invitation_links.slug") => ConflictKind::DuplicateSlug,
         m if m.contains("idx_one_pending_per_link_per_user") => ConflictKind::DuplicatePendingRequest,
         m if m.contains("idx_installations_active_account") => ConflictKind::DuplicateActiveInstallation,
         _ => default,
@@ -4412,8 +4412,8 @@ async fn scenario_timestamp_precision<S: Storage>(s: S) {
     // 123_456 microseconds = 123_456_000 nanoseconds
     link.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()
         + chrono::Duration::microseconds(123_456);
-    s.insert_share_link(&link).await.unwrap();
-    let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+    s.insert_invitation_link(&link).await.unwrap();
+    let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(got.created_at, link.created_at, "microsecond precision lost in round-trip");
 }
 ```
@@ -4441,8 +4441,8 @@ The /autoplan review surfaced several recommendations that affect later plans (w
 | 1 | CEO | Reject "drop Restate" challenge | User Challenge — rejected | User direction holds |
 | 2 | CEO | Reject "audit UI in v1" challenge | User Challenge — rejected | User direction holds |
 | 3 | CEO | Reject "notifications in v1" challenge | User Challenge — rejected | User direction holds |
-| 4 | Eng/DX | Drop `NewShareLink`/`NewInvitationRequest` wrappers | Taste — accepted | P5 explicit-over-clever |
-| 5 | Eng/DX | `ShareLink.slug` typed `Slug` | Taste — accepted | P5 + safety |
+| 4 | Eng/DX | Drop `NewInvitationLink`/`NewInvitationRequest` wrappers | Taste — accepted | P5 explicit-over-clever |
+| 5 | Eng/DX | `InvitationLink.slug` typed `Slug` | Taste — accepted | P5 + safety |
 | 6 | Audit | `EventType` becomes typed enum | Taste — accepted | P5 + completeness |
 | 7 | Eng | Fix `SelectedRepos` serde inconsistency | Auto | P5 explicit |
 | 8 | Eng | Fix N+1 reads (single LEFT JOIN) | Auto | P3 pragmatic |

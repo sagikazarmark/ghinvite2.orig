@@ -177,7 +177,7 @@ kill %1
 - Modify: `crates/restate-svc/Cargo.toml` (add `integration` feature, `reqwest` dev-dep)
 - Create: `crates/restate-svc/tests/integration_test.rs`
 
-**Goal:** Integration tests that exercise the five Restate service handlers (`Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`) against a real Restate server running on `localhost:8080` (via `docker compose up`). GitHub API calls hit the `github-stub` server.
+**Goal:** Integration tests that exercise the five Restate service handlers (`Installation`, `InvitationLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`) against a real Restate server running on `localhost:8080` (via `docker compose up`). GitHub API calls hit the `github-stub` server.
 
 - [ ] **Step 1: Add `integration` feature to `crates/restate-svc/Cargo.toml`**
 
@@ -285,7 +285,7 @@ async fn installation_install_and_query() {
 async fn full_happy_path() {
     reset_github_stub().await;
     let _addr = setup_restate().await;
-    // ShareLink create → InvitationRequest → approve → GithubInvitation sent
+    // InvitationLink create → InvitationRequest → approve → GithubInvitation sent
     // TODO: implement after installation_install_and_query is proven
     todo!("implement after basic wiring is confirmed")
 }
@@ -342,7 +342,7 @@ The approach: implement a `WranglerD1Bridge` that wraps `wrangler d1 execute ghi
 - Schema smoke: `SELECT COUNT(*) FROM installations` (table exists)
 - INSERT smoke: each table accepts a valid row
 - UNIQUE constraint verification: duplicate slug → correct error message substring
-- LEFT JOIN null-sentinel: zero-repo share link returns one null-repo row
+- LEFT JOIN null-sentinel: zero-repo invitation link returns one null-repo row
 
 These tests run as `#[ignore]` and require `wrangler` on PATH.
 
@@ -370,7 +370,7 @@ fn wrangler_d1_execute(sql: &str) -> String {
 #[test]
 #[ignore]
 fn d1_schema_tables_exist() {
-    for table in ["installations", "users", "share_links", "share_link_repos",
+    for table in ["installations", "users", "invitation_links", "invitation_link_repos",
                   "invitation_requests", "github_invitations", "audit_events"] {
         let out = wrangler_d1_execute(&format!("SELECT COUNT(*) as cnt FROM {table}"));
         assert!(out.contains("cnt"), "table {table} missing or inaccessible");

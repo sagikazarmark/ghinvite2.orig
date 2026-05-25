@@ -6,7 +6,7 @@ use subtle::ConstantTimeEq;
 const SLUG_LEN: usize = 16;
 const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// 16-character base62 secret used in share-link URLs.
+/// 16-character base62 secret used in invitation-link URLs.
 ///
 /// `PartialEq`/`Eq` are derived for struct equality (e.g. test assertions on
 /// records that contain a `Slug`); use [`Slug::ct_eq`] when comparing a

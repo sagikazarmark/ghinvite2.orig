@@ -53,7 +53,7 @@ async fn home_returns_html() {
     assert!(text.contains("Sign in with GitHub"));
     assert!(text.contains("Controlled GitHub invitations without access guesswork"));
     assert!(text.contains("home-features"));
-    assert!(text.contains("Controlled share links"));
+    assert!(text.contains("Controlled invitation links"));
     assert!(text.contains("Review requests before invitations"));
     assert!(text.contains("Operational history"));
     assert!(!text.contains(concat!("class=\"he", "ro")));
@@ -91,7 +91,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                             p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-primary", "GitHub access operations" }
                             h1 { class: "mt-4 text-3xl font-semibold tracking-tight text-base-content sm:text-5xl", "Controlled GitHub invitations without access guesswork" }
                             p { class: "mt-5 max-w-2xl text-base leading-7 text-base-content/68 sm:text-lg",
-                                "Create share links, review incoming requests, and send repository invitations only after the access consequences are clear."
+                                "Create invitation links, review incoming requests, and send repository invitations only after the access consequences are clear."
                             }
                         }
                         div { class: "home-hero-action mt-9 flex justify-center",
@@ -114,7 +114,7 @@ pub fn HomePage(props: HomePageProps) -> Element {
                         div { class: "mt-5 grid gap-3 lg:grid-cols-3",
                             article { class: "home-feature-item",
                                 p { class: "home-feature-kicker", "01" }
-                                h3 { class: "mt-3 text-base font-semibold text-base-content", "Controlled share links" }
+                                h3 { class: "mt-3 text-base font-semibold text-base-content", "Controlled invitation links" }
                                 p { class: "mt-2 text-sm leading-6 text-base-content/66",
                                     "Define repositories, permission level, expiration, and usage limits before a request reaches the queue."
                                 }

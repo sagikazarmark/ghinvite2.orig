@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use audit::AuditEvent;
 use chrono::{DateTime, Utc};
 use domain::{
-    Account, GithubInvitation, GithubInvitationId, InvitationRequest, RequestId, SelectedRepos,
-    ShareLink, ShareLinkId, User,
+    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
+    InvitationRequest, RequestId, SelectedRepos, User,
 };
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -80,25 +80,29 @@ impl SqlxStorage {
     }
 }
 
-/// Collapse a `LEFT JOIN share_links × share_link_repos` result set into at most
-/// one [`ShareLink`]. Returns `None` if the join produced zero rows.
-fn group_one_share_link(
-    rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)>,
-) -> Result<Option<ShareLink>> {
+/// Collapse a `LEFT JOIN invitation_links × invitation_link_repos` result set into at most
+/// one [`InvitationLink`]. Returns `None` if the join produced zero rows.
+fn group_one_invitation_link(
+    rows: Vec<(
+        crate::records::InvitationLinkRow,
+        Option<i64>,
+        Option<String>,
+    )>,
+) -> Result<Option<InvitationLink>> {
     let mut iter = rows.into_iter();
     let Some((row, first_repo_id, first_repo_name)) = iter.next() else {
         return Ok(None);
     };
     let mut repos = Vec::new();
     if let (Some(rid), Some(name)) = (first_repo_id, first_repo_name) {
-        repos.push(domain::ShareLinkRepo {
+        repos.push(domain::InvitationLinkRepo {
             repo_id: rid as u64,
             repo_full_name: name,
         });
     }
     for (_, repo_id, repo_full_name) in iter {
         if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
-            repos.push(domain::ShareLinkRepo {
+            repos.push(domain::InvitationLinkRepo {
                 repo_id: rid as u64,
                 repo_full_name: name,
             });
@@ -116,9 +120,9 @@ fn group_one_share_link(
 /// `default` for primary-key collisions and other unique violations.
 fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
     let m = db.message();
-    if m.contains("share_links.slug") {
+    if m.contains("invitation_links.slug") {
         ConflictKind::DuplicateSlug
-    } else if m.contains("invitation_requests.share_link_id")
+    } else if m.contains("invitation_requests.invitation_link_id")
         && m.contains("invitation_requests.requester_id")
     {
         ConflictKind::DuplicatePendingRequest
@@ -283,11 +287,11 @@ impl Storage for SqlxStorage {
         .map_err(crate::to_db_err)?;
         Ok(row.map(|r| r.into_domain()))
     }
-    async fn insert_share_link(&self, link: &ShareLink) -> Result<()> {
+    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()> {
         let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
         sqlx::query(
             r#"
-            INSERT INTO share_links
+            INSERT INTO invitation_links
               (id, slug, installation_id, account_id, created_by, created_at, expires_at,
                max_uses, uses_count, permission, approval_required, internal_note,
                revoked_at, revoked_by)
@@ -322,7 +326,7 @@ impl Storage for SqlxStorage {
 
         for repo in &link.repos {
             sqlx::query(
-                r#"INSERT INTO share_link_repos (share_link_id, repo_id, repo_full_name)
+                r#"INSERT INTO invitation_link_repos (invitation_link_id, repo_id, repo_full_name)
                    VALUES (?1, ?2, ?3)"#,
             )
             .bind(link.id.to_string())
@@ -336,14 +340,14 @@ impl Storage for SqlxStorage {
         Ok(())
     }
 
-    async fn mark_share_link_revoked(
+    async fn mark_invitation_link_revoked(
         &self,
-        id: ShareLinkId,
+        id: InvitationLinkId,
         by_user: u64,
         when: DateTime<Utc>,
     ) -> Result<()> {
         let res = sqlx::query(
-            r#"UPDATE share_links SET revoked_at = ?1, revoked_by = ?2
+            r#"UPDATE invitation_links SET revoked_at = ?1, revoked_by = ?2
                WHERE id = ?3 AND revoked_at IS NULL"#,
         )
         .bind(when)
@@ -358,15 +362,18 @@ impl Storage for SqlxStorage {
         Ok(())
     }
 
-    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>> {
-        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>> {
+        let rows: Vec<crate::records::InvitationLinkJoinRow> = sqlx::query_as(
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
                        l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
-                FROM share_links l
-                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                FROM invitation_links l
+                LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                 WHERE l.id = ?1
                 ORDER BY r.repo_id
                 "#,
@@ -375,18 +382,18 @@ impl Storage for SqlxStorage {
         .fetch_all(&self.pool)
         .await
         .map_err(crate::to_db_err)?;
-        group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
+        group_one_invitation_link(rows.into_iter().map(|j| j.split()).collect())
     }
 
-    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>> {
-        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
+        let rows: Vec<crate::records::InvitationLinkJoinRow> = sqlx::query_as(
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
                        l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
-                FROM share_links l
-                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                FROM invitation_links l
+                LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                 WHERE l.slug = ?1
                 ORDER BY r.repo_id
                 "#,
@@ -395,20 +402,23 @@ impl Storage for SqlxStorage {
         .fetch_all(&self.pool)
         .await
         .map_err(crate::to_db_err)?;
-        group_one_share_link(rows.into_iter().map(|j| j.split()).collect())
+        group_one_invitation_link(rows.into_iter().map(|j| j.split()).collect())
     }
 
-    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>> {
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>> {
         use std::collections::BTreeMap;
 
-        let rows: Vec<crate::records::ShareLinkJoinRow> = sqlx::query_as(
+        let rows: Vec<crate::records::InvitationLinkJoinRow> = sqlx::query_as(
             r#"
                 SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
                        l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
                        l.internal_note, l.revoked_at, l.revoked_by,
                        r.repo_id, r.repo_full_name
-                FROM share_links l
-                LEFT JOIN share_link_repos r ON r.share_link_id = l.id
+                FROM invitation_links l
+                LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
                 WHERE l.account_id = ?1
                 ORDER BY l.created_at DESC, l.id, r.repo_id
                 "#,
@@ -417,14 +427,20 @@ impl Storage for SqlxStorage {
         .fetch_all(&self.pool)
         .await
         .map_err(crate::to_db_err)?;
-        let rows: Vec<(crate::records::ShareLinkRow, Option<i64>, Option<String>)> =
-            rows.into_iter().map(|j| j.split()).collect();
+        let rows: Vec<(
+            crate::records::InvitationLinkRow,
+            Option<i64>,
+            Option<String>,
+        )> = rows.into_iter().map(|j| j.split()).collect();
 
         // Preserve the SQL ordering (created_at DESC, id) by tracking insertion order.
         let mut order: Vec<String> = Vec::new();
         let mut by_link: BTreeMap<
             String,
-            (crate::records::ShareLinkRow, Vec<domain::ShareLinkRepo>),
+            (
+                crate::records::InvitationLinkRow,
+                Vec<domain::InvitationLinkRepo>,
+            ),
         > = BTreeMap::new();
         for (link_row, repo_id, repo_full_name) in rows {
             let key = link_row.id.clone();
@@ -433,7 +449,7 @@ impl Storage for SqlxStorage {
                 (link_row, Vec::new())
             });
             if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
-                entry.1.push(domain::ShareLinkRepo {
+                entry.1.push(domain::InvitationLinkRepo {
                     repo_id: rid as u64,
                     repo_full_name: name,
                 });
@@ -457,13 +473,13 @@ impl Storage for SqlxStorage {
         let res = sqlx::query(
             r#"
             INSERT INTO invitation_requests
-              (id, share_link_id, requester_id, justification, state,
+              (id, invitation_link_id, requester_id, justification, state,
                decided_by, decided_at, decline_reason, created_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
         )
         .bind(request.id.to_string())
-        .bind(request.share_link_id.to_string())
+        .bind(request.invitation_link_id.to_string())
         .bind(u64_to_i64(request.requester_id))
         .bind(request.justification.as_deref())
         .bind(request.state.to_string())
@@ -491,8 +507,8 @@ impl Storage for SqlxStorage {
         // Increment uses_count atomically. Caller has already verified is_active(now);
         // here we trust that and do the bump.
         let updated =
-            sqlx::query(r#"UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?1"#)
-                .bind(request.share_link_id.to_string())
+            sqlx::query(r#"UPDATE invitation_links SET uses_count = uses_count + 1 WHERE id = ?1"#)
+                .bind(request.invitation_link_id.to_string())
                 .execute(&mut *tx)
                 .await
                 .map_err(crate::to_db_err)?;
@@ -526,7 +542,7 @@ impl Storage for SqlxStorage {
 
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         let row: Option<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT id, share_link_id, requester_id, justification, state,
+            r#"SELECT id, invitation_link_id, requester_id, justification, state,
                       decided_by, decided_at, decline_reason, created_at
                FROM invitation_requests WHERE id = ?1"#,
         )
@@ -542,10 +558,10 @@ impl Storage for SqlxStorage {
         account_id: u64,
     ) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT r.id, r.share_link_id, r.requester_id, r.justification, r.state,
+            r#"SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
                       r.decided_by, r.decided_at, r.decline_reason, r.created_at
                FROM invitation_requests r
-               JOIN share_links l ON l.id = r.share_link_id
+               JOIN invitation_links l ON l.id = r.invitation_link_id
                WHERE l.account_id = ?1 AND r.state = 'pending'
                ORDER BY r.created_at"#,
         )
@@ -556,11 +572,14 @@ impl Storage for SqlxStorage {
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
-    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>> {
+    async fn list_requests_for_link(
+        &self,
+        link_id: InvitationLinkId,
+    ) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT id, share_link_id, requester_id, justification, state,
+            r#"SELECT id, invitation_link_id, requester_id, justification, state,
                       decided_by, decided_at, decline_reason, created_at
-               FROM invitation_requests WHERE share_link_id = ?1
+               FROM invitation_requests WHERE invitation_link_id = ?1
                ORDER BY created_at DESC"#,
         )
         .bind(link_id.to_string())
@@ -662,7 +681,7 @@ impl Storage for SqlxStorage {
                       g.error_message, g.created_at, g.updated_at
                FROM github_invitations g
                JOIN invitation_requests r ON r.id = g.invitation_request_id
-               JOIN share_links l ON l.id = r.share_link_id
+               JOIN invitation_links l ON l.id = r.invitation_link_id
                WHERE l.installation_id = ?1
                  AND g.state IN ('sending', 'sent')
                ORDER BY g.created_at"#,
@@ -742,8 +761,8 @@ mod tests {
         for table in [
             "installations",
             "users",
-            "share_links",
-            "share_link_repos",
+            "invitation_links",
+            "invitation_link_repos",
             "invitation_requests",
             "github_invitations",
             "audit_events",
@@ -755,6 +774,16 @@ mod tests {
                     .await
                     .unwrap();
             assert!(row.is_some(), "table {table} missing");
+        }
+
+        for old_table in ["share_links", "share_link_repos"] {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' AND name=?1")
+                    .bind(old_table)
+                    .fetch_optional(&s.pool)
+                    .await
+                    .unwrap();
+            assert!(row.is_none(), "old table {old_table} should not exist");
         }
     }
 
@@ -884,10 +913,10 @@ mod tests {
         installation_id: u64,
         created_by: u64,
         slug_seed: u64,
-    ) -> ShareLink {
-        use domain::{Permission, ShareLinkRepo};
-        ShareLink {
-            id: ShareLinkId::new(),
+    ) -> InvitationLink {
+        use domain::{InvitationLinkRepo, Permission};
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: slug_with_seed(slug_seed),
             installation_id,
             account_id,
@@ -902,11 +931,11 @@ mod tests {
             revoked_at: None,
             revoked_by: None,
             repos: vec![
-                ShareLinkRepo {
+                InvitationLinkRepo {
                     repo_id: 10,
                     repo_full_name: "acme/api".into(),
                 },
-                ShareLinkRepo {
+                InvitationLinkRepo {
                     repo_id: 11,
                     repo_full_name: "acme/web".into(),
                 },
@@ -915,7 +944,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_and_get_share_link_round_trips_with_repos() {
+    async fn insert_and_get_invitation_link_round_trips_with_repos() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme"))
             .await
@@ -923,13 +952,13 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let link = sample_link(100, 1, 7, 1);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
-        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(got, link);
 
         let by_slug = s
-            .get_share_link_by_slug(link.slug.as_str())
+            .get_invitation_link_by_slug(link.slug.as_str())
             .await
             .unwrap()
             .unwrap();
@@ -937,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn share_link_slug_is_unique() {
+    async fn invitation_link_slug_is_unique() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme"))
             .await
@@ -946,9 +975,9 @@ mod tests {
 
         let a = sample_link(100, 1, 7, 1);
         let mut b = sample_link(100, 1, 7, 1); // same seed → same slug
-        b.id = ShareLinkId::new();
-        s.insert_share_link(&a).await.unwrap();
-        let err = s.insert_share_link(&b).await.unwrap_err();
+        b.id = InvitationLinkId::new();
+        s.insert_invitation_link(&a).await.unwrap();
+        let err = s.insert_invitation_link(&b).await.unwrap_err();
         assert!(
             matches!(err, Error::Conflict(ConflictKind::DuplicateSlug)),
             "got {err:?}"
@@ -963,26 +992,26 @@ mod tests {
             .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         let link = sample_link(100, 1, 7, 2);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
-        s.mark_share_link_revoked(link.id, 7, dt("2026-05-04T13:00:00Z"))
+        s.mark_invitation_link_revoked(link.id, 7, dt("2026-05-04T13:00:00Z"))
             .await
             .unwrap();
 
-        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(got.revoked_by, Some(7));
         assert_eq!(got.revoked_at, Some(dt("2026-05-04T13:00:00Z")));
 
         // Idempotent revoke returns NotFound second time:
         let err = s
-            .mark_share_link_revoked(link.id, 7, dt("2026-05-04T14:00:00Z"))
+            .mark_invitation_link_revoked(link.id, 7, dt("2026-05-04T14:00:00Z"))
             .await
             .unwrap_err();
         assert!(matches!(err, Error::NotFound));
     }
 
     #[tokio::test]
-    async fn list_share_links_for_account_returns_in_descending_created_at() {
+    async fn list_invitation_links_for_account_returns_in_descending_created_at() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme"))
             .await
@@ -995,10 +1024,10 @@ mod tests {
         let mut newer = sample_link(100, 1, 7, 4);
         newer.created_at = dt("2026-05-04T00:00:00Z");
 
-        s.insert_share_link(&older).await.unwrap();
-        s.insert_share_link(&newer).await.unwrap();
+        s.insert_invitation_link(&older).await.unwrap();
+        s.insert_invitation_link(&newer).await.unwrap();
 
-        let list = s.list_share_links_for_account(100).await.unwrap();
+        let list = s.list_invitation_links_for_account(100).await.unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, newer.id);
         assert_eq!(list[1].id, older.id);
@@ -1014,34 +1043,34 @@ mod tests {
 
         let mut link = sample_link(100, 1, 7, 5);
         link.repos.clear();
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
-        let got = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert!(got.repos.is_empty());
 
-        let list = s.list_share_links_for_account(100).await.unwrap();
+        let list = s.list_invitation_links_for_account(100).await.unwrap();
         assert_eq!(list.len(), 1);
         assert!(list[0].repos.is_empty());
     }
 
     #[tokio::test]
-    async fn share_link_with_unknown_installation_fails() {
+    async fn invitation_link_with_unknown_installation_fails() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         // installation_id 999 does not exist → FK violation
         let link = sample_link(100, 999, 7, 6);
-        let err = s.insert_share_link(&link).await.unwrap_err();
+        let err = s.insert_invitation_link(&link).await.unwrap_err();
         assert!(
             matches!(err, Error::Conflict(ConflictKind::ForeignKey)),
             "got {err:?}"
         );
     }
 
-    pub(crate) fn sample_request(link_id: ShareLinkId, requester: u64) -> InvitationRequest {
+    pub(crate) fn sample_request(link_id: InvitationLinkId, requester: u64) -> InvitationRequest {
         use domain::RequestState;
         InvitationRequest {
             id: RequestId::new(),
-            share_link_id: link_id,
+            invitation_link_id: link_id,
             requester_id: requester,
             justification: Some("contractor for q2".into()),
             state: RequestState::Pending,
@@ -1061,7 +1090,7 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7, 10);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(&req)
@@ -1071,7 +1100,7 @@ mod tests {
         let got = s.get_invitation_request(req.id).await.unwrap().unwrap();
         assert_eq!(got, req);
 
-        let updated_link = s.get_share_link_by_id(link.id).await.unwrap().unwrap();
+        let updated_link = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
         assert_eq!(updated_link.uses_count, 1);
     }
 
@@ -1084,7 +1113,7 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7, 11);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
         let req_a = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(&req_a)
@@ -1112,7 +1141,7 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7, 12);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
 
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(&req)
@@ -1145,7 +1174,7 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7, 13);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(&req)
             .await
@@ -1188,8 +1217,8 @@ mod tests {
         let link_a = sample_link(100, 1, 7, 14);
         let link_b = sample_link(200, 2, 7, 15);
 
-        s.insert_share_link(&link_a).await.unwrap();
-        s.insert_share_link(&link_b).await.unwrap();
+        s.insert_invitation_link(&link_a).await.unwrap();
+        s.insert_invitation_link(&link_b).await.unwrap();
 
         let r_a = sample_request(link_a.id, 8);
         let r_b = sample_request(link_b.id, 8);
@@ -1233,7 +1262,7 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7, 20);
-        s.insert_share_link(&link).await.unwrap();
+        s.insert_invitation_link(&link).await.unwrap();
         let req = sample_request(link.id, 8);
         s.insert_invitation_request_and_increment_uses(&req)
             .await
@@ -1279,9 +1308,9 @@ mod tests {
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
 
         let link_a = sample_link(100, 1, 7, 21);
-        s.insert_share_link(&link_a).await.unwrap();
+        s.insert_invitation_link(&link_a).await.unwrap();
         let link_b = sample_link(200, 2, 7, 22);
-        s.insert_share_link(&link_b).await.unwrap();
+        s.insert_invitation_link(&link_b).await.unwrap();
 
         let req_a = sample_request(link_a.id, 8);
         s.insert_invitation_request_and_increment_uses(&req_a)
@@ -1342,7 +1371,7 @@ mod tests {
             event_type,
             actor_kind: ActorKind::User,
             actor_id: Some(7),
-            target_kind: TargetKind::ShareLink,
+            target_kind: TargetKind::InvitationLink,
             target_id: target.into(),
             metadata: serde_json::json!({"k": "v"}),
             request_id: Some("inv-abc".into()),
@@ -1353,10 +1382,10 @@ mod tests {
     async fn audit_append_then_read_back() {
         use audit::EventType;
         let s = SqlxStorage::in_memory().await.unwrap();
-        let e1 = sample_audit(100, EventType::ShareLinkCreated, "01HFLINK1");
+        let e1 = sample_audit(100, EventType::InvitationLinkCreated, "01HFLINK1");
         let e2 = AuditEvent {
             occurred_at: dt("2026-05-04T13:01:00Z"),
-            ..sample_audit(100, EventType::ShareLinkRevoked, "01HFLINK1")
+            ..sample_audit(100, EventType::InvitationLinkRevoked, "01HFLINK1")
         };
         s.audit(&e1).await.unwrap();
         s.audit(&e2).await.unwrap();
@@ -1371,10 +1400,10 @@ mod tests {
     async fn audit_scoped_per_account() {
         use audit::EventType;
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.audit(&sample_audit(100, EventType::ShareLinkCreated, "x"))
+        s.audit(&sample_audit(100, EventType::InvitationLinkCreated, "x"))
             .await
             .unwrap();
-        s.audit(&sample_audit(200, EventType::ShareLinkCreated, "y"))
+        s.audit(&sample_audit(200, EventType::InvitationLinkCreated, "y"))
             .await
             .unwrap();
 
@@ -1388,7 +1417,7 @@ mod tests {
     async fn audit_metadata_null_is_preserved() {
         use audit::EventType;
         let s = SqlxStorage::in_memory().await.unwrap();
-        let mut e = sample_audit(100, EventType::ShareLinkCreated, "x");
+        let mut e = sample_audit(100, EventType::InvitationLinkCreated, "x");
         e.metadata = serde_json::Value::Null;
         s.audit(&e).await.unwrap();
         let got = s.debug_list_audit(100).await.unwrap();
@@ -1399,8 +1428,8 @@ mod tests {
     async fn invitation_request_with_unknown_link_fails() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
-        // bogus share_link_id (no row in share_links) → FK violation
-        let req = sample_request(ShareLinkId::new(), 8);
+        // bogus invitation_link_id (no row in invitation_links) → FK violation
+        let req = sample_request(InvitationLinkId::new(), 8);
         let err = s
             .insert_invitation_request_and_increment_uses(&req)
             .await

@@ -71,7 +71,7 @@ In `crates/web/src/account_admin_reads.rs`, change the row struct to:
 pub(crate) struct AccountAdminPendingRequestRow {
     pub(crate) request_id: RequestId,
     pub(crate) link_slug: String,
-    pub(crate) link_id: Option<ShareLinkId>,
+    pub(crate) link_id: Option<InvitationLinkId>,
     pub(crate) requester_login: String,
     pub(crate) justification: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -82,17 +82,17 @@ pub(crate) struct AccountAdminPendingRequestRow {
 }
 ```
 
-- [ ] **Step 4: Hydrate the new fields from `ShareLink`**
+- [ ] **Step 4: Hydrate the new fields from `InvitationLink`**
 
 Replace `pending_request_row` with:
 
 ```rust
 fn pending_request_row(
     request: InvitationRequest,
-    share_link: Option<ShareLink>,
+    invitation_link: Option<InvitationLink>,
     requester: Option<domain::User>,
 ) -> AccountAdminPendingRequestRow {
-    let (link_slug, link_id, permission, repos, expires_at, approval_required) = match share_link {
+    let (link_slug, link_id, permission, repos, expires_at, approval_required) = match invitation_link {
         Some(link) => {
             let repos = link
                 .repos
@@ -217,7 +217,7 @@ Replace the `children` body of `LinkCreateFormPage` with this structure. Keep th
 ```rust
 children: rsx! {
     header { class: "mb-6",
-        h1 { class: "text-2xl font-bold", "New share link" }
+        h1 { class: "text-2xl font-bold", "New invitation link" }
         p { class: "mt-2 text-sm text-base-content/70 max-w-2xl",
             "Create a URL that lets a GitHub user request collaborator access to the repositories you choose."
         }
@@ -345,7 +345,7 @@ Expected: PASS.
 
 ```bash
 git add crates/web/src/views/links.rs
-git commit -m "feat(web): make share link creation safer"
+git commit -m "feat(web): make invitation link creation safer"
 ```
 
 ## Task 3: Link Detail Operational Hub
@@ -362,15 +362,15 @@ Inside the existing `#[cfg(test)] mod tests` in `crates/web/src/views/links.rs`,
 ```rust
     use chrono::{DateTime, Utc};
     use dioxus::prelude::*;
-    use domain::{Permission, ShareLink, ShareLinkId, ShareLinkRepo, Slug};
+    use domain::{Permission, InvitationLink, InvitationLinkId, InvitationLinkRepo, Slug};
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    fn sample_link() -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    fn sample_link() -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
             installation_id: 1,
             account_id: 9001,
@@ -385,8 +385,8 @@ Inside the existing `#[cfg(test)] mod tests` in `crates/web/src/views/links.rs`,
             revoked_at: None,
             revoked_by: None,
             repos: vec![
-                ShareLinkRepo { repo_id: 10, repo_full_name: "acme/api".into() },
-                ShareLinkRepo { repo_id: 11, repo_full_name: "acme/web".into() },
+                InvitationLinkRepo { repo_id: 10, repo_full_name: "acme/api".into() },
+                InvitationLinkRepo { repo_id: 11, repo_full_name: "acme/web".into() },
             ],
         }
     }
@@ -464,7 +464,7 @@ children: rsx! {
     header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
         div {
             h1 { class: "text-2xl font-bold", "{slug}" }
-            p { class: "text-sm text-base-content/70", "Share link details and controls" }
+            p { class: "text-sm text-base-content/70", "Invitation link details and controls" }
         }
         span { class: "{badge_class}", "{badge_label}" }
     }
@@ -573,7 +573,7 @@ Expected: PASS.
 
 ```bash
 git add crates/web/src/views/links.rs crates/web/src/routes/dashboard.rs
-git commit -m "feat(web): expand share link detail context"
+git commit -m "feat(web): expand invitation link detail context"
 ```
 
 ## Task 4: Approval Queue Context And Responsive Layout
@@ -863,7 +863,7 @@ Replace the recent-links empty state with:
 ```rust
 rsx! {
     div { class: "rounded-box bg-base-100 p-6 text-base-content/70",
-        h3 { class: "font-semibold text-base-content", "No share links yet" }
+        h3 { class: "font-semibold text-base-content", "No invitation links yet" }
         p { class: "mt-1 text-sm", "Create a link to let recipients request GitHub collaborator access without sending invites by hand." }
         a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first link" }
     }

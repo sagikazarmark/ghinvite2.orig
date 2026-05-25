@@ -647,7 +647,7 @@ mod tests {
         dt, fixture_github_client, fixture_state_with_storage, fixture_storage,
     };
     use ::audit::{ActorKind, EventType, TargetKind};
-    use domain::{AccountType, Permission, SelectedRepos, ShareLinkId, Slug};
+    use domain::{AccountType, InvitationLinkId, Permission, SelectedRepos, Slug};
     use github::mocks::{Expectation, MockTransport};
     use github::transport::{Method, Response};
     use rand::SeedableRng;
@@ -671,7 +671,7 @@ mod tests {
         }
     }
 
-    /// Seed installation, user, share_link, request — all FK chain prerequisites.
+    /// Seed installation, user, invitation_link, request — all FK chain prerequisites.
     async fn seed_chain(state: &AppState) -> RequestId {
         state
             .storage
@@ -707,8 +707,8 @@ mod tests {
             .await
             .unwrap();
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rng),
             installation_id: 9,
             account_id: 100,
@@ -724,11 +724,11 @@ mod tests {
             revoked_by: None,
             repos: vec![],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,
@@ -1490,8 +1490,8 @@ mod tests {
             .await
             .unwrap();
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rng),
             installation_id: 9,
             account_id: 100,
@@ -1505,16 +1505,16 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![domain::ShareLinkRepo {
+            repos: vec![domain::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
         let req_id = RequestId::new();
         let req = domain::InvitationRequest {
             id: req_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: domain::RequestState::Approved,

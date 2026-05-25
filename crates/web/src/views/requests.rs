@@ -200,7 +200,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                             {if repos_available {
                                                 rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
                                             } else {
-                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its share link details are available." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its invitation link details are available." } }
                                             }}
                                         }
                                         {if actions_available {

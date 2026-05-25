@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use audit::AuditEvent;
 use chrono::{DateTime, Utc};
 use domain::{
-    Account, GithubInvitation, GithubInvitationId, InvitationRequest, InvitationState, RequestId,
-    RequestState, SelectedRepos, ShareLink, ShareLinkId, User,
+    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
+    InvitationRequest, InvitationState, RequestId, RequestState, SelectedRepos, User,
 };
 use thiserror::Error;
 
@@ -33,7 +33,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// specific unique-constraint or invariant the storage layer enforced.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConflictKind {
-    #[error("share_link slug already in use")]
+    #[error("invitation_link slug already in use")]
     DuplicateSlug,
     #[error("a pending request already exists for this (link, requester)")]
     DuplicatePendingRequest,
@@ -164,9 +164,9 @@ pub trait Storage: Send + Sync + 'static {
     /// **Errors:** [`Error::Database`] only.
     async fn get_user(&self, user_id: u64) -> Result<Option<User>>;
 
-    // -------- share links --------
+    // -------- invitation links --------
 
-    /// Insert a share link plus its repo set in one transaction.
+    /// Insert an invitation link plus its repo set in one transaction.
     ///
     /// **Errors:**
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateSlug`] if `link.slug`
@@ -175,56 +175,62 @@ pub trait Storage: Send + Sync + 'static {
     /// - [`Error::Conflict`] with [`ConflictKind::ForeignKey`] if `installation_id`
     ///   or `created_by` reference rows that do not exist.
     /// - [`Error::Database`] for any other failure.
-    async fn insert_share_link(&self, link: &ShareLink) -> Result<()>;
+    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()>;
 
-    /// Mark a share link as revoked (idempotent guard: only updates rows where
+    /// Mark an invitation link as revoked (idempotent guard: only updates rows where
     /// `revoked_at IS NULL`).
     ///
     /// **Errors:**
     /// - [`Error::NotFound`] if the link is unknown *or* was already revoked.
     /// - [`Error::Database`] otherwise.
-    async fn mark_share_link_revoked(
+    async fn mark_invitation_link_revoked(
         &self,
-        id: ShareLinkId,
+        id: InvitationLinkId,
         by_user: u64,
         when: DateTime<Utc>,
     ) -> Result<()>;
 
-    /// Read a share link plus its repo set by primary key.
+    /// Read an invitation link plus its repo set by primary key.
     ///
     /// **Errors:**
     /// - [`Error::Corrupt`] if the row contains an unparseable enum/slug/ulid.
     /// - [`Error::Database`] otherwise.
-    async fn get_share_link_by_id(&self, id: ShareLinkId) -> Result<Option<ShareLink>>;
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>>;
 
-    /// Read a share link by its public slug. Slug is the URL-facing identifier;
+    /// Read an invitation link by its public slug. Slug is the URL-facing identifier;
     /// callers MUST compare in constant time against `Slug::ct_eq` *before* trusting
     /// the result, to defend against timing-based slug enumeration.
     ///
-    /// **Errors:** as for [`Self::get_share_link_by_id`].
-    async fn get_share_link_by_slug(&self, slug: &str) -> Result<Option<ShareLink>>;
+    /// **Errors:** as for [`Self::get_invitation_link_by_id`].
+    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>>;
 
-    /// List every share link belonging to an account, newest first. Each link
+    /// List every invitation link belonging to an account, newest first. Each link
     /// includes its repo set (single LEFT JOIN — no N+1).
     ///
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`] as above.
-    async fn list_share_links_for_account(&self, account_id: u64) -> Result<Vec<ShareLink>>;
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>>;
 
     // -------- invitation requests --------
 
     /// Insert a new `InvitationRequest` row and atomically increment
-    /// `share_links.uses_count` for the link this request was filed against.
+    /// `invitation_links.uses_count` for the link this request was filed against.
     ///
-    /// **Precondition:** the caller must have just verified that the share link is
-    /// `ShareLink::is_active(now)`. This method does *not* re-check active status —
-    /// the partial unique index on `(share_link_id, requester_id) WHERE state = 'pending'`
+    /// **Precondition:** the caller must have just verified that the invitation link is
+    /// `InvitationLink::is_active(now)`. This method does *not* re-check active status —
+    /// the partial unique index on `(invitation_link_id, requester_id) WHERE state = 'pending'`
     /// only defends against duplicate pending requests, not against exhaustion or expiry.
     ///
     /// **Errors:**
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicatePendingRequest`] if a pending
     ///   request already exists for this `(link, requester)`.
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] if `request.id` collides.
-    /// - [`Error::NotFound`] if `share_link_id` doesn't reference an existing link.
+    /// - [`Error::NotFound`] if `invitation_link_id` doesn't reference an existing link.
     /// - [`Error::Database`] for any other SQLite/D1 failure.
     ///
     /// **Idempotency:** safe to retry on [`Error::Database`] (timeout etc.) — the
@@ -258,10 +264,13 @@ pub trait Storage: Send + Sync + 'static {
         account_id: u64,
     ) -> Result<Vec<InvitationRequest>>;
 
-    /// List every request (any state) for a given share link, newest first.
+    /// List every request (any state) for a given invitation link, newest first.
     ///
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn list_requests_for_link(&self, link_id: ShareLinkId) -> Result<Vec<InvitationRequest>>;
+    async fn list_requests_for_link(
+        &self,
+        link_id: InvitationLinkId,
+    ) -> Result<Vec<InvitationRequest>>;
 
     // -------- github invitations --------
 

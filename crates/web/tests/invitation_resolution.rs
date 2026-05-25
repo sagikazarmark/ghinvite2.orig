@@ -2,8 +2,8 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
 use domain::{
-    Account, AccountType, InvitationRequest, Permission, RequestId, RequestState, SelectedRepos,
-    ShareLink, ShareLinkId, ShareLinkRepo, Slug, User,
+    Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
+    Permission, RequestId, RequestState, SelectedRepos, Slug, User,
 };
 use github::mocks::{Expectation, MockTransport};
 use github::transport::{Method, Response};
@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use storage::Storage;
 use tower::ServiceExt;
 use web::commands::{
-    CreateShareLink, CreateShareLinkOutput, DecideInvitationRequest, GhinviteCommands,
+    CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
     OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
-    RevokeShareLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
+    RevokeInvitationLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
 };
 use web::{AppState, WebConfig, build_app};
 
@@ -27,7 +27,7 @@ const REQUESTER_ID: u64 = 802;
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RecordedCommand {
     SubmitInvitationRequest {
-        share_link_id: ShareLinkId,
+        invitation_link_id: InvitationLinkId,
         requester_id: u64,
         justification: Option<String>,
     },
@@ -40,15 +40,15 @@ struct RecordingCommands {
 
 #[async_trait::async_trait]
 impl GhinviteCommands for RecordingCommands {
-    async fn create_share_link(
+    async fn create_invitation_link(
         &self,
-        _command: CreateShareLink,
-    ) -> web::Result<CreateShareLinkOutput> {
-        panic!("unexpected create_share_link command")
+        _command: CreateInvitationLink,
+    ) -> web::Result<CreateInvitationLinkOutput> {
+        panic!("unexpected create_invitation_link command")
     }
 
-    async fn revoke_share_link(&self, _command: RevokeShareLink) -> web::Result<()> {
-        panic!("unexpected revoke_share_link command")
+    async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> web::Result<()> {
+        panic!("unexpected revoke_invitation_link command")
     }
 
     async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> web::Result<()> {
@@ -56,7 +56,7 @@ impl GhinviteCommands for RecordingCommands {
             .lock()
             .unwrap()
             .push(RecordedCommand::SubmitInvitationRequest {
-                share_link_id: command.share_link_id,
+                invitation_link_id: command.invitation_link_id,
                 requester_id: command.requester_id,
                 justification: command.justification,
             });
@@ -121,9 +121,9 @@ fn sample_user(user_id: u64, login: &str) -> User {
     }
 }
 
-fn active_link(slug: &str) -> ShareLink {
-    ShareLink {
-        id: ShareLinkId::new(),
+fn active_link(slug: &str) -> InvitationLink {
+    InvitationLink {
+        id: InvitationLinkId::new(),
         slug: Slug::from_string(slug.to_string()).unwrap(),
         installation_id: 1,
         account_id: 9001,
@@ -137,26 +137,26 @@ fn active_link(slug: &str) -> ShareLink {
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![ShareLinkRepo {
+        repos: vec![InvitationLinkRepo {
             repo_id: 10,
             repo_full_name: "acme/api".into(),
         }],
     }
 }
 
-fn pending_request(id: RequestId, link: ShareLinkId, requester_id: u64) -> InvitationRequest {
+fn pending_request(id: RequestId, link: InvitationLinkId, requester_id: u64) -> InvitationRequest {
     request_with_state(id, link, requester_id, RequestState::Pending)
 }
 
 fn request_with_state(
     id: RequestId,
-    link: ShareLinkId,
+    link: InvitationLinkId,
     requester_id: u64,
     state: RequestState,
 ) -> InvitationRequest {
     InvitationRequest {
         id,
-        share_link_id: link,
+        invitation_link_id: link,
         requester_id,
         justification: None,
         state,
@@ -168,7 +168,7 @@ fn request_with_state(
 }
 
 async fn build_test_app(
-    link: ShareLink,
+    link: InvitationLink,
     pending: Option<InvitationRequest>,
     mock: MockTransport,
 ) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
@@ -185,7 +185,7 @@ async fn build_test_app(
         .upsert_user(&sample_user(REQUESTER_ID, "octocat"))
         .await
         .unwrap();
-    storage.insert_share_link(&link).await.unwrap();
+    storage.insert_invitation_link(&link).await.unwrap();
     if let Some(request) = pending {
         storage
             .insert_invitation_request_and_increment_uses(&request)
@@ -632,7 +632,7 @@ async fn submit_with_other_recipient_pending_request_sends_command() {
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[RecordedCommand::SubmitInvitationRequest {
-            share_link_id: link_id,
+            invitation_link_id: link_id,
             requester_id: REQUESTER_ID,
             justification: Some("ship-it".into()),
         }]

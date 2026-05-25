@@ -615,8 +615,8 @@ In `crates/web/src/views/dashboard.rs`, update `overview_page_renders_console_co
 ```rust
         assert!(html.contains("Console overview"));
         assert!(html.contains("Review queue"));
-        assert!(html.contains("Create first share link"));
-        assert!(html.contains("Recent share links"));
+        assert!(html.contains("Create first invitation link"));
+        assert!(html.contains("Recent invitation links"));
         assert!(html.contains("mac-panel"));
         assert!(html.contains("compact-table"));
         assert!(!html.contains("text-3xl"));
@@ -665,7 +665,7 @@ Replace the `children` block inside `DashboardLayout` with a compact header, sum
                         h1 { class: "text-xl font-semibold tracking-tight", "Console overview" }
                         p { class: "mt-0.5 text-sm text-base-content/60", "{props.account_type} account: {props.account_login}" }
                     }
-                    a { class: "btn btn-primary btn-sm", href: "/accounts/{login}/links/new", "New share link" }
+                    a { class: "btn btn-primary btn-sm", href: "/accounts/{login}/links/new", "New invitation link" }
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "grid divide-y divide-base-300 md:grid-cols-2 md:divide-x md:divide-y-0",
@@ -681,15 +681,15 @@ Replace the `children` block inside `DashboardLayout` with a compact header, sum
                 }
                 section { class: "mac-panel overflow-hidden",
                     div { class: "flex items-center justify-between border-b border-base-300 px-4 py-3",
-                        h2 { class: "text-sm font-semibold", "Recent share links" }
+                        h2 { class: "text-sm font-semibold", "Recent invitation links" }
                         a { class: "btn btn-ghost btn-xs h-7 min-h-0", href: "/accounts/{login}/links/new", "Create link" }
                     }
                     {if props.recent_links.is_empty() {
                         rsx! {
                             div { class: "p-5 text-sm text-base-content/70",
-                                h3 { class: "font-medium text-base-content", "No share links yet" }
+                                h3 { class: "font-medium text-base-content", "No invitation links yet" }
                                 p { class: "mt-1", "Create a link to let recipients request collaborator access without manual GitHub invites." }
-                                a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first share link" }
+                                a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first invitation link" }
                             }
                         }
                     } else {
@@ -772,7 +772,7 @@ In `RequestsQueuePage`, replace the non-empty wrapper with this compact decision
                                             {if repos_available {
                                                 rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
                                             } else {
-                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its share link details are available." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "This request cannot be completed until its invitation link details are available." } }
                                             }}
                                         }
                                         {if actions_available {

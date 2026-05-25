@@ -1,10 +1,10 @@
-//! Share-link views: create form + detail page.
+//! Invitation-link views: create form + detail page.
 
 use crate::session::Flash;
 use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::{Permission, ShareLink};
+use domain::{InvitationLink, Permission};
 use github::payloads::GhRepo;
 
 #[derive(Clone, PartialEq, Props)]
@@ -47,14 +47,14 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     rsx! {
         ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
-            title: "New share link · {login}",
+            title: "New invitation link · {login}",
             account_login: Some(props.account_login.clone()),
             active_nav: Some("new-link".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6 flex flex-col gap-2",
-                    p { class: "text-sm font-medium text-primary", "Share links" }
-                    h1 { class: "text-2xl font-semibold tracking-tight", "New share link" }
+                    p { class: "text-sm font-medium text-primary", "Invitation links" }
+                    h1 { class: "text-2xl font-semibold tracking-tight", "New invitation link" }
                     p { class: "max-w-2xl text-sm leading-6 text-base-content/70",
                         "Create a controlled URL that lets GitHub users request collaborator access to selected repositories."
                     }
@@ -96,7 +96,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                             div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
                                 div { class: "form-control gap-2",
-                                    label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max uses" } }
+                                    label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max use" } }
                                     input { id: "max_uses", r#type: "number", name: "max_uses", value: "{props.form.max_uses}", class: "input input-bordered w-full", min: "1", placeholder: "Unlimited" }
                                     p { class: "text-sm text-base-content/65", "Blank means unlimited requests." }
                                 }
@@ -154,9 +154,9 @@ pub struct LinkDetailProps {
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub now: DateTime<Utc>,
-    pub share_url: String,
+    pub invitation_url: String,
 }
 
 #[component]
@@ -193,7 +193,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     } else {
         "Requests are auto-approved"
     };
-    let preview_href = props.share_url.clone();
+    let preview_href = props.invitation_url.clone();
     let repos = props.link.repos.iter().map(|repo| {
         let full_name = repo.repo_full_name.clone();
         rsx! { li { "{full_name}" } }
@@ -210,21 +210,21 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
                     div {
                         h1 { class: "text-2xl font-bold", "{slug}" }
-                        p { class: "text-sm text-base-content/70", "Share link details and controls" }
+                        p { class: "text-sm text-base-content/70", "Invitation link details and controls" }
                     }
                     span { class: "{badge_class}", "{badge_label}" }
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "border-b border-base-300 px-4 py-3",
-                        h2 { class: "text-sm font-semibold", "Share URL" }
+                        h2 { class: "text-sm font-semibold", "Invitation URL" }
                         p { class: "mt-0.5 text-xs text-base-content/60", "Send this URL to recipients who should request access." }
                     }
                     div { class: "p-4",
                         input {
                             class: "input input-bordered input-sm w-full font-mono text-xs",
                             readonly: true,
-                            value: "{props.share_url}",
-                            aria_label: "Share URL",
+                            value: "{props.invitation_url}",
+                            aria_label: "Invitation URL",
                         }
                         div { class: "mt-3",
                             a { class: "btn btn-outline btn-sm h-8 min-h-0", href: "{preview_href}", "Open recipient preview" }
@@ -289,7 +289,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                             div { class: "modal-box",
                                 h3 { id: "stop-link-modal-title", class: "text-lg font-semibold", "Confirm stop" }
                                 p { class: "mt-2 text-sm text-base-content/70",
-                                    "Recipients will no longer be able to create new requests from this share link. Existing requests and invitations continue."
+                                    "Recipients will no longer be able to create new requests from this invitation link. Existing requests and invitations continue."
                                 }
                                 div { class: "modal-action",
                                     a { class: "btn btn-ghost", href: "#", "Cancel" }
@@ -313,15 +313,15 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use domain::{Permission, ShareLink, ShareLinkId, ShareLinkRepo, Slug};
+    use domain::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
-    fn sample_link() -> ShareLink {
-        ShareLink {
-            id: ShareLinkId::new(),
+    fn sample_link() -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
             installation_id: 1,
             account_id: 9001,
@@ -336,11 +336,11 @@ mod tests {
             revoked_at: None,
             revoked_by: None,
             repos: vec![
-                ShareLinkRepo {
+                InvitationLinkRepo {
                     repo_id: 10,
                     repo_full_name: "acme/api".into(),
                 },
-                ShareLinkRepo {
+                InvitationLinkRepo {
                     repo_id: 11,
                     repo_full_name: "acme/web".into(),
                 },
@@ -377,8 +377,10 @@ mod tests {
         });
 
         assert!(html.contains("Access configuration"));
-        assert!(html.contains("<title>New share link · acme</title>"));
+        assert!(html.contains("<title>New invitation link · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
+        assert!(html.contains("Max use"));
+        assert!(!html.contains("Max uses"));
         assert!(html.contains("Request handling"));
         assert!(html.contains("Repository scope"));
         assert!(html.contains("acme/api"));
@@ -397,7 +399,7 @@ mod tests {
                     account_login: String::from("acme"),
                     link: link.clone(),
                     now: dt("2026-05-05T12:00:00Z"),
-                    share_url: String::from("http://127.0.0.1:8787/i/abcdEFGH01234567"),
+                    invitation_url: String::from("http://127.0.0.1:8787/i/abcdEFGH01234567"),
                 }
             }
         });

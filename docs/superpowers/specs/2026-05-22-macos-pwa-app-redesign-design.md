@@ -12,7 +12,7 @@ The redesign keeps the existing Rust, Dioxus SSR, Tailwind, and DaisyUI stack. I
 
 ## 2. Scene And Direction
 
-An account admin opens ghinvite as an installed PWA on a MacBook during normal work, switches between GitHub account contexts, checks pending repository access requests, and creates a share link while expecting the interface to behave like a compact utility.
+An account admin opens ghinvite as an installed PWA on a MacBook during normal work, switches between GitHub account contexts, checks pending repository access requests, and creates an invitation link while expecting the interface to behave like a compact utility.
 
 This scene supports a restrained product theme with light mode as the default and dark mode available through a compact icon toggle. The interface should borrow from macOS utility apps through density, structure, muted surfaces, and native-feeling controls, not through fake window chrome or decorative nostalgia.
 
@@ -71,10 +71,10 @@ The overview should be a compact operational start page.
 
 - Replace metric-like cards with concise summary rows or compact panels.
 - Show pending requests and active links as navigable work areas, not hero metrics.
-- Present recent share links in a dense table or list with status, slug, uses, and direct navigation.
+- Present recent invitation links in a dense table or list with status, slug, uses, and direct navigation.
 - Empty state should teach the first admin action with one clear primary action.
 
-### New Share Link
+### New Invitation Link
 
 The create form should feel like a macOS settings sheet inside the app frame.
 
@@ -99,7 +99,7 @@ The link detail page should feel like a property inspector.
 The requests page should be a decision table.
 
 - Use a denser table-like surface instead of card rows.
-- Align requester, share link, permission, repositories, requested time, justification, and actions.
+- Align requester, invitation link, permission, repositories, requested time, justification, and actions.
 - Tighten cell padding.
 - Preserve responsive behavior by stacking each request into readable blocks on small screens.
 - Keep approve and decline actions visually consistent and close to the row they affect.

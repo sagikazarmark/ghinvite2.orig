@@ -30,7 +30,7 @@ async fn setup_restate() -> SocketAddr {
     let last_seen_at = chrono::DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    // ShareLink and InvitationRequest enforce user FKs; this smoke only exercises ingress.
+    // InvitationLink and InvitationRequest enforce user FKs; this smoke only exercises ingress.
     for (user_id, login) in [(7, "creator"), (8, "requester")] {
         storage
             .upsert_user(&domain::User {
@@ -106,7 +106,7 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
     assert_eq!(onboard_resp.status(), 200, "Installation::onboard failed");
 
     let create_link_resp = client
-        .post("http://localhost:8080/ShareLink/raw-json-smoke/create")
+        .post("http://localhost:8080/InvitationLink/raw-json-smoke/create")
         .json(&serde_json::json!({
             "installation_id": 1,
             "account_id": 42,
@@ -122,19 +122,23 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
         .send()
         .await
         .unwrap();
-    assert_eq!(create_link_resp.status(), 200, "ShareLink::create failed");
+    assert_eq!(
+        create_link_resp.status(),
+        200,
+        "InvitationLink::create failed"
+    );
     let create_link_body: serde_json::Value = create_link_resp.json().await.unwrap();
     let link_id = create_link_body
         .get("link_id")
         .and_then(serde_json::Value::as_str)
-        .expect("ShareLink::create response should contain link_id")
+        .expect("InvitationLink::create response should contain link_id")
         .to_string();
     assert!(
         create_link_body
             .get("slug")
             .and_then(serde_json::Value::as_str)
             .is_some(),
-        "ShareLink::create response should contain slug"
+        "InvitationLink::create response should contain slug"
     );
 
     let request_id = RequestId::new().to_string();
@@ -144,7 +148,7 @@ async fn raw_json_ingress_accepts_object_and_workflow_payloads() {
         ))
         .json(&serde_json::json!({
             "request_id": request_id,
-            "share_link_id": link_id,
+            "invitation_link_id": link_id,
             "requester_id": 8,
             "justification": null,
             "created_at": "2026-05-04T12:00:00Z"

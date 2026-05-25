@@ -6,9 +6,9 @@ use crate::Error;
 use audit::{ActorKind, AuditEvent, EventType, TargetKind};
 use chrono::{DateTime, Utc};
 use domain::{
-    Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationRequest,
-    InvitationState, RequestId, RequestState, SelectedRepos, ShareLink, ShareLinkId, ShareLinkRepo,
-    Slug, User,
+    Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationLink,
+    InvitationLinkId, InvitationLinkRepo, InvitationRequest, InvitationState, RequestId,
+    RequestState, SelectedRepos, Slug, User,
 };
 use sqlx::FromRow;
 use std::str::FromStr;
@@ -86,7 +86,7 @@ impl UserRow {
 }
 
 #[derive(FromRow, Debug)]
-pub struct ShareLinkRow {
+pub struct InvitationLinkRow {
     pub id: String,
     pub slug: String,
     pub installation_id: i64,
@@ -103,10 +103,10 @@ pub struct ShareLinkRow {
     pub revoked_by: Option<i64>,
 }
 
-impl ShareLinkRow {
-    pub fn try_into_domain(self, repos: Vec<ShareLinkRepo>) -> Result<ShareLink, Error> {
-        Ok(ShareLink {
-            id: ShareLinkId::from_ulid(
+impl InvitationLinkRow {
+    pub fn try_into_domain(self, repos: Vec<InvitationLinkRepo>) -> Result<InvitationLink, Error> {
+        Ok(InvitationLink {
+            id: InvitationLinkId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
             slug: Slug::from_string(self.slug).map_err(|e| Error::Corrupt(format!("slug: {e}")))?,
@@ -129,10 +129,10 @@ impl ShareLinkRow {
     }
 }
 
-/// Flat row shape for `share_links LEFT JOIN share_link_repos` queries.
-/// Splits into a `ShareLinkRow` plus optional repo fields via [`Self::split`].
+/// Flat row shape for `invitation_links LEFT JOIN invitation_link_repos` queries.
+/// Splits into a `InvitationLinkRow` plus optional repo fields via [`Self::split`].
 #[derive(FromRow, Debug)]
-pub struct ShareLinkJoinRow {
+pub struct InvitationLinkJoinRow {
     pub id: String,
     pub slug: String,
     pub installation_id: i64,
@@ -151,10 +151,10 @@ pub struct ShareLinkJoinRow {
     pub repo_full_name: Option<String>,
 }
 
-impl ShareLinkJoinRow {
-    pub fn split(self) -> (ShareLinkRow, Option<i64>, Option<String>) {
+impl InvitationLinkJoinRow {
+    pub fn split(self) -> (InvitationLinkRow, Option<i64>, Option<String>) {
         (
-            ShareLinkRow {
+            InvitationLinkRow {
                 id: self.id,
                 slug: self.slug,
                 installation_id: self.installation_id,
@@ -177,15 +177,15 @@ impl ShareLinkJoinRow {
 }
 
 #[derive(FromRow, Debug)]
-pub struct ShareLinkRepoRow {
-    pub share_link_id: String,
+pub struct InvitationLinkRepoRow {
+    pub invitation_link_id: String,
     pub repo_id: i64,
     pub repo_full_name: String,
 }
 
-impl ShareLinkRepoRow {
-    pub fn into_domain(self) -> ShareLinkRepo {
-        ShareLinkRepo {
+impl InvitationLinkRepoRow {
+    pub fn into_domain(self) -> InvitationLinkRepo {
+        InvitationLinkRepo {
             repo_id: self.repo_id as u64,
             repo_full_name: self.repo_full_name,
         }
@@ -195,7 +195,7 @@ impl ShareLinkRepoRow {
 #[derive(FromRow, Debug)]
 pub struct InvitationRequestRow {
     pub id: String,
-    pub share_link_id: String,
+    pub invitation_link_id: String,
     pub requester_id: i64,
     pub justification: Option<String>,
     pub state: String,
@@ -211,8 +211,8 @@ impl InvitationRequestRow {
             id: RequestId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("req id: {e}")))?,
             ),
-            share_link_id: ShareLinkId::from_ulid(
-                Ulid::from_str(&self.share_link_id)
+            invitation_link_id: InvitationLinkId::from_ulid(
+                Ulid::from_str(&self.invitation_link_id)
                     .map_err(|e| Error::Corrupt(format!("link id: {e}")))?,
             ),
             requester_id: self.requester_id as u64,

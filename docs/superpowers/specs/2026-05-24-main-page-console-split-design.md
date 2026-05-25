@@ -7,7 +7,7 @@ Issue #16 asks to reorganize the application into two clearer surfaces:
 - A user-facing public surface for the main page and recipient invitation flow.
 - An admin-facing Account Console for account admins.
 
-`CONTEXT.md` defines the relevant domain language: Public Surface, Recipient Flow, Account Console, Share Link, and Share Link Code. User-facing copy may call a share link an invitation link when speaking to non-admins.
+`CONTEXT.md` defines the relevant domain language: Public Surface, Recipient Flow, Account Console, Invitation Link, and Invitation Code. User-facing copy may call an invitation link an invitation link when speaking to non-admins.
 
 The current web app routes account-admin pages under `/accounts/{login}` and redirects signed-in users from `/` to the first active account. The new design removes that redirect, moves account-admin pages under `/console`, and keeps `/` as the public entry point for everyone.
 
@@ -27,8 +27,8 @@ This design intentionally supersedes older dashboard/account-route wording in pr
 
 - No compatibility routes or redirects for old `/accounts/...` URLs.
 - No tests for old `/accounts/...` behavior.
-- No server resolver endpoint for Share Link Code entry.
-- No URL/link parsing in the Share Link Code input.
+- No server resolver endpoint for Invitation Code entry.
+- No URL/link parsing in the Invitation Code input.
 - No new setup-incomplete recovery flow for installations visible to GitHub but absent from local storage.
 - No ADR. The route split is captured through domain language and this spec.
 
@@ -40,7 +40,7 @@ Alternatives considered:
 
 - Link the header directly to the first account console. Rejected because it hides multiple-account context and makes the global header depend on account selection.
 - Keep `/accounts/...` as compatibility redirects. Rejected because the desired split is explicit and old route tests should not remain.
-- Add a server-side Share Link Code resolver. Rejected because the desired shortcut should directly navigate to `/i/{code}` without validation or a separate endpoint.
+- Add a server-side Invitation Code resolver. Rejected because the desired shortcut should directly navigate to `/i/{code}` without validation or a separate endpoint.
 
 ## Routing
 
@@ -111,17 +111,17 @@ Signed-out home:
 - Concise explanatory text about requesting or managing GitHub repository access.
 - Primary action: `Sign in with GitHub`.
 - No feature-card section.
-- No Share Link Code shortcut.
+- No Invitation Code shortcut.
 
 Signed-in home:
 
-- First task: open an invitation by Share Link Code.
-- Field label: `Share Link Code`.
+- First task: open an invitation by Invitation Code.
+- Field label: `Invitation Code`.
 - Placeholder: `Paste code`.
 - Helper text: `Enter the code from an invitation link to request repository access.`
 - Button: `Open invitation`.
 - Behavior: trim leading/trailing whitespace, preserve case, require non-empty, then navigate to `/i/{encodeURIComponent(code)}`.
-- Empty input shows an inline client-side message such as `Enter a share link code first.` in an `aria-live="polite"` region.
+- Empty input shows an inline client-side message such as `Enter an invitation code first.` in an `aria-live="polite"` region.
 - Enter key in the input triggers the same behavior as the button.
 - The entered value is always treated as a code. Do not parse full URLs or links.
 - Second task: create an invitation link.
@@ -150,7 +150,7 @@ Console layout:
 
 - Rename dashboard shell concepts to console shell concepts.
 - The account sidebar appears only after account context is selected.
-- Console sidebar links keep admin-facing domain language: `Overview`, `New share link`, `Pending requests`, `Audit log`, and `Settings`.
+- Console sidebar links keep admin-facing domain language: `Overview`, `New invitation link`, `Pending requests`, `Audit log`, and `Settings`.
 - Console routes and links use `/console/accounts/{login}`.
 
 ## Invitation Status Pages
@@ -194,7 +194,7 @@ Expected scope:
 Keep canonical domain terms intact:
 
 - `Account Console` for the admin-facing account workspace.
-- `Share Link` in admin-facing console copy.
+- `Invitation Link` in admin-facing console copy.
 - `Invitation link` as public/home copy when speaking to non-admins.
 
 ## Testing
@@ -204,8 +204,8 @@ Update tests to assert the new behavior only.
 Coverage should include:
 
 - Signed-out `/` renders concise public home copy and sign-in CTA.
-- Signed-in `/` does not redirect and renders the Share Link Code shortcut plus `Create invitation link` action.
-- The Share Link Code view includes the client-side empty-code error region and navigation script behavior markers.
+- Signed-in `/` does not redirect and renders the Invitation Code shortcut plus `Create invitation link` action.
+- The Invitation Code view includes the client-side empty-code error region and navigation script behavior markers.
 - Normal header signed-in controls include `Console`, `@login`, and `Sign out` outside recipient pages.
 - Recipient layout does not render normal header controls and keeps only logo navigation.
 - `/console` unauthenticated redirects to `/login?return_to=/console`.
@@ -227,7 +227,7 @@ Do not add or keep tests whose purpose is to assert old `/accounts/...` behavior
 
 - `/` no longer redirects signed-in users to an account page.
 - Signed-out home is reduced to concise explanatory copy and sign-in.
-- Signed-in home has a Share Link Code shortcut and a separated `Create invitation link` action.
+- Signed-in home has a Invitation Code shortcut and a separated `Create invitation link` action.
 - All generated account-admin links use `/console/accounts/{login}`.
 - `/console` handles one, many, zero, and error account-discovery states.
 - All `/console...` URLs authenticate before account authorization checks.

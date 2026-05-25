@@ -4,7 +4,7 @@ use crate::session::Flash;
 use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
-use domain::ShareLink;
+use domain::InvitationLink;
 
 #[derive(Clone, PartialEq)]
 pub struct ConsoleAccountChoice {
@@ -60,7 +60,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                             div { class: "mac-panel p-6",
                                 p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45", "Console" }
                                 h1 { class: "mt-3 text-2xl font-semibold tracking-tight", "No accounts connected" }
-                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating share links." }
+                                p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating invitation links." }
                                 div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
                                     a { class: "btn btn-primary", href: "/install", "Install GitHub App" }
                                     a { class: "btn btn-ghost", href: "/", "Go home" }
@@ -94,13 +94,39 @@ pub struct OverviewProps {
     pub account_type: String, // "User" / "Organization"
     pub pending_requests: u64,
     pub active_links: u64,
-    pub recent_links: Vec<ShareLink>,
+    pub recent_links: Vec<InvitationLink>,
     pub now: DateTime<Utc>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::{InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+
+    fn sample_link() -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
+            slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
+            installation_id: 77,
+            account_id: 9001,
+            created_by: 42,
+            created_at: DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            expires_at: None,
+            max_uses: Some(5),
+            uses_count: 2,
+            permission: Permission::Pull,
+            approval_required: false,
+            internal_note: None,
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![InvitationLinkRepo {
+                repo_id: 10,
+                repo_full_name: "acme/api".to_string(),
+            }],
+        }
+    }
 
     #[test]
     fn overview_page_renders_console_copy() {
@@ -123,11 +149,32 @@ mod tests {
         assert!(html.contains("<title>acme · ghinvite</title>"));
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Review queue"));
-        assert!(html.contains("Create first share link"));
-        assert!(html.contains("Recent share links"));
+        assert!(html.contains("Create first invitation link"));
+        assert!(html.contains("Recent invitation links"));
         assert!(html.contains("mac-panel"));
         assert!(html.contains("compact-table"));
         assert!(!html.contains("text-3xl"));
+    }
+
+    #[test]
+    fn overview_recent_links_call_link_identifier_code() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                OverviewPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    account_type: "Organization".to_string(),
+                    pending_requests: 0,
+                    active_links: 1,
+                    recent_links: vec![sample_link()],
+                    now: Utc::now(),
+                }
+            }
+        });
+
+        assert!(html.contains("<th>Code</th>"));
+        assert!(!html.contains("<th>Slug</th>"));
     }
 
     #[test]
@@ -230,7 +277,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                         h1 { class: "text-xl font-semibold tracking-tight", "Console overview" }
                         p { class: "mt-0.5 text-sm text-base-content/60", "{props.account_type} account: {props.account_login}" }
                     }
-                    a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}/links/new", "New share link" }
+                    a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}/links/new", "New invitation link" }
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "grid divide-y divide-base-300 md:grid-cols-2 md:divide-x md:divide-y-0",
@@ -246,22 +293,22 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                 }
                 section { class: "mac-panel compact-table overflow-hidden",
                     div { class: "flex items-center justify-between border-b border-base-300 px-4 py-3",
-                        h2 { class: "text-sm font-semibold", "Recent share links" }
+                        h2 { class: "text-sm font-semibold", "Recent invitation links" }
                         a { class: "btn btn-ghost btn-xs h-7 min-h-0", href: "/console/accounts/{login}/links/new", "Create link" }
                     }
                     {if props.recent_links.is_empty() {
                         rsx! {
                             div { class: "p-5 text-sm text-base-content/70",
-                                h3 { class: "font-medium text-base-content", "No share links yet" }
+                                h3 { class: "font-medium text-base-content", "No invitation links yet" }
                                 p { class: "mt-1", "Create a link to let recipients request collaborator access without manual GitHub invites." }
-                                a { class: "btn btn-primary btn-sm mt-4", href: "/console/accounts/{login}/links/new", "Create first share link" }
+                                a { class: "btn btn-primary btn-sm mt-4", href: "/console/accounts/{login}/links/new", "Create first invitation link" }
                             }
                         }
                     } else {
                         rsx! {
                             div { class: "overflow-x-auto",
                                 table { class: "table compact-table table-sm",
-                                    thead { tr { th { "Slug" } th { "State" } th { class: "text-right", "Uses" } } }
+                                    thead { tr { th { "Code" } th { "State" } th { class: "text-right", "Uses" } } }
                                     tbody { {recent_links_view} }
                                 }
                             }

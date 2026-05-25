@@ -33,12 +33,12 @@ Create `crates/restate-svc/src/invitation_context.rs` with the module imports, p
 ```rust
 use crate::error::{HandlerError, Result};
 use crate::state::AppState;
-use domain::{InvitationRequest, RequestId, ShareLink, User};
+use domain::{InvitationRequest, RequestId, InvitationLink, User};
 
 #[derive(Clone, Debug)]
 pub(crate) struct InvitationRequestContext {
     pub request: InvitationRequest,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub requester: User,
 }
 
@@ -54,10 +54,10 @@ mod tests {
     use super::*;
     use crate::HandlerError;
     use crate::test_support::{dt, fixture_state};
-    use domain::{AccountType, Permission, RequestState, SelectedRepos, ShareLinkId, Slug};
+    use domain::{AccountType, Permission, RequestState, SelectedRepos, InvitationLinkId, Slug};
     use rand::SeedableRng;
 
-    async fn seed_request_chain(state: &AppState) -> (RequestId, ShareLinkId) {
+    async fn seed_request_chain(state: &AppState) -> (RequestId, InvitationLinkId) {
         state.storage.insert_installation(&domain::Account {
             installation_id: 9,
             account_id: 100,
@@ -80,8 +80,8 @@ mod tests {
             last_seen_at: dt("2026-05-04T12:00:00Z"),
         }).await.unwrap();
 
-        let link = domain::ShareLink {
-            id: ShareLinkId::new(),
+        let link = domain::InvitationLink {
+            id: InvitationLinkId::new(),
             slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(21)),
             installation_id: 9,
             account_id: 100,
@@ -95,17 +95,17 @@ mod tests {
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![domain::ShareLinkRepo {
+            repos: vec![domain::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
             }],
         };
-        state.storage.insert_share_link(&link).await.unwrap();
+        state.storage.insert_invitation_link(&link).await.unwrap();
 
         let request_id = RequestId::new();
         state.storage.insert_invitation_request_and_increment_uses(&domain::InvitationRequest {
             id: request_id,
-            share_link_id: link.id,
+            invitation_link_id: link.id,
             requester_id: 8,
             justification: None,
             state: RequestState::Approved,
@@ -170,7 +170,7 @@ pub(crate) async fn load_invitation_request_context(
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let link = state
         .storage
-        .get_share_link_by_id(request.share_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id)
         .await?
         .ok_or(HandlerError::Storage(storage::Error::NotFound))?;
     let requester = state
@@ -205,14 +205,14 @@ Expected: PASS.
 Add `GithubInvitationContext`, placeholder loader signatures, and tests to `crates/restate-svc/src/invitation_context.rs`:
 
 ```rust
-use domain::{Account, GithubInvitation, GithubInvitationId, RepositoryIdentity, ShareLinkRepo};
+use domain::{Account, GithubInvitation, GithubInvitationId, RepositoryIdentity, InvitationLinkRepo};
 
 #[derive(Clone, Debug)]
 pub(crate) struct GithubInvitationContext {
     pub invitation: GithubInvitation,
     pub request: InvitationRequest,
-    pub link: ShareLink,
-    pub repo: ShareLinkRepo,
+    pub link: InvitationLink,
+    pub repo: InvitationLinkRepo,
     pub repository: RepositoryIdentity,
     pub requester: User,
     pub account: Account,
@@ -222,7 +222,7 @@ pub(crate) struct GithubInvitationContext {
 pub(crate) struct GithubInvitationAccountContext {
     pub invitation: GithubInvitation,
     pub request: InvitationRequest,
-    pub link: ShareLink,
+    pub link: InvitationLink,
     pub requester: User,
     pub account: Account,
 }
@@ -258,7 +258,7 @@ pub(crate) async fn load_github_invitation_context_for_account(
 }
 ```
 
-Add these tests. Use private helper functions for impossible foreign-key states: `load_share_link_for_request` can be tested with a synthetic `InvitationRequest` whose `share_link_id` does not exist, and `load_requester_for_request` can be tested with a synthetic `InvitationRequest` whose `requester_id` does not exist.
+Add these tests. Use private helper functions for impossible foreign-key states: `load_invitation_link_for_request` can be tested with a synthetic `InvitationRequest` whose `invitation_link_id` does not exist, and `load_requester_for_request` can be tested with a synthetic `InvitationRequest` whose `requester_id` does not exist.
 
 ```rust
 #[tokio::test]
@@ -280,11 +280,11 @@ async fn github_context_loads_invitation_request_link_repo_requester_and_account
 }
 
 #[tokio::test]
-async fn missing_share_link_returns_not_found() {
+async fn missing_invitation_link_returns_not_found() {
     let state = fixture_state().await;
     let request = domain::InvitationRequest {
         id: RequestId::new(),
-        share_link_id: ShareLinkId::new(),
+        invitation_link_id: InvitationLinkId::new(),
         requester_id: 8,
         justification: None,
         state: domain::RequestState::Approved,
@@ -294,7 +294,7 @@ async fn missing_share_link_returns_not_found() {
         created_at: dt("2026-05-04T12:30:00Z"),
     };
 
-    let err = load_share_link_for_request(&state, &request).await.unwrap_err();
+    let err = load_invitation_link_for_request(&state, &request).await.unwrap_err();
 
     assert!(matches!(err, HandlerError::Storage(storage::Error::NotFound)));
 }
@@ -304,7 +304,7 @@ async fn missing_requester_returns_not_found() {
     let state = fixture_state().await;
     let request = domain::InvitationRequest {
         id: RequestId::new(),
-        share_link_id: ShareLinkId::new(),
+        invitation_link_id: InvitationLinkId::new(),
         requester_id: 8,
         justification: None,
         state: domain::RequestState::Approved,
@@ -333,7 +333,7 @@ async fn github_context_missing_repo_returns_invariant() {
 #[tokio::test]
 async fn github_context_invalid_repo_name_returns_invariant() {
     let state = fixture_state().await;
-    let (request_id, _) = seed_request_chain_with_repos(&state, vec![domain::ShareLinkRepo {
+    let (request_id, _) = seed_request_chain_with_repos(&state, vec![domain::InvitationLinkRepo {
         repo_id: 10,
         repo_full_name: "acme/team/api".into(),
     }]).await;

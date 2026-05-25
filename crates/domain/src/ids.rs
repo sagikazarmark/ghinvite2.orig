@@ -67,7 +67,7 @@ macro_rules! ulid_newtype {
     };
 }
 
-ulid_newtype!(ShareLinkId);
+ulid_newtype!(InvitationLinkId);
 ulid_newtype!(RequestId);
 ulid_newtype!(GithubInvitationId);
 ulid_newtype!(AuditEventId);
@@ -78,19 +78,19 @@ mod tests {
 
     #[test]
     fn ids_roundtrip_through_string() {
-        let id = ShareLinkId::new();
+        let id = InvitationLinkId::new();
         let s = id.to_string();
-        let parsed: ShareLinkId = s.parse().expect("roundtrip");
+        let parsed: InvitationLinkId = s.parse().expect("roundtrip");
         assert_eq!(id, parsed);
     }
 
     #[test]
     fn distinct_id_types_are_not_interchangeable() {
         // This is a compile-time guarantee; we just check the types differ at runtime.
-        let _link: ShareLinkId = ShareLinkId::new();
+        let _link: InvitationLinkId = InvitationLinkId::new();
         let _req: RequestId = RequestId::new();
         // Uncommenting this line should cause a compile error:
-        // let _: ShareLinkId = _req;
+        // let _: InvitationLinkId = _req;
     }
 
     #[test]
@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn id_schema_matches_ulid_string_wire_format() {
-        let schema = schemars::schema_for!(ShareLinkId).to_value();
+        let schema = schemars::schema_for!(InvitationLinkId).to_value();
         assert_eq!(
             schema.get("type").and_then(serde_json::Value::as_str),
             Some("string")

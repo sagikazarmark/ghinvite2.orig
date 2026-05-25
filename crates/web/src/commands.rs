@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait GhinviteCommands: Send + Sync + 'static {
-    async fn create_share_link(&self, command: CreateShareLink) -> Result<CreateShareLinkOutput>;
-    async fn revoke_share_link(&self, command: RevokeShareLink) -> Result<()>;
+    async fn create_invitation_link(
+        &self,
+        command: CreateInvitationLink,
+    ) -> Result<CreateInvitationLinkOutput>;
+    async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()>;
     async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()>;
     async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()>;
     async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()>;
@@ -28,9 +31,9 @@ pub trait GhinviteCommands: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-const SHARE_LINK_SERVICE: &str = "ShareLink";
-const CREATE_SHARE_LINK_METHOD: &str = "create";
-const REVOKE_SHARE_LINK_METHOD: &str = "revoke";
+const INVITATION_LINK_SERVICE: &str = "InvitationLink";
+const CREATE_INVITATION_LINK_METHOD: &str = "create";
+const REVOKE_INVITATION_LINK_METHOD: &str = "revoke";
 const INVITATION_REQUEST_SERVICE: &str = "InvitationRequest";
 const SUBMIT_INVITATION_REQUEST_METHOD: &str = "submit";
 const DECIDE_INVITATION_REQUEST_METHOD: &str = "decide";
@@ -88,7 +91,7 @@ impl<R> RestateCommands<R> {
     }
 }
 
-fn share_link_command_key(account_id: u64) -> String {
+fn invitation_link_command_key(account_id: u64) -> String {
     account_id.to_string()
 }
 
@@ -101,17 +104,30 @@ impl<R> GhinviteCommands for RestateCommands<R>
 where
     R: RestateCommandAdapter,
 {
-    async fn create_share_link(&self, command: CreateShareLink) -> Result<CreateShareLinkOutput> {
-        let key = share_link_command_key(command.account_id);
+    async fn create_invitation_link(
+        &self,
+        command: CreateInvitationLink,
+    ) -> Result<CreateInvitationLinkOutput> {
+        let key = invitation_link_command_key(command.account_id);
         self.restate
-            .call(SHARE_LINK_SERVICE, &key, CREATE_SHARE_LINK_METHOD, &command)
+            .call(
+                INVITATION_LINK_SERVICE,
+                &key,
+                CREATE_INVITATION_LINK_METHOD,
+                &command,
+            )
             .await
     }
 
-    async fn revoke_share_link(&self, command: RevokeShareLink) -> Result<()> {
-        let key = share_link_command_key(command.account_id);
+    async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()> {
+        let key = invitation_link_command_key(command.account_id);
         self.restate
-            .send(SHARE_LINK_SERVICE, &key, REVOKE_SHARE_LINK_METHOD, &command)
+            .send(
+                INVITATION_LINK_SERVICE,
+                &key,
+                REVOKE_INVITATION_LINK_METHOD,
+                &command,
+            )
             .await
     }
 
@@ -212,7 +228,7 @@ where
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct CreateShareLink {
+pub struct CreateInvitationLink {
     pub installation_id: u64,
     pub account_id: u64,
     pub created_by: u64,
@@ -222,20 +238,20 @@ pub struct CreateShareLink {
     pub permission: domain::Permission,
     pub approval_required: bool,
     pub internal_note: Option<String>,
-    pub repos: Vec<domain::ShareLinkRepo>,
+    pub repos: Vec<domain::InvitationLinkRepo>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct CreateShareLinkOutput {
-    pub link_id: domain::ShareLinkId,
+pub struct CreateInvitationLinkOutput {
+    pub link_id: domain::InvitationLinkId,
     pub slug: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct RevokeShareLink {
+pub struct RevokeInvitationLink {
     #[serde(skip)]
     pub account_id: u64,
-    pub link_id: domain::ShareLinkId,
+    pub link_id: domain::InvitationLinkId,
     pub by_user: u64,
     pub when: DateTime<Utc>,
 }
@@ -243,7 +259,7 @@ pub struct RevokeShareLink {
 #[derive(Clone, Debug)]
 pub struct SubmitInvitationRequest {
     pub request_id: domain::RequestId,
-    pub share_link_id: domain::ShareLinkId,
+    pub invitation_link_id: domain::InvitationLinkId,
     pub requester_id: u64,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -252,14 +268,14 @@ pub struct SubmitInvitationRequest {
 impl SubmitInvitationRequest {
     pub fn new(
         request_id: domain::RequestId,
-        share_link_id: domain::ShareLinkId,
+        invitation_link_id: domain::InvitationLinkId,
         requester_id: u64,
         justification: Option<String>,
         created_at: DateTime<Utc>,
     ) -> Self {
         Self {
             request_id,
-            share_link_id,
+            invitation_link_id,
             requester_id,
             justification,
             created_at,
@@ -270,7 +286,7 @@ impl SubmitInvitationRequest {
 #[derive(Clone, Debug, Serialize)]
 struct SubmitInvitationRequestPayload {
     request_id: domain::RequestId,
-    share_link_id: domain::ShareLinkId,
+    invitation_link_id: domain::InvitationLinkId,
     requester_id: u64,
     justification: Option<String>,
     created_at: DateTime<Utc>,
@@ -280,7 +296,7 @@ impl From<SubmitInvitationRequest> for SubmitInvitationRequestPayload {
     fn from(command: SubmitInvitationRequest) -> Self {
         Self {
             request_id: command.request_id,
-            share_link_id: command.share_link_id,
+            invitation_link_id: command.invitation_link_id,
             requester_id: command.requester_id,
             justification: command.justification,
             created_at: command.created_at,
@@ -886,15 +902,15 @@ mod tests {
 
     #[async_trait]
     impl GhinviteCommands for RecordingCommands {
-        async fn create_share_link(
+        async fn create_invitation_link(
             &self,
-            _command: CreateShareLink,
-        ) -> Result<CreateShareLinkOutput> {
-            panic!("unexpected create_share_link command")
+            _command: CreateInvitationLink,
+        ) -> Result<CreateInvitationLinkOutput> {
+            panic!("unexpected create_invitation_link command")
         }
 
-        async fn revoke_share_link(&self, _command: RevokeShareLink) -> Result<()> {
-            panic!("unexpected revoke_share_link command")
+        async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> Result<()> {
+            panic!("unexpected revoke_invitation_link command")
         }
 
         async fn submit_invitation_request(&self, _command: SubmitInvitationRequest) -> Result<()> {
@@ -999,9 +1015,9 @@ mod tests {
             .await
             .unwrap();
 
-        let link_id = domain::ShareLinkId::new();
+        let link_id = domain::InvitationLinkId::new();
         storage
-            .insert_share_link(&domain::ShareLink {
+            .insert_invitation_link(&domain::InvitationLink {
                 id: link_id,
                 slug: domain::Slug::from_string("0123456789ABCDEF".into()).unwrap(),
                 installation_id: 1,
@@ -1016,7 +1032,7 @@ mod tests {
                 internal_note: None,
                 revoked_at: None,
                 revoked_by: None,
-                repos: vec![domain::ShareLinkRepo {
+                repos: vec![domain::InvitationLinkRepo {
                     repo_id: 10,
                     repo_full_name: "acme/api".into(),
                 }],
@@ -1028,7 +1044,7 @@ mod tests {
         storage
             .insert_invitation_request_and_increment_uses(&domain::InvitationRequest {
                 id: request_id,
-                share_link_id: link_id,
+                invitation_link_id: link_id,
                 requester_id: 99,
                 justification: None,
                 state: domain::RequestState::Pending,
@@ -1337,8 +1353,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_share_link_calls_restate_create_and_returns_output() {
-        let link_id = domain::ShareLinkId::new();
+    async fn create_invitation_link_calls_restate_create_and_returns_output() {
+        let link_id = domain::InvitationLinkId::new();
         let (restate, calls) = RecordingRestateClient::new(serde_json::json!({
             "link_id": link_id,
             "slug": "0123456789abcdef"
@@ -1346,7 +1362,7 @@ mod tests {
         let commands = RestateCommands::new(Arc::new(restate));
 
         let output = commands
-            .create_share_link(CreateShareLink {
+            .create_invitation_link(CreateInvitationLink {
                 installation_id: 77,
                 account_id: 9001,
                 created_by: 42,
@@ -1356,7 +1372,7 @@ mod tests {
                 permission: domain::Permission::Push,
                 approval_required: true,
                 internal_note: Some("team onboarding".into()),
-                repos: vec![domain::ShareLinkRepo {
+                repos: vec![domain::InvitationLinkRepo {
                     repo_id: 10,
                     repo_full_name: "acme/api".into(),
                 }],
@@ -1370,7 +1386,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        assert_eq!(call.service, "ShareLink");
+        assert_eq!(call.service, "InvitationLink");
         assert_eq!(call.key, "9001");
         assert_eq!(call.method, "create");
         assert!(!call.send);
@@ -1385,12 +1401,12 @@ mod tests {
         let (restate, calls) = RecordingRestateClient::new(Value::Null);
         let commands = RestateCommands::new(Arc::new(restate));
         let request_id = domain::RequestId::new();
-        let share_link_id = domain::ShareLinkId::new();
+        let invitation_link_id = domain::InvitationLinkId::new();
 
         commands
             .submit_invitation_request(SubmitInvitationRequest::new(
                 request_id,
-                share_link_id,
+                invitation_link_id,
                 42,
                 Some("need access".into()),
                 at("2026-05-20T11:00:00Z"),
@@ -1409,7 +1425,7 @@ mod tests {
             call.body,
             serde_json::json!({
                 "request_id": request_id.to_string(),
-                "share_link_id": share_link_id.to_string(),
+                "invitation_link_id": invitation_link_id.to_string(),
                 "requester_id": 42,
                 "justification": "need access",
                 "created_at": "2026-05-20T11:00:00Z"
@@ -1418,13 +1434,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revoke_share_link_sends_restate_revoke_without_account_id_payload() {
+    async fn revoke_invitation_link_sends_restate_revoke_without_account_id_payload() {
         let (restate, calls) = RecordingRestateClient::new(Value::Null);
         let commands = RestateCommands::new(Arc::new(restate));
-        let link_id = domain::ShareLinkId::new();
+        let link_id = domain::InvitationLinkId::new();
 
         commands
-            .revoke_share_link(RevokeShareLink {
+            .revoke_invitation_link(RevokeInvitationLink {
                 account_id: 9001,
                 link_id,
                 by_user: 42,
@@ -1436,7 +1452,7 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         let call = &calls[0];
-        assert_eq!(call.service, "ShareLink");
+        assert_eq!(call.service, "InvitationLink");
         assert_eq!(call.key, "9001");
         assert_eq!(call.method, "revoke");
         assert!(call.send);

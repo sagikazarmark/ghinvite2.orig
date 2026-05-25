@@ -74,9 +74,9 @@ The `storage-d1` crate declares `worker` under `[target.'cfg(target_arch = "wasm
 
 `worker::D1Database::prepare(sql).bind(&[..]).first::<T>(None).await?` is the D1 query pattern. Parameters bind as `JsValue` via `wasm_bindgen::JsValue::from_*`. Results deserialize via serde (JSON bridge). There are no compile-time query macros.
 
-For **atomic multi-statement operations** (`insert_share_link` needs link + repos rows together; `insert_invitation_request_and_increment_uses` needs request insert + uses_count increment): D1 GA batch API runs statements in a transaction (Cloudflare's current documentation states batch calls are "automatically wrapped in a transaction"). Use `d1.batch(vec![stmt1, stmt2, ...]).await?`. If at implementation time batch is found NOT to be atomic (verify against current Cloudflare docs when implementing), fall back to explicit SQLite transaction statements: run `"BEGIN"`, then the individual statements, then `"COMMIT"` — on error run `"ROLLBACK"`. The `D1Database::exec()` method accepts raw SQL strings for this purpose.
+For **atomic multi-statement operations** (`insert_invitation_link` needs link + repos rows together; `insert_invitation_request_and_increment_uses` needs request insert + uses_count increment): D1 GA batch API runs statements in a transaction (Cloudflare's current documentation states batch calls are "automatically wrapped in a transaction"). Use `d1.batch(vec![stmt1, stmt2, ...]).await?`. If at implementation time batch is found NOT to be atomic (verify against current Cloudflare docs when implementing), fall back to explicit SQLite transaction statements: run `"BEGIN"`, then the individual statements, then `"COMMIT"` — on error run `"ROLLBACK"`. The `D1Database::exec()` method accepts raw SQL strings for this purpose.
 
-**Conflict detection** in D1: run/batch errors surface as JavaScript errors with messages like `UNIQUE constraint failed: share_links.slug`. Parse `worker::Error`'s message string to map to `ConflictKind`. **Limitation:** This approach is brittle against D1 error-message format changes. A helper `classify_d1_error(err: &worker::Error) -> storage::Error` lives in `bind.rs` and must be tested against each conflict scenario (covered by the parameterized test suite in Plan 8). Match on the most specific substring available (table.column name from the index definition, e.g. `"share_links.slug"`, `"invitation_requests"`, `"FOREIGN KEY"`), and default to `Error::Database(msg)` for anything unrecognized.
+**Conflict detection** in D1: run/batch errors surface as JavaScript errors with messages like `UNIQUE constraint failed: invitation_links.slug`. Parse `worker::Error`'s message string to map to `ConflictKind`. **Limitation:** This approach is brittle against D1 error-message format changes. A helper `classify_d1_error(err: &worker::Error) -> storage::Error` lives in `bind.rs` and must be tested against each conflict scenario (covered by the parameterized test suite in Plan 8). Match on the most specific substring available (table.column name from the index definition, e.g. `"invitation_links.slug"`, `"invitation_requests"`, `"FOREIGN KEY"`), and default to `Error::Database(msg)` for anything unrecognized.
 
 ### A4: KV session store for Workers
 
@@ -240,12 +240,12 @@ mod wasm_impl {
     pub fn classify_d1_error(e: worker::Error) -> Error {
         let msg = e.to_string();
         if msg.contains("UNIQUE constraint failed") {
-            if msg.contains("share_links.slug") {
+            if msg.contains("invitation_links.slug") {
                 return Error::Conflict(ConflictKind::DuplicateSlug);
             }
             // DuplicatePendingRequest: partial unique index covers BOTH columns.
             // Check both to avoid misclassifying PK collisions on invitation_requests.id.
-            if msg.contains("invitation_requests.share_link_id")
+            if msg.contains("invitation_requests.invitation_link_id")
                 && msg.contains("invitation_requests.requester_id")
             {
                 return Error::Conflict(ConflictKind::DuplicatePendingRequest);
@@ -341,7 +341,7 @@ Must compile without errors before proceeding to Task 3. Fix any wasm32 incompat
 
 ---
 
-### Task 3: D1Storage — installations, users, share_links
+### Task 3: D1Storage — installations, users, invitation_links
 
 **Files:**
 - Modify: `crates/storage-d1/src/wasm_impl.rs`
@@ -391,7 +391,7 @@ self.db
     .map_err(classify_d1_error)?;
 ```
 
-**Row deserialization:** D1 returns JSON rows. Create serde-deserializable structs in `bind.rs` for each table (`InstallationRow`, `UserRow`, `ShareLinkRow`, `ShareLinkRepoRow`, etc.) and implement `From<InstallationRow> for Account`, etc. Match the column names exactly as defined in `migrations/0001_initial.sql`.
+**Row deserialization:** D1 returns JSON rows. Create serde-deserializable structs in `bind.rs` for each table (`InstallationRow`, `UserRow`, `InvitationLinkRow`, `InvitationLinkRepoRow`, etc.) and implement `From<InstallationRow> for Account`, etc. Match the column names exactly as defined in `migrations/0001_initial.sql`.
 
 **DateTime serialization:** The schema stores timestamps as TEXT (`TEXT NOT NULL`). Use ISO8601 format (`chrono::DateTime<Utc>::to_rfc3339()`). Deserialize with `chrono::DateTime::parse_from_rfc3339`.
 
@@ -419,13 +419,13 @@ Standard SELECT queries. Use the `InstallationRow` → `Account` conversion from
 
 `INSERT INTO users ... ON CONFLICT(user_id) DO UPDATE SET login = excluded.login, avatar_url = excluded.avatar_url, last_seen_at = excluded.last_seen_at`.
 
-- [ ] **Step 7: implement `insert_share_link`**
+- [ ] **Step 7: implement `insert_invitation_link`**
 
-Requires atomicity: the share_link row and all share_link_repos rows must succeed or fail together. Use explicit `BEGIN`/`COMMIT`/`ROLLBACK` via `D1Database::exec()`:
+Requires atomicity: the invitation_link row and all invitation_link_repos rows must succeed or fail together. Use explicit `BEGIN`/`COMMIT`/`ROLLBACK` via `D1Database::exec()`:
 
 ```rust
 self.db.exec("BEGIN").await.map_err(classify_d1_error)?;
-// run INSERT INTO share_links + all INSERT INTO share_link_repos statements
+// run INSERT INTO invitation_links + all INSERT INTO invitation_link_repos statements
 // if any fails: self.db.exec("ROLLBACK").await?; return Err(...)
 self.db.exec("COMMIT").await.map_err(classify_d1_error)?;
 ```
@@ -434,34 +434,34 @@ Build the individual statements using `self.db.prepare(sql).bind(&[...])?.run().
 
 The `D1Database::exec()` method accepts a raw SQL string. Use it only for the `BEGIN`/`COMMIT`/`ROLLBACK` control flow statements (no parameters needed).
 
-- [ ] **Step 8: implement `mark_share_link_revoked`**
+- [ ] **Step 8: implement `mark_invitation_link_revoked`**
 
-`UPDATE share_links SET revoked_at = ?1, revoked_by = ?2 WHERE id = ?3 AND revoked_at IS NULL`. Check rows_changed.
+`UPDATE invitation_links SET revoked_at = ?1, revoked_by = ?2 WHERE id = ?3 AND revoked_at IS NULL`. Check rows_changed.
 
-- [ ] **Step 9: implement `get_share_link_by_id`, `get_share_link_by_slug`, `list_share_links_for_account`**
+- [ ] **Step 9: implement `get_invitation_link_by_id`, `get_invitation_link_by_slug`, `list_invitation_links_for_account`**
 
-Each requires a JOIN with `share_link_repos`:
+Each requires a JOIN with `invitation_link_repos`:
 ```sql
 SELECT sl.*, slr.repo_id, slr.repo_full_name
-FROM share_links sl
-LEFT JOIN share_link_repos slr ON sl.id = slr.share_link_id
+FROM invitation_links sl
+LEFT JOIN invitation_link_repos slr ON sl.id = slr.invitation_link_id
 WHERE sl.id = ?1
 ```
 
-D1 returns one row per repo. `ShareLinkJoinRow` must have nullable repo fields:
+D1 returns one row per repo. `InvitationLinkJoinRow` must have nullable repo fields:
 ```rust
 #[derive(Deserialize)]
-struct ShareLinkJoinRow {
-    // share_links columns...
+struct InvitationLinkJoinRow {
+    // invitation_links columns...
     id: String,
     slug: String,
-    // ... other share_link fields ...
+    // ... other invitation_link fields ...
     repo_id: Option<i64>,        // NULL when link has zero repos (LEFT JOIN)
     repo_full_name: Option<String>,
 }
 ```
 
-A helper `fn collect_share_links(rows: Vec<ShareLinkJoinRow>) -> Result<Vec<ShareLink>>` in `bind.rs` groups rows by `id` and reconstructs each `ShareLink`. When both `repo_id` and `repo_full_name` are `None` (zero-repo link produces one null-sentinel row from the LEFT JOIN), the row is skipped — do not push a phantom `ShareLinkRepo` entry. This mirrors the null-handling in `sqlx_impl.rs` around `if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name)`. Reference that existing function when implementing.
+A helper `fn collect_invitation_links(rows: Vec<InvitationLinkJoinRow>) -> Result<Vec<InvitationLink>>` in `bind.rs` groups rows by `id` and reconstructs each `InvitationLink`. When both `repo_id` and `repo_full_name` are `None` (zero-repo link produces one null-sentinel row from the LEFT JOIN), the row is skipped — do not push a phantom `InvitationLinkRepo` entry. This mirrors the null-handling in `sqlx_impl.rs` around `if let (Some(rid), Some(name)) = (row.repo_id, row.repo_full_name)`. Reference that existing function when implementing.
 
 - [ ] **Step 10: compile check**
 
@@ -481,19 +481,19 @@ cargo check -p storage-d1 --target wasm32-unknown-unknown
 
 - [ ] **Step 1: implement `insert_invitation_request_and_increment_uses`**
 
-Requires atomicity: the request row insert and the uses_count increment must both succeed or both fail. Use explicit `BEGIN`/`COMMIT`/`ROLLBACK` (same pattern as `insert_share_link`):
+Requires atomicity: the request row insert and the uses_count increment must both succeed or both fail. Use explicit `BEGIN`/`COMMIT`/`ROLLBACK` (same pattern as `insert_invitation_link`):
 
 ```sql
 -- Inside BEGIN/COMMIT block:
 -- statement 1:
-INSERT INTO invitation_requests (id, share_link_id, requester_id, justification, state, created_at)
+INSERT INTO invitation_requests (id, invitation_link_id, requester_id, justification, state, created_at)
 VALUES (?1, ?2, ?3, ?4, 'pending', ?5)
 
 -- statement 2:
-UPDATE share_links SET uses_count = uses_count + 1 WHERE id = ?2
+UPDATE invitation_links SET uses_count = uses_count + 1 WHERE id = ?2
 ```
 
-The `(share_link_id, requester_id) WHERE state = 'pending'` partial unique index will surface `DuplicatePendingRequest` if a pending request exists — this error bubbles out through the `ROLLBACK` path. Do NOT use `d1.batch()` here — it does not roll back on partial failure.
+The `(invitation_link_id, requester_id) WHERE state = 'pending'` partial unique index will surface `DuplicatePendingRequest` if a pending request exists — this error bubbles out through the `ROLLBACK` path. Do NOT use `d1.batch()` here — it does not roll back on partial failure.
 
 - [ ] **Step 2: implement `record_request_decision`**
 
@@ -506,12 +506,12 @@ Check `rows_changed == 0` → `Error::NotFound`.
 
 - [ ] **Step 3: implement `get_invitation_request`, `list_pending_requests_for_account`, `list_requests_for_link`**
 
-Standard SELECT queries. `list_pending_requests_for_account` joins `share_links` on `account_id`. Deserialize via `InvitationRequestRow` → `InvitationRequest` conversion in `bind.rs`.
+Standard SELECT queries. `list_pending_requests_for_account` joins `invitation_links` on `account_id`. Deserialize via `InvitationRequestRow` → `InvitationRequest` conversion in `bind.rs`.
 
-**D1 query latency note:** Each D1 call is an HTTP round-trip (~10–50ms). The dashboard handler calls `list_share_links_for_account` and `list_pending_requests_for_account` for every page load. These two queries are independent and should be fired concurrently. In the dashboard route handler (in `crates/web`), use `futures::join!` or `tokio::join!` (both are wasm32-compatible via `wasm-bindgen-futures`):
+**D1 query latency note:** Each D1 call is an HTTP round-trip (~10–50ms). The dashboard handler calls `list_invitation_links_for_account` and `list_pending_requests_for_account` for every page load. These two queries are independent and should be fired concurrently. In the dashboard route handler (in `crates/web`), use `futures::join!` or `tokio::join!` (both are wasm32-compatible via `wasm-bindgen-futures`):
 ```rust
 let (links, requests) = tokio::join!(
-    storage.list_share_links_for_account(account_id),
+    storage.list_invitation_links_for_account(account_id),
     storage.list_pending_requests_for_account(account_id),
 );
 ```
@@ -536,7 +536,7 @@ Check `rows_changed == 0` → `Error::NotFound`.
 
 - [ ] **Step 6: implement `get_github_invitation`, `get_github_invitation_by_github_id`, `list_pending_github_invitations_for_installation`**
 
-Standard SELECT queries. The installation-scoped list joins through `invitation_requests → share_links → installations`.
+Standard SELECT queries. The installation-scoped list joins through `invitation_requests → invitation_links → installations`.
 
 - [ ] **Step 7: implement `audit`**
 
@@ -766,7 +766,7 @@ pub async fn serve_workers(
     env: worker::Env,
     ctx: worker::Context,
 ) -> worker::Result<worker::Response> {
-    // Register Installation, ShareLink, InvitationRequest,
+    // Register Installation, InvitationLink, InvitationRequest,
     // GithubInvitation, Reconcile services with the Restate SDK router.
     // Delegate to the SDK's Workers fetch handler.
     todo!("adapt from PoC — exact wiring TBD after reading Step 2")
@@ -1066,18 +1066,18 @@ wrangler d1 execute ghinvite --local --config wrangler/web.toml \
   --command "SELECT COUNT(*) as cnt FROM users"
 # Expected: cnt = 1
 
-# Verify share_links and share_link_repos foreign key + LEFT JOIN work:
+# Verify invitation_links and invitation_link_repos foreign key + LEFT JOIN work:
 wrangler d1 execute ghinvite --local --config wrangler/web.toml \
-  --command "INSERT INTO share_links (id, installation_id, created_by, slug, permission, approval_required, max_uses, uses_count, created_at) VALUES ('01JTEST000000000000000001', 1, 99, 'test-slug', 'read', 0, 10, 0, datetime('now'))"
+  --command "INSERT INTO invitation_links (id, installation_id, created_by, slug, permission, approval_required, max_uses, uses_count, created_at) VALUES ('01JTEST000000000000000001', 1, 99, 'test-slug', 'read', 0, 10, 0, datetime('now'))"
 wrangler d1 execute ghinvite --local --config wrangler/web.toml \
-  --command "SELECT sl.id, slr.repo_id FROM share_links sl LEFT JOIN share_link_repos slr ON sl.id = slr.share_link_id WHERE sl.slug = 'test-slug'"
+  --command "SELECT sl.id, slr.repo_id FROM invitation_links sl LEFT JOIN invitation_link_repos slr ON sl.id = slr.invitation_link_id WHERE sl.slug = 'test-slug'"
 # Expected: one row, repo_id = NULL (zero repos) — this exercises the null-sentinel path
 
 # Verify UNIQUE constraint fires correctly (duplicate slug):
 wrangler d1 execute ghinvite --local --config wrangler/web.toml \
-  --command "INSERT INTO share_links (id, installation_id, created_by, slug, permission, approval_required, max_uses, uses_count, created_at) VALUES ('01JTEST000000000000000002', 1, 99, 'test-slug', 'read', 0, 10, 0, datetime('now'))" \
-  2>&1 | grep -i "UNIQUE constraint failed: share_links.slug" || echo "ERROR: duplicate slug not rejected"
-# Expected: grep matches (constraint fired on share_links.slug)
+  --command "INSERT INTO invitation_links (id, installation_id, created_by, slug, permission, approval_required, max_uses, uses_count, created_at) VALUES ('01JTEST000000000000000002', 1, 99, 'test-slug', 'read', 0, 10, 0, datetime('now'))" \
+  2>&1 | grep -i "UNIQUE constraint failed: invitation_links.slug" || echo "ERROR: duplicate slug not rejected"
+# Expected: grep matches (constraint fired on invitation_links.slug)
 
 # Repeat for invitation_requests, github_invitations, audit_events with similarly minimal synthetic rows.
 ```
@@ -1170,7 +1170,7 @@ After deploying the restate-svc Worker, the Restate Cloud control plane must be 
 restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers.dev
 ```
 
-Restate will introspect the Worker, discover the five services (`Installation`, `ShareLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`), and begin routing invocations to it.
+Restate will introspect the Worker, discover the five services (`Installation`, `InvitationLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`), and begin routing invocations to it.
 
 **`RESTATE_IDENTITY_KEY` is always required for Restate Cloud deployments** — it is the key Restate Cloud uses to sign requests to the Worker so the Worker can verify they are genuine. Set it in `wrangler/restate-svc.toml` as a secret:
 
@@ -1244,10 +1244,10 @@ In `docs/superpowers/plans/README.md`, mark Plan 7 status as **Implemented**.
 8. **1b+1c KvSessionStore Send/Sync** — `tower_sessions::SessionStore` requires `Send + Sync`; `KvStore` is `!Send`. Add `unsafe impl Send/Sync for KvSessionStore {}` to Task 5 Step 3, same pattern as D1Storage. Decision: APPLY.
 9. **1e.1 worker crate version** — Updated `"0.4"` → `"0.8"` throughout. Current release is v0.8.x; v0.4 is 4 major versions behind with breaking API changes. Decision: APPLY.
 10. **1e.2 build artifact path** — Added Task 10 Step 0 to verify `build/worker/shim.js` vs `.mjs` extension before deploy. Decision: APPLY.
-11. **1f D1 batch not atomic (reinforced)** — Promoted explicit `BEGIN`/`COMMIT`/`ROLLBACK` to primary path for `insert_share_link` and `insert_invitation_request_and_increment_uses`. Removed batch() from atomicity-critical paths. Decision: APPLY.
+11. **1f D1 batch not atomic (reinforced)** — Promoted explicit `BEGIN`/`COMMIT`/`ROLLBACK` to primary path for `insert_invitation_link` and `insert_invitation_request_and_increment_uses`. Removed batch() from atomicity-critical paths. Decision: APPLY.
 12. **2a Error::Database direct construction** — Task 1 Step 3 now enumerates three distinct patterns (`.map_err(Error::Database)`, direct construction, migration error wrapping). Decision: APPLY.
 13. **2b classify_d1_error misclassification** — Fixed to two-column check for DuplicatePendingRequest; added DuplicateActiveInstallation case. Decision: APPLY.
-14. **2c collect_share_links null-repo handling** — Specified `Option<i64>` fields, null-sentinel skip logic, reference to sqlx_impl.rs equivalent. Decision: APPLY.
+14. **2c collect_invitation_links null-repo handling** — Specified `Option<i64>` fields, null-sentinel skip logic, reference to sqlx_impl.rs equivalent. Decision: APPLY.
 15. **2d WebConfig::from_env wrong fields** — Rewrote to match actual struct (base_url, session_secret [u8;32], restate_ingress, oauth: OAuthConfig, github_install_url). Updated wrangler/web.toml vars and secrets lists to match. Decision: APPLY.
 16. **2e sqlx sequential migrations** — Added `sqlx.toml` with `version-format = "sequential"` as Task 9 Step 2b. Decision: APPLY.
 17. **3b test gate too narrow** — Task 1 Step 5 now includes `cargo test -p web -p restate-svc`. Decision: APPLY.
@@ -1287,7 +1287,7 @@ In `docs/superpowers/plans/README.md`, mark Plan 7 status as **Implemented**.
 
 - [ ] Task 1: Make `storage::Error` wasm-compatible
 - [ ] Task 2: `crates/storage-d1` skeleton + wasm32 smoke test
-- [ ] Task 3: D1Storage — installations, users, share_links
+- [ ] Task 3: D1Storage — installations, users, invitation_links
 - [ ] Task 4: D1Storage — invitation_requests, github_invitations, audit
 - [ ] Task 5: `crates/web` Workers entry point + KV session store
 - [ ] Task 6: `crates/restate-svc` wasm compatibility + entry point

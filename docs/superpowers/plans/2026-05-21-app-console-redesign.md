@@ -491,8 +491,8 @@ mod tests {
 
         assert!(html.contains("Console overview"));
         assert!(html.contains("Review queue"));
-        assert!(html.contains("Create first share link"));
-        assert!(html.contains("Recent share links"));
+        assert!(html.contains("Create first invitation link"));
+        assert!(html.contains("Recent invitation links"));
     }
 }
 ```
@@ -516,7 +516,7 @@ children: rsx! {
             p { class: "mb-3 text-sm font-medium text-primary", "GitHub access operations" }
             h1 { class: "text-3xl font-semibold tracking-tight text-base-content sm:text-4xl", "Access console for GitHub collaborators" }
             p { class: "mt-4 max-w-xl text-base leading-7 text-base-content/70",
-                "Create share links, review access requests, and keep repository invitations moving without ad-hoc admin work."
+                "Create invitation links, review access requests, and keep repository invitations moving without ad-hoc admin work."
             }
             div { class: "mt-6 flex flex-wrap gap-3",
                 {match props.signed_in_login.as_deref() {
@@ -555,7 +555,7 @@ children: rsx! {
             h1 { class: "text-2xl font-semibold tracking-tight", "Console overview" }
             p { class: "mt-1 text-sm text-base-content/65", "Manage collaborator access for {props.account_login}." }
         }
-        a { class: "btn btn-primary btn-sm", href: "/accounts/{login}/links/new", "New share link" }
+        a { class: "btn btn-primary btn-sm", href: "/accounts/{login}/links/new", "New invitation link" }
     }
     div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
         a { class: "card border border-base-300 bg-base-100 shadow-sm transition-colors hover:border-primary/40",
@@ -583,15 +583,15 @@ children: rsx! {
     }
     section { class: "mt-6 rounded-box border border-base-300 bg-base-100 shadow-sm",
         div { class: "flex items-center justify-between border-b border-base-300 px-5 py-4",
-            h2 { class: "text-base font-semibold", "Recent share links" }
+            h2 { class: "text-base font-semibold", "Recent invitation links" }
             a { class: "btn btn-ghost btn-sm", href: "/accounts/{login}/links/new", "Create link" }
         }
         {if props.recent_links.is_empty() {
             rsx! {
                 div { class: "p-6 text-sm text-base-content/70",
-                    h3 { class: "font-medium text-base-content", "No share links yet" }
+                    h3 { class: "font-medium text-base-content", "No invitation links yet" }
                     p { class: "mt-1", "Create a link to let recipients request collaborator access without manual GitHub invites." }
-                    a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first share link" }
+                    a { class: "btn btn-primary btn-sm mt-4", href: "/accounts/{login}/links/new", "Create first invitation link" }
                 }
             }
         } else {
@@ -683,8 +683,8 @@ In `LinkCreateFormPage`, keep `let login` and `let perms`, then replace the `chi
 ```rust
 children: rsx! {
     header { class: "mb-6 flex flex-col gap-2",
-        p { class: "text-sm font-medium text-primary", "Share links" }
-        h1 { class: "text-2xl font-semibold tracking-tight", "New share link" }
+        p { class: "text-sm font-medium text-primary", "Invitation links" }
+        h1 { class: "text-2xl font-semibold tracking-tight", "New invitation link" }
         p { class: "max-w-2xl text-sm leading-6 text-base-content/70",
             "Create a controlled URL that lets GitHub users request collaborator access to selected repositories."
         }
@@ -797,7 +797,7 @@ div { class: "modal", role: "dialog", id: "stop-link-modal",
     div { class: "modal-box",
         h3 { class: "text-lg font-semibold", "Confirm stop" }
         p { class: "mt-2 text-sm text-base-content/70",
-            "Recipients will no longer be able to create new requests from this share link. Existing requests and invitations continue."
+            "Recipients will no longer be able to create new requests from this invitation link. Existing requests and invitations continue."
         }
         div { class: "modal-action",
             a { class: "btn btn-ghost", href: "#", "Cancel" }
@@ -826,7 +826,7 @@ Expected: PASS.
 
 ```bash
 git add crates/web/src/views/links.rs
-git commit -m "feat(web): polish share link workflows"
+git commit -m "feat(web): polish invitation link workflows"
 ```
 
 ## Task 5: Requests Queue Decision List
@@ -931,7 +931,7 @@ children: rsx! {
                                 {if repos_available {
                                     rsx! { p { class: "text-sm text-base-content/70", "Approving sends GitHub collaborator invitations for the repositories listed here." } }
                                 } else {
-                                    rsx! { p { class: "text-sm text-base-content/70", "This request cannot be completed until its share link details are available." } }
+                                    rsx! { p { class: "text-sm text-base-content/70", "This request cannot be completed until its invitation link details are available." } }
                                 }}
                             }
                             {if actions_available {
@@ -1087,7 +1087,7 @@ In `LandingPage`, replace the first page content block with:
 ```rust
 h1 { class: "text-2xl font-semibold tracking-tight", "Access request" }
 p { class: "mt-2 text-sm text-base-content/70",
-    "This share link requests collaborator access to the following {repo_word}:"
+    "This invitation link requests collaborator access to the following {repo_word}:"
 }
 ul { class: "mt-4 list-inside list-disc space-y-1 rounded-box border border-base-300 bg-base-200 p-4 text-sm", {repos_view} }
 p { class: "mt-4",
@@ -1184,7 +1184,7 @@ If `git status --short` shows no tracked modifications after verification, skip 
 
 ## Self-Review Notes
 
-- Spec coverage: Task 1 covers OKLCH DaisyUI theme customization. Task 2 covers app shell, active navigation, and invitation shell. Task 3 covers home and dashboard surfaces. Task 4 covers share-link form/detail and destructive modal confirmation. Task 5 covers the requests queue. Task 6 covers settings and recipient flows. Task 7 covers verification.
+- Spec coverage: Task 1 covers OKLCH DaisyUI theme customization. Task 2 covers app shell, active navigation, and invitation shell. Task 3 covers home and dashboard surfaces. Task 4 covers invitation-link form/detail and destructive modal confirmation. Task 5 covers the requests queue. Task 6 covers settings and recipient flows. Task 7 covers verification.
 - Scope check: The plan stays inside CSS source, Dioxus views, and existing tests. It does not change storage, commands, workflows, route behavior, hydration, or frontend frameworks.
 - Type consistency: `active_nav` is `Option<String>` on `LayoutProps`; all layout call sites pass a concrete `Some("overview")`, `Some("new-link")`, `Some("requests")`, `Some("settings")`, or `None`. Existing view props remain unchanged except layout invocation internals.
 - Component constraint: DaisyUI primitives and Tailwind utilities are used throughout. Custom CSS is limited to DaisyUI theme tokens and base document styling.

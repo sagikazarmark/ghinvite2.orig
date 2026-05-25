@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use web::commands::{
-    CreateShareLink, CreateShareLinkOutput, DecideInvitationRequest, GhinviteCommands,
+    CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
     OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
-    RepositorySelectionChangeSource, RevokeShareLink, RouteGithubInvitationWebhook,
+    RepositorySelectionChangeSource, RevokeInvitationLink, RouteGithubInvitationWebhook,
     SubmitInvitationRequest,
 };
 use web::{AppState, WebConfig, build_app};
@@ -38,15 +38,15 @@ struct RecordingCommands {
 
 #[async_trait::async_trait]
 impl GhinviteCommands for RecordingCommands {
-    async fn create_share_link(
+    async fn create_invitation_link(
         &self,
-        _command: CreateShareLink,
-    ) -> web::Result<CreateShareLinkOutput> {
-        panic!("unexpected create_share_link command")
+        _command: CreateInvitationLink,
+    ) -> web::Result<CreateInvitationLinkOutput> {
+        panic!("unexpected create_invitation_link command")
     }
 
-    async fn revoke_share_link(&self, _command: RevokeShareLink) -> web::Result<()> {
-        panic!("unexpected revoke_share_link command")
+    async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> web::Result<()> {
+        panic!("unexpected revoke_invitation_link command")
     }
 
     async fn submit_invitation_request(

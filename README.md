@@ -1,6 +1,6 @@
 # ghinvite
 
-GitHub invitation management via share links. Organisation owners create invite links; recipients request access; owners approve; the app sends the GitHub collaborator invitation automatically.
+GitHub invitation management via invitation links. Organisation owners create invite links; recipients request access; owners approve; the app sends the GitHub collaborator invitation automatically.
 
 ## Architecture
 

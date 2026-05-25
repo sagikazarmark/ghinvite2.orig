@@ -130,7 +130,9 @@ async fn signed_in_admin_with_existing_installation_sees_public_home() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Share Link Code"));
+    assert!(text.contains("Invitation code"));
+    assert!(text.contains("Enter an invitation code first."));
+    assert!(!text.contains("Invitation Link Code"));
     assert!(text.contains("Create invitation link"));
     assert!(text.contains("href=\"/console\""));
     assert!(text.contains("Console"));

@@ -8,7 +8,7 @@ This keeps product behavior and persistence unchanged while removing ad hoc repo
 
 ## Current State
 
-`ShareLinkRepo` stores repositories as `repo_id` plus `repo_full_name: String`. Storage adapters and database schemas persist that full-name string, and web views display it directly.
+`InvitationLinkRepo` stores repositories as `repo_id` plus `repo_full_name: String`. Storage adapters and database schemas persist that full-name string, and web views display it directly.
 
 GitHub invitation workflow code currently parses repository full names close to GitHub API calls:
 
@@ -21,7 +21,7 @@ Those call sites only validate that a slash exists. They do not centralize the d
 
 Add a minimal `domain::RepositoryIdentity` value type and parse stored full-name strings at GitHub-call boundaries.
 
-Keep `ShareLinkRepo.repo_full_name: String`, existing storage records, schemas, Restate payloads, and UI display behavior unchanged.
+Keep `InvitationLinkRepo.repo_full_name: String`, existing storage records, schemas, Restate payloads, and UI display behavior unchanged.
 
 ## Detailed Design
 
@@ -55,9 +55,9 @@ Export `RepositoryIdentity` and its error type from `domain::lib`.
 Adopt the type in Restate-side invitation paths before GitHub calls:
 
 - `create_logic` parses `input.repo_full_name` once and passes `identity.owner()` and `identity.name()` to `add_collaborator`.
-- `cancel_logic` parses the matched share-link repository full name before `delete_invitation`.
-- `tick_expire_logic` parses the matched share-link repository full name before `list_invitations`.
-- `reconcile_single` parses the matched share-link repository full name before `list_invitations` and `is_collaborator`.
+- `cancel_logic` parses the matched invitation-link repository full name before `delete_invitation`.
+- `tick_expire_logic` parses the matched invitation-link repository full name before `list_invitations`.
+- `reconcile_single` parses the matched invitation-link repository full name before `list_invitations` and `is_collaborator`.
 
 Remove the local `split_full_name` helper and direct `split_once('/')` parsing from these paths.
 
@@ -92,4 +92,4 @@ cargo test -p domain -p restate-svc -p github
 
 This change does not modify database schemas, migrations, storage record shapes, Restate payload JSON, web display behavior, GitHub API endpoints, or GitHub path encoding.
 
-It also does not thread `RepositoryIdentity` through `ShareLinkRepo` or storage adapters. That broader typing change can be considered later if persisted repository modeling becomes richer.
+It also does not thread `RepositoryIdentity` through `InvitationLinkRepo` or storage adapters. That broader typing change can be considered later if persisted repository modeling becomes richer.
