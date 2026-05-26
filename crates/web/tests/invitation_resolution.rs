@@ -429,7 +429,7 @@ async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
 }
 
 #[tokio::test]
-async fn nested_invitation_routes_authenticate_before_404() {
+async fn unsupported_nested_invitation_routes_authenticate_before_404() {
     let (app, _calls) = build_test_app(
         active_link(ACTIVE_SLUG),
         None,
@@ -494,6 +494,8 @@ async fn nested_invitation_routes_authenticate_before_404() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Page not found"));
     assert!(text.contains("The link may be incorrect or no longer available."));
+    assert!(!text.contains("Request repository access"));
+    assert!(!text.contains("Submit request"));
 }
 
 #[tokio::test]
@@ -644,6 +646,37 @@ async fn signed_in_landing_shows_newest_retry_notice_with_form() {
 }
 
 #[tokio::test]
+async fn signed_in_landing_shows_expired_retry_notice_with_form() {
+    let link = active_link(ACTIVE_SLUG);
+    let expired = request_with_state(RequestId::new(), link.id, REQUESTER_ID, RequestState::Expired);
+    let (app, _calls) = build_test_app(
+        link,
+        Some(expired),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Your previous request expired."));
+    assert!(text.contains("Submit request"));
+    assert!(text.contains("Justification"));
+}
+
+#[tokio::test]
 async fn inactive_link_with_existing_pending_request_shows_status() {
     let mut link = active_link(ACTIVE_SLUG);
     link.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
@@ -676,18 +709,19 @@ async fn inactive_link_with_existing_pending_request_shows_status() {
 }
 
 #[tokio::test]
-async fn inactive_link_without_non_repeatable_request_returns_generic_404() {
+async fn inactive_link_with_existing_approved_request_shows_status() {
     let mut link = active_link(ACTIVE_SLUG);
-    link.expires_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
-    let declined = request_with_state(
+    link.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
+    link.revoked_by = Some(CREATOR_ID);
+    let approved = request_with_state(
         RequestId::new(),
         link.id,
         REQUESTER_ID,
-        RequestState::Declined,
+        RequestState::Approved,
     );
     let (app, _calls) = build_test_app(
         link,
-        Some(declined),
+        Some(approved),
         MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
     )
     .await;
@@ -704,11 +738,64 @@ async fn inactive_link_without_non_repeatable_request_returns_generic_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Page not found"));
-    assert!(!text.contains("expired"));
+    assert!(text.contains("Approved"));
+    assert!(text.contains("GitHub notifications and email"));
+    assert!(!text.contains("revoked"));
+    assert!(!text.contains("Submit request"));
+}
+
+#[tokio::test]
+async fn inactive_link_without_non_repeatable_request_returns_generic_404() {
+    let mut expired = active_link(ACTIVE_SLUG);
+    expired.expires_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
+
+    let mut revoked = active_link(ACTIVE_SLUG);
+    revoked.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
+    revoked.revoked_by = Some(CREATOR_ID);
+
+    let mut exhausted = active_link(ACTIVE_SLUG);
+    exhausted.max_uses = Some(1);
+    exhausted.uses_count = 1;
+
+    for (link, hidden_detail) in [
+        (expired, "expired"),
+        (revoked, "revoked"),
+        (exhausted, "exhausted"),
+    ] {
+        let declined = request_with_state(
+            RequestId::new(),
+            link.id,
+            REQUESTER_ID,
+            RequestState::Declined,
+        );
+        let (app, _calls) = build_test_app(
+            link,
+            Some(declined),
+            MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+        )
+        .await;
+        let cookie = sign_in(app.clone()).await;
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("Page not found"));
+        assert!(!text.contains(hidden_detail));
+    }
 }
 
 #[tokio::test]
@@ -749,6 +836,39 @@ async fn submit_creates_request_and_redirects_to_canonical_page() {
             justification: Some("ship-it".into()),
         }]
     );
+}
+
+#[tokio::test]
+async fn submit_with_existing_pending_request_redirects_without_command() {
+    let link = active_link(ACTIVE_SLUG);
+    let pending = pending_request(RequestId::new(), link.id, REQUESTER_ID);
+    let (app, calls) = build_test_app(
+        link,
+        Some(pending),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=again",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, format!("/i/{ACTIVE_SLUG}"));
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
