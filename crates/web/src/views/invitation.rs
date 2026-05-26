@@ -256,6 +256,10 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
     let action = format!("/i/{slug}");
     let check_href = format!("/i/{slug}");
     let request_id = props.request_id.clone();
+    let effective_retry_notice = props
+        .retry_notice
+        .and_then(retry_notice_copy)
+        .or_else(|| props.current_status.and_then(retry_notice_copy));
 
     let flash_view = match &props.flash {
         None => rsx! {},
@@ -271,7 +275,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
         }
     };
 
-    let retry_notice_view = match props.retry_notice.and_then(retry_notice_copy) {
+    let retry_notice_view = match effective_retry_notice {
         None => rsx! {},
         Some(copy) => rsx! {
             div { class: "alert alert-warning mb-5",
@@ -309,34 +313,10 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                 }
             }
         },
-        Some(RequestState::Declined) => rsx! {
-            div { class: "space-y-5",
-                div { class: "badge badge-error badge-lg", "Declined" }
-                h1 { class: "text-2xl font-semibold tracking-tight", "Request declined" }
-                p { class: "text-sm leading-6 text-base-content/70",
-                    "The account admins declined this request."
-                }
-            }
-        },
-        Some(RequestState::Expired) => rsx! {
-            div { class: "space-y-5",
-                div { class: "badge badge-warning badge-lg", "Expired" }
-                h1 { class: "text-2xl font-semibold tracking-tight", "Request expired" }
-                p { class: "text-sm leading-6 text-base-content/70",
-                    "This request expired before it was reviewed."
-                }
-            }
-        },
-        Some(RequestState::Cancelled) => rsx! {
-            div { class: "space-y-5",
-                div { class: "badge badge-warning badge-lg", "Cancelled" }
-                h1 { class: "text-2xl font-semibold tracking-tight", "Request cancelled" }
-                p { class: "text-sm leading-6 text-base-content/70",
-                    "This request was cancelled."
-                }
-            }
-        },
-        None => rsx! {
+        Some(RequestState::Declined)
+        | Some(RequestState::Expired)
+        | Some(RequestState::Cancelled)
+        | None => rsx! {
             div { class: "space-y-5",
                 header { class: "space-y-2",
                     p { class: "text-xs font-semibold uppercase tracking-[0.2em] text-primary", "Repository request" }
@@ -678,6 +658,30 @@ mod tests {
         assert!(html.contains("You can submit a new request."));
         assert!(html.contains("Submit request"));
         assert!(html.contains("Justification"));
+    }
+
+    #[test]
+    fn request_page_renders_declined_status_as_retryable_form() {
+        let link = sample_link();
+        let html = crate::views::render::render(move || {
+            rsx! {
+                RequestPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    link: link.clone(),
+                    signed_in_login: "octocat".to_string(),
+                    flash: None,
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                    current_status: Some(RequestState::Declined),
+                    retry_notice: None,
+                }
+            }
+        });
+
+        assert!(html.contains("Your previous request was declined."));
+        assert!(html.contains("You can submit a new request."));
+        assert!(html.contains("Submit request"));
+        assert!(html.contains("Justification"));
+        assert!(html.contains("action=\"/i/abcdEFGH01234567\""));
     }
 
     #[test]
