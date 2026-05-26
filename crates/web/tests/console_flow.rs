@@ -8,9 +8,14 @@ use github::mocks::{Expectation, MockTransport};
 use github::transport::{Method, Response};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use storage::Storage;
 use tower::ServiceExt;
+use web::commands::{
+    CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
+    OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
+    RevokeInvitationLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
+};
 use web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 
 fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
@@ -102,6 +107,90 @@ fn oauth_sign_in_expectations() -> Vec<Expectation> {
     ]
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum RecordedCommand {
+    CreateInvitationLink {
+        description: String,
+        internal_note: Option<String>,
+        permission: domain::Permission,
+        approval_required: bool,
+        max_uses: Option<u32>,
+        repo_ids: Vec<u64>,
+    },
+}
+
+#[derive(Default)]
+struct RecordingCommands {
+    calls: Arc<Mutex<Vec<RecordedCommand>>>,
+}
+
+#[async_trait::async_trait]
+impl GhinviteCommands for RecordingCommands {
+    async fn create_invitation_link(
+        &self,
+        command: CreateInvitationLink,
+    ) -> web::Result<CreateInvitationLinkOutput> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(RecordedCommand::CreateInvitationLink {
+                description: command.description,
+                internal_note: command.internal_note,
+                permission: command.permission,
+                approval_required: command.approval_required,
+                max_uses: command.max_uses,
+                repo_ids: command.repos.into_iter().map(|repo| repo.repo_id).collect(),
+            });
+        Ok(CreateInvitationLinkOutput {
+            link_id: domain::InvitationLinkId::new(),
+            slug: "abcdEFGH01234567".to_string(),
+        })
+    }
+
+    async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> web::Result<()> {
+        panic!("unexpected revoke_invitation_link command")
+    }
+
+    async fn submit_invitation_request(
+        &self,
+        _command: SubmitInvitationRequest,
+    ) -> web::Result<()> {
+        panic!("unexpected submit_invitation_request command")
+    }
+
+    async fn decide_invitation_request(
+        &self,
+        _command: DecideInvitationRequest,
+    ) -> web::Result<()> {
+        panic!("unexpected decide_invitation_request command")
+    }
+
+    async fn onboard_installation(&self, _command: OnboardInstallation) -> web::Result<()> {
+        panic!("unexpected onboard_installation command")
+    }
+
+    async fn record_repository_selection_change(
+        &self,
+        _command: RecordRepositorySelectionChange,
+    ) -> web::Result<()> {
+        panic!("unexpected record_repository_selection_change command")
+    }
+
+    async fn record_installation_uninstalled(
+        &self,
+        _command: RecordInstallationUninstalled,
+    ) -> web::Result<()> {
+        panic!("unexpected record_installation_uninstalled command")
+    }
+
+    async fn route_github_invitation_webhook(
+        &self,
+        _command: RouteGithubInvitationWebhook,
+    ) -> web::Result<()> {
+        panic!("unexpected route_github_invitation_webhook command")
+    }
+}
+
 async fn build_test_app() -> axum::Router {
     use github::mocks::MockTransport;
     let storage: Arc<dyn storage::Storage> =
@@ -168,6 +257,77 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
     let cookie2 = session_cookie(&resp2, Some(cookie1));
 
     (app, cookie2)
+}
+
+async fn build_signed_in_admin_app_with_recording_commands(
+    expectations: Vec<Expectation>,
+) -> (axum::Router, String, Arc<Mutex<Vec<RecordedCommand>>>) {
+    let storage = Arc::new(storage::SqlxStorage::in_memory().await.unwrap());
+    storage
+        .insert_installation(&Account {
+            installation_id: 77,
+            account_id: 9001,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: Utc::now(),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        })
+        .await
+        .unwrap();
+
+    let storage: Arc<dyn storage::Storage> = storage;
+    let transport: Arc<dyn github::HttpTransport> = Arc::new(MockTransport::scripted(expectations));
+    let commands = Arc::new(RecordingCommands::default());
+    let calls = commands.calls.clone();
+    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let session_store = tower_sessions::MemoryStore::default();
+    let app = build_app(state, session_store);
+
+    let resp1 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/login")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
+    let cookie1 = session_cookie(&resp1, None);
+    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
+    let state = state_from_location(location);
+
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/oauth/callback?code=test-code&state={state}"))
+                .header("cookie", &cookie1)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
+    let cookie2 = session_cookie(&resp2, Some(cookie1));
+
+    (app, cookie2, calls)
+}
+
+fn installation_repos_expectation() -> Expectation {
+    Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user/installations/77/repositories?per_page=100",
+        serde_json::json!({
+            "total_count": 2,
+            "repositories": [
+                {"id": 10, "full_name": "acme/api", "private": true},
+                {"id": 11, "full_name": "acme/web", "private": true}
+            ]
+        }),
+    )
 }
 
 async fn sign_in(app: axum::Router) -> (axum::Router, String) {
@@ -669,6 +829,83 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
     assert!(!text.contains("<table"));
     assert!(!text.contains("Filter"));
     assert!(!text.contains("No events"));
+}
+
+#[tokio::test]
+async fn create_link_invalid_description_rerenders_form_with_errors_and_preserved_values() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=%20%20%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains("Description is required. Use short, single-line admin-only context for this invitation link."));
+    assert!(text.contains("aria-invalid=\"true\""));
+    assert!(text.contains("aria-describedby=\"description-help description-error\""));
+    assert!(text.contains("value=\"push\" selected"));
+    assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert!(text.contains("name=\"max_uses\" value=\"7\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("acme/api"));
+}
+
+#[tokio::test]
+async fn create_link_valid_submission_invokes_command_and_redirects() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("/console/accounts/acme/links/"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        calls.lock().unwrap()[0],
+        RecordedCommand::CreateInvitationLink {
+            description: "AI coding workshop".to_string(),
+            internal_note: Some("Keep this note".to_string()),
+            permission: domain::Permission::Push,
+            approval_required: true,
+            max_uses: Some(7),
+            repo_ids: vec![10],
+        }
+    );
 }
 
 #[tokio::test]

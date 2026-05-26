@@ -25,6 +25,13 @@ pub struct LinkFormValues {
     pub expires_in_days: String,
     pub internal_note: String,
     pub selected_repo_ids: Vec<u64>,
+    pub errors: LinkFormErrors,
+}
+
+#[derive(Clone, Default, PartialEq)]
+pub struct LinkFormErrors {
+    pub summary: Vec<String>,
+    pub description: Option<String>,
 }
 
 impl Default for LinkFormValues {
@@ -37,6 +44,7 @@ impl Default for LinkFormValues {
             expires_in_days: "30".into(),
             internal_note: String::new(),
             selected_repo_ids: Vec::new(),
+            errors: LinkFormErrors::default(),
         }
     }
 }
@@ -45,6 +53,17 @@ impl Default for LinkFormValues {
 pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     let login = props.account_login.clone();
     let perms = ["pull", "triage", "push", "maintain", "admin"];
+    let has_description_error = props.form.errors.description.is_some();
+    let description_class = if has_description_error {
+        "input input-bordered input-error w-full"
+    } else {
+        "input input-bordered w-full"
+    };
+    let description_described_by = if has_description_error {
+        "description-help description-error"
+    } else {
+        "description-help"
+    };
 
     rsx! {
         ConsoleLayout {
@@ -62,6 +81,20 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     }
                 }
                 form { method: "post", action: "/console/accounts/{login}/links", class: "max-w-3xl space-y-5",
+                    {if props.form.errors.summary.is_empty() {
+                        rsx! {}
+                    } else {
+                        rsx! {
+                            div { id: "link-form-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
+                                div {
+                                    h2 { class: "font-semibold", dangerous_inner_html: "We couldn't create this invitation link" }
+                                    ul { class: "mt-1 list-disc space-y-1 pl-5 text-sm",
+                                        {props.form.errors.summary.iter().map(|message| rsx! { li { "{message}" } })}
+                                    }
+                                }
+                            }
+                        }
+                    }}
                     section { class: "mac-panel",
                         div { class: "space-y-4 p-4",
                             div {
@@ -70,8 +103,21 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                             div { class: "form-control gap-2",
                                 label { class: "label", r#for: "description", span { class: "label-text font-medium", "Description" } }
-                                input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "input input-bordered w-full", required: true, maxlength: "120", placeholder: "AI coding workshop" }
-                                p { class: "text-sm text-base-content/65", "Visible only to admins. Use a short purpose or audience for this invitation link." }
+                                {if has_description_error {
+                                    rsx! {
+                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_invalid: "true", aria_describedby: "{description_described_by}" }
+                                    }
+                                } else {
+                                    rsx! {
+                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_describedby: "{description_described_by}" }
+                                    }
+                                }}
+                                p { id: "description-help", class: "text-sm text-base-content/65", "Visible only to admins. Use a short purpose or audience for this invitation link." }
+                                {if let Some(message) = props.form.errors.description.as_ref() {
+                                    rsx! { p { id: "description-error", class: "text-sm font-medium text-error", "{message}" } }
+                                } else {
+                                    rsx! {}
+                                }}
                             }
                             div { class: "form-control gap-2",
                                 label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
@@ -417,6 +463,55 @@ mod tests {
         assert!(html.contains("acme/api"));
         assert!(html.contains("mac-panel"));
         assert!(html.contains("repo-choice-row"));
+    }
+
+    #[test]
+    fn link_create_form_renders_description_validation_errors_and_preserved_values() {
+        let form = LinkFormValues {
+            description: "   ".to_string(),
+            permission: "push".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![10],
+            errors: LinkFormErrors {
+                summary: vec!["Fix the highlighted fields before creating this invitation link."
+                    .to_string()],
+                description: Some("Description is required. Use short, single-line admin-only context for this invitation link.".to_string()),
+            },
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: vec![
+                        github::payloads::GhRepo { id: 10, full_name: "acme/api".to_string(), private: true },
+                        github::payloads::GhRepo { id: 11, full_name: "acme/web".to_string(), private: true },
+                    ],
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
+        assert!(html.contains("Description is required. Use short, single-line admin-only context for this invitation link."));
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains("role=\"alert\""));
+        assert!(html.contains("aria-live=\"polite\""));
+        assert!(html.contains("id=\"description-error\""));
+        assert!(html.contains("aria-invalid=\"true\""));
+        assert!(html.contains("aria-describedby=\"description-help description-error\""));
+        assert!(html.contains("value=\"push\" selected"));
+        assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
+        assert!(html.contains("name=\"max_uses\" value=\"7\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
+        assert!(html.contains("Keep this note"));
+        assert!(html.contains("value=\"10\" checked"));
+        assert!(html.contains("value=\"11\""));
     }
 
     #[test]

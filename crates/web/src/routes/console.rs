@@ -227,20 +227,7 @@ async fn new_link_form(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
-    let user_api = github::oauth::UserApiClient::new(
-        state.github_transport.clone(),
-        admin.session.access_token.clone(),
-    );
-    let repos = match user_api
-        .list_user_installation_repos(admin.account.installation_id)
-        .await
-    {
-        Ok(r) => r.repositories,
-        Err(e) => {
-            tracing::warn!(error = ?e, "failed to list installation repos; rendering form with empty list");
-            vec![]
-        }
-    };
+    let repos = load_installation_repos_for_form(&state, &admin).await;
 
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
@@ -276,24 +263,65 @@ struct CreateLinkForm {
 
 const DESCRIPTION_MAX_CHARS: usize = 120;
 
-fn validate_description(raw: Option<&str>) -> crate::error::Result<String> {
-    let description = raw.unwrap_or("").trim();
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DescriptionValidationError {
+    message: String,
+}
+
+fn validate_description(raw: Option<&str>) -> Result<String, DescriptionValidationError> {
+    let raw_description = raw.unwrap_or("");
+    let description = raw_description.trim();
     if description.is_empty() {
-        return Err(crate::error::WebError::BadRequest(
-            "description is required".into(),
-        ));
+        return Err(DescriptionValidationError {
+            message: "Description is required. Use short, single-line admin-only context for this invitation link.".into(),
+        });
     }
-    if description.contains('\n') || description.contains('\r') {
-        return Err(crate::error::WebError::BadRequest(
-            "description must be a single line".into(),
-        ));
+    if raw_description.contains('\n') || raw_description.contains('\r') {
+        return Err(DescriptionValidationError {
+            message: "Description must be a single line.".into(),
+        });
     }
     if description.chars().count() > DESCRIPTION_MAX_CHARS {
-        return Err(crate::error::WebError::BadRequest(
-            "description must be 120 characters or fewer".into(),
-        ));
+        return Err(DescriptionValidationError {
+            message: "Description must be 120 characters or fewer.".into(),
+        });
     }
     Ok(description.to_string())
+}
+
+impl CreateLinkForm {
+    fn into_view_values(self) -> crate::views::links::LinkFormValues {
+        crate::views::links::LinkFormValues {
+            description: self.description.unwrap_or_default(),
+            permission: self.permission,
+            approval_required: self.approval_required.is_some(),
+            max_uses: self.max_uses.unwrap_or_default(),
+            expires_in_days: self.expires_in_days.unwrap_or_default(),
+            internal_note: self.internal_note.unwrap_or_default(),
+            selected_repo_ids: self.repo_ids,
+            errors: crate::views::links::LinkFormErrors::default(),
+        }
+    }
+}
+
+async fn load_installation_repos_for_form(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+) -> Vec<github::payloads::GhRepo> {
+    let user_api = github::oauth::UserApiClient::new(
+        state.github_transport.clone(),
+        admin.session.access_token.clone(),
+    );
+    match user_api
+        .list_user_installation_repos(admin.account.installation_id)
+        .await
+    {
+        Ok(r) => r.repositories,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to list installation repos; rendering form with empty list");
+            vec![]
+        }
+    }
 }
 
 async fn create_link(
@@ -318,7 +346,28 @@ async fn create_link(
     let approval_required = form.approval_required.is_some();
     let description = match validate_description(form.description.as_deref()) {
         Ok(description) => description,
-        Err(e) => return e.into_response(),
+        Err(error) => {
+            let repos = load_installation_repos_for_form(&state, &admin).await;
+            let mut form_values = form.into_view_values();
+            form_values.errors.summary =
+                vec!["Fix the highlighted fields before creating this invitation link.".into()];
+            form_values.errors.description = Some(error.message);
+
+            let signed_in_login = Some(admin.session.login.clone());
+            let account_login = admin.account.account_login.clone();
+            let html = render(move || {
+                rsx! {
+                    crate::views::links::LinkCreateFormPage {
+                        signed_in_login: signed_in_login.clone(),
+                        flash: None,
+                        account_login: account_login.clone(),
+                        repos: repos.clone(),
+                        form: form_values.clone(),
+                    }
+                }
+            });
+            return Html(html).into_response();
+        }
     };
     let max_uses: Option<u32> = form
         .max_uses
@@ -335,15 +384,7 @@ async fn create_link(
         .map(|s: &str| s.trim().to_string())
         .filter(|s: &String| !s.is_empty());
 
-    let user_api = github::oauth::UserApiClient::new(
-        state.github_transport.clone(),
-        admin.session.access_token.clone(),
-    );
-    let installation_repos = user_api
-        .list_user_installation_repos(admin.account.installation_id)
-        .await
-        .map(|r| r.repositories)
-        .unwrap_or_default();
+    let installation_repos = load_installation_repos_for_form(&state, &admin).await;
     let repos: Vec<domain::InvitationLinkRepo> = installation_repos
         .into_iter()
         .filter(|r| form.repo_ids.contains(&r.id))
@@ -736,27 +777,35 @@ mod tests {
 
     #[test]
     fn description_validation_requires_value() {
-        let err = validate_description(None).unwrap_err().to_string();
-        assert!(err.contains("description is required"));
+        let err = validate_description(None).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Description is required. Use short, single-line admin-only context for this invitation link."
+        );
 
-        let err = validate_description(Some("   ")).unwrap_err().to_string();
-        assert!(err.contains("description is required"));
+        let err = validate_description(Some("   ")).unwrap_err();
+        assert_eq!(
+            err.message,
+            "Description is required. Use short, single-line admin-only context for this invitation link."
+        );
     }
 
     #[test]
     fn description_validation_rejects_multiline_text() {
-        let err = validate_description(Some("AI\nworkshop"))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("description must be a single line"));
+        let err = validate_description(Some("AI\nworkshop")).unwrap_err();
+        assert_eq!(err.message, "Description must be a single line.");
+
+        let err = validate_description(Some("AI workshop\n")).unwrap_err();
+        assert_eq!(err.message, "Description must be a single line.");
+
+        let err = validate_description(Some("\rAI workshop")).unwrap_err();
+        assert_eq!(err.message, "Description must be a single line.");
     }
 
     #[test]
     fn description_validation_rejects_over_120_characters() {
         let too_long = "x".repeat(121);
-        let err = validate_description(Some(&too_long))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("description must be 120 characters or fewer"));
+        let err = validate_description(Some(&too_long)).unwrap_err();
+        assert_eq!(err.message, "Description must be 120 characters or fewer.");
     }
 }
