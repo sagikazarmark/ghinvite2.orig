@@ -73,7 +73,7 @@ Admin UI may use `Audit` as a compact label when the Console context makes the m
 ### Invitation Request
 A requester's request for access through an invitation link. It may be auto-approved or wait for an account admin decision. A requester may have at most one pending invitation request for a given invitation link at a time. Admin UI may use `Requests` as a compact label when the Console context makes the meaning clear.
 
-A requester may create a new invitation request through the same invitation link after a previous invitation request is declined, expired, or cancelled.
+A requester may create a new invitation request through the same invitation link after a previous invitation request is declined, expired, or cancelled. A requester may not create a new invitation request through the same invitation link after a previous invitation request is pending or approved.
 
 An auto-approved invitation request is approved by invitation-link policy without account-admin review. Auto-approval does not guarantee that every GitHub invitation is sent successfully.
 
