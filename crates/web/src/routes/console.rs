@@ -212,7 +212,7 @@ async fn overview(
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
-                account_type: account_type.clone(),
+                account_type,
                 pending_requests: pending,
                 active_links,
                 recent_links: recent_links.clone(),

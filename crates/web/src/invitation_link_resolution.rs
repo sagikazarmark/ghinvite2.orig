@@ -1,19 +1,5 @@
-use crate::error::WebError;
-use chrono::{DateTime, Utc};
-use domain::{InvitationLink, InvitationRequest, RequestId, RequestState, Slug};
+use domain::{InvitationLink, InvitationRequest, RequestState, Slug};
 use storage::Storage;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRequestPolicy {
-    Ignore,
-    RedirectForRecipient { recipient_id: u64 },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PublicInvitationLinkResolution {
-    Available { slug: Slug, link: InvitationLink },
-    PendingRequest { slug: Slug, request_id: RequestId },
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PublicInvitationLinkContext {
@@ -36,16 +22,8 @@ pub(crate) enum ResolutionError {
     UnknownSlug,
     #[error("stored slug mismatch")]
     SlugMismatch,
-    #[error("inactive link")]
-    Inactive,
     #[error("storage error: {0}")]
     Storage(#[from] storage::Error),
-}
-
-impl ResolutionError {
-    pub(crate) fn into_public_error(self) -> WebError {
-        WebError::NotFound
-    }
 }
 
 pub(crate) async fn resolve_public_invitation_link_context(
@@ -72,41 +50,6 @@ pub(crate) async fn resolve_public_invitation_link_context(
         slug,
         link,
         requests,
-    })
-}
-
-pub(crate) async fn resolve_public_invitation_link(
-    storage: &dyn Storage,
-    raw_slug: &str,
-    now: DateTime<Utc>,
-    pending_policy: PendingRequestPolicy,
-) -> Result<PublicInvitationLinkResolution, ResolutionError> {
-    let context = resolve_public_invitation_link_context(storage, raw_slug).await?;
-
-    if !context.link.is_active(now) {
-        return Err(ResolutionError::Inactive);
-    }
-
-    if let PendingRequestPolicy::RedirectForRecipient { recipient_id } = pending_policy {
-        let selection = select_requester_request_state(&context.requests, recipient_id);
-        if selection.current_status == Some(RequestState::Pending) {
-            let request = context
-                .requests
-                .iter()
-                .find(|request| {
-                    request.requester_id == recipient_id && request.state == RequestState::Pending
-                })
-                .expect("pending selection must have a matching request");
-            return Ok(PublicInvitationLinkResolution::PendingRequest {
-                slug: context.slug,
-                request_id: request.id,
-            });
-        }
-    }
-
-    Ok(PublicInvitationLinkResolution::Available {
-        slug: context.slug,
-        link: context.link,
     })
 }
 
@@ -153,9 +96,7 @@ pub(crate) fn select_requester_request_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingRequestPolicy, PublicInvitationLinkResolution, ResolutionError,
-        resolve_public_invitation_link, resolve_public_invitation_link_context,
-        select_requester_request_state,
+        ResolutionError, resolve_public_invitation_link_context, select_requester_request_state,
     };
     use audit::AuditEvent;
     use chrono::{DateTime, Utc};
@@ -451,60 +392,6 @@ mod tests {
         assert_eq!(context.slug.as_str(), "abcdEFGH01234567");
         assert_eq!(context.requests, vec![request]);
         assert!(!context.link.is_active(dt("2026-05-20T12:00:00Z")));
-    }
-
-    #[tokio::test]
-    async fn legacy_resolver_rejects_inactive_links() {
-        let now = dt("2026-05-20T12:00:00Z");
-        let mut revoked = sample_link("abcdEFGH01234567");
-        revoked.revoked_at = Some(dt("2026-05-20T11:00:00Z"));
-        revoked.revoked_by = Some(701);
-
-        let storage = FakeStorage {
-            link: Some(revoked),
-            ..FakeStorage::default()
-        };
-
-        let err = resolve_public_invitation_link(
-            &storage,
-            "abcdEFGH01234567",
-            now,
-            PendingRequestPolicy::Ignore,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, ResolutionError::Inactive));
-    }
-
-    #[tokio::test]
-    async fn legacy_resolver_returns_same_recipient_pending_request() {
-        let link = sample_link("abcdEFGH01234567");
-        let request_id = RequestId::new();
-        let storage = FakeStorage {
-            requests: vec![sample_request(
-                request_id,
-                link.id,
-                802,
-                RequestState::Pending,
-            )],
-            link: Some(link),
-            ..FakeStorage::default()
-        };
-
-        let resolved = resolve_public_invitation_link(
-            &storage,
-            "abcdEFGH01234567",
-            dt("2026-05-20T12:00:00Z"),
-            PendingRequestPolicy::RedirectForRecipient { recipient_id: 802 },
-        )
-        .await
-        .unwrap();
-
-        assert!(matches!(
-            resolved,
-            PublicInvitationLinkResolution::PendingRequest { request_id: id, .. } if id == request_id
-        ));
     }
 
     #[test]

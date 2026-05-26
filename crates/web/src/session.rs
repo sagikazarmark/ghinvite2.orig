@@ -46,11 +46,12 @@ impl Session {
 pub fn validate_return_to(raw: &str) -> Option<String> {
     if raw.starts_with("//") || raw.contains("..") {
         None
-    } else if raw.starts_with("/i/") {
-        Some(raw.to_string())
-    } else if raw == "/console" || raw.starts_with("/console/") {
-        Some(raw.to_string())
-    } else if raw == "/setup/github" || raw.starts_with("/setup/github?") {
+    } else if raw.starts_with("/i/")
+        || raw == "/console"
+        || raw.starts_with("/console/")
+        || raw == "/setup/github"
+        || raw.starts_with("/setup/github?")
+    {
         Some(raw.to_string())
     } else {
         None
