@@ -305,6 +305,15 @@ async fn sign_in(app: axum::Router) -> String {
     session_cookie(&resp2, Some(cookie1))
 }
 
+fn assert_notice_above_form(text: &str, notice: &str) {
+    let notice_pos = text.find(notice).expect("retry notice rendered");
+    let form_pos = text.find("Justification").expect("request form rendered");
+    assert!(
+        notice_pos < form_pos,
+        "retry notice should appear above form"
+    );
+}
+
 #[tokio::test]
 async fn landing_unauthenticated_redirects_to_login_for_active_slug() {
     let (app, _calls) = build_test_app(
@@ -640,15 +649,59 @@ async fn signed_in_landing_shows_newest_retry_notice_with_form() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Your previous request was cancelled."));
+    let notice = "Your previous request was cancelled.";
+    assert!(text.contains(notice));
     assert!(!text.contains("Your previous request was declined."));
+    assert_notice_above_form(&text, notice);
+    assert!(text.contains("Submit request"));
+}
+
+#[tokio::test]
+async fn signed_in_landing_shows_declined_retry_notice_above_form() {
+    let link = active_link(ACTIVE_SLUG);
+    let declined = request_with_state(
+        RequestId::new(),
+        link.id,
+        REQUESTER_ID,
+        RequestState::Declined,
+    );
+    let (app, _calls) = build_test_app(
+        link,
+        Some(declined),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    let notice = "Your previous request was declined.";
+    assert!(text.contains(notice));
+    assert_notice_above_form(&text, notice);
     assert!(text.contains("Submit request"));
 }
 
 #[tokio::test]
 async fn signed_in_landing_shows_expired_retry_notice_with_form() {
     let link = active_link(ACTIVE_SLUG);
-    let expired = request_with_state(RequestId::new(), link.id, REQUESTER_ID, RequestState::Expired);
+    let expired = request_with_state(
+        RequestId::new(),
+        link.id,
+        REQUESTER_ID,
+        RequestState::Expired,
+    );
     let (app, _calls) = build_test_app(
         link,
         Some(expired),
@@ -671,7 +724,9 @@ async fn signed_in_landing_shows_expired_retry_notice_with_form() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Your previous request expired."));
+    let notice = "Your previous request expired.";
+    assert!(text.contains(notice));
+    assert_notice_above_form(&text, notice);
     assert!(text.contains("Submit request"));
     assert!(text.contains("Justification"));
 }
@@ -869,6 +924,52 @@ async fn submit_with_existing_pending_request_redirects_without_command() {
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(location, format!("/i/{ACTIVE_SLUG}"));
     assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn submit_with_existing_declined_request_sends_command() {
+    let link = active_link(ACTIVE_SLUG);
+    let link_id = link.id;
+    let declined = request_with_state(
+        RequestId::new(),
+        link_id,
+        REQUESTER_ID,
+        RequestState::Declined,
+    );
+    let (app, calls) = build_test_app(
+        link,
+        Some(declined),
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=retry",
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, format!("/i/{ACTIVE_SLUG}"));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[RecordedCommand::SubmitInvitationRequest {
+            invitation_link_id: link_id,
+            requester_id: REQUESTER_ID,
+            justification: Some("retry".into()),
+        }]
+    );
 }
 
 #[tokio::test]
