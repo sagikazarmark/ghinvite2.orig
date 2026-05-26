@@ -274,51 +274,7 @@ async fn sign_in(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn landing_returns_not_found_for_malformed_slug() {
-    let (app, _calls) = build_test_app(
-        active_link(ACTIVE_SLUG),
-        None,
-        MockTransport::scripted(vec![]),
-    )
-    .await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/i/not-a-valid-slug")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn landing_returns_not_found_for_unknown_slug() {
-    let (app, _calls) = build_test_app(
-        active_link(ACTIVE_SLUG),
-        None,
-        MockTransport::scripted(vec![]),
-    )
-    .await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{UNKNOWN_SLUG}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn landing_renders_active_link() {
+async fn landing_unauthenticated_redirects_to_login_for_active_slug() {
     let (app, _calls) = build_test_app(
         active_link(ACTIVE_SLUG),
         None,
@@ -336,12 +292,9 @@ async fn landing_renders_active_link() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("acme/api"));
-    assert!(text.contains("Repository access request"));
-    assert!(text.contains("GitHub sign-in confirms your identity"));
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, format!("/login?return_to=/i/{ACTIVE_SLUG}"));
 }
 
 #[tokio::test]
@@ -371,71 +324,65 @@ async fn landing_with_existing_pending_request_still_renders_preview() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("acme/api"));
+    assert!(text.contains("Awaiting review"));
+    assert!(text.contains("The account admins have your request."));
 }
 
 #[tokio::test]
-async fn landing_returns_not_found_for_revoked_link() {
-    let mut link = active_link(ACTIVE_SLUG);
-    link.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
-    link.revoked_by = Some(CREATOR_ID);
-    let (app, _calls) = build_test_app(link, None, MockTransport::scripted(vec![])).await;
+async fn landing_unauthenticated_redirects_to_login_for_bad_or_inactive_slugs() {
+    let mut revoked = active_link(ACTIVE_SLUG);
+    revoked.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
+    revoked.revoked_by = Some(CREATOR_ID);
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let mut expired = active_link(ACTIVE_SLUG);
+    expired.expires_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let mut exhausted = active_link(ACTIVE_SLUG);
+    exhausted.max_uses = Some(1);
+    exhausted.uses_count = 1;
+
+    for (link, uri, expected_return_to) in [
+        (
+            active_link(ACTIVE_SLUG),
+            "/i/not-a-valid-slug".to_string(),
+            "/i/not-a-valid-slug".to_string(),
+        ),
+        (
+            active_link(ACTIVE_SLUG),
+            format!("/i/{UNKNOWN_SLUG}"),
+            format!("/i/{UNKNOWN_SLUG}"),
+        ),
+        (
+            revoked,
+            format!("/i/{ACTIVE_SLUG}"),
+            format!("/i/{ACTIVE_SLUG}"),
+        ),
+        (
+            expired,
+            format!("/i/{ACTIVE_SLUG}"),
+            format!("/i/{ACTIVE_SLUG}"),
+        ),
+        (
+            exhausted,
+            format!("/i/{ACTIVE_SLUG}"),
+            format!("/i/{ACTIVE_SLUG}"),
+        ),
+    ] {
+        let (app, _calls) = build_test_app(link, None, MockTransport::scripted(vec![])).await;
+        let resp = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert_eq!(location, format!("/login?return_to={expected_return_to}"));
+    }
 }
 
 #[tokio::test]
-async fn landing_returns_not_found_for_expired_link() {
-    let mut link = active_link(ACTIVE_SLUG);
-    link.expires_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
-    let (app, _calls) = build_test_app(link, None, MockTransport::scripted(vec![])).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn landing_returns_not_found_for_exhausted_link() {
-    let mut link = active_link(ACTIVE_SLUG);
-    link.max_uses = Some(1);
-    link.uses_count = 1;
-    let (app, _calls) = build_test_app(link, None, MockTransport::scripted(vec![])).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test]
-async fn request_form_for_unauthenticated_recipient_redirects_to_login() {
-    let (app, _calls) = build_test_app(
+async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
+    let (app, calls) = build_test_app(
         active_link(ACTIVE_SLUG),
         None,
         MockTransport::scripted(vec![]),
@@ -445,8 +392,12 @@ async fn request_form_for_unauthenticated_recipient_redirects_to_login() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
-                .body(Body::empty())
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(
+                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=ship",
+                ))
                 .unwrap(),
         )
         .await
@@ -454,26 +405,37 @@ async fn request_form_for_unauthenticated_recipient_redirects_to_login() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, format!("/login?return_to=/i/{ACTIVE_SLUG}"));
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn nested_invitation_routes_authenticate_before_404() {
+    let (app, _calls) = build_test_app(
+        active_link(ACTIVE_SLUG),
+        None,
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(
         location,
         format!("/login?return_to=/i/{ACTIVE_SLUG}/request")
     );
-}
 
-#[tokio::test]
-async fn request_form_with_existing_pending_request_redirects_to_pending_page() {
-    let link = active_link(ACTIVE_SLUG);
-    let link_id = link.id;
-    let request_id = RequestId::new();
-    let pending = pending_request(request_id, link_id, REQUESTER_ID);
-    let (app, _calls) = build_test_app(
-        link,
-        Some(pending),
-        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
-    )
-    .await;
     let cookie = sign_in(app.clone()).await;
-
     let resp = app
         .oneshot(
             Request::builder()
@@ -485,13 +447,15 @@ async fn request_form_with_existing_pending_request_redirects_to_pending_page() 
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, format!("/i/{ACTIVE_SLUG}/pending/{request_id}"));
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Page not found"));
+    assert!(text.contains("The link may be incorrect or no longer available."));
 }
 
 #[tokio::test]
-async fn request_form_with_other_recipient_pending_request_renders_form() {
+async fn invitation_page_with_other_recipient_pending_request_renders_form() {
     let link = active_link(ACTIVE_SLUG);
     let link_id = link.id;
     let pending = pending_request(RequestId::new(), link_id, CREATOR_ID);
@@ -506,7 +470,7 @@ async fn request_form_with_other_recipient_pending_request_renders_form() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -525,7 +489,7 @@ async fn request_form_with_other_recipient_pending_request_renders_form() {
 }
 
 #[tokio::test]
-async fn request_form_with_same_recipient_declined_request_renders_form() {
+async fn invitation_page_with_same_recipient_declined_request_renders_form() {
     let link = active_link(ACTIVE_SLUG);
     let link_id = link.id;
     let declined = request_with_state(
@@ -545,7 +509,7 @@ async fn request_form_with_same_recipient_declined_request_renders_form() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -561,7 +525,7 @@ async fn request_form_with_same_recipient_declined_request_renders_form() {
 }
 
 #[tokio::test]
-async fn submit_with_existing_pending_request_redirects_to_pending_page_without_command() {
+async fn submit_with_existing_pending_request_redirects_to_canonical_page_without_command() {
     let link = active_link(ACTIVE_SLUG);
     let link_id = link.id;
     let request_id = RequestId::new();
@@ -578,7 +542,7 @@ async fn submit_with_existing_pending_request_redirects_to_pending_page_without_
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(
@@ -591,7 +555,7 @@ async fn submit_with_existing_pending_request_redirects_to_pending_page_without_
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, format!("/i/{ACTIVE_SLUG}/pending/{request_id}"));
+    assert_eq!(location, format!("/i/{ACTIVE_SLUG}"));
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -613,7 +577,7 @@ async fn submit_with_other_recipient_pending_request_sends_command() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -626,10 +590,7 @@ async fn submit_with_other_recipient_pending_request_sends_command() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!("/i/{ACTIVE_SLUG}/pending/{posted_request_id}")
-    );
+    assert_eq!(location, format!("/i/{ACTIVE_SLUG}"));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         &[RecordedCommand::SubmitInvitationRequest {

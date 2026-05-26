@@ -247,7 +247,7 @@ async fn favicon_returns_plain_404() {
 // get an integration test in Plan 8 (tests/invitation_ownership.rs).
 
 #[tokio::test]
-async fn invitation_landing_unknown_slug_returns_404() {
+async fn invitation_landing_unauthenticated_redirects_to_login() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -260,23 +260,15 @@ async fn invitation_landing_unknown_slug_returns_404() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::NOT_FOUND,
+        StatusCode::SEE_OTHER,
         "GET /i/AAAAAAAAAAAAAAAA"
     );
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Page not found"));
-    assert!(text.contains("The link may be incorrect or no longer available."));
-    assert!(text.contains("Go home"));
-    assert!(text.contains("mac-panel"));
-    assert!(!text.contains("app-header"));
-    assert!(!text.contains("theme-toggle"));
-    assert!(!text.contains("expired"));
-    assert!(!text.contains("revoked"));
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA");
 }
 
 #[tokio::test]
-async fn invitation_unknown_nested_route_returns_recipient_404() {
+async fn invitation_unknown_nested_route_unauthenticated_redirects_to_login() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -288,20 +280,13 @@ async fn invitation_unknown_nested_route_returns_recipient_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Page not found"));
-    assert!(text.contains("The link may be incorrect or no longer available."));
-    assert!(text.contains("Go home"));
-    assert!(text.contains("mac-panel"));
-    assert!(!text.contains("app-header"));
-    assert!(!text.contains("theme-toggle"));
-    assert!(!text.contains("home-hero"));
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/anything");
 }
 
 #[tokio::test]
-async fn invitation_unknown_nested_post_returns_plain_404() {
+async fn invitation_unknown_nested_post_unauthenticated_redirects_to_login() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -314,15 +299,13 @@ async fn invitation_unknown_nested_post_returns_plain_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"Not Found");
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/anything");
 }
 
 #[tokio::test]
 async fn invitation_request_form_unauthenticated_redirects_to_login() {
-    // GET /i/{slug}/request is now implemented:
-    // unauthenticated request → 303 to /login with return_to.
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -339,20 +322,11 @@ async fn invitation_request_form_unauthenticated_redirects_to_login() {
         "GET /i/.../request unauthenticated should redirect to /login"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(
-        location.contains("/login"),
-        "expected redirect to /login, got {location}"
-    );
-    assert!(
-        location.contains("return_to="),
-        "expected return_to in redirect, got {location}"
-    );
+    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/request");
 }
 
 #[tokio::test]
 async fn invitation_pending_unauthenticated_redirects_to_login() {
-    // GET /i/{slug}/pending/{request_id} is now implemented:
-    // unauthenticated (any ULID, valid or not) → 303 to /login first.
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -369,17 +343,9 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
         "GET /i/.../pending/... unauthenticated should redirect to /login"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(
-        location.contains("/login"),
-        "expected redirect to /login, got {location}"
-    );
-    assert!(
-        location.contains("return_to="),
-        "expected return_to in redirect location, got {location}"
-    );
-    assert!(
-        location.contains("/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-        "expected return_to to point to the pending URL, got {location}"
+    assert_eq!(
+        location,
+        "/login?return_to=/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"
     );
 }
 

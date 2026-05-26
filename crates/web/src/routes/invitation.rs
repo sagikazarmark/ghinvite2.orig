@@ -2,22 +2,23 @@
 
 use crate::commands::SubmitInvitationRequest;
 use crate::invitation_link_resolution::{
-    PendingRequestPolicy, PublicInvitationLinkResolution, resolve_public_invitation_link,
+    resolve_public_invitation_link_context, select_requester_request_state,
 };
 use crate::session;
 use crate::state::AppState;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;
+use axum::http::Uri;
 use axum::response::{Html, IntoResponse, Redirect};
-use axum::routing::get;
+use axum::routing::{any, get};
 use chrono::Utc;
 use dioxus::prelude::*;
 use tower_sessions::Session as TowerSession;
 
 #[derive(serde::Deserialize)]
 struct SubmitForm {
-    /// Pre-generated ULID from GET /request handler for double-submit dedup.
+    /// Pre-generated ULID from GET /i/{slug} handler for double-submit dedup.
     #[serde(default)]
     request_id: String,
     #[serde(default)]
@@ -26,13 +27,8 @@ struct SubmitForm {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/i/{slug}", get(landing))
-        .route("/i/{slug}/request", get(request_form).post(submit_request))
-        .route("/i/{slug}/pending/{request_id}", get(pending))
-        .route(
-            "/i/{slug}/{*rest}",
-            get(unknown_nested).fallback(plain_not_found),
-        )
+        .route("/i/{slug}", get(invitation_page).post(submit_request))
+        .route("/i/{slug}/{*rest}", any(unknown_nested))
 }
 
 fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
@@ -46,137 +42,95 @@ fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::respo
     (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
 }
 
-fn signed_in_login_from_session(session: &session::Session) -> Option<String> {
-    if session.is_authenticated() {
-        Some(session.login.clone())
-    } else {
-        None
-    }
+fn redirect_to_login(return_to: &str) -> axum::response::Response {
+    Redirect::to(&format!("/login?return_to={return_to}")).into_response()
 }
 
-async fn landing(
-    State(state): State<AppState>,
-    tower: TowerSession,
-    axum::extract::Path(slug): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    let now = Utc::now();
-    let session = session::load(&tower).await.unwrap_or_default();
-    let signed_in_login = signed_in_login_from_session(&session);
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::Ignore,
-    )
-    .await
-    {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { .. }) => {
-            return invitation_not_found_response(signed_in_login);
-        }
-        Err(_) => return invitation_not_found_response(signed_in_login),
-    };
-    let slug = slug.as_str().to_string();
-    let html = render(move || {
-        rsx! {
-            crate::views::invitation::LandingPage {
-                slug: slug.clone(),
-                link: link.clone(),
-                signed_in_login: signed_in_login.clone(),
-                now,
-            }
-        }
-    });
-    Html(html).into_response()
+fn canonical_invitation_path(slug: &str) -> String {
+    format!("/i/{slug}")
 }
 
-async fn unknown_nested(tower: TowerSession) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
-    invitation_not_found_response(signed_in_login_from_session(&session))
-}
-
-async fn plain_not_found() -> impl IntoResponse {
-    crate::error::WebError::NotFound
-}
-
-async fn request_form(
+async fn invitation_page(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     let session = session::load(&tower).await.unwrap_or_default();
     if !session.is_authenticated() {
-        return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
+        return redirect_to_login(&canonical_invitation_path(&slug));
     }
+
     let now = Utc::now();
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::RedirectForRecipient {
-            recipient_id: session.user_id,
-        },
-    )
-    .await
+    let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
     {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
-            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
-                .into_response();
-        }
+        Ok(context) => context,
         Err(_) => return invitation_not_found_response(Some(session.login.clone())),
     };
+    let selection = select_requester_request_state(&context.requests, session.user_id);
+    if !context.link.is_active(now) && selection.current_status.is_none() {
+        return invitation_not_found_response(Some(session.login.clone()));
+    }
 
-    let slug = slug.as_str().to_string();
-    let request_id = domain::RequestId::new();
+    let slug = context.slug.as_str().to_string();
+    let request_id = domain::RequestId::new().to_string();
     let flash = session::take_flash(&tower).await.unwrap_or(None);
     let signed_in_login = session.login.clone();
-    let request_id_str = request_id.to_string();
     let html = render(move || {
         rsx! {
-            crate::views::invitation::RequestFormPage {
+            crate::views::invitation::RequestPage {
                 slug: slug.clone(),
-                link: link.clone(),
+                link: context.link.clone(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
-                request_id: request_id_str.clone(),
+                request_id: request_id.clone(),
+                current_status: selection.current_status,
+                retry_notice: selection.retry_notice,
             }
         }
     });
     Html(html).into_response()
+}
+
+async fn unknown_nested(tower: TowerSession, uri: Uri) -> impl IntoResponse {
+    let session = session::load(&tower).await.unwrap_or_default();
+    if !session.is_authenticated() {
+        let return_to = uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/");
+        return redirect_to_login(return_to);
+    }
+    invitation_not_found_response(Some(session.login.clone()))
 }
 
 async fn submit_request(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
-    // Use serde_qs::axum::QsForm, NOT axum::extract::Form — this workspace uses serde_qs.
+    // Use serde_qs::axum::QsForm, NOT axum::extract::Form - this workspace uses serde_qs.
     serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<SubmitForm>,
 ) -> impl IntoResponse {
     let session = session::load(&tower).await.unwrap_or_default();
     if !session.is_authenticated() {
-        return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
+        return redirect_to_login(&canonical_invitation_path(&slug));
     }
-    let now = Utc::now();
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::RedirectForRecipient {
-            recipient_id: session.user_id,
-        },
-    )
-    .await
-    {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
-            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
-                .into_response();
-        }
-        Err(error) => return error.into_public_error().into_response(),
-    };
 
-    let slug = slug.as_str().to_string();
+    let now = Utc::now();
+    let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
+    {
+        Ok(context) => context,
+        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
+    };
+    let selection = select_requester_request_state(&context.requests, session.user_id);
+    if !context.link.is_active(now) && selection.current_status.is_none() {
+        return invitation_not_found_response(Some(session.login.clone()));
+    }
+
+    let slug = context.slug.as_str().to_string();
+
+    if selection.current_status.is_some() {
+        return Redirect::to(&canonical_invitation_path(&slug)).into_response();
+    }
 
     let justification = form
         .justification
@@ -195,7 +149,7 @@ async fn submit_request(
         .commands
         .submit_invitation_request(SubmitInvitationRequest::new(
             request_id,
-            link.id,
+            context.link.id,
             session.user_id,
             justification,
             now,
@@ -211,52 +165,8 @@ async fn submit_request(
             },
         )
         .await;
-        return Redirect::to(&format!("/i/{slug}/request")).into_response();
+        return Redirect::to(&canonical_invitation_path(&slug)).into_response();
     }
 
-    Redirect::to(&format!("/i/{slug}/pending/{request_id}")).into_response()
-}
-
-async fn pending(
-    State(state): State<AppState>,
-    tower: TowerSession,
-    axum::extract::Path((slug, request_id_str)): axum::extract::Path<(String, String)>,
-) -> impl IntoResponse {
-    // TODO(test): the requester_id ownership guard is security-critical and should be
-    // covered by an integration test in Plan 8 (tests/invitation_ownership.rs).
-    use std::str::FromStr;
-
-    let session = session::load(&tower).await.unwrap_or_default();
-    if !session.is_authenticated() {
-        return Redirect::to(&format!(
-            "/login?return_to=/i/{slug}/pending/{request_id_str}"
-        ))
-        .into_response();
-    }
-
-    let request_id = match domain::RequestId::from_str(&request_id_str) {
-        Ok(id) => id,
-        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
-    };
-
-    // Load request. None = workflow just started, not yet in DB — show "processing" state.
-    let request_state = match state.storage.get_invitation_request(request_id).await {
-        Ok(Some(r)) if r.requester_id == session.user_id => Some(r.state),
-        Ok(Some(_)) => return invitation_not_found_response(Some(session.login.clone())),
-        Ok(None) => None,
-        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
-    };
-
-    let signed_in_login = Some(session.login.clone());
-    let html = render(move || {
-        rsx! {
-            crate::views::invitation::PendingPage {
-                slug: slug.clone(),
-                request_id: request_id_str.clone(),
-                request_state,
-                signed_in_login: signed_in_login.clone(),
-            }
-        }
-    });
-    Html(html).into_response()
+    Redirect::to(&canonical_invitation_path(&slug)).into_response()
 }
