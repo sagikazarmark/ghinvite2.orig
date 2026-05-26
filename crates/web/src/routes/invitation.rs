@@ -2,7 +2,7 @@
 
 use crate::commands::SubmitInvitationRequest;
 use crate::invitation_link_resolution::{
-    PendingRequestPolicy, PublicInvitationLinkResolution, resolve_public_invitation_link,
+    resolve_public_invitation_link_context, select_requester_request_state,
 };
 use crate::session;
 use crate::state::AppState;
@@ -62,20 +62,12 @@ async fn landing(
     let now = Utc::now();
     let session = session::load(&tower).await.unwrap_or_default();
     let signed_in_login = signed_in_login_from_session(&session);
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::Ignore,
-    )
-    .await
-    {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { .. }) => {
-            return invitation_not_found_response(signed_in_login);
-        }
+    let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await {
+        Ok(context) => context,
         Err(_) => return invitation_not_found_response(signed_in_login),
     };
+    let slug = context.slug;
+    let link = context.link;
     let slug = slug.as_str().to_string();
     let html = render(move || {
         rsx! {
@@ -108,24 +100,22 @@ async fn request_form(
     if !session.is_authenticated() {
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
-    let now = Utc::now();
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::RedirectForRecipient {
-            recipient_id: session.user_id,
-        },
-    )
-    .await
-    {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
-            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
-                .into_response();
-        }
+    let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await {
+        Ok(context) => context,
         Err(_) => return invitation_not_found_response(Some(session.login.clone())),
     };
+    let selection = select_requester_request_state(&context.requests, session.user_id);
+    if selection.current_status == Some(domain::RequestState::Pending) {
+        if let Some(request) = context.requests.iter().find(|request| {
+            request.requester_id == session.user_id
+                && request.state == domain::RequestState::Pending
+        }) {
+            return Redirect::to(&format!("/i/{}/pending/{}", context.slug.as_str(), request.id))
+                .into_response();
+        }
+    }
+    let slug = context.slug;
+    let link = context.link;
 
     let slug = slug.as_str().to_string();
     let request_id = domain::RequestId::new();
@@ -158,23 +148,22 @@ async fn submit_request(
         return Redirect::to(&format!("/login?return_to=/i/{slug}/request")).into_response();
     }
     let now = Utc::now();
-    let (slug, link) = match resolve_public_invitation_link(
-        state.storage.as_ref(),
-        &slug,
-        now,
-        PendingRequestPolicy::RedirectForRecipient {
-            recipient_id: session.user_id,
-        },
-    )
-    .await
-    {
-        Ok(PublicInvitationLinkResolution::Available { slug, link }) => (slug, link),
-        Ok(PublicInvitationLinkResolution::PendingRequest { slug, request_id }) => {
-            return Redirect::to(&format!("/i/{}/pending/{}", slug.as_str(), request_id))
-                .into_response();
-        }
+    let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await {
+        Ok(context) => context,
         Err(error) => return error.into_public_error().into_response(),
     };
+    let selection = select_requester_request_state(&context.requests, session.user_id);
+    if selection.current_status == Some(domain::RequestState::Pending) {
+        if let Some(request) = context.requests.iter().find(|request| {
+            request.requester_id == session.user_id
+                && request.state == domain::RequestState::Pending
+        }) {
+            return Redirect::to(&format!("/i/{}/pending/{}", context.slug.as_str(), request.id))
+                .into_response();
+        }
+    }
+    let slug = context.slug;
+    let link = context.link;
 
     let slug = slug.as_str().to_string();
 
