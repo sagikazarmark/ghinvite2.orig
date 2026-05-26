@@ -153,7 +153,9 @@ pub(crate) fn select_requester_request_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolutionError, resolve_public_invitation_link_context, select_requester_request_state,
+        PendingRequestPolicy, PublicInvitationLinkResolution, ResolutionError,
+        resolve_public_invitation_link, resolve_public_invitation_link_context,
+        select_requester_request_state,
     };
     use audit::AuditEvent;
     use chrono::{DateTime, Utc};
@@ -449,6 +451,60 @@ mod tests {
         assert_eq!(context.slug.as_str(), "abcdEFGH01234567");
         assert_eq!(context.requests, vec![request]);
         assert!(!context.link.is_active(dt("2026-05-20T12:00:00Z")));
+    }
+
+    #[tokio::test]
+    async fn legacy_resolver_rejects_inactive_links() {
+        let now = dt("2026-05-20T12:00:00Z");
+        let mut revoked = sample_link("abcdEFGH01234567");
+        revoked.revoked_at = Some(dt("2026-05-20T11:00:00Z"));
+        revoked.revoked_by = Some(701);
+
+        let storage = FakeStorage {
+            link: Some(revoked),
+            ..FakeStorage::default()
+        };
+
+        let err = resolve_public_invitation_link(
+            &storage,
+            "abcdEFGH01234567",
+            now,
+            PendingRequestPolicy::Ignore,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, ResolutionError::Inactive));
+    }
+
+    #[tokio::test]
+    async fn legacy_resolver_returns_same_recipient_pending_request() {
+        let link = sample_link("abcdEFGH01234567");
+        let request_id = RequestId::new();
+        let storage = FakeStorage {
+            requests: vec![sample_request(
+                request_id,
+                link.id,
+                802,
+                RequestState::Pending,
+            )],
+            link: Some(link),
+            ..FakeStorage::default()
+        };
+
+        let resolved = resolve_public_invitation_link(
+            &storage,
+            "abcdEFGH01234567",
+            dt("2026-05-20T12:00:00Z"),
+            PendingRequestPolicy::RedirectForRecipient { recipient_id: 802 },
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            resolved,
+            PublicInvitationLinkResolution::PendingRequest { request_id: id, .. } if id == request_id
+        ));
     }
 
     #[test]
