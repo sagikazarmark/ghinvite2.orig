@@ -171,7 +171,9 @@ mod tests {
         });
 
         assert!(html.contains("data-theme=\"ghinvite\""));
-        assert!(html.contains("console-page min-h-screen bg-base-200 text-base-content antialiased"));
+        assert!(
+            html.contains("console-page min-h-screen bg-base-200 text-base-content antialiased")
+        );
         assert!(html.contains("app-header"));
         assert!(html.contains("console-frame"));
         assert!(html.contains("console-sidebar"));

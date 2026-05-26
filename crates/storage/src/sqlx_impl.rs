@@ -834,12 +834,11 @@ mod tests {
             }
         }
 
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            r#"SELECT id, description FROM invitation_links ORDER BY id"#,
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
+        let rows: Vec<(String, String)> =
+            sqlx::query_as(r#"SELECT id, description FROM invitation_links ORDER BY id"#)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
 
         assert_eq!(
             rows,
