@@ -24,6 +24,10 @@ const UNKNOWN_SLUG: &str = "ZZZZZZZZZZZZZZZZ";
 const CREATOR_ID: u64 = 701;
 const REQUESTER_ID: u64 = 802;
 
+fn encoded_return_to(path: &str) -> String {
+    url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RecordedCommand {
     SubmitInvitationRequest {
@@ -294,7 +298,13 @@ async fn landing_unauthenticated_redirects_to_login_for_active_slug() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, format!("/login?return_to=/i/{ACTIVE_SLUG}"));
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
+        )
+    );
 }
 
 #[tokio::test]
@@ -376,7 +386,13 @@ async fn landing_unauthenticated_redirects_to_login_for_bad_or_inactive_slugs() 
 
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         let location = resp.headers().get("location").unwrap().to_str().unwrap();
-        assert_eq!(location, format!("/login?return_to={expected_return_to}"));
+        assert_eq!(
+            location,
+            format!(
+                "/login?return_to={}",
+                encoded_return_to(&expected_return_to)
+            )
+        );
     }
 }
 
@@ -405,7 +421,13 @@ async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, format!("/login?return_to=/i/{ACTIVE_SLUG}"));
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
+        )
+    );
     assert!(calls.lock().unwrap().is_empty());
 }
 
@@ -432,7 +454,30 @@ async fn nested_invitation_routes_authenticate_before_404() {
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(
         location,
-        format!("/login?return_to=/i/{ACTIVE_SLUG}/request")
+        format!(
+            "/login?return_to={}",
+            encoded_return_to(&format!("/i/{ACTIVE_SLUG}/request"))
+        )
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}/request?foo=1&bar=2"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to(&format!("/i/{ACTIVE_SLUG}/request?foo=1&bar=2"))
+        )
     );
 
     let cookie = sign_in(app.clone()).await;

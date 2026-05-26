@@ -9,6 +9,10 @@ use std::sync::Arc;
 use tower::ServiceExt;
 use web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 
+fn encoded_return_to(path: &str) -> String {
+    url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
+}
+
 async fn build_test_app() -> axum::Router {
     use github::mocks::MockTransport;
     let storage: Arc<dyn storage::Storage> =
@@ -264,7 +268,13 @@ async fn invitation_landing_unauthenticated_redirects_to_login() {
         "GET /i/AAAAAAAAAAAAAAAA"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA");
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to("/i/AAAAAAAAAAAAAAAA")
+        )
+    );
 }
 
 #[tokio::test]
@@ -282,7 +292,13 @@ async fn invitation_unknown_nested_route_unauthenticated_redirects_to_login() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/anything");
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to("/i/AAAAAAAAAAAAAAAA/anything")
+        )
+    );
 }
 
 #[tokio::test]
@@ -301,7 +317,13 @@ async fn invitation_unknown_nested_post_unauthenticated_redirects_to_login() {
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/anything");
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to("/i/AAAAAAAAAAAAAAAA/anything")
+        )
+    );
 }
 
 #[tokio::test]
@@ -322,7 +344,13 @@ async fn invitation_request_form_unauthenticated_redirects_to_login() {
         "GET /i/.../request unauthenticated should redirect to /login"
     );
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/login?return_to=/i/AAAAAAAAAAAAAAAA/request");
+    assert_eq!(
+        location,
+        format!(
+            "/login?return_to={}",
+            encoded_return_to("/i/AAAAAAAAAAAAAAAA/request")
+        )
+    );
 }
 
 #[tokio::test]
@@ -345,7 +373,10 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert_eq!(
         location,
-        "/login?return_to=/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        format!(
+            "/login?return_to={}",
+            encoded_return_to("/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        )
     );
 }
 

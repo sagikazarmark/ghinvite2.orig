@@ -43,7 +43,8 @@ fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::respo
 }
 
 fn redirect_to_login(return_to: &str) -> axum::response::Response {
-    Redirect::to(&format!("/login?return_to={return_to}")).into_response()
+    let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
+    Redirect::to(&format!("/login?return_to={encoded}")).into_response()
 }
 
 fn canonical_invitation_path(slug: &str) -> String {
