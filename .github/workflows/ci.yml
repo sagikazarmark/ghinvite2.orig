@@ -19,7 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
-        run: cargo test --workspace --exclude github-stub
+        run: cargo test --workspace
 
   lint:
     name: Lint
@@ -31,7 +31,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --exclude github-stub -- -D warnings
+      - run: cargo clippy --workspace -- -D warnings
 
   wasm32:
     name: wasm32 build
@@ -42,9 +42,9 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build -p storage-d1 --target wasm32-unknown-unknown
-      - run: cargo build -p web-worker --target wasm32-unknown-unknown
-      - run: cargo build -p restate-svc-worker --target wasm32-unknown-unknown
+      - run: cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
+      - run: cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
+      - run: cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
 
   integration:
     name: Restate integration tests
@@ -64,8 +64,8 @@ jobs:
         run: until curl -sf http://localhost:9070/health; do sleep 2; done
       - name: Start github-stub
         run: |
-          cargo build -p github-stub
-          ./target/debug/github-stub --port 3001 &
+          cargo build -p ghinvite-github --example stub
+          ./target/debug/examples/stub --port 3001 &
           until curl -sf http://localhost:3001/calls; do sleep 1; done
       - name: Run integration tests
-        run: cargo test -p restate-svc --features integration -- --ignored
+        run: cargo test -p ghinvite-workflows --features integration -- --ignored

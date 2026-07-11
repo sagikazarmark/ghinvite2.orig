@@ -1,0 +1,48 @@
+[package]
+name = "ghinvite-workflows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ghinvite-workflows"
+path = "src/main.rs"
+
+[features]
+integration = []
+
+[dependencies]
+async-trait.workspace = true
+restate-sdk.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+ghinvite-core.workspace = true
+ghinvite-github.workspace = true
+rand.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# The native binary (src/main.rs) wires up SqlxStorage and serves the endpoint
+# over restate-sdk's hyper HTTP server; the Workers build
+# (ghinvite-workflows-worker) wires up D1Storage and drives the endpoint via
+# the `worker` runtime instead. `http_server` pulls tokio's `net`/mio, which
+# does not compile on wasm32 — keep it native-only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ghinvite-storage-sqlx.workspace = true
+restate-sdk = { workspace = true, features = ["http_server"] }
+tokio.workspace = true
+
+[dev-dependencies]
+ghinvite-github = { workspace = true, features = ["test-mock"] }
+ghinvite-core = { workspace = true, features = ["test-suite"] }
+ghinvite-storage-sqlx = { workspace = true, features = ["test-util"] }
+rand_chacha.workspace = true
+reqwest.workspace = true
+restate-sdk = { version = "0.10", features = ["http_server", "hyper", "schemars", "rust_crypto"] }
+serde_json.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

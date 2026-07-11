@@ -1,0 +1,28 @@
+[package]
+name = "ghinvite-storage-sqlx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes debug/test-only helpers (e.g. `SqlxStorage::debug_list_audit`) to
+# dependents' tests.
+test-util = []
+
+# Native-only implementation of the ghinvite-core Storage port. Never built
+# for wasm32 — Workers use ghinvite-storage-d1 instead.
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+ghinvite-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+ghinvite-core = { workspace = true, features = ["test-suite"] }
+rand.workspace = true
+rand_chacha.workspace = true
+tokio.workspace = true

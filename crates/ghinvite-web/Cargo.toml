@@ -1,0 +1,60 @@
+[package]
+name = "ghinvite-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "ghinvite-web"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+chrono.workspace = true
+cookie.workspace = true
+dioxus.workspace = true
+dioxus-ssr.workspace = true
+ghinvite-core.workspace = true
+ghinvite-github.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_qs.workspace = true
+thiserror.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tower-sessions.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+# axum's `tokio` feature pulls in the full mio-backed tokio runtime, which does
+# not compile on wasm32. The native binary needs it for `axum::serve`; the
+# Workers build (`ghinvite-web-worker`) drives the router via
+# `worker::axum::run` and does not need it. Cargo unions feature sets and can't
+# subtract, so we list axum twice — workspace dep is target-specific instead of
+# unconditional. The native binary also wires up SqlxStorage; the Workers build
+# wires up D1Storage instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
+ghinvite-storage-sqlx.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tower-sessions-sqlx-store.workspace = true
+
+# Wasm32 / Workers build: same axum, minus the `tokio` feature.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
+
+[dev-dependencies]
+ghinvite-github = { workspace = true, features = ["test-mock"] }
+ghinvite-core = { workspace = true, features = ["test-suite"] }
+http-body-util = "0.1"
+sqlx.workspace = true
+tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }
+hmac.workspace = true
+sha2.workspace = true
+hex = "0.4"

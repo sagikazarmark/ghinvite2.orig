@@ -6,10 +6,10 @@ GitHub invitation management via invitation links. Organisation owners create in
 
 Two Cloudflare Workers sharing one D1 database:
 
-- **ghinvite-web** (`crates/web-worker`) — HTTP, SSR, OAuth, webhooks
-- **ghinvite-restate-svc** (`crates/restate-svc-worker`) — durable workflow handlers via [Restate](https://restate.dev)
+- **ghinvite-web** (`crates/ghinvite-web-worker`) — HTTP, SSR, OAuth, webhooks
+- **ghinvite-restate-svc** (`crates/ghinvite-workflows-worker`) — durable workflow handlers via [Restate](https://restate.dev)
 
-The core business logic lives in native Rust crates (`crates/restate-svc`, `crates/web`, `crates/storage`, etc.) compiled for both the host (tests) and wasm32 (Workers).
+The core business logic lives in native Rust crates (`crates/ghinvite-workflows`, `crates/ghinvite-web`, `crates/ghinvite-storage-sqlx`, etc.) compiled for both the host (tests) and wasm32 (Workers).
 
 ## Prerequisites
 
@@ -51,7 +51,7 @@ You need a GitHub App before the service can authenticate users or send invitati
 No services required:
 
 ```bash
-cargo test --workspace --exclude github-stub
+cargo test --workspace
 ```
 
 ## Running locally (full stack)
@@ -63,7 +63,7 @@ Two options: native Rust binaries (faster iteration) or Wrangler dev (closer to 
 First-time only — build the CSS:
 
 ```bash
-cd crates/web && npm install && npm run build:css && cd ../..
+cd crates/ghinvite-web && npm install && npm run build:css && cd ../..
 ```
 
 Three terminals:
@@ -82,7 +82,7 @@ Wait for: `Restate is ready`
 GHINVITE_GITHUB_APP_ID=<your-app-id> \
 GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE=path/to/private-key.pem \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
-cargo run -p restate-svc
+cargo run -p ghinvite-workflows
 ```
 
 On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. GitHub App keys work as downloaded, whether they start with `BEGIN RSA PRIVATE KEY` or `BEGIN PRIVATE KEY`. Without either, the binary starts but GitHub API calls will fail at runtime.
@@ -101,7 +101,7 @@ curl -X POST http://localhost:9070/restate/v1/deployments \
 #   -d '{"uri": "http://172.17.0.1:9080"}'
 ```
 
-> **Note:** `restate-svc` binds to `127.0.0.1:9080` by default, so the URI you give to Restate must resolve to the host from *inside* the Restate container — not just from your shell. Use `GHINVITE_LISTEN_ADDR=0.0.0.0:9080 cargo run -p restate-svc` if `host.docker.internal` is unavailable on your platform.
+> **Note:** `ghinvite-workflows` binds to `127.0.0.1:9080` by default, so the URI you give to Restate must resolve to the host from *inside* the Restate container — not just from your shell. Use `GHINVITE_LISTEN_ADDR=0.0.0.0:9080 cargo run -p ghinvite-workflows` if `host.docker.internal` is unavailable on your platform.
 
 **Terminal 3 — web**
 
@@ -110,7 +110,7 @@ GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
 GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
 GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
-cargo run -p web
+cargo run -p ghinvite-web
 ```
 
 App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. All other env vars have safe defaults.
@@ -158,16 +158,15 @@ See [`docs/deploy.md`](docs/deploy.md) for the full Cloudflare + Restate Cloud d
 
 ```
 crates/
-  domain/          — types, IDs, state machines, slug
-  audit/           — audit event definitions
-  storage/         — Storage trait + SqlxStorage (native dev/tests)
-  storage-d1/      — D1Storage (wasm32/production)
-  github/          — GitHub API clients (OAuth + installation tokens)
-  restate-svc/     — Restate handler logic (native, tested without Workers)
-  restate-svc-worker/ — wasm32 entry point wrapping restate-svc
-  web/             — axum app + Dioxus SSR layouts (native, tested without Workers)
-  web-worker/      — wasm32 entry point wrapping web
-  github-stub/     — GitHub API stub binary for integration tests
+  ghinvite-core/         — domain types, audit events, Storage trait + conformance suite
+  ghinvite-storage-sqlx/ — SqlxStorage: Storage impl for native dev/tests
+  ghinvite-storage-d1/   — D1Storage: Storage impl for wasm32/production
+  ghinvite-github/       — GitHub API clients (OAuth + installation tokens);
+                           examples/stub.rs is the API stub for integration tests
+  ghinvite-workflows/    — Restate handler logic (native, tested without Workers)
+  ghinvite-workflows-worker/ — wasm32 entry point wiring workflows + D1
+  ghinvite-web/          — axum app + Dioxus SSR layouts (native, tested without Workers)
+  ghinvite-web-worker/   — wasm32 entry point wiring web + D1
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 wrangler/          — wrangler.toml configs for both workers
 docs/
@@ -179,7 +178,7 @@ docs/
 
 GitHub Actions runs on every push and PR to `main`:
 
-- **Test** — `cargo test --workspace --exclude github-stub`
+- **Test** — `cargo test --workspace`
 - **Lint** — `cargo fmt --check` + `cargo clippy`
 - **wasm32 build** — `cargo build` for all three wasm32 targets
-- **Integration** (main branch only) — Restate-in-Docker + github-stub + `cargo test --features integration`
+- **Integration** (main branch only) — Restate-in-Docker + the github stub example + `cargo test --features integration`

@@ -12,8 +12,8 @@
 
 Two Cloudflare Workers share one D1 database:
 
-- **ghinvite-web** (`crates/web-worker`) — handles HTTP requests, SSR, OAuth, webhooks
-- **ghinvite-restate-svc** (`crates/restate-svc`) — Restate durable workflow handlers
+- **ghinvite-web** (`crates/ghinvite-web-worker`) — handles HTTP requests, SSR, OAuth, webhooks
+- **ghinvite-restate-svc** (`crates/ghinvite-workflows`) — Restate durable workflow handlers
 
 ## First-time Setup
 

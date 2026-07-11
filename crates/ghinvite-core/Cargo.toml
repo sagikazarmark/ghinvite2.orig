@@ -1,0 +1,32 @@
+[package]
+name = "ghinvite-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Exposes `storage::test_suite` — the conformance suite every Storage impl
+# runs against a fresh database (see ghinvite-storage-sqlx / -d1 tests).
+test-suite = ["dep:rand_chacha"]
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+rand.workspace = true
+rand_chacha = { workspace = true, optional = true }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
+
+# getrandom needs the wasm_js backend on wasm32 (pulled in transitively via
+# ulid → rand_core); the matching rustc cfg lives in .cargo/config.toml.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+rand_chacha.workspace = true
+serde_json.workspace = true

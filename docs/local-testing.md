@@ -17,7 +17,7 @@ Wait for: `Restate is ready` in the output.
 ## Terminal 2 — GitHub Stub
 
 ```bash
-cargo run -p github-stub -- --port 3001
+cargo run -p ghinvite-github --example stub -- --port 3001
 ```
 
 Wait for: `github-stub listening on 0.0.0.0:3001`
@@ -27,13 +27,13 @@ Wait for: `github-stub listening on 0.0.0.0:3001`
 ### Unit tests (no Docker/wrangler required)
 
 ```bash
-cargo test --workspace --exclude github-stub
+cargo test --workspace
 ```
 
 ### Restate integration tests
 
 ```bash
-cargo test -p restate-svc --features integration -- --ignored
+cargo test -p ghinvite-workflows --features integration -- --ignored
 ```
 
 ### D1 storage smoke tests (requires wrangler)
@@ -47,15 +47,15 @@ wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
 Then run the smoke tests:
 
 ```bash
-cargo test -p storage-d1 --features d1-suite -- --ignored
+cargo test -p ghinvite-storage-d1 --features d1-suite -- --ignored
 ```
 
 ### wasm32 build check
 
 ```bash
-cargo build -p storage-d1 --target wasm32-unknown-unknown
-cargo build -p web-worker --target wasm32-unknown-unknown
-cargo build -p restate-svc-worker --target wasm32-unknown-unknown
+cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
+cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
+cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
 ```
 
 ## CI vs Local

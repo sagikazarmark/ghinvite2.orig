@@ -1,16 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/domain",
-    "crates/audit",
-    "crates/storage",
-    "crates/storage-d1",
-    "crates/github",
-    "crates/restate-svc",
-    "crates/restate-svc-worker",
-    "crates/web",
-    "crates/web-worker",
-    "crates/github-stub",
+    "crates/ghinvite-core",
+    "crates/ghinvite-storage-sqlx",
+    "crates/ghinvite-storage-d1",
+    "crates/ghinvite-github",
+    "crates/ghinvite-workflows",
+    "crates/ghinvite-workflows-worker",
+    "crates/ghinvite-web",
+    "crates/ghinvite-web-worker",
 ]
 
 [workspace.package]
@@ -56,12 +54,9 @@ url = "2"
 wiremock = "0.6"
 
 # crates depend on each other only via path:
-domain = { path = "crates/domain" }
-audit = { path = "crates/audit" }
-storage = { path = "crates/storage" }
-storage-d1 = { path = "crates/storage-d1" }
-github = { path = "crates/github" }
-restate-svc = { path = "crates/restate-svc" }
-restate-svc-worker = { path = "crates/restate-svc-worker" }
-web = { path = "crates/web" }
-web-worker = { path = "crates/web-worker" }
+ghinvite-core = { path = "crates/ghinvite-core" }
+ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
+ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
+ghinvite-github = { path = "crates/ghinvite-github" }
+ghinvite-workflows = { path = "crates/ghinvite-workflows" }
+ghinvite-web = { path = "crates/ghinvite-web" }
