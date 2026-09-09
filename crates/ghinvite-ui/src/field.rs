@@ -62,6 +62,28 @@ pub struct FieldProps {
     pub onblur: Option<EventHandler<FocusEvent>>,
 }
 
+/// The three listeners a reactive caller may attach to one control, bundled
+/// so a form component can take one optional set per control instead of
+/// three props each. Every handler is optional; the server renders with
+/// [`ControlHandlers::default`] (no listeners), and since SSR never emits
+/// listener attributes the markup is identical either way.
+#[derive(Clone, Default, PartialEq)]
+pub struct ControlHandlers {
+    /// Fired as the value changes.
+    pub oninput: Option<EventHandler<FormEvent>>,
+    /// Fired when the value is committed (a `<select>` or checkbox change).
+    pub onchange: Option<EventHandler<FormEvent>>,
+    /// Fired when focus leaves the control.
+    pub onblur: Option<EventHandler<FocusEvent>>,
+}
+
+impl ControlHandlers {
+    /// The listeners as spreadable attributes (see [`listeners`]).
+    pub(crate) fn attributes(&self) -> Vec<Attribute> {
+        listeners(self.oninput, self.onchange, self.onblur)
+    }
+}
+
 /// A labelled form control with optional help text and field-level error.
 ///
 /// Renders one `<div class="form-control">` containing the label, the control,

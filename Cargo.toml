@@ -8,6 +8,7 @@ members = [
     "crates/ghinvite-workflows",
     "crates/ghinvite-workflows-worker",
     "crates/ghinvite-ui",
+    "crates/ghinvite-island",
     "crates/ghinvite-web",
     "crates/ghinvite-web-worker",
 ]
@@ -24,6 +25,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 cookie = { version = "0.18", default-features = false }
+# The `dioform` facade (Dioxus bindings) is for the browser island only; the
+# server and the shared form model use `dioform-core` + `dioform-derive`
+# (Dioxus-free validators).
+dioform = { version = "0.6.0" }
 dioform-core = { version = "0.6.0", default-features = false }
 dioform-derive = { version = "0.6.0" }
 dioxus = { version = "0.7.10", default-features = false, features = ["html", "macro", "signals", "hooks"] }

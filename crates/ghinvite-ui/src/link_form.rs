@@ -13,6 +13,9 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use dioform_core::{FieldIdentity, Form, FormCore};
 use dioform_derive::Form;
+// The `Props` derive expands to paths under `dioxus_core`, which `dioxus`'s
+// prelude normally brings in; this module only needs the derive itself.
+use dioxus::{dioxus_core, prelude::Props};
 use ghinvite_core::{InvitationLinkRepo, Permission};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -127,7 +130,11 @@ pub const LINK_FORM_ISLAND_MODULE_SRC: &str = "/assets/ghinvite-island.js";
 /// validated against, so the island passes it to [`register_validators`]
 /// instead of reading a clock in wasm — both sides judge expiration from the
 /// same anchor.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// Also a Dioxus `Props` struct, so the island component
+/// (`ghinvite_island::LinkFormIsland`) takes it directly: what the server
+/// serialised is exactly what the browser component receives.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Props)]
 pub struct LinkFormIslandProps {
     /// `action` of the form; the route that handles the POST.
     pub action: String,

@@ -5,8 +5,9 @@
 //! [`LinkCreateFormPage`] is the Console page, [`LinkCreateForm`] is just the
 //! `<form>` inside it, and [`PermissionSelect`] / [`RepositoryScopeGroup`] are
 //! the two controls that [`crate::field::Field`] does not cover. All of them
-//! are props-in, markup-out; the optional event-handler props are for the
-//! island and change nothing in server-rendered HTML.
+//! are props-in, markup-out; the optional event-handler props
+//! ([`LinkFormHandlers`]) are for the island and change nothing in
+//! server-rendered HTML.
 //!
 //! The page also emits the island's mount points: the form is wrapped in
 //! `<div id="link-form-island">`, followed by a `<script type="application/json"
@@ -16,7 +17,9 @@
 //! `script-src 'self'` Content-Security-Policy; if the module is missing (no
 //! bundle built), the browser 404s it and the plain form keeps working.
 
-use crate::field::{Field, FieldKind, described_by, error_text, help_text, listeners};
+use crate::field::{
+    ControlHandlers, Field, FieldKind, described_by, error_text, help_text, listeners,
+};
 use crate::flash::Flash;
 use crate::layouts::ConsoleLayout;
 use crate::link_form::{
@@ -100,6 +103,35 @@ pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
 /// [`ghinvite_core::Permission`] parses.
 pub const PERMISSION_LEVELS: [&str; 5] = ["pull", "triage", "push", "maintain", "admin"];
 
+/// The listeners the browser island attaches to [`LinkCreateForm`], one
+/// bundle per control plus the form's `onsubmit`. All optional: the server
+/// renders with [`LinkFormHandlers::default`] and, because SSR never emits
+/// listener attributes, the markup is byte-identical with or without them
+/// (tested). This is what lets the island render the very same component the
+/// server rendered instead of a copy of its layout.
+#[derive(Clone, Default, PartialEq)]
+pub struct LinkFormHandlers {
+    /// Fired when the form is submitted; the island's progressive submit
+    /// preflight, which cancels the native POST only on a known blocker.
+    pub onsubmit: Option<EventHandler<FormEvent>>,
+    pub description: ControlHandlers,
+    pub internal_note: ControlHandlers,
+    pub permission: ControlHandlers,
+    pub approval_required: ControlHandlers,
+    pub max_uses: ControlHandlers,
+    pub expires_in_days: ControlHandlers,
+    pub repo_scope: RepositoryScopeHandlers,
+}
+
+/// Listeners for the repository checkbox group ([`RepositoryScopeGroup`]).
+#[derive(Clone, Default, PartialEq)]
+pub struct RepositoryScopeHandlers {
+    /// Fired with `(repository id, checked)` when a checkbox changes.
+    pub onchange: Option<EventHandler<(u64, bool)>>,
+    /// Fired when focus leaves any checkbox.
+    pub onblur: Option<EventHandler<FocusEvent>>,
+}
+
 /// The `<form>` of the new invitation link page: summary alert, the four
 /// sections, and the submit button. Rendered by [`LinkCreateFormPage`] on the
 /// server and again by the island in the browser, from the same inputs.
@@ -113,11 +145,19 @@ pub fn LinkCreateForm(
     form: LinkFormValues,
     /// Available repositories, in the order the account makes them available.
     repos: Vec<RepositoryChoice>,
+    /// Listeners for the island; the server passes none.
+    #[props(default)]
+    handlers: LinkFormHandlers,
 ) -> Element {
     let fields = CreateLinkForm::fields();
+    let mut form_listeners: Vec<Attribute> = Vec::new();
+    if let Some(handler) = handlers.onsubmit {
+        form_listeners.push(dioxus_elements::events::onsubmit(handler));
+    }
+    let approval_listeners = handlers.approval_required.attributes();
 
     rsx! {
-        form { method: "post", action: "{action}", class: "max-w-3xl space-y-5",
+        form { method: "post", action: "{action}", class: "max-w-3xl space-y-5", ..form_listeners,
             {if form.errors.summary.is_empty() {
                 rsx! {}
             } else {
@@ -148,6 +188,9 @@ pub fn LinkCreateForm(
                         placeholder: "AI coding workshop",
                         help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
                         error: form.errors.description.clone(),
+                        oninput: handlers.description.oninput,
+                        onchange: handlers.description.onchange,
+                        onblur: handlers.description.onblur,
                     }
                     Field {
                         id: "internal_note",
@@ -157,6 +200,9 @@ pub fn LinkCreateForm(
                         value: form.internal_note.clone(),
                         placeholder: "Why this link exists",
                         help: "Optional admin-only notes. Not visible in the invitation request flow.",
+                        oninput: handlers.internal_note.oninput,
+                        onchange: handlers.internal_note.onchange,
+                        onblur: handlers.internal_note.onblur,
                     }
                 }
             }
@@ -172,6 +218,8 @@ pub fn LinkCreateForm(
                         value: form.permission.clone(),
                         help: "Use pull for read-only access. Maintain and admin can change repository settings.",
                         error: form.errors.permission.clone(),
+                        onchange: handlers.permission.onchange,
+                        onblur: handlers.permission.onblur,
                     }
                     div { class: "alert alert-warning shadow-sm",
                         span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
@@ -186,7 +234,7 @@ pub fn LinkCreateForm(
                     }
                     div { class: "form-control",
                         label { class: "label cursor-pointer justify-start gap-3",
-                            input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: form.approval_required, class: "checkbox" }
+                            input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: form.approval_required, class: "checkbox", ..approval_listeners }
                             span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
                         }
                         p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
@@ -201,6 +249,9 @@ pub fn LinkCreateForm(
                             placeholder: "Unlimited",
                             help: "Blank means unlimited invitation requests.",
                             error: form.errors.max_uses.clone(),
+                            oninput: handlers.max_uses.oninput,
+                            onchange: handlers.max_uses.onchange,
+                            onblur: handlers.max_uses.onblur,
                         }
                         Field {
                             id: "expires_in_days",
@@ -210,6 +261,9 @@ pub fn LinkCreateForm(
                             value: form.expires_in_days.clone(),
                             help: "Default is 30 days. Blank creates an invitation link with no expiration.",
                             error: form.errors.expires_in_days.clone(),
+                            oninput: handlers.expires_in_days.oninput,
+                            onchange: handlers.expires_in_days.onchange,
+                            onblur: handlers.expires_in_days.onblur,
                         }
                     }
                 }
@@ -222,6 +276,8 @@ pub fn LinkCreateForm(
                         selected: form.selected_repo_ids.clone(),
                         help: "Select every repository this invitation link may grant access to.",
                         error: form.errors.repo_scope.clone(),
+                        onchange: handlers.repo_scope.onchange,
+                        onblur: handlers.repo_scope.onblur,
                     }
                 }
             }
@@ -784,6 +840,86 @@ mod tests {
                 "page does not embed the standalone form verbatim"
             );
             assert_eq!(page.matches("<form").count(), 1);
+        }
+    }
+
+    #[test]
+    fn link_create_form_with_every_handler_wired_renders_the_same_markup_as_without() {
+        // The island renders `LinkCreateForm` with `LinkFormHandlers` filled
+        // in; the server renders it with none. SSR emits no listener
+        // attributes, so the two must be byte-identical — this is what makes
+        // "the island renders the same component" hold literally.
+        let with_errors = LinkFormValues {
+            description: "   ".to_string(),
+            permission: "owner".to_string(),
+            approval_required: true,
+            max_uses: "abc".to_string(),
+            expires_in_days: "0".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11, 999],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: Some("d".to_string()),
+                permission: Some("p".to_string()),
+                max_uses: Some("m".to_string()),
+                expires_in_days: Some("e".to_string()),
+                repo_scope: Some("r".to_string()),
+            },
+        };
+
+        for (form, repos) in [
+            (LinkFormValues::default(), acme_repos()),
+            (with_errors.clone(), acme_repos()),
+            (with_errors, vec![]),
+        ] {
+            let (plain_form, plain_repos) = (form.clone(), repos.clone());
+            let plain = crate::testing::render(move || {
+                rsx! {
+                    LinkCreateForm {
+                        action: "/console/accounts/acme/links".to_string(),
+                        form: plain_form.clone(),
+                        repos: plain_repos.clone(),
+                    }
+                }
+            });
+            let wired = crate::testing::render(move || {
+                let control = || ControlHandlers {
+                    oninput: Some(EventHandler::new(|_event: FormEvent| {})),
+                    onchange: Some(EventHandler::new(|_event: FormEvent| {})),
+                    onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
+                };
+                let handlers = LinkFormHandlers {
+                    onsubmit: Some(EventHandler::new(|_event: FormEvent| {})),
+                    description: control(),
+                    internal_note: control(),
+                    permission: control(),
+                    approval_required: control(),
+                    max_uses: control(),
+                    expires_in_days: control(),
+                    repo_scope: RepositoryScopeHandlers {
+                        onchange: Some(EventHandler::new(|_change: (u64, bool)| {})),
+                        onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
+                    },
+                };
+                rsx! {
+                    LinkCreateForm {
+                        action: "/console/accounts/acme/links".to_string(),
+                        form: form.clone(),
+                        repos: repos.clone(),
+                        handlers: handlers,
+                    }
+                }
+            });
+
+            assert_eq!(wired, plain);
+            for listener in ["onsubmit", "oninput", "onchange", "onblur"] {
+                assert!(
+                    !wired.contains(listener),
+                    "SSR emitted a {listener} listener"
+                );
+            }
         }
     }
 
