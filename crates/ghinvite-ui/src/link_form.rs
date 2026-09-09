@@ -72,6 +72,97 @@ pub struct LinkFormErrors {
     pub repo_scope: Option<String>,
 }
 
+/// The new invitation link form as the view renders it: the submitted values
+/// verbatim (so an admin sees exactly what they typed when correcting a
+/// mistake) plus the errors to show next to each control.
+///
+/// Serialised into the island's props blob, so the browser starts from the
+/// same values and server-side errors the page shows.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinkFormValues {
+    pub description: String,
+    pub permission: String,
+    pub approval_required: bool,
+    pub max_uses: String,
+    pub expires_in_days: String,
+    pub internal_note: String,
+    pub selected_repo_ids: Vec<u64>,
+    pub errors: LinkFormErrors,
+}
+
+impl Default for LinkFormValues {
+    fn default() -> Self {
+        Self {
+            description: String::new(),
+            permission: "pull".into(),
+            approval_required: false,
+            max_uses: String::new(),
+            expires_in_days: "30".into(),
+            internal_note: String::new(),
+            selected_repo_ids: Vec::new(),
+            errors: LinkFormErrors::default(),
+        }
+    }
+}
+
+// --- island props -----------------------------------------------------------
+
+/// `id` of the container the island mounts on; it wraps the server-rendered
+/// `<form>` (see `links::LinkCreateFormPage`).
+pub const LINK_FORM_ISLAND_ROOT_ID: &str = "link-form-island";
+/// `id` of the `<script type="application/json">` block holding the
+/// serialised [`LinkFormIslandProps`].
+pub const LINK_FORM_ISLAND_PROPS_ID: &str = "link-form-props";
+/// `src` of the island's module script. A stable name: the island build
+/// writes a small loader here that imports the hashed `dx` bundle, so the
+/// server never needs to know the hash. When the file is absent the browser
+/// gets a 404 for the module and the plain form keeps working.
+pub const LINK_FORM_ISLAND_MODULE_SRC: &str = "/assets/ghinvite-island.js";
+
+/// Everything the island needs to re-render the form the server rendered:
+/// the same inputs `LinkCreateForm` received plus the server's clock.
+///
+/// The server serialises this into the props blob ([`Self::script_json`]);
+/// the island deserialises it on mount. `now` is the instant the server
+/// validated against, so the island passes it to [`register_validators`]
+/// instead of reading a clock in wasm — both sides judge expiration from the
+/// same anchor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinkFormIslandProps {
+    /// `action` of the form; the route that handles the POST.
+    pub action: String,
+    pub values: LinkFormValues,
+    /// Available repositories, in the order the account makes them available.
+    pub repos: Vec<RepositoryChoice>,
+    /// The server's instant, RFC 3339.
+    pub now: DateTime<Utc>,
+}
+
+impl LinkFormIslandProps {
+    /// The props as the body of a `<script type="application/json">` block.
+    ///
+    /// JSON is not HTML: the HTML parser ends a script element at the first
+    /// `</script` regardless of what the JSON quoting says, so a description
+    /// containing `</script>` would break out of the data block. Every `<` is
+    /// written as the JSON escape `\u003c`, which `JSON.parse` reads back as
+    /// `<` and the HTML parser never sees as a tag.
+    pub fn script_json(&self) -> String {
+        json_for_script_block(self)
+    }
+}
+
+/// Serialise `value` for embedding inside a `<script type="application/json">`
+/// element: standard JSON with every `<` escaped as `\u003c` so the text can
+/// never contain `</script` (or a comment opener `<!--`) for the HTML parser.
+pub fn json_for_script_block<T: Serialize + ?Sized>(value: &T) -> String {
+    // Serialising a struct made of strings, bools, integers, vectors, options
+    // and a chrono timestamp cannot fail: there are no map keys to reject and
+    // no I/O. `expect` documents that this is structurally infallible.
+    serde_json::to_string(value)
+        .expect("island props serialise to JSON")
+        .replace('<', "\\u003c")
+}
+
 impl LinkFormErrors {
     /// Attach one message: to the slot for `field`, or to the summary for a
     /// form-level error (`None`) or a field without a slot of its own. The
@@ -835,5 +926,85 @@ mod tests {
         );
         assert_eq!(errors.description, None);
         assert_eq!(errors.repo_scope, None);
+    }
+
+    // --- island props ------------------------------------------------------
+
+    fn island_props(description: &str) -> LinkFormIslandProps {
+        LinkFormIslandProps {
+            action: "/console/accounts/acme/links".to_string(),
+            values: LinkFormValues {
+                description: description.to_string(),
+                permission: "push".to_string(),
+                approval_required: true,
+                max_uses: "7".to_string(),
+                expires_in_days: "45".to_string(),
+                internal_note: "Keep this note".to_string(),
+                selected_repo_ids: vec![10],
+                errors: LinkFormErrors {
+                    summary: vec![SUMMARY_MESSAGE.to_string()],
+                    description: Some(DESCRIPTION_REQUIRED.to_string()),
+                    ..LinkFormErrors::default()
+                },
+            },
+            repos: available_repos(),
+            now: now(),
+        }
+    }
+
+    #[test]
+    fn island_props_json_carries_action_values_errors_repos_and_now() {
+        let json = island_props("AI coding workshop").script_json();
+
+        assert!(json.contains("\"action\":\"/console/accounts/acme/links\""));
+        assert!(json.contains("\"description\":\"AI coding workshop\""));
+        assert!(json.contains("\"permission\":\"push\""));
+        assert!(json.contains("\"approval_required\":true"));
+        assert!(json.contains("\"max_uses\":\"7\""));
+        assert!(json.contains("\"expires_in_days\":\"45\""));
+        assert!(json.contains("\"internal_note\":\"Keep this note\""));
+        assert!(json.contains("\"selected_repo_ids\":[10]"));
+        assert!(json.contains(
+            "\"summary\":[\"Fix the highlighted fields before creating this invitation link.\"]"
+        ));
+        assert!(json.contains("\"repo_scope\":null"));
+        assert!(json.contains("{\"id\":10,\"full_name\":\"acme/api\"}"));
+        assert!(json.contains("{\"id\":12,\"full_name\":\"acme/docs\"}"));
+        assert!(json.contains("\"now\":\"2026-05-04T12:00:00Z\""));
+    }
+
+    #[test]
+    fn island_props_json_round_trips() {
+        let props = island_props("AI coding workshop");
+
+        let back: LinkFormIslandProps = serde_json::from_str(&props.script_json()).unwrap();
+
+        assert_eq!(back, props);
+    }
+
+    #[test]
+    fn island_props_json_cannot_close_the_script_block() {
+        // A description is admin-typed text that ends up inside a <script>
+        // element; the HTML parser would end the element at `</script` no
+        // matter how JSON quotes it.
+        let props = island_props("</script><script>alert(1)</script><!--");
+
+        let json = props.script_json();
+
+        assert!(!json.contains('<'), "raw '<' in script block: {json}");
+        assert!(json.contains("\\u003c/script>\\u003cscript>alert(1)\\u003c/script>\\u003c!--"));
+        // Still the same value once parsed as JSON.
+        let back: LinkFormIslandProps = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, props);
+    }
+
+    #[test]
+    fn json_for_script_block_escapes_every_less_than_sign() {
+        assert_eq!(json_for_script_block("a<b<c"), "\"a\\u003cb\\u003cc\"");
+        assert_eq!(
+            json_for_script_block(&vec!["<", ">"]),
+            "[\"\\u003c\",\">\"]"
+        );
+        assert_eq!(json_for_script_block(&7u32), "7");
     }
 }

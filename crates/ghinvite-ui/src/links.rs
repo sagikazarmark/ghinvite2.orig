@@ -7,16 +7,28 @@
 //! the two controls that [`crate::field::Field`] does not cover. All of them
 //! are props-in, markup-out; the optional event-handler props are for the
 //! island and change nothing in server-rendered HTML.
+//!
+//! The page also emits the island's mount points: the form is wrapped in
+//! `<div id="link-form-island">`, followed by a `<script type="application/json"
+//! id="link-form-props">` data block (a serialised
+//! [`crate::link_form::LinkFormIslandProps`]) and one `<script type="module" src>`
+//! tag. Neither script is inline executable code, so both are clean under the
+//! `script-src 'self'` Content-Security-Policy; if the module is missing (no
+//! bundle built), the browser 404s it and the plain form keeps working.
 
 use crate::field::{Field, FieldKind, described_by, error_text, help_text, listeners};
 use crate::flash::Flash;
 use crate::layouts::ConsoleLayout;
-use crate::link_form::{CreateLinkForm, LinkFormErrors, RepositoryChoice};
+use crate::link_form::{
+    CreateLinkForm, LINK_FORM_ISLAND_MODULE_SRC, LINK_FORM_ISLAND_PROPS_ID,
+    LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps, RepositoryChoice,
+};
 use chrono::{DateTime, Utc};
 use dioform_core::Form;
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission};
-use serde::{Deserialize, Serialize};
+
+pub use crate::link_form::{LinkFormErrors, LinkFormValues};
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormPageProps {
@@ -26,44 +38,23 @@ pub struct LinkCreateFormPageProps {
     /// Available repositories, in the order the account makes them available.
     pub repos: Vec<RepositoryChoice>,
     pub form: LinkFormValues,
-}
-
-/// The new invitation link form as the view renders it: the submitted values
-/// verbatim (so an admin sees exactly what they typed when correcting a
-/// mistake) plus the errors to show next to each control.
-///
-/// Serialised into the island's props blob, so the browser starts from the
-/// same values and server-side errors the page shows.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct LinkFormValues {
-    pub description: String,
-    pub permission: String,
-    pub approval_required: bool,
-    pub max_uses: String,
-    pub expires_in_days: String,
-    pub internal_note: String,
-    pub selected_repo_ids: Vec<u64>,
-    pub errors: LinkFormErrors,
-}
-
-impl Default for LinkFormValues {
-    fn default() -> Self {
-        Self {
-            description: String::new(),
-            permission: "pull".into(),
-            approval_required: false,
-            max_uses: String::new(),
-            expires_in_days: "30".into(),
-            internal_note: String::new(),
-            selected_repo_ids: Vec::new(),
-            errors: LinkFormErrors::default(),
-        }
-    }
+    /// The server's instant: what the route validated (or will validate)
+    /// against. Handed to the island through the props blob so browser-side
+    /// validation judges expiration from the same anchor.
+    pub now: DateTime<Utc>,
 }
 
 #[component]
 pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
+    let action = format!("/console/accounts/{login}/links");
+    let island_props = LinkFormIslandProps {
+        action: action.clone(),
+        values: props.form.clone(),
+        repos: props.repos.clone(),
+        now: props.now,
+    }
+    .script_json();
 
     rsx! {
         ConsoleLayout {
@@ -80,11 +71,23 @@ pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
                         "Create a controlled invitation link that lets GitHub users request repository access to selected repositories."
                     }
                 }
-                LinkCreateForm {
-                    action: "/console/accounts/{login}/links",
-                    form: props.form.clone(),
-                    repos: props.repos.clone(),
+                // The island root: `dioxus-web` mounts here and re-renders
+                // `LinkCreateForm` from the props blob below.
+                div { id: LINK_FORM_ISLAND_ROOT_ID,
+                    LinkCreateForm {
+                        action: action.clone(),
+                        form: props.form.clone(),
+                        repos: props.repos.clone(),
+                    }
                 }
+                // Data, not code: a JSON script block is inert for the browser
+                // and for the CSP. `dangerous_inner_html` writes it verbatim,
+                // which is why `script_json` escapes `<`.
+                script { r#type: "application/json", id: LINK_FORM_ISLAND_PROPS_ID, dangerous_inner_html: "{island_props}" }
+                // Module scripts are deferred wherever they sit, so this can
+                // live next to the island it drives instead of in the shared
+                // layout head; it runs after the whole document is parsed.
+                script { r#type: "module", src: LINK_FORM_ISLAND_MODULE_SRC }
             },
         }
     }
@@ -596,6 +599,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: page_repos.clone(),
                     form: page_form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -609,6 +613,117 @@ mod tests {
             }
         });
         (page, standalone)
+    }
+
+    /// The `<form>…</form>` slice of a rendered page: what the admin sees and
+    /// submits, as opposed to the props blob that follows it.
+    fn form_markup(page: &str) -> &str {
+        let start = page.find("<form").expect("page renders a form");
+        let end = page.find("</form>").expect("page closes the form") + "</form>".len();
+        &page[start..end]
+    }
+
+    // --- island mount points ------------------------------------------------
+
+    const APP_SCRIPT: &str = "<script src=\"/static/app.js\"></script>";
+    const PROPS_SCRIPT_OPEN: &str = "<script type=\"application/json\" id=\"link-form-props\">";
+    const MODULE_SCRIPT: &str =
+        "<script type=\"module\" src=\"/assets/ghinvite-island.js\"></script>";
+
+    /// Every `<script` on the page is one of: the shared app script, the JSON
+    /// data block, the island module. Nothing inline and executable.
+    fn assert_no_inline_executable_script(html: &str) {
+        let app = html.matches(APP_SCRIPT).count();
+        let data = html.matches(PROPS_SCRIPT_OPEN).count();
+        let module = html.matches(MODULE_SCRIPT).count();
+        assert_eq!(app, 1);
+        assert_eq!(data, 1);
+        assert_eq!(module, 1);
+        assert_eq!(
+            html.matches("<script").count(),
+            app + data + module,
+            "page contains an inline executable <script>"
+        );
+    }
+
+    #[test]
+    fn link_create_form_page_wraps_the_form_in_the_island_root() {
+        let (page, form) = render_page_and_form(LinkFormValues::default(), acme_repos());
+
+        let wrapped = format!("<div id=\"link-form-island\">{form}</div>");
+        assert!(
+            page.contains(&wrapped),
+            "island root does not wrap exactly the form"
+        );
+        assert_eq!(page.matches("id=\"link-form-island\"").count(), 1);
+    }
+
+    #[test]
+    fn link_create_form_page_emits_props_blob_then_module_script_after_the_island() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            permission: "push".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: Some("d".to_string()),
+                ..LinkFormErrors::default()
+            },
+        };
+        let (page, _) = render_page_and_form(form.clone(), acme_repos());
+
+        assert_no_inline_executable_script(&page);
+
+        let blob_start = page.find(PROPS_SCRIPT_OPEN).unwrap();
+        let blob = &page[blob_start + PROPS_SCRIPT_OPEN.len()..];
+        let blob = &blob[..blob.find("</script>").unwrap()];
+        let props: LinkFormIslandProps = serde_json::from_str(blob).unwrap();
+        assert_eq!(
+            props,
+            LinkFormIslandProps {
+                action: "/console/accounts/acme/links".to_string(),
+                values: form,
+                repos: acme_repos(),
+                now: dt("2026-05-04T12:00:00Z"),
+            }
+        );
+        assert!(blob.contains("\"now\":\"2026-05-04T12:00:00Z\""));
+
+        let island_at = page.find("id=\"link-form-island\"").unwrap();
+        let module_at = page.find(MODULE_SCRIPT).unwrap();
+        assert!(
+            island_at < blob_start,
+            "props blob must follow the island root"
+        );
+        assert!(
+            blob_start < module_at,
+            "module script must follow the props blob"
+        );
+        assert!(module_at < page.find("</main>").unwrap());
+    }
+
+    #[test]
+    fn link_create_form_page_props_blob_cannot_be_closed_by_a_description() {
+        let form = LinkFormValues {
+            description: "</script><script>alert(1)</script>".to_string(),
+            ..LinkFormValues::default()
+        };
+        let (page, _) = render_page_and_form(form, acme_repos());
+
+        assert_no_inline_executable_script(&page);
+        // Three script elements in total: app, data block, module.
+        assert_eq!(page.matches("</script>").count(), 3);
+        assert!(page.contains("\\u003c/script>\\u003cscript>alert(1)\\u003c/script>"));
+        // The form itself still escapes it as HTML.
+        assert!(
+            page.contains("value=\"&#60;/script&#62;&#60;script&#62;alert(1)&#60;/script&#62;\"")
+        );
     }
 
     #[test]
@@ -847,6 +962,7 @@ mod tests {
                         full_name: "acme/api".to_string(),
                     }],
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -917,6 +1033,7 @@ mod tests {
                         RepositoryChoice { id: 11, full_name: "acme/web".to_string() },
                     ],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -971,6 +1088,7 @@ mod tests {
                         RepositoryChoice { id: 10, full_name: "acme/api".to_string() },
                     ],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -1028,6 +1146,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -1046,9 +1165,11 @@ mod tests {
                 < html.find("id=\"permission-error\"").unwrap(),
             "error is rendered under the permission select"
         );
-        // The tampered value is never echoed into the markup; the select
-        // still lists exactly the five supported levels, none pre-selected.
-        assert!(!html.contains("owner"));
+        // The tampered value is never echoed into the form markup (the props
+        // blob carries the submitted values verbatim, JSON-escaped, so the
+        // island starts from the same state); the select still lists exactly
+        // the five supported levels, none pre-selected.
+        assert!(!form_markup(&html).contains("owner"));
         assert_eq!(html.matches("<option").count(), 5);
         assert!(!html.contains("\" selected"));
         assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
@@ -1075,6 +1196,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -1113,6 +1235,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -1158,6 +1281,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -1180,7 +1304,9 @@ mod tests {
         assert!(html.contains("value=\"11\" checked"));
         assert!(html.contains("value=\"10\""));
         assert!(!html.contains("value=\"10\" checked"));
-        assert!(!html.contains("999"));
+        // The unknown id never reaches the form markup (the props blob carries
+        // the submitted selection verbatim).
+        assert!(!form_markup(&html).contains("999"));
         assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
         assert!(!html.contains("description-error"));
         assert!(!html.contains("input-error"));
@@ -1210,6 +1336,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: vec![],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });

@@ -139,9 +139,14 @@ Every HTML response carries an enforced `Content-Security-Policy`
 `script-src 'self' 'wasm-unsafe-eval'` and `style-src 'self'`, so:
 
 - **No inline `<script>` blocks.** Not in layouts, not in pages, not in
-  components. The browser will refuse to run them. Rendered HTML must contain
-  exactly one script element: `<script src="/static/app.js"></script>` in the
-  layout `<head>` (`views::components::AppScript`).
+  components. The browser will refuse to run them. Rendered HTML may contain
+  only these script elements: `<script src="/static/app.js"></script>` in the
+  layout `<head>` (`views::components::AppScript`); on a page that hosts a
+  Dioxus island, one `<script type="application/json" id="…">` data block
+  (inert — the browser never executes it, and the CSP does not apply to it)
+  and one `<script type="module" src="/assets/…">` tag. Data blocks are
+  written with `link_form::json_for_script_block`, which escapes `<` so
+  user-typed text cannot close the element.
 - **Client behaviour goes in `assets/app.js`**, served at `/static/app.js`
   (`include_str!`, like the CSS). It runs on every page, so each section must
   guard for the absence of the elements it wires — prefer `data-*` hooks in
@@ -155,8 +160,9 @@ Every HTML response carries an enforced `Content-Security-Policy`
   If a page genuinely needs a new origin (for example GitHub avatars under
   `img-src`), extend that constant and its per-directive rationale rather
   than weakening it with `'unsafe-inline'`. Route tests assert the header on
-  the home page, a Console page, and a public invitation page; view tests
-  assert that no inline script remains.
+  the home page, a Console page, and a public invitation page; view and route
+  tests assert that every `<script` is one of the allowed forms above (no
+  inline executable script).
 
 The header is only set on `text/html` responses — static assets, the JSON
 webhook receiver, plain-text errors, and redirects are left alone.
