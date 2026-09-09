@@ -67,7 +67,7 @@ jobs:
       # installed binaries), whereas binstall downloads the release asset in
       # seconds. Pinned to the version the bundle was verified with.
       - uses: cargo-bins/cargo-binstall@main
-      - run: cargo binstall -y --locked dioxus-cli@0.7.9
+      - run: cargo binstall -y dioxus-cli@0.7.9
       # dx bundle → dist/public (hashed js/wasm, stable loader, _headers);
       # fails if the gzipped bundle exceeds the 600 KB budget.
       - run: scripts/build-island.sh

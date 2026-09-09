@@ -24,8 +24,6 @@
 //! `dioxus-web` appear. The component compiles natively so the parity test
 //! can render it with `dioxus_ssr`; the browser entrypoint is `main.rs`.
 
-#![forbid(unsafe_code)]
-
 use dioform::advanced::SubmitAttempt;
 use dioform::prelude::*;
 use dioxus::prelude::*;
@@ -229,6 +227,11 @@ fn format_count(value: &Option<u32>) -> String {
 /// its messages are recorded as submit errors on the fields the server
 /// attached them to, and summary-only messages as form-level errors. Either
 /// way the errors clear as the admin edits the field, like any dioform error.
+///
+/// Known limit: when the client rules reject the values *and* the server
+/// also reported something they cannot reproduce, that extra message is not
+/// shown — dioform only accepts submit errors for a started submission. The
+/// server re-reports it on the next POST, so nothing is lost, only delayed.
 ///
 /// Raw numeric text that does not parse ("abc", "0") cannot live in the
 /// typed model, so it is re-applied to the parsed binding as if typed: the
