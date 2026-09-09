@@ -11,10 +11,9 @@
 //! one slot in the match inside [`validate`], and one field on
 //! [`LinkFormErrors`].
 
-use crate::views::links::{LinkFormErrors, LinkFormValues};
+use crate::views::links::{LinkFormErrors, LinkFormValues, RepositoryChoice};
 use chrono::{DateTime, TimeDelta, Utc};
 use ghinvite_core::{InvitationLinkRepo, Permission};
-use ghinvite_github::payloads::GhRepo;
 use serde::Deserialize;
 use std::str::FromStr;
 
@@ -84,15 +83,16 @@ pub struct ValidatedCreateLink {
 /// Validate a submitted new invitation link form.
 ///
 /// Runs every rule and reports all failures together. `available_repos` are
-/// the repositories the installation currently exposes; only those can enter
-/// the repository scope. `now` anchors the expiration timestamp; callers pass
-/// the same instant they record as `created_at` so the two agree.
+/// the repositories the installation currently exposes, in the shape the form
+/// offered them; only those can enter the repository scope. `now` anchors the
+/// expiration timestamp; callers pass the same instant they record as
+/// `created_at` so the two agree.
 ///
 /// The error side is boxed because [`LinkFormErrors`] carries a message slot
 /// per field and is only built on the (cold) failure path.
 pub fn validate(
     form: &CreateLinkForm,
-    available_repos: &[GhRepo],
+    available_repos: &[RepositoryChoice],
     now: DateTime<Utc>,
 ) -> Result<ValidatedCreateLink, Box<LinkFormErrors>> {
     let description = validate_description(form.description.as_deref());
@@ -244,7 +244,7 @@ fn expiration_after(now: DateTime<Utc>, days: u64) -> Option<DateTime<Utc>> {
 /// non-empty, because a repository scope is by definition a non-empty set.
 fn validate_repo_scope(
     selected: &[u64],
-    available: &[GhRepo],
+    available: &[RepositoryChoice],
 ) -> Result<Vec<InvitationLinkRepo>, FieldError> {
     let repos: Vec<InvitationLinkRepo> = available
         .iter()
@@ -312,17 +312,16 @@ mod tests {
         }
     }
 
-    fn repo(id: u64, full_name: &str) -> GhRepo {
-        GhRepo {
+    fn repo(id: u64, full_name: &str) -> RepositoryChoice {
+        RepositoryChoice {
             id,
             full_name: full_name.into(),
-            private: true,
         }
     }
 
     /// The available repositories the installation exposes, in the order
     /// GitHub returned them (which is the order the form lists them).
-    fn available_repos() -> Vec<GhRepo> {
+    fn available_repos() -> Vec<RepositoryChoice> {
         vec![
             repo(10, "acme/api"),
             repo(11, "acme/web"),

@@ -18,6 +18,7 @@ dioxus.workspace = true
 dioxus-ssr.workspace = true
 ghinvite-core.workspace = true
 ghinvite-github.workspace = true
+ghinvite-ui.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 reqwest.workspace = true

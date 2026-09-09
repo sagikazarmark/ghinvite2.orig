@@ -42,6 +42,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # Each crate is built with `-p` on purpose: `cfg(target_arch = "wasm32")`
+      # means "Cloudflare Workers" in the Worker crates and "browser" in
+      # ghinvite-ui, and a `--workspace --target wasm32-unknown-unknown` build
+      # would unify features across both (ADR 0001).
+      - run: cargo check -p ghinvite-ui --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown

@@ -180,7 +180,7 @@ mod tests {
     where
         F: 'static + Clone + Fn() -> Element + Send,
     {
-        crate::views::render::render(component)
+        crate::testing::render(component)
     }
 
     #[test]

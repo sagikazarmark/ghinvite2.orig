@@ -1,8 +1,8 @@
 //! Settings page (read-only in v1).
 
-use crate::session::Flash;
-use crate::views::components::account_type_label;
-use crate::views::layouts::ConsoleLayout;
+use crate::components::account_type_label;
+use crate::flash::Flash;
+use crate::layouts::ConsoleLayout;
 use dioxus::prelude::*;
 use ghinvite_core::{Account, SelectedRepos};
 
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn settings_page_renders_account_status_panels() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 SettingsPage {
                     signed_in_login: Some("admin".to_string()),
@@ -99,7 +99,7 @@ mod tests {
 
     #[test]
     fn settings_page_uses_glossary_account_type_label() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 SettingsPage {
                     signed_in_login: Some("octocat".to_string()),

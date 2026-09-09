@@ -1,19 +1,33 @@
 //! Invitation-link views: create form + detail page.
 
-use crate::session::Flash;
-use crate::views::forms::{Field, FieldKind};
-use crate::views::layouts::ConsoleLayout;
+use crate::flash::Flash;
+use crate::forms::{Field, FieldKind};
+use crate::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission};
-use ghinvite_github::payloads::GhRepo;
+
+/// One of the account's available repositories, offered as a repository-scope
+/// option on the new invitation link form.
+///
+/// This is the view's own shape, not the GitHub API payload: the web route
+/// maps the installation's repository list into it at the boundary, so the
+/// views (and any browser build of them) never depend on the GitHub client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepositoryChoice {
+    /// GitHub repository id, submitted as the `repo_ids` checkbox value.
+    pub id: u64,
+    /// `owner/name`, shown as the checkbox label.
+    pub full_name: String,
+}
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormProps {
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
-    pub repos: Vec<GhRepo>,
+    /// Available repositories, in the order the account makes them available.
+    pub repos: Vec<RepositoryChoice>,
     pub form: LinkFormValues,
 }
 
@@ -473,16 +487,15 @@ mod tests {
 
     #[test]
     fn link_create_form_renders_sectioned_console_form() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
-                    repos: vec![ghinvite_github::payloads::GhRepo {
+                    repos: vec![RepositoryChoice {
                         id: 10,
                         full_name: "acme/api".to_string(),
-                        private: true,
                     }],
                     form: LinkFormValues::default(),
                 }
@@ -544,15 +557,15 @@ mod tests {
             },
         };
 
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
                     repos: vec![
-                        ghinvite_github::payloads::GhRepo { id: 10, full_name: "acme/api".to_string(), private: true },
-                        ghinvite_github::payloads::GhRepo { id: 11, full_name: "acme/web".to_string(), private: true },
+                        RepositoryChoice { id: 10, full_name: "acme/api".to_string() },
+                        RepositoryChoice { id: 11, full_name: "acme/web".to_string() },
                     ],
                     form: form.clone(),
                 }
@@ -599,14 +612,14 @@ mod tests {
             ..LinkFormValues::default()
         };
 
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
                     repos: vec![
-                        ghinvite_github::payloads::GhRepo { id: 10, full_name: "acme/api".to_string(), private: true },
+                        RepositoryChoice { id: 10, full_name: "acme/api".to_string() },
                     ],
                     form: form.clone(),
                 }
@@ -658,7 +671,7 @@ mod tests {
             },
         };
 
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
@@ -705,7 +718,7 @@ mod tests {
 
     #[test]
     fn link_create_form_permission_select_is_described_by_help_without_error() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
@@ -728,24 +741,22 @@ mod tests {
         assert_eq!(html.matches("<option").count(), 5);
     }
 
-    fn acme_repos() -> Vec<ghinvite_github::payloads::GhRepo> {
+    fn acme_repos() -> Vec<RepositoryChoice> {
         vec![
-            ghinvite_github::payloads::GhRepo {
+            RepositoryChoice {
                 id: 10,
                 full_name: "acme/api".to_string(),
-                private: true,
             },
-            ghinvite_github::payloads::GhRepo {
+            RepositoryChoice {
                 id: 11,
                 full_name: "acme/web".to_string(),
-                private: true,
             },
         ]
     }
 
     #[test]
     fn link_create_form_repository_group_is_labelled_and_described_without_error() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
@@ -790,7 +801,7 @@ mod tests {
             ..LinkFormValues::default()
         };
 
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
@@ -842,7 +853,7 @@ mod tests {
             ..LinkFormValues::default()
         };
 
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
                     signed_in_login: Some("admin".to_string()),
@@ -863,7 +874,7 @@ mod tests {
     #[test]
     fn link_detail_renders_operational_context() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 LinkDetailPage {
                     signed_in_login: Some("admin".into()),

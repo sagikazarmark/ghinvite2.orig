@@ -1,7 +1,7 @@
 //! Approval queue page (Dioxus).
 
-use crate::session::Flash;
-use crate::views::layouts::ConsoleLayout;
+use crate::flash::Flash;
+use crate::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
@@ -30,7 +30,7 @@ mod tests {
 
     #[test]
     fn requests_queue_renders_link_context_before_actions() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 RequestsQueuePage {
                     signed_in_login: Some("admin".into()),
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn requests_queue_renders_missing_link_context_without_broken_link() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 RequestsQueuePage {
                     signed_in_login: Some("admin".into()),

@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Tailwind auto-scans from the directory `npm run build:css` runs in
+   (crates/ghinvite-web). The views that use these utility classes live in
+   crates/ghinvite-ui, so register them explicitly; the path is relative to
+   this stylesheet. */
+@source "../../ghinvite-ui/src";
+
 @plugin "daisyui" {
   themes: ghinvite --default, ghinvite-dark;
 }

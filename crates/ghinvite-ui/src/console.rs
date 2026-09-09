@@ -1,7 +1,7 @@
 //! Console overview page (Dioxus).
 
-use crate::session::Flash;
-use crate::views::layouts::ConsoleLayout;
+use crate::flash::Flash;
+use crate::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use ghinvite_core::{AccountType, InvitationLink};
@@ -28,7 +28,7 @@ pub struct ConsoleIndexPageProps {
 #[component]
 pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
     rsx! {
-        crate::views::layouts::HomeLayout {
+        crate::layouts::HomeLayout {
             signed_in_login: props.signed_in_login.clone(),
             title: "Console · ghinvite".to_string(),
             account_login: None,
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn overview_page_renders_console_copy() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 OverviewPage {
                     signed_in_login: Some("admin".to_string()),
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn overview_page_uses_glossary_account_type_label() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 OverviewPage {
                     signed_in_login: Some("octocat".to_string()),
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn overview_recent_links_show_description_before_code() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 OverviewPage {
                     signed_in_login: Some("admin".to_string()),
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn console_index_renders_account_picker() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleIndexPage {
                     signed_in_login: Some("admin".to_string()),
@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn console_index_renders_empty_state() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleIndexPage {
                     signed_in_login: Some("admin".to_string()),
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn console_index_renders_load_error() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleIndexPage {
                     signed_in_login: Some("admin".to_string()),
@@ -270,7 +270,7 @@ mod tests {
 #[component]
 pub fn OverviewPage(props: OverviewProps) -> Element {
     let login = props.account_login.clone();
-    let account_type = crate::views::components::account_type_label(props.account_type).to_string();
+    let account_type = crate::components::account_type_label(props.account_type).to_string();
     let recent_links_view = props.recent_links.iter().map(|link| {
         let active = link.is_active(props.now);
         let badge = if active {

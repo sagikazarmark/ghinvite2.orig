@@ -1,6 +1,6 @@
 //! Invitation request flow views.
 
-use crate::views::layouts::InvitationLayout;
+use crate::layouts::InvitationLayout;
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission, RequestState};
 
@@ -27,7 +27,7 @@ pub struct RequestPageProps {
     pub slug: String,
     pub link: InvitationLink,
     pub signed_in_login: String,
-    pub flash: Option<crate::session::Flash>,
+    pub flash: Option<crate::flash::Flash>,
     pub request_id: String,
     pub current_status: Option<RequestState>,
     pub retry_notice: Option<RequestState>,
@@ -65,7 +65,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
         None => rsx! {},
         Some(f) => {
             let alert_class = match f.level {
-                crate::session::FlashLevel::Error => "alert alert-error mb-5",
+                crate::flash::FlashLevel::Error => "alert alert-error mb-5",
                 _ => "alert alert-info mb-5",
             };
             let msg = f.message.clone();
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn request_page_renders_merged_form() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn request_page_renders_pending_status_without_form() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),
@@ -292,7 +292,7 @@ mod tests {
 
     fn render_request_page_with_status(current_status: Option<RequestState>) -> String {
         let link = sample_link();
-        crate::views::render::render(move || {
+        crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn request_page_renders_approved_status_without_form() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn request_page_renders_retry_notice_with_form() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn request_page_renders_declined_status_as_retryable_form() {
         let link = sample_link();
-        let html = crate::views::render::render(move || {
+        let html = crate::testing::render(move || {
             rsx! {
                 RequestPage {
                     slug: "abcdEFGH01234567".to_string(),

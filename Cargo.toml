@@ -7,6 +7,7 @@ members = [
     "crates/ghinvite-github",
     "crates/ghinvite-workflows",
     "crates/ghinvite-workflows-worker",
+    "crates/ghinvite-ui",
     "crates/ghinvite-web",
     "crates/ghinvite-web-worker",
 ]
@@ -23,8 +24,8 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 cookie = { version = "0.18", default-features = false }
-dioxus = { version = "0.7", default-features = false, features = ["html", "macro", "signals", "hooks"] }
-dioxus-ssr = { version = "0.7" }
+dioxus = { version = "0.7.10", default-features = false, features = ["html", "macro", "signals", "hooks"] }
+dioxus-ssr = { version = "0.7.10" }
 hmac = "0.12"
 jsonwebtoken = { version = "10", default-features = false }   # only used by tests as a verifier
 oauth2 = { version = "5", default-features = false, features = ["reqwest"] }
@@ -59,4 +60,5 @@ ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
 ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
 ghinvite-github = { path = "crates/ghinvite-github" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }
+ghinvite-ui = { path = "crates/ghinvite-ui" }
 ghinvite-web = { path = "crates/ghinvite-web" }

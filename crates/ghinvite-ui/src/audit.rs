@@ -1,7 +1,7 @@
 //! Audit Log coming-soon page.
 
-use crate::session::Flash;
-use crate::views::layouts::ConsoleLayout;
+use crate::flash::Flash;
+use crate::layouts::ConsoleLayout;
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -49,7 +49,7 @@ mod tests {
 
     #[test]
     fn audit_log_page_renders_coming_soon_empty_state() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 AuditLogPage {
                     signed_in_login: Some("admin".to_string()),

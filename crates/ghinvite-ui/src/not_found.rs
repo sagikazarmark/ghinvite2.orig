@@ -1,6 +1,6 @@
 //! Route-aware 404 page views.
 
-use crate::views::layouts::{ConsoleLayout, HomeLayout, InvitationLayout};
+use crate::layouts::{ConsoleLayout, HomeLayout, InvitationLayout};
 use dioxus::prelude::*;
 
 const PUBLIC_NOT_FOUND_MESSAGE: &str = "The link may be incorrect or no longer available.";
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn public_not_found_page_uses_generic_copy() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! { PublicNotFoundPage { signed_in_login: None::<String> } }
         });
 
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn invitation_not_found_page_uses_invitation_layout() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! { InvitationNotFoundPage { signed_in_login: Some("octocat".to_string()) } }
         });
 
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn console_not_found_page_has_no_active_sidebar_item() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleNotFoundPage {
                     signed_in_login: Some("admin".to_string()),

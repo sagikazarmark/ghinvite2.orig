@@ -1,7 +1,7 @@
 //! Three Dioxus layouts: HomeLayout, ConsoleLayout, InvitationLayout.
 //! Each wraps page content in zone-specific chrome (per spec §12).
 
-use crate::views::components::{AppScript, Footer, Nav};
+use crate::components::{AppScript, Footer, Nav};
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -14,7 +14,7 @@ pub struct LayoutProps {
     /// The current console section for active navigation styling.
     pub active_nav: Option<String>,
     /// One-shot status message rendered above `children`.
-    pub flash: Option<crate::session::Flash>,
+    pub flash: Option<crate::flash::Flash>,
     /// When set, the page emits `<meta http-equiv="refresh">` so the browser
     /// reloads it after this many seconds. Only InvitationLayout honours it;
     /// used by the pending invitation request page (no client runtime).
@@ -113,9 +113,9 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                         {match &props.flash {
                             Some(f) => {
                                 let alert_class = match f.level {
-                                    crate::session::FlashLevel::Success => "alert alert-success mb-4 shadow-sm",
-                                    crate::session::FlashLevel::Error => "alert alert-error mb-4 shadow-sm",
-                                    crate::session::FlashLevel::Info => "alert alert-info mb-4 shadow-sm",
+                                    crate::flash::FlashLevel::Success => "alert alert-success mb-4 shadow-sm",
+                                    crate::flash::FlashLevel::Error => "alert alert-error mb-4 shadow-sm",
+                                    crate::flash::FlashLevel::Info => "alert alert-info mb-4 shadow-sm",
                                 };
                                 rsx! { div { class: "{alert_class}", span { "{f.message}" } } }
                             }
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn home_layout_loads_app_script_from_head() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 HomeLayout {
                     signed_in_login: Some("admin".to_string()),
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn console_layout_loads_app_script_from_head() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleLayout {
                     signed_in_login: Some("admin".to_string()),
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn invitation_layout_loads_app_script_from_head() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 InvitationLayout {
                     signed_in_login: None,
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn console_layout_renders_real_sidebar_and_account_control() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleLayout {
                     signed_in_login: Some("admin".to_string()),
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn console_layout_marks_audit_navigation_active() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 ConsoleLayout {
                     signed_in_login: Some("admin".to_string()),
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn invitation_layout_uses_product_theme() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 InvitationLayout {
                     signed_in_login: None,
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn invitation_layout_emits_meta_refresh_only_when_interval_is_set() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! {
                 InvitationLayout {
                     signed_in_login: None,

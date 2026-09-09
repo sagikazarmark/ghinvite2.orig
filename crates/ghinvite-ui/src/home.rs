@@ -4,7 +4,7 @@
 //! with `data-*` hooks; the behaviour lives in `assets/app.js` (served at
 //! `/static/app.js`), never inline — the CSP blocks inline scripts.
 
-use crate::views::layouts::HomeLayout;
+use crate::layouts::HomeLayout;
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -80,7 +80,7 @@ mod tests {
 
     #[test]
     fn signed_in_home_uses_invitation_link_language() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! { HomePage { signed_in_login: Some("octocat".to_string()) } }
         });
 
@@ -90,7 +90,7 @@ mod tests {
 
     #[test]
     fn signed_in_home_exposes_invitation_code_hooks_without_inline_script() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! { HomePage { signed_in_login: Some("octocat".to_string()) } }
         });
 
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn signed_out_home_has_no_inline_script() {
-        let html = crate::views::render::render(|| rsx! { HomePage { signed_in_login: None } });
+        let html = crate::testing::render(|| rsx! { HomePage { signed_in_login: None } });
 
         assert!(html.contains("<script src=\"/static/app.js\"></script>"));
         assert_eq!(html.matches("<script").count(), 1);

@@ -52,7 +52,13 @@ cargo test -p ghinvite-storage-d1 --features d1-suite -- --ignored
 
 ### wasm32 build check
 
+One crate per command, always with `-p`. `cfg(target_arch = "wasm32")` means
+"Cloudflare Workers" in the Worker crates and "browser" in `ghinvite-ui`, so a
+`--workspace --target wasm32-unknown-unknown` build would unify features across
+both and is never what you want (ADR 0001).
+
 ```bash
+cargo check -p ghinvite-ui --target wasm32-unknown-unknown
 cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
 cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
 cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
