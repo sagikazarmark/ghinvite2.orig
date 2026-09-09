@@ -284,19 +284,7 @@ async fn create_link(
     admin: RequireConsoleAdminOf,
     serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
     let now = Utc::now();
-    let permission = match ghinvite_core::Permission::from_str(&form.permission) {
-        Ok(p) => p,
-        Err(_) => {
-            return crate::error::WebError::BadRequest(format!(
-                "invalid permission: {}",
-                form.permission
-            ))
-            .into_response();
-        }
-    };
 
     // Loaded once, before validating: the validator needs the available
     // repositories to resolve the repository scope, and the error path needs
@@ -305,7 +293,7 @@ async fn create_link(
     let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
         Err(errors) => {
-            return link_form_response(&admin, None, repos, form.into_view_values(errors));
+            return link_form_response(&admin, None, repos, form.into_view_values(*errors));
         }
     };
 
@@ -318,7 +306,7 @@ async fn create_link(
             created_at: now,
             expires_at: validated.expires_at,
             max_uses: validated.max_uses,
-            permission,
+            permission: validated.permission,
             approval_required: validated.approval_required,
             description: validated.description,
             internal_note: validated.internal_note,

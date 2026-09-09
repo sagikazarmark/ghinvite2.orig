@@ -1122,7 +1122,7 @@ const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least
 /// exposes `acme/api` (10) and `acme/web` (11), returning the response and the
 /// recorded command calls.
 async fn post_create_link(
-    body: &'static str,
+    body: impl Into<Body>,
 ) -> (axum::response::Response, Arc<Mutex<Vec<RecordedCommand>>>) {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
@@ -1136,7 +1136,7 @@ async fn post_create_link(
                 .uri("/console/accounts/acme/links")
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
+                .body(body.into())
                 .unwrap(),
         )
         .await
@@ -1236,6 +1236,114 @@ async fn create_link_validation_failure_keeps_available_repositories_checked_and
     assert!(text.contains("value=\"11\""));
     assert!(!text.contains("value=\"11\" checked"));
     assert!(!text.contains("value=\"999\""));
+}
+
+const PERMISSION_UNSUPPORTED: &str =
+    "Choose a supported permission level: pull, triage, push, maintain, or admin.";
+
+#[tokio::test]
+async fn create_link_tampered_permission_rerenders_form_with_permission_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=owner&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a tampered permission level must not reach the command facade"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains(PERMISSION_UNSUPPORTED));
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(text.contains("aria-describedby=\"permission-help permission-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 1);
+    assert!(text.contains("select-error"));
+    assert!(!text.contains("Bad Request"));
+    assert!(!text.contains("invalid permission"));
+    // The tampered value is not echoed; the select offers only supported levels.
+    assert!(!text.contains("owner"));
+    assert_eq!(text.matches("<option").count(), 5);
+    // Every other submitted value and selection survives the re-render.
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert!(text.contains("name=\"max_uses\" value=\"7\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("description-error"));
+    assert!(!text.contains("repo_ids-error"));
+}
+
+#[tokio::test]
+async fn create_link_tampered_permission_is_reported_with_other_field_errors() {
+    let (resp, calls) =
+        post_create_link("description=&permission=Push&max_uses=0&repo_ids=10").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(text.contains("id=\"description-error\""));
+    assert!(text.contains("id=\"max_uses-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 3);
+    assert!(!text.contains("Bad Request"));
+}
+
+#[tokio::test]
+async fn create_link_every_supported_permission_level_reaches_command() {
+    for (raw, expected) in [
+        ("pull", ghinvite_core::Permission::Pull),
+        ("triage", ghinvite_core::Permission::Triage),
+        ("push", ghinvite_core::Permission::Push),
+        ("maintain", ghinvite_core::Permission::Maintain),
+        ("admin", ghinvite_core::Permission::Admin),
+    ] {
+        let body = format!("description=AI+coding+workshop&permission={raw}&repo_ids=10");
+        let (resp, calls) = post_create_link(body).await;
+
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "permission={raw:?}");
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(location.starts_with("/console/accounts/acme/links/"));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "permission={raw:?}");
+        let RecordedCommand::CreateInvitationLink { permission, .. } = &calls[0];
+        assert_eq!(*permission, expected, "permission={raw:?}");
+    }
+}
+
+#[tokio::test]
+async fn create_link_approval_policy_checkbox_behaviour_is_unchanged() {
+    // Checked means account admin approval is required.
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=pull&approval_required=true&repo_ids=10",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let RecordedCommand::CreateInvitationLink {
+            approval_required, ..
+        } = &calls[0];
+        assert!(*approval_required, "checked box requires admin approval");
+    }
+
+    // Unchecked (the key is absent from a native form POST) means auto-approve.
+    let (resp, calls) =
+        post_create_link("description=AI+coding+workshop&permission=pull&repo_ids=10").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        approval_required, ..
+    } = &calls[0];
+    assert!(!*approval_required, "unchecked box auto-approves");
 }
 
 #[tokio::test]

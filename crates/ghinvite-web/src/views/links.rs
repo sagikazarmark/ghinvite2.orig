@@ -33,6 +33,7 @@ pub struct LinkFormValues {
 pub struct LinkFormErrors {
     pub summary: Vec<String>,
     pub description: Option<String>,
+    pub permission: Option<String>,
     pub max_uses: Option<String>,
     pub expires_in_days: Option<String>,
     /// Section-level error for the repository checkbox group.
@@ -123,15 +124,40 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 h2 { class: "text-base font-semibold", "Access configuration" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and repositories included in this invitation link." }
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
-                                select { id: "permission", name: "permission", class: "select select-bordered w-full",
-                                    {perms.iter().map(|p| {
-                                        let selected = props.form.permission == *p;
-                                        rsx! { option { value: "{p}", selected: selected, "{p}" } }
-                                    })}
+                            // Hand-written rather than a `Field` (which has no
+                            // select kind yet); same id scheme and aria wiring.
+                            {
+                                let has_error = props.form.errors.permission.is_some();
+                                let select_class = if has_error {
+                                    "select select-bordered select-error w-full"
+                                } else {
+                                    "select select-bordered w-full"
+                                };
+                                let described_by = if has_error {
+                                    "permission-help permission-error"
+                                } else {
+                                    "permission-help"
+                                };
+                                rsx! {
+                                    div { class: "form-control gap-2",
+                                        label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
+                                        select {
+                                            id: "permission",
+                                            name: "permission",
+                                            class: "{select_class}",
+                                            aria_describedby: "{described_by}",
+                                            aria_invalid: if has_error { "true" },
+                                            {perms.iter().map(|p| {
+                                                let selected = props.form.permission == *p;
+                                                rsx! { option { value: "{p}", selected: selected, "{p}" } }
+                                            })}
+                                        }
+                                        p { id: "permission-help", class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
+                                        {props.form.errors.permission.as_ref().map(|message| rsx! {
+                                            p { id: "permission-error", class: "text-sm font-medium text-error", "{message}" }
+                                        })}
+                                    }
                                 }
-                                p { class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
                             }
                             div { class: "alert alert-warning shadow-sm",
                                 span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
@@ -565,12 +591,11 @@ mod tests {
                 summary: vec![
                     "Fix the highlighted fields before creating this invitation link.".to_string(),
                 ],
-                description: None,
                 max_uses: Some("Max use must be a whole number of 1 or more.".to_string()),
                 expires_in_days: Some(
                     "Expiration must be a whole number of days, 1 or more.".to_string(),
                 ),
-                repo_scope: None,
+                ..LinkFormErrors::default()
             },
             ..LinkFormValues::default()
         };
@@ -608,6 +633,100 @@ mod tests {
         assert!(html.contains("value=\"10\" checked"));
         assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
         assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_renders_permission_error_under_select_with_preserved_values() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            // A tampered value: not one of the rendered options, so no option
+            // can be marked selected and the browser falls back to the first.
+            permission: "owner".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                permission: Some(
+                    "Choose a supported permission level: pull, triage, push, maintain, or admin."
+                        .to_string(),
+                ),
+                ..LinkFormErrors::default()
+            },
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
+        assert!(html.contains(
+            "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">Choose a supported permission level: pull, triage, push, maintain, or admin.</p>"
+        ));
+        assert!(html.contains("aria-describedby=\"permission-help permission-error\""));
+        assert!(html.contains("id=\"permission-help\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
+        assert!(html.contains("select-error"));
+        assert!(
+            html.find("name=\"permission\"").unwrap()
+                < html.find("id=\"permission-error\"").unwrap(),
+            "error is rendered under the permission select"
+        );
+        // The tampered value is never echoed into the markup; the select
+        // still lists exactly the five supported levels, none pre-selected.
+        assert!(!html.contains("owner"));
+        assert_eq!(html.matches("<option").count(), 5);
+        assert!(!html.contains("\" selected"));
+        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
+        assert!(html.contains("name=\"max_uses\" value=\"7\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
+        assert!(html.contains("Keep this note"));
+        assert!(html.contains("value=\"11\" checked"));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("description-error"));
+        assert!(!html.contains("repo_ids-error"));
+        assert!(!html.contains("input-error"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_permission_select_is_described_by_help_without_error() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: LinkFormValues::default(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"permission\""));
+        assert!(html.contains("name=\"permission\""));
+        assert!(html.contains("id=\"permission-help\""));
+        assert!(html.contains("aria-describedby=\"permission-help\""));
+        assert!(!html.contains("permission-error"));
+        assert!(!html.contains("select-error"));
+        assert!(!html.contains("aria-invalid"));
+        assert!(html.contains("value=\"pull\" selected"));
+        assert_eq!(html.matches("<option").count(), 5);
     }
 
     fn acme_repos() -> Vec<ghinvite_github::payloads::GhRepo> {

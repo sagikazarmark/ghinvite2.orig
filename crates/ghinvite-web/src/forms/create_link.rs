@@ -13,9 +13,10 @@
 
 use crate::views::links::{LinkFormErrors, LinkFormValues};
 use chrono::{DateTime, TimeDelta, Utc};
-use ghinvite_core::InvitationLinkRepo;
+use ghinvite_core::{InvitationLinkRepo, Permission};
 use ghinvite_github::payloads::GhRepo;
 use serde::Deserialize;
+use std::str::FromStr;
 
 /// Raw POST body of the new invitation link form, exactly as submitted.
 ///
@@ -40,8 +41,11 @@ impl CreateLinkForm {
     ///
     /// Values are preserved verbatim (untrimmed, unparsed) so an admin sees
     /// exactly what they typed when correcting a mistake. Submitted repository
-    /// IDs are carried as-is: the view only renders a checkbox per available
-    /// repository, so an unknown or tampered ID can never appear checked.
+    /// IDs and the permission value are carried as-is: the view only renders a
+    /// checkbox per available repository and an option per supported
+    /// permission level, so an unknown or tampered value can never appear
+    /// checked or selected (the select simply falls back to its first option,
+    /// with the permission error shown beneath it).
     pub fn into_view_values(self, errors: LinkFormErrors) -> LinkFormValues {
         LinkFormValues {
             description: self.description.unwrap_or_default(),
@@ -61,6 +65,8 @@ impl CreateLinkForm {
 pub struct ValidatedCreateLink {
     pub description: String,
     pub internal_note: Option<String>,
+    /// The permission level, one of the supported GitHub collaborator levels.
+    pub permission: Permission,
     pub approval_required: bool,
     /// `None` is an intentional "unlimited" (the field was left blank).
     pub max_uses: Option<u32>,
@@ -78,32 +84,40 @@ pub struct ValidatedCreateLink {
 /// the repositories the installation currently exposes; only those can enter
 /// the repository scope. `now` anchors the expiration timestamp; callers pass
 /// the same instant they record as `created_at` so the two agree.
+///
+/// The error side is boxed because [`LinkFormErrors`] carries a message slot
+/// per field and is only built on the (cold) failure path.
 pub fn validate(
     form: &CreateLinkForm,
     available_repos: &[GhRepo],
     now: DateTime<Utc>,
-) -> Result<ValidatedCreateLink, LinkFormErrors> {
+) -> Result<ValidatedCreateLink, Box<LinkFormErrors>> {
     let description = validate_description(form.description.as_deref());
+    let permission = validate_permission(&form.permission);
     let max_uses = validate_max_uses(form.max_uses.as_deref());
     let expires_at = validate_expires_in_days(form.expires_in_days.as_deref(), now);
     let repos = validate_repo_scope(&form.repo_ids, available_repos);
 
-    match (description, max_uses, expires_at, repos) {
-        (Ok(description), Ok(max_uses), Ok(expires_at), Ok(repos)) => Ok(ValidatedCreateLink {
-            description,
-            internal_note: normalize_internal_note(form.internal_note.as_deref()),
-            approval_required: form.approval_required.is_some(),
-            max_uses,
-            expires_at,
-            repos,
-        }),
-        (description, max_uses, expires_at, repos) => Err(LinkFormErrors {
+    match (description, permission, max_uses, expires_at, repos) {
+        (Ok(description), Ok(permission), Ok(max_uses), Ok(expires_at), Ok(repos)) => {
+            Ok(ValidatedCreateLink {
+                description,
+                internal_note: normalize_internal_note(form.internal_note.as_deref()),
+                permission,
+                approval_required: form.approval_required.is_some(),
+                max_uses,
+                expires_at,
+                repos,
+            })
+        }
+        (description, permission, max_uses, expires_at, repos) => Err(Box::new(LinkFormErrors {
             summary: vec![SUMMARY.to_string()],
             description: description.err().map(|e| e.message),
+            permission: permission.err().map(|e| e.message),
             max_uses: max_uses.err().map(|e| e.message),
             expires_in_days: expires_at.err().map(|e| e.message),
             repo_scope: repos.err().map(|e| e.message),
-        }),
+        })),
     }
 }
 
@@ -151,6 +165,19 @@ fn normalize_internal_note(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|note| !note.is_empty())
         .map(str::to_string)
+}
+
+/// Permission level: exactly one of the supported GitHub collaborator levels.
+///
+/// The `<select>` only ever submits those exact lowercase values, so nothing
+/// is trimmed or case-folded here: any other string did not come from the
+/// form and is treated as tampering, not a typo.
+fn validate_permission(raw: &str) -> Result<Permission, FieldError> {
+    Permission::from_str(raw).map_err(|_| {
+        FieldError::new(
+            "Choose a supported permission level: pull, triage, push, maintain, or admin.",
+        )
+    })
 }
 
 /// Max use: blank means unlimited; otherwise a positive whole number that
@@ -321,6 +348,7 @@ mod tests {
             ValidatedCreateLink {
                 description: "AI coding workshop".into(),
                 internal_note: Some("Keep this note".into()),
+                permission: ghinvite_core::Permission::Push,
                 approval_required: true,
                 max_uses: Some(7),
                 expires_at: Some(
@@ -441,6 +469,7 @@ mod tests {
     fn max_uses_error(raw: &str) -> String {
         let errors = validate(&with_max_uses(Some(raw)), &available_repos(), now()).unwrap_err();
         assert_eq!(errors.description, None, "only max use should fail");
+        assert_eq!(errors.permission, None, "only max use should fail");
         assert_eq!(errors.repo_scope, None, "only max use should fail");
         assert!(
             !errors.summary.is_empty(),
@@ -507,6 +536,7 @@ mod tests {
         let errors =
             validate(&with_expires_in_days(Some(raw)), &available_repos(), now()).unwrap_err();
         assert_eq!(errors.description, None, "only expiration should fail");
+        assert_eq!(errors.permission, None, "only expiration should fail");
         assert_eq!(errors.max_uses, None, "only expiration should fail");
         assert_eq!(errors.repo_scope, None, "only expiration should fail");
         assert!(
@@ -573,6 +603,7 @@ mod tests {
     fn validate_reports_every_field_error_at_once() {
         let form = CreateLinkForm {
             description: Some("".into()),
+            permission: "owner".into(),
             max_uses: Some("0".into()),
             expires_in_days: Some("abc".into()),
             repo_ids: vec![],
@@ -586,6 +617,7 @@ mod tests {
             vec!["Fix the highlighted fields before creating this invitation link.".to_string()]
         );
         assert!(errors.description.is_some());
+        assert_eq!(errors.permission.as_deref(), Some(PERMISSION_UNSUPPORTED));
         assert_eq!(
             errors.max_uses.as_deref(),
             Some("Max use must be a whole number of 1 or more.")
@@ -595,6 +627,83 @@ mod tests {
             Some("Expiration must be a whole number of days, 1 or more.")
         );
         assert_eq!(errors.repo_scope.as_deref(), Some(REPO_SCOPE_REQUIRED));
+    }
+
+    const PERMISSION_UNSUPPORTED: &str =
+        "Choose a supported permission level: pull, triage, push, maintain, or admin.";
+
+    fn with_permission(permission: &str) -> CreateLinkForm {
+        CreateLinkForm {
+            permission: permission.into(),
+            ..valid_form()
+        }
+    }
+
+    /// Only the permission level should fail; returns its message.
+    fn permission_error(permission: &str) -> String {
+        let errors = validate(&with_permission(permission), &available_repos(), now()).unwrap_err();
+        assert_eq!(errors.description, None, "only permission should fail");
+        assert_eq!(errors.max_uses, None, "only permission should fail");
+        assert_eq!(errors.expires_in_days, None, "only permission should fail");
+        assert_eq!(errors.repo_scope, None, "only permission should fail");
+        assert!(
+            !errors.summary.is_empty(),
+            "summary line accompanies field errors"
+        );
+        errors.permission.unwrap_or_else(|| {
+            panic!("permission={permission:?} should produce a permission error")
+        })
+    }
+
+    #[test]
+    fn permission_accepts_every_supported_level() {
+        use ghinvite_core::Permission;
+
+        for (raw, expected) in [
+            ("pull", Permission::Pull),
+            ("triage", Permission::Triage),
+            ("push", Permission::Push),
+            ("maintain", Permission::Maintain),
+            ("admin", Permission::Admin),
+        ] {
+            let validated = validate(&with_permission(raw), &available_repos(), now()).unwrap();
+            assert_eq!(validated.permission, expected, "permission={raw:?}");
+        }
+    }
+
+    #[test]
+    fn permission_rejects_tampered_values() {
+        // Unknown names, GitHub-adjacent names that are not collaborator
+        // levels, casing/whitespace variants (the select submits exact lowercase
+        // values, so anything else did not come from the form), and blank.
+        for raw in [
+            "owner", "write", "read", "Push", "PUSH", " push", "push ", "", "  ", "push\n",
+        ] {
+            assert_eq!(
+                permission_error(raw),
+                PERMISSION_UNSUPPORTED,
+                "permission={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tampered_permission_is_reported_alongside_other_field_errors() {
+        let form = CreateLinkForm {
+            permission: "owner".into(),
+            max_uses: Some("0".into()),
+            ..valid_form()
+        };
+
+        let errors = validate(&form, &available_repos(), now()).unwrap_err();
+
+        assert_eq!(errors.permission.as_deref(), Some(PERMISSION_UNSUPPORTED));
+        assert_eq!(
+            errors.max_uses.as_deref(),
+            Some("Max use must be a whole number of 1 or more.")
+        );
+        assert_eq!(errors.description, None);
+        assert_eq!(errors.repo_scope, None);
     }
 
     const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
@@ -614,6 +723,7 @@ mod tests {
             errors.description, None,
             "only repository scope should fail"
         );
+        assert_eq!(errors.permission, None, "only repository scope should fail");
         assert_eq!(errors.max_uses, None, "only repository scope should fail");
         assert_eq!(
             errors.expires_in_days, None,
