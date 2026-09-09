@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use ghinvite_core::storage::Storage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
@@ -115,6 +115,7 @@ enum RecordedCommand {
         permission: ghinvite_core::Permission,
         approval_required: bool,
         max_uses: Option<u32>,
+        expires_at: Option<DateTime<Utc>>,
         repo_ids: Vec<u64>,
     },
 }
@@ -139,6 +140,7 @@ impl GhinviteCommands for RecordingCommands {
                 permission: command.permission,
                 approval_required: command.approval_required,
                 max_uses: command.max_uses,
+                expires_at: command.expires_at,
                 repo_ids: command.repos.into_iter().map(|repo| repo.repo_id).collect(),
             });
         Ok(CreateInvitationLinkOutput {
@@ -943,6 +945,152 @@ async fn create_link_valid_submission_invokes_command_and_redirects() {
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let before = Utc::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = Utc::now();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("/console/accounts/acme/links/"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        description,
+        internal_note,
+        permission,
+        approval_required,
+        max_uses,
+        expires_at,
+        repo_ids,
+    } = &calls[0];
+    assert_eq!(description, "AI coding workshop");
+    assert_eq!(internal_note.as_deref(), Some("Keep this note"));
+    assert_eq!(*permission, ghinvite_core::Permission::Push);
+    assert!(approval_required);
+    assert_eq!(*max_uses, Some(7));
+    assert_expires_days_from(*expires_at, 45, before, after);
+    assert_eq!(*repo_ids, vec![10]);
+}
+
+/// `expires_at` must be exactly `days` after some instant between `before`
+/// and `after` (the request's `now`), i.e. `now + days` without drift.
+fn assert_expires_days_from(
+    expires_at: Option<DateTime<Utc>>,
+    days: i64,
+    before: DateTime<Utc>,
+    after: DateTime<Utc>,
+) {
+    let expires_at = expires_at.expect("expires_at should be set");
+    let earliest = before + Duration::days(days);
+    let latest = after + Duration::days(days);
+    assert!(
+        expires_at >= earliest && expires_at <= latest,
+        "expires_at {expires_at} should be {days} days after a now in [{before}, {after}]"
+    );
+}
+
+#[tokio::test]
+async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=AI+coding+workshop&permission=push&max_uses=abc&expires_in_days=0&internal_note=Keep+this+note&repo_ids=10";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains("Max use must be a whole number of 1 or more."));
+    assert!(text.contains("Expiration must be a whole number of days, 1 or more."));
+    assert!(text.contains("id=\"max_uses-error\""));
+    assert!(text.contains("id=\"expires_in_days-error\""));
+    assert!(text.contains("aria-describedby=\"max_uses-help max_uses-error\""));
+    assert!(text.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 2);
+    assert!(!text.contains("description-error"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("name=\"max_uses\" value=\"abc\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"0\""));
+    assert!(text.contains("value=\"push\" selected"));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("Bad Request"));
+}
+
+#[tokio::test]
+async fn create_link_valid_numeric_guardrails_reach_command() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=AI+coding+workshop&permission=pull&max_uses=+3+&expires_in_days=+10+&repo_ids=11";
+    let before = Utc::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = Utc::now();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        max_uses,
+        expires_at,
+        repo_ids,
+        ..
+    } = &calls[0];
+    assert_eq!(*max_uses, Some(3));
+    assert_expires_days_from(*expires_at, 10, before, after);
+    assert_eq!(*repo_ids, vec![11]);
+}
+
+#[tokio::test]
+async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body =
+        "description=AI+coding+workshop&permission=pull&max_uses=&expires_in_days=&repo_ids=10";
     let resp = app
         .oneshot(
             Request::builder()
@@ -957,20 +1105,267 @@ async fn create_link_valid_submission_invokes_command_and_redirects() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        max_uses,
+        expires_at,
+        ..
+    } = &calls[0];
+    assert_eq!(*max_uses, None);
+    assert_eq!(*expires_at, None);
+}
+
+const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
+
+/// POST the new invitation link form as a signed-in admin whose installation
+/// exposes `acme/api` (10) and `acme/web` (11), returning the response and the
+/// recorded command calls.
+async fn post_create_link(
+    body: impl Into<Body>,
+) -> (axum::response::Response, Arc<Mutex<Vec<RecordedCommand>>>) {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(body.into())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    (resp, calls)
+}
+
+#[tokio::test]
+async fn create_link_without_repositories_rerenders_form_with_repository_scope_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains(REPO_SCOPE_REQUIRED));
+    assert!(text.contains("id=\"repo_ids-error\""));
+    assert!(text.contains("role=\"group\""));
+    assert!(text.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
+    // aria-invalid is not permitted on role="group"; no field is invalid here.
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 0);
+    assert!(!text.contains("description-error"));
+    assert!(!text.contains("Bad Request"));
+    assert!(!text.contains("select at least one repository"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("value=\"push\" selected"));
+    assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert!(text.contains("name=\"max_uses\" value=\"7\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("acme/api"));
+    assert!(text.contains("acme/web"));
+    assert!(!text.contains("value=\"10\" checked"));
+    assert!(!text.contains("value=\"11\" checked"));
+}
+
+#[tokio::test]
+async fn create_link_with_only_unknown_repositories_rerenders_form_with_repository_scope_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=1000",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains(REPO_SCOPE_REQUIRED));
+    assert!(text.contains("id=\"repo_ids-error\""));
+    assert!(!text.contains("Bad Request"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("value=\"999\""));
+    assert!(!text.contains("value=\"1000\""));
+    assert!(!text.contains("value=\"10\" checked"));
+    assert!(!text.contains("value=\"11\" checked"));
+}
+
+#[tokio::test]
+async fn create_link_with_valid_and_unknown_repositories_scopes_only_the_available_ones() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=11&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.starts_with("/console/accounts/acme/links/"));
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink { repo_ids, .. } = &calls[0];
     assert_eq!(
-        calls.lock().unwrap()[0],
-        RecordedCommand::CreateInvitationLink {
-            description: "AI coding workshop".to_string(),
-            internal_note: Some("Keep this note".to_string()),
-            permission: ghinvite_core::Permission::Push,
-            approval_required: true,
-            max_uses: Some(7),
-            repo_ids: vec![10],
-        }
+        *repo_ids,
+        vec![10, 11],
+        "available order, unknown 999 dropped"
     );
+}
+
+#[tokio::test]
+async fn create_link_validation_failure_keeps_available_repositories_checked_and_drops_unknown() {
+    let (resp, calls) =
+        post_create_link("description=&permission=push&repo_ids=10&repo_ids=999").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("id=\"description-error\""));
+    assert!(
+        !text.contains("repo_ids-error"),
+        "a valid available repository was selected, so repository scope passes"
+    );
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("value=\"11\""));
+    assert!(!text.contains("value=\"11\" checked"));
+    assert!(!text.contains("value=\"999\""));
+}
+
+const PERMISSION_UNSUPPORTED: &str =
+    "Choose a supported permission level: pull, triage, push, maintain, or admin.";
+
+#[tokio::test]
+async fn create_link_missing_permission_key_rerenders_form_with_permission_error() {
+    // The select always submits a value, so a POST without the key is tampering.
+    // It must get the same inline error path as a wrong value, not a bare 400
+    // from form deserialization.
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&approval_required=true&max_uses=7&expires_in_days=45&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains(PERMISSION_UNSUPPORTED));
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(!text.contains("Bad Request"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("value=\"10\" checked"));
+}
+
+#[tokio::test]
+async fn create_link_tampered_permission_rerenders_form_with_permission_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=owner&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "a tampered permission level must not reach the command facade"
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains(PERMISSION_UNSUPPORTED));
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(text.contains("aria-describedby=\"permission-help permission-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 1);
+    assert!(text.contains("select-error"));
+    assert!(!text.contains("Bad Request"));
+    assert!(!text.contains("invalid permission"));
+    // The tampered value is not echoed; the select offers only supported levels.
+    assert!(!text.contains("owner"));
+    assert_eq!(text.matches("<option").count(), 5);
+    // Every other submitted value and selection survives the re-render.
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert!(text.contains("name=\"max_uses\" value=\"7\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("description-error"));
+    assert!(!text.contains("repo_ids-error"));
+}
+
+#[tokio::test]
+async fn create_link_tampered_permission_is_reported_with_other_field_errors() {
+    let (resp, calls) =
+        post_create_link("description=&permission=Push&max_uses=0&repo_ids=10").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(text.contains("id=\"description-error\""));
+    assert!(text.contains("id=\"max_uses-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 3);
+    assert!(!text.contains("Bad Request"));
+}
+
+#[tokio::test]
+async fn create_link_every_supported_permission_level_reaches_command() {
+    for (raw, expected) in [
+        ("pull", ghinvite_core::Permission::Pull),
+        ("triage", ghinvite_core::Permission::Triage),
+        ("push", ghinvite_core::Permission::Push),
+        ("maintain", ghinvite_core::Permission::Maintain),
+        ("admin", ghinvite_core::Permission::Admin),
+    ] {
+        let body = format!("description=AI+coding+workshop&permission={raw}&repo_ids=10");
+        let (resp, calls) = post_create_link(body).await;
+
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "permission={raw:?}");
+        let location = resp.headers().get("location").unwrap().to_str().unwrap();
+        assert!(location.starts_with("/console/accounts/acme/links/"));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "permission={raw:?}");
+        let RecordedCommand::CreateInvitationLink { permission, .. } = &calls[0];
+        assert_eq!(*permission, expected, "permission={raw:?}");
+    }
+}
+
+#[tokio::test]
+async fn create_link_approval_policy_checkbox_behaviour_is_unchanged() {
+    // Checked means account admin approval is required.
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=pull&approval_required=true&repo_ids=10",
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    {
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let RecordedCommand::CreateInvitationLink {
+            approval_required, ..
+        } = &calls[0];
+        assert!(*approval_required, "checked box requires admin approval");
+    }
+
+    // Unchecked (the key is absent from a native form POST) means auto-approve.
+    let (resp, calls) =
+        post_create_link("description=AI+coding+workshop&permission=pull&repo_ids=10").await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        approval_required, ..
+    } = &calls[0];
+    assert!(!*approval_required, "unchecked box auto-approves");
 }
 
 #[tokio::test]

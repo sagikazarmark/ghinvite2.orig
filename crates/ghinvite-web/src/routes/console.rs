@@ -4,6 +4,7 @@ use crate::account_admin_reads::{
     find_account_admin_invitation_link, find_account_admin_request, pending_request_queue,
 };
 use crate::commands::{CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink};
+use crate::forms::create_link::{self as create_link_form, CreateLinkForm};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
@@ -15,7 +16,6 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
-use serde::Deserialize;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -228,11 +228,22 @@ async fn new_link_form(
     admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
     let repos = load_installation_repos_for_form(&state, &admin).await;
-
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
+    let form = crate::views::links::LinkFormValues::default();
+
+    link_form_response(&admin, flash, repos, form)
+}
+
+/// Render the new invitation link page, both fresh and re-rendered with
+/// validation errors and preserved values after a failed POST.
+fn link_form_response(
+    admin: &RequireConsoleAdminOf,
+    flash: Option<session::Flash>,
+    repos: Vec<ghinvite_github::payloads::GhRepo>,
+    form: crate::views::links::LinkFormValues,
+) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
-    let form = crate::views::links::LinkFormValues::default();
 
     let html = render(move || {
         rsx! {
@@ -246,62 +257,6 @@ async fn new_link_form(
         }
     });
     Html(html).into_response()
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateLinkForm {
-    description: Option<String>,
-    permission: String,
-    #[serde(default)]
-    approval_required: Option<String>,
-    max_uses: Option<String>,
-    expires_in_days: Option<String>,
-    internal_note: Option<String>,
-    #[serde(default)]
-    repo_ids: Vec<u64>,
-}
-
-const DESCRIPTION_MAX_CHARS: usize = 120;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DescriptionValidationError {
-    message: String,
-}
-
-fn validate_description(raw: Option<&str>) -> Result<String, DescriptionValidationError> {
-    let raw_description = raw.unwrap_or("");
-    let description = raw_description.trim();
-    if description.is_empty() {
-        return Err(DescriptionValidationError {
-            message: "Description is required. Use short, single-line admin-only context for this invitation link.".into(),
-        });
-    }
-    if raw_description.contains('\n') || raw_description.contains('\r') {
-        return Err(DescriptionValidationError {
-            message: "Description must be a single line.".into(),
-        });
-    }
-    if description.chars().count() > DESCRIPTION_MAX_CHARS {
-        return Err(DescriptionValidationError {
-            message: "Description must be 120 characters or fewer.".into(),
-        });
-    }
-    Ok(description.to_string())
-}
-
-impl CreateLinkForm {
-    fn into_view_values(self) -> crate::views::links::LinkFormValues {
-        crate::views::links::LinkFormValues {
-            description: self.description.unwrap_or_default(),
-            permission: self.permission,
-            approval_required: self.approval_required.is_some(),
-            max_uses: self.max_uses.unwrap_or_default(),
-            expires_in_days: self.expires_in_days.unwrap_or_default(),
-            internal_note: self.internal_note.unwrap_or_default(),
-            selected_repo_ids: self.repo_ids,
-            errors: crate::views::links::LinkFormErrors::default(),
-        }
-    }
 }
 
 async fn load_installation_repos_for_form(
@@ -329,75 +284,18 @@ async fn create_link(
     admin: RequireConsoleAdminOf,
     serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
 ) -> impl IntoResponse {
-    use chrono::{Duration, Utc};
-    use std::str::FromStr;
-
     let now = Utc::now();
-    let permission = match ghinvite_core::Permission::from_str(&form.permission) {
-        Ok(p) => p,
-        Err(_) => {
-            return crate::error::WebError::BadRequest(format!(
-                "invalid permission: {}",
-                form.permission
-            ))
-            .into_response();
+
+    // Loaded once, before validating: the validator needs the available
+    // repositories to resolve the repository scope, and the error path needs
+    // the same list to re-render the form.
+    let repos = load_installation_repos_for_form(&state, &admin).await;
+    let validated = match create_link_form::validate(&form, &repos, now) {
+        Ok(validated) => validated,
+        Err(errors) => {
+            return link_form_response(&admin, None, repos, form.into_view_values(*errors));
         }
     };
-    let approval_required = form.approval_required.is_some();
-    let description = match validate_description(form.description.as_deref()) {
-        Ok(description) => description,
-        Err(error) => {
-            let repos = load_installation_repos_for_form(&state, &admin).await;
-            let mut form_values = form.into_view_values();
-            form_values.errors.summary =
-                vec!["Fix the highlighted fields before creating this invitation link.".into()];
-            form_values.errors.description = Some(error.message);
-
-            let signed_in_login = Some(admin.session.login.clone());
-            let account_login = admin.account.account_login.clone();
-            let html = render(move || {
-                rsx! {
-                    crate::views::links::LinkCreateFormPage {
-                        signed_in_login: signed_in_login.clone(),
-                        flash: None,
-                        account_login: account_login.clone(),
-                        repos: repos.clone(),
-                        form: form_values.clone(),
-                    }
-                }
-            });
-            return Html(html).into_response();
-        }
-    };
-    let max_uses: Option<u32> = form
-        .max_uses
-        .as_deref()
-        .and_then(|s: &str| s.trim().parse::<u32>().ok());
-    let expires_at = form
-        .expires_in_days
-        .as_deref()
-        .and_then(|s: &str| s.trim().parse::<i64>().ok())
-        .map(|d| now + Duration::days(d));
-    let internal_note = form
-        .internal_note
-        .as_deref()
-        .map(|s: &str| s.trim().to_string())
-        .filter(|s: &String| !s.is_empty());
-
-    let installation_repos = load_installation_repos_for_form(&state, &admin).await;
-    let repos: Vec<ghinvite_core::InvitationLinkRepo> = installation_repos
-        .into_iter()
-        .filter(|r| form.repo_ids.contains(&r.id))
-        .map(|r| ghinvite_core::InvitationLinkRepo {
-            repo_id: r.id,
-            repo_full_name: r.full_name,
-        })
-        .collect();
-
-    if repos.is_empty() {
-        return crate::error::WebError::BadRequest("select at least one repository".into())
-            .into_response();
-    }
 
     let output = match state
         .commands
@@ -406,13 +304,13 @@ async fn create_link(
             account_id: admin.account.account_id,
             created_by: admin.session.user_id,
             created_at: now,
-            expires_at,
-            max_uses,
-            permission,
-            approval_required,
-            description,
-            internal_note,
-            repos,
+            expires_at: validated.expires_at,
+            max_uses: validated.max_uses,
+            permission: validated.permission,
+            approval_required: validated.approval_required,
+            description: validated.description,
+            internal_note: validated.internal_note,
+            repos: validated.repos,
         })
         .await
     {
@@ -761,51 +659,4 @@ async fn not_found(admin: RequireConsoleAdminOf) -> impl IntoResponse {
 
 async fn plain_not_found() -> impl IntoResponse {
     crate::error::WebError::NotFound
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_description;
-
-    #[test]
-    fn description_validation_trims_valid_input() {
-        assert_eq!(
-            validate_description(Some("  AI coding workshop  ")).unwrap(),
-            "AI coding workshop"
-        );
-    }
-
-    #[test]
-    fn description_validation_requires_value() {
-        let err = validate_description(None).unwrap_err();
-        assert_eq!(
-            err.message,
-            "Description is required. Use short, single-line admin-only context for this invitation link."
-        );
-
-        let err = validate_description(Some("   ")).unwrap_err();
-        assert_eq!(
-            err.message,
-            "Description is required. Use short, single-line admin-only context for this invitation link."
-        );
-    }
-
-    #[test]
-    fn description_validation_rejects_multiline_text() {
-        let err = validate_description(Some("AI\nworkshop")).unwrap_err();
-        assert_eq!(err.message, "Description must be a single line.");
-
-        let err = validate_description(Some("AI workshop\n")).unwrap_err();
-        assert_eq!(err.message, "Description must be a single line.");
-
-        let err = validate_description(Some("\rAI workshop")).unwrap_err();
-        assert_eq!(err.message, "Description must be a single line.");
-    }
-
-    #[test]
-    fn description_validation_rejects_over_120_characters() {
-        let too_long = "x".repeat(121);
-        let err = validate_description(Some(&too_long)).unwrap_err();
-        assert_eq!(err.message, "Description must be 120 characters or fewer.");
-    }
 }

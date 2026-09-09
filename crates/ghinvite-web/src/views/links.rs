@@ -1,6 +1,7 @@
 //! Invitation-link views: create form + detail page.
 
 use crate::session::Flash;
+use crate::views::forms::{Field, FieldKind};
 use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
@@ -28,10 +29,15 @@ pub struct LinkFormValues {
     pub errors: LinkFormErrors,
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LinkFormErrors {
     pub summary: Vec<String>,
     pub description: Option<String>,
+    pub permission: Option<String>,
+    pub max_uses: Option<String>,
+    pub expires_in_days: Option<String>,
+    /// Section-level error for the repository checkbox group.
+    pub repo_scope: Option<String>,
 }
 
 impl Default for LinkFormValues {
@@ -53,17 +59,6 @@ impl Default for LinkFormValues {
 pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     let login = props.account_login.clone();
     let perms = ["pull", "triage", "push", "maintain", "admin"];
-    let has_description_error = props.form.errors.description.is_some();
-    let description_class = if has_description_error {
-        "input input-bordered input-error w-full"
-    } else {
-        "input input-bordered w-full"
-    };
-    let description_described_by = if has_description_error {
-        "description-help description-error"
-    } else {
-        "description-help"
-    };
 
     rsx! {
         ConsoleLayout {
@@ -101,28 +96,25 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 h2 { class: "text-base font-semibold", "Link details" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Name the admin purpose for this invitation link and keep optional notes separate." }
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "description", span { class: "label-text font-medium", "Description" } }
-                                {if has_description_error {
-                                    rsx! {
-                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_invalid: "true", aria_describedby: "{description_described_by}" }
-                                    }
-                                } else {
-                                    rsx! {
-                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_describedby: "{description_described_by}" }
-                                    }
-                                }}
-                                p { id: "description-help", class: "text-sm text-base-content/65", "Visible only to admins. Use a short purpose or audience for this invitation link." }
-                                {if let Some(message) = props.form.errors.description.as_ref() {
-                                    rsx! { p { id: "description-error", class: "text-sm font-medium text-error", "{message}" } }
-                                } else {
-                                    rsx! {}
-                                }}
+                            Field {
+                                id: "description",
+                                name: "description",
+                                label: "Description",
+                                kind: FieldKind::Text { maxlength: Some(120) },
+                                value: props.form.description.clone(),
+                                required: true,
+                                placeholder: "AI coding workshop",
+                                help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
+                                error: props.form.errors.description.clone(),
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
-                                textarea { id: "internal_note", name: "internal_note", class: "textarea textarea-bordered w-full", placeholder: "Why this link exists", "{props.form.internal_note}" }
-                                p { class: "text-sm text-base-content/65", "Optional admin-only notes. Not visible in the invitation request flow." }
+                            Field {
+                                id: "internal_note",
+                                name: "internal_note",
+                                label: "Internal note",
+                                kind: FieldKind::Textarea { rows: None },
+                                value: props.form.internal_note.clone(),
+                                placeholder: "Why this link exists",
+                                help: "Optional admin-only notes. Not visible in the invitation request flow.",
                             }
                         }
                     }
@@ -132,15 +124,40 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 h2 { class: "text-base font-semibold", "Access configuration" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and repositories included in this invitation link." }
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
-                                select { id: "permission", name: "permission", class: "select select-bordered w-full",
-                                    {perms.iter().map(|p| {
-                                        let selected = props.form.permission == *p;
-                                        rsx! { option { value: "{p}", selected: selected, "{p}" } }
-                                    })}
+                            // Hand-written rather than a `Field` (which has no
+                            // select kind yet); same id scheme and aria wiring.
+                            {
+                                let has_error = props.form.errors.permission.is_some();
+                                let select_class = if has_error {
+                                    "select select-bordered select-error w-full"
+                                } else {
+                                    "select select-bordered w-full"
+                                };
+                                let described_by = if has_error {
+                                    "permission-help permission-error"
+                                } else {
+                                    "permission-help"
+                                };
+                                rsx! {
+                                    div { class: "form-control gap-2",
+                                        label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
+                                        select {
+                                            id: "permission",
+                                            name: "permission",
+                                            class: "{select_class}",
+                                            aria_describedby: "{described_by}",
+                                            aria_invalid: if has_error { "true" },
+                                            {perms.iter().map(|p| {
+                                                let selected = props.form.permission == *p;
+                                                rsx! { option { value: "{p}", selected: selected, "{p}" } }
+                                            })}
+                                        }
+                                        p { id: "permission-help", class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
+                                        {props.form.errors.permission.as_ref().map(|message| rsx! {
+                                            p { id: "permission-error", class: "text-sm font-medium text-error", "{message}" }
+                                        })}
+                                    }
                                 }
-                                p { class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
                             }
                             div { class: "alert alert-warning shadow-sm",
                                 span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
@@ -161,15 +178,24 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
                             }
                             div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
-                                div { class: "form-control gap-2",
-                                    label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max use" } }
-                                    input { id: "max_uses", r#type: "number", name: "max_uses", value: "{props.form.max_uses}", class: "input input-bordered w-full", min: "1", placeholder: "Unlimited" }
-                                    p { class: "text-sm text-base-content/65", "Blank means unlimited invitation requests." }
+                                Field {
+                                    id: "max_uses",
+                                    name: "max_uses",
+                                    label: "Max use",
+                                    kind: FieldKind::Number { min: Some(1), max: None },
+                                    value: props.form.max_uses.clone(),
+                                    placeholder: "Unlimited",
+                                    help: "Blank means unlimited invitation requests.",
+                                    error: props.form.errors.max_uses.clone(),
                                 }
-                                div { class: "form-control gap-2",
-                                    label { class: "label", r#for: "expires_in_days", span { class: "label-text font-medium", "Expires in days" } }
-                                    input { id: "expires_in_days", r#type: "number", name: "expires_in_days", value: "{props.form.expires_in_days}", class: "input input-bordered w-full", min: "1" }
-                                    p { class: "text-sm text-base-content/65", "Default is 30 days. Blank creates an invitation link with no expiration." }
+                                Field {
+                                    id: "expires_in_days",
+                                    name: "expires_in_days",
+                                    label: "Expires in days",
+                                    kind: FieldKind::Number { min: Some(1), max: None },
+                                    value: props.form.expires_in_days.clone(),
+                                    help: "Default is 30 days. Blank creates an invitation link with no expiration.",
+                                    error: props.form.errors.expires_in_days.clone(),
                                 }
                             }
                         }
@@ -177,14 +203,35 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     section { class: "mac-panel",
                         div { class: "space-y-4 p-4",
                             div {
-                                h2 { class: "text-base font-semibold", "Repository scope" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
+                                h2 { id: "repo_ids-label", class: "text-base font-semibold", "Repository scope" }
+                                p { id: "repo_ids-help", class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
                             }
                             {if props.repos.is_empty() {
                                 rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
                             } else {
+                                // The checkbox group is the "control" for the
+                                // repository scope: labelled by the heading,
+                                // described by the help text and, on failure,
+                                // the error under the list (same id scheme as
+                                // `Field`).
+                                let has_error = props.form.errors.repo_scope.is_some();
+                                let group_class = if has_error {
+                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-error bg-base-200 p-3"
+                                } else {
+                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3"
+                                };
+                                let described_by = if has_error {
+                                    "repo_ids-help repo_ids-error"
+                                } else {
+                                    "repo_ids-help"
+                                };
                                 rsx! {
-                                    div { class: "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3",
+                                    div {
+                                        id: "repo_ids",
+                                        role: "group",
+                                        class: "{group_class}",
+                                        aria_labelledby: "repo_ids-label",
+                                        aria_describedby: "{described_by}",
                                         {props.repos.iter().map(|repo| {
                                             let id = repo.id;
                                             let checked = props.form.selected_repo_ids.contains(&id);
@@ -199,6 +246,9 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                     }
                                 }
                             }}
+                            {props.form.errors.repo_scope.as_ref().map(|message| rsx! {
+                                p { id: "repo_ids-error", class: "text-sm font-medium text-error", "{message}" }
+                            })}
                         }
                     }
                     div { class: "flex justify-end",
@@ -442,9 +492,20 @@ mod tests {
         assert!(html.contains("Access configuration"));
         assert!(html.contains("Link details"));
         assert!(html.contains("name=\"description\""));
+        assert_eq!(html.matches("name=\"description\"").count(), 1);
         assert!(html.contains("required"));
         assert!(html.contains("maxlength=\"120\""));
         assert!(html.contains("AI coding workshop"));
+        assert!(html.contains("aria-describedby=\"description-help\""));
+        assert!(html.contains("id=\"description-help\""));
+        assert!(!html.contains("aria-invalid"));
+        assert!(html.contains("aria-describedby=\"internal_note-help\""));
+        assert!(html.contains("id=\"internal_note-help\""));
+        assert!(html.contains("aria-describedby=\"max_uses-help\""));
+        assert!(html.contains("aria-describedby=\"expires_in_days-help\""));
+        assert!(html.contains("name=\"max_uses\" value=\"\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"30\""));
+        assert!(html.contains("min=\"1\""));
         assert!(html.find("Link details").unwrap() < html.find("Access configuration").unwrap());
         assert!(html.contains("<title>New invitation link · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
@@ -479,6 +540,7 @@ mod tests {
                 summary: vec!["Fix the highlighted fields before creating this invitation link."
                     .to_string()],
                 description: Some("Description is required. Use short, single-line admin-only context for this invitation link.".to_string()),
+                ..LinkFormErrors::default()
             },
         };
 
@@ -504,7 +566,10 @@ mod tests {
         assert!(html.contains("aria-live=\"polite\""));
         assert!(html.contains("id=\"description-error\""));
         assert!(html.contains("aria-invalid=\"true\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
         assert!(html.contains("aria-describedby=\"description-help description-error\""));
+        assert!(html.contains("input-error"));
+        assert_eq!(html.matches("name=\"description\"").count(), 1);
         assert!(html.contains("value=\"push\" selected"));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
         assert!(html.contains("name=\"max_uses\" value=\"7\""));
@@ -512,6 +577,287 @@ mod tests {
         assert!(html.contains("Keep this note"));
         assert!(html.contains("value=\"10\" checked"));
         assert!(html.contains("value=\"11\""));
+    }
+
+    #[test]
+    fn link_create_form_renders_numeric_guardrail_errors_and_preserved_raw_values() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            max_uses: "abc".to_string(),
+            expires_in_days: "0".to_string(),
+            selected_repo_ids: vec![10],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                max_uses: Some("Max use must be a whole number of 1 or more.".to_string()),
+                expires_in_days: Some(
+                    "Expiration must be a whole number of days, 1 or more.".to_string(),
+                ),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: vec![
+                        ghinvite_github::payloads::GhRepo { id: 10, full_name: "acme/api".to_string(), private: true },
+                    ],
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
+        assert!(html.contains(
+            "<p id=\"max_uses-error\" class=\"text-sm font-medium text-error\">Max use must be a whole number of 1 or more.</p>"
+        ));
+        assert!(html.contains(
+            "<p id=\"expires_in_days-error\" class=\"text-sm font-medium text-error\">Expiration must be a whole number of days, 1 or more.</p>"
+        ));
+        assert!(html.contains("aria-describedby=\"max_uses-help max_uses-error\""));
+        assert!(html.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 2);
+        assert_eq!(html.matches("input-error").count(), 2);
+        assert!(html.contains("name=\"max_uses\" value=\"abc\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"0\""));
+        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(!html.contains("description-error"));
+        assert!(html.contains("value=\"10\" checked"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_renders_permission_error_under_select_with_preserved_values() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            // A tampered value: not one of the rendered options, so no option
+            // can be marked selected and the browser falls back to the first.
+            permission: "owner".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                permission: Some(
+                    "Choose a supported permission level: pull, triage, push, maintain, or admin."
+                        .to_string(),
+                ),
+                ..LinkFormErrors::default()
+            },
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
+        assert!(html.contains(
+            "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">Choose a supported permission level: pull, triage, push, maintain, or admin.</p>"
+        ));
+        assert!(html.contains("aria-describedby=\"permission-help permission-error\""));
+        assert!(html.contains("id=\"permission-help\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
+        assert!(html.contains("select-error"));
+        assert!(
+            html.find("name=\"permission\"").unwrap()
+                < html.find("id=\"permission-error\"").unwrap(),
+            "error is rendered under the permission select"
+        );
+        // The tampered value is never echoed into the markup; the select
+        // still lists exactly the five supported levels, none pre-selected.
+        assert!(!html.contains("owner"));
+        assert_eq!(html.matches("<option").count(), 5);
+        assert!(!html.contains("\" selected"));
+        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
+        assert!(html.contains("name=\"max_uses\" value=\"7\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
+        assert!(html.contains("Keep this note"));
+        assert!(html.contains("value=\"11\" checked"));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("description-error"));
+        assert!(!html.contains("repo_ids-error"));
+        assert!(!html.contains("input-error"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_permission_select_is_described_by_help_without_error() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: LinkFormValues::default(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"permission\""));
+        assert!(html.contains("name=\"permission\""));
+        assert!(html.contains("id=\"permission-help\""));
+        assert!(html.contains("aria-describedby=\"permission-help\""));
+        assert!(!html.contains("permission-error"));
+        assert!(!html.contains("select-error"));
+        assert!(!html.contains("aria-invalid"));
+        assert!(html.contains("value=\"pull\" selected"));
+        assert_eq!(html.matches("<option").count(), 5);
+    }
+
+    fn acme_repos() -> Vec<ghinvite_github::payloads::GhRepo> {
+        vec![
+            ghinvite_github::payloads::GhRepo {
+                id: 10,
+                full_name: "acme/api".to_string(),
+                private: true,
+            },
+            ghinvite_github::payloads::GhRepo {
+                id: 11,
+                full_name: "acme/web".to_string(),
+                private: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn link_create_form_repository_group_is_labelled_and_described_without_error() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: LinkFormValues::default(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"repo_ids-label\""));
+        assert!(html.contains("id=\"repo_ids-help\""));
+        assert!(html.contains("id=\"repo_ids\""));
+        assert!(html.contains("role=\"group\""));
+        assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
+        assert!(html.contains("aria-describedby=\"repo_ids-help\""));
+        assert!(!html.contains("repo_ids-error"));
+        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("border-error"));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("value=\"11\" checked"));
+    }
+
+    #[test]
+    fn link_create_form_renders_repository_scope_error_under_group_with_preserved_selection() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            // 11 is available and stays checked; 999 is unknown and must not
+            // surface anywhere in the markup.
+            selected_repo_ids: vec![999, 11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                repo_scope: Some(
+                    "Repository scope is required. Select at least one available repository for this invitation link."
+                        .to_string(),
+                ),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains(
+            "<p id=\"repo_ids-error\" class=\"text-sm font-medium text-error\">Repository scope is required. Select at least one available repository for this invitation link.</p>"
+        ));
+        assert!(html.contains("role=\"group\""));
+        assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
+        assert!(html.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
+        // ARIA does not permit aria-invalid on role="group"; the error is
+        // associated through aria-describedby and the visible border only.
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 0);
+        assert!(html.contains("border-error"));
+        assert!(
+            html.find("name=\"repo_ids\"").unwrap() < html.find("id=\"repo_ids-error\"").unwrap(),
+            "error is rendered under the repository list"
+        );
+        assert!(html.contains("value=\"11\" checked"));
+        assert!(html.contains("value=\"10\""));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("999"));
+        assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
+        assert!(!html.contains("description-error"));
+        assert!(!html.contains("input-error"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_renders_repository_scope_error_when_no_repositories_are_available() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                repo_scope: Some("Repository scope is required. Select at least one available repository for this invitation link.".to_string()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: vec![],
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("No repositories are available for this installation."));
+        assert!(html.contains("id=\"repo_ids-error\""));
+        assert!(html.contains("Repository scope is required."));
+        assert!(!html.contains("name=\"repo_ids\""));
     }
 
     #[test]
