@@ -84,6 +84,35 @@ per-request from `state.github_transport` plus the session's access token.
 - Built CSS is `.gitignore`d — it's a build artifact. CI / Plan 7 deploy runs
   `npm run build:css` before `cargo build`.
 
+## Client-side JavaScript and the Content-Security-Policy
+
+Every HTML response carries an enforced `Content-Security-Policy`
+(`src/middleware/csp.rs`, mounted once in `build_app`). The policy is
+`script-src 'self' 'wasm-unsafe-eval'` and `style-src 'self'`, so:
+
+- **No inline `<script>` blocks.** Not in layouts, not in pages, not in
+  components. The browser will refuse to run them. Rendered HTML must contain
+  exactly one script element: `<script src="/static/app.js"></script>` in the
+  layout `<head>` (`views::components::AppScript`).
+- **Client behaviour goes in `assets/app.js`**, served at `/static/app.js`
+  (`include_str!`, like the CSS). It runs on every page, so each section must
+  guard for the absence of the elements it wires — prefer `data-*` hooks in
+  the markup plus delegated `document` listeners, as the theme sync and the
+  invitation-code shortcut do. Richer interactivity is a Dioxus island per
+  [ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md), not a new
+  script tag.
+- **No inline `style=""` attributes** and no external stylesheets or fonts;
+  use Tailwind/DaisyUI classes in the built stylesheet.
+- The policy is a single constant, `middleware::csp::CONTENT_SECURITY_POLICY`.
+  If a page genuinely needs a new origin (for example GitHub avatars under
+  `img-src`), extend that constant and its per-directive rationale rather
+  than weakening it with `'unsafe-inline'`. Route tests assert the header on
+  the home page, a Console page, and a public invitation page; view tests
+  assert that no inline script remains.
+
+The header is only set on `text/html` responses — static assets, the JSON
+webhook receiver, plain-text errors, and redirects are left alone.
+
 ## What this crate does NOT do (yet)
 
 - **Dashboard routes** (`/accounts/{login}/...`) — Plan 5. Currently 501 stubs.

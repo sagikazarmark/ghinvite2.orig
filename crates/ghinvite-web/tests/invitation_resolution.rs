@@ -552,6 +552,46 @@ async fn signed_in_landing_renders_merged_request_form() {
 }
 
 #[tokio::test]
+async fn signed_in_landing_carries_csp_and_only_external_script() {
+    let (app, _calls) = build_test_app(
+        active_link(ACTIVE_SLUG),
+        None,
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap()),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY)
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Request repository access"));
+    let external = "<script src=\"/static/app.js\"></script>";
+    assert!(text.contains(external));
+    assert_eq!(
+        text.matches("<script").count(),
+        text.matches(external).count(),
+        "invitation HTML contains an inline <script> block"
+    );
+}
+
+#[tokio::test]
 async fn signed_in_landing_shows_pending_status_instead_of_form() {
     let link = active_link(ACTIVE_SLUG);
     let pending = pending_request(RequestId::new(), link.id, REQUESTER_ID);

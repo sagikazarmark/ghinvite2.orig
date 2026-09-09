@@ -1,34 +1,11 @@
 //! Public home page.
+//!
+//! The signed-in variant renders the invitation-code shortcut as plain markup
+//! with `data-*` hooks; the behaviour lives in `assets/app.js` (served at
+//! `/static/app.js`), never inline — the CSP blocks inline scripts.
 
 use crate::views::layouts::HomeLayout;
 use dioxus::prelude::*;
-
-const INVITATION_CODE_SCRIPT: &str = r#"
-(function () {
-  document.addEventListener('click', function (event) {
-    var button = event.target.closest('[data-open-invitation-code]');
-    if (!button) return;
-    openInvitationCode();
-  });
-  document.addEventListener('keydown', function (event) {
-    if (event.key !== 'Enter' || !event.target.matches('[data-invitation-code-input]')) return;
-    event.preventDefault();
-    openInvitationCode();
-  });
-  function openInvitationCode() {
-    var input = document.querySelector('[data-invitation-code-input]');
-    var message = document.querySelector('[data-invitation-code-message]');
-    var code = input ? input.value.trim() : '';
-    if (!code) {
-      if (message) message.textContent = 'Enter an invitation code first.';
-      if (input) input.focus();
-      return;
-    }
-    if (message) message.textContent = '';
-    window.location.href = '/i/' + encodeURIComponent(code);
-  }
-})();
-"#;
 
 #[derive(Clone, PartialEq, Props)]
 pub struct HomePageProps {
@@ -76,7 +53,6 @@ pub fn HomePage(props: HomePageProps) -> Element {
                                         a { class: "btn btn-outline min-h-10", href: "/console", "Create invitation link" }
                                     }
                                 }
-                                script { "{INVITATION_CODE_SCRIPT}" }
                             },
                             None => rsx! {
                                 section { class: "p-6 text-center sm:p-8",
@@ -110,5 +86,31 @@ mod tests {
 
         assert!(html.contains("Open invitation link"));
         assert!(!html.contains("Open invitation</button>"));
+    }
+
+    #[test]
+    fn signed_in_home_exposes_invitation_code_hooks_without_inline_script() {
+        let html = crate::views::render::render(|| {
+            rsx! { HomePage { signed_in_login: Some("octocat".to_string()) } }
+        });
+
+        assert!(html.contains("data-invitation-code-input=\"true\""));
+        assert!(html.contains("data-open-invitation-code=\"true\""));
+        assert!(html.contains("data-invitation-code-message=\"true\""));
+        assert!(html.contains("<script src=\"/static/app.js\"></script>"));
+        assert_eq!(
+            html.matches("<script").count(),
+            1,
+            "home page must not render an inline <script> block"
+        );
+        assert!(!html.contains("encodeURIComponent"));
+    }
+
+    #[test]
+    fn signed_out_home_has_no_inline_script() {
+        let html = crate::views::render::render(|| rsx! { HomePage { signed_in_login: None } });
+
+        assert!(html.contains("<script src=\"/static/app.js\"></script>"));
+        assert_eq!(html.matches("<script").count(), 1);
     }
 }
