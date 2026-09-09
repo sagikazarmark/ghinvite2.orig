@@ -1325,6 +1325,7 @@ dependencies = [
  "dioxus-ssr",
  "ghinvite-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

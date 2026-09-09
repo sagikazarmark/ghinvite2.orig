@@ -28,3 +28,4 @@ serde.workspace = true
 # production renderer lives in `ghinvite-web` (`views::render`).
 [dev-dependencies]
 dioxus-ssr.workspace = true
+serde_json.workspace = true

@@ -14,6 +14,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use dioform_core::{FieldIdentity, Form, FormCore};
 use dioform_derive::Form;
 use ghinvite_core::{InvitationLinkRepo, Permission};
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
 /// The new invitation link form as the admin fills it in.
@@ -41,7 +42,8 @@ pub struct CreateLinkForm {
 /// This is the form's own shape, not the GitHub API payload: the web route
 /// maps the installation's repository list into it at the boundary, so this
 /// crate (and any browser build of it) never depends on the GitHub client.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Serialised into the island's props blob.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryChoice {
     /// GitHub repository id, submitted as the `repo_ids` checkbox value.
     pub id: u64,
@@ -55,8 +57,9 @@ pub struct RepositoryChoice {
 /// Built by [`LinkFormErrors::attach`]ing messages keyed by the model's
 /// [`FieldIdentity`], so the mapping from a dioform error to a slot is by
 /// identity, not position. The typed fields stay public because the view reads
-/// them directly (and tests build them literally).
-#[derive(Clone, Debug, Default, PartialEq)]
+/// them directly (and tests build them literally). Serialised into the
+/// island's props blob so the browser starts from the server's errors.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LinkFormErrors {
     /// Shown in the alert above the form: the summary line, followed by any
     /// form-level messages that have no control of their own.

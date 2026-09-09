@@ -6,6 +6,16 @@
 //! never hand-write two near-identical control branches to toggle
 //! `aria-invalid`. (Form *models* and their validators live in modules such
 //! as [`crate::link_form`]; this module is markup only.)
+//!
+//! Controls that `Field` does not render itself (a `<select>`, a checkbox
+//! group) reuse the same building blocks — [`described_by`], [`help_text`],
+//! [`error_text`], [`listeners`] — so every control follows one id scheme:
+//! `{id}`, `{id}-help`, `{id}-error`.
+//!
+//! The optional `oninput` / `onchange` / `onblur` props exist for the browser
+//! island, which renders these same components reactively. Server-side
+//! rendering ignores listeners entirely, so with or without handlers the SSR
+//! markup is byte-identical.
 
 use dioxus::prelude::*;
 
@@ -44,6 +54,12 @@ pub struct FieldProps {
     /// Field-level error rendered as `<p id="{id}-error">` under the help text.
     /// Its presence is what sets `aria-invalid` and the error styling.
     pub error: Option<String>,
+    /// Fired as the value changes (island only; ignored by SSR).
+    pub oninput: Option<EventHandler<FormEvent>>,
+    /// Fired when the value is committed (island only; ignored by SSR).
+    pub onchange: Option<EventHandler<FormEvent>>,
+    /// Fired when focus leaves the control (island only; ignored by SSR).
+    pub onblur: Option<EventHandler<FocusEvent>>,
 }
 
 /// A labelled form control with optional help text and field-level error.
@@ -62,6 +78,7 @@ pub fn Field(props: FieldProps) -> Element {
         props.help.as_ref().map(|_| help_id.as_str()),
         props.error.as_ref().map(|_| error_id.as_str()),
     );
+    let listeners = listeners(props.oninput, props.onchange, props.onblur);
 
     let control = match &props.kind {
         FieldKind::Textarea { rows } => {
@@ -81,6 +98,7 @@ pub fn Field(props: FieldProps) -> Element {
                     placeholder: props.placeholder.clone(),
                     aria_invalid: if has_error { "true" },
                     aria_describedby: described_by,
+                    ..listeners,
                     "{props.value}"
                 }
             }
@@ -88,6 +106,7 @@ pub fn Field(props: FieldProps) -> Element {
         FieldKind::Text { maxlength } => input_control(
             &props,
             described_by,
+            listeners,
             InputAttrs {
                 input_type: "text",
                 inputmode: None,
@@ -99,6 +118,7 @@ pub fn Field(props: FieldProps) -> Element {
         FieldKind::Number { min, max } => input_control(
             &props,
             described_by,
+            listeners,
             InputAttrs {
                 input_type: "number",
                 inputmode: Some("numeric"),
@@ -115,12 +135,8 @@ pub fn Field(props: FieldProps) -> Element {
                 span { class: "label-text font-medium", "{props.label}" }
             }
             {control}
-            {props.help.as_ref().map(|help| rsx! {
-                p { id: "{help_id}", class: "text-sm text-base-content/65", "{help}" }
-            })}
-            {props.error.as_ref().map(|message| rsx! {
-                p { id: "{error_id}", class: "text-sm font-medium text-error", "{message}" }
-            })}
+            {help_text(&help_id, props.help.as_deref())}
+            {error_text(&error_id, props.error.as_deref())}
         }
     }
 }
@@ -137,7 +153,12 @@ struct InputAttrs {
 }
 
 /// The single `<input>` element used by every non-textarea kind.
-fn input_control(props: &FieldProps, described_by: Option<String>, attrs: InputAttrs) -> Element {
+fn input_control(
+    props: &FieldProps,
+    described_by: Option<String>,
+    listeners: Vec<Attribute>,
+    attrs: InputAttrs,
+) -> Element {
     let class = if props.error.is_some() {
         "input input-bordered input-error w-full"
     } else {
@@ -158,18 +179,59 @@ fn input_control(props: &FieldProps, described_by: Option<String>, attrs: InputA
             placeholder: props.placeholder.clone(),
             aria_invalid: if props.error.is_some() { "true" },
             aria_describedby: described_by,
+            ..listeners,
         }
     }
 }
 
+/// The event listeners a reactive caller asked for, as spreadable attributes.
+/// A `None` handler adds nothing, so a control without handlers carries no
+/// listener at all (rather than a no-op one).
+pub(crate) fn listeners(
+    oninput: Option<EventHandler<FormEvent>>,
+    onchange: Option<EventHandler<FormEvent>>,
+    onblur: Option<EventHandler<FocusEvent>>,
+) -> Vec<Attribute> {
+    let mut attrs = Vec::new();
+    if let Some(handler) = oninput {
+        attrs.push(dioxus_elements::events::oninput(handler));
+    }
+    if let Some(handler) = onchange {
+        attrs.push(dioxus_elements::events::onchange(handler));
+    }
+    if let Some(handler) = onblur {
+        attrs.push(dioxus_elements::events::onblur(handler));
+    }
+    attrs
+}
+
 /// Space-separated `aria-describedby` target list, or `None` when the control
 /// has nothing to point at (so the attribute is omitted entirely).
-fn described_by(help_id: Option<&str>, error_id: Option<&str>) -> Option<String> {
+pub(crate) fn described_by(help_id: Option<&str>, error_id: Option<&str>) -> Option<String> {
     let ids: Vec<&str> = help_id.into_iter().chain(error_id).collect();
     if ids.is_empty() {
         None
     } else {
         Some(ids.join(" "))
+    }
+}
+
+/// The help paragraph under a control: `<p id="{id}-help">`, or nothing.
+pub(crate) fn help_text(id: &str, text: Option<&str>) -> Element {
+    rsx! {
+        {text.map(|text| rsx! {
+            p { id: "{id}", class: "text-sm text-base-content/65", "{text}" }
+        })}
+    }
+}
+
+/// The field-level error paragraph under a control: `<p id="{id}-error">`,
+/// or nothing. The `id` is what the control's `aria-describedby` points at.
+pub(crate) fn error_text(id: &str, message: Option<&str>) -> Element {
+    rsx! {
+        {message.map(|message| rsx! {
+            p { id: "{id}", class: "text-sm font-medium text-error", "{message}" }
+        })}
     }
 }
 
@@ -373,6 +435,80 @@ mod tests {
         assert!(html.contains("aria-invalid=\"true\""));
         assert!(html.contains("aria-describedby=\"internal_note-error\""));
         assert!(!html.contains("rows"));
+    }
+
+    #[test]
+    fn field_with_handlers_renders_the_same_markup_as_without() {
+        // The island attaches behaviour through these props; on the server
+        // nothing changes (SSR without `pre_render` emits no listeners).
+        let plain = render(|| {
+            rsx! {
+                Field {
+                    id: "description",
+                    name: "description",
+                    label: "Description",
+                    kind: FieldKind::Text { maxlength: Some(120) },
+                    value: "AI coding workshop",
+                    required: true,
+                    help: "Visible only to admins.",
+                    error: "Description is required.",
+                }
+            }
+        });
+        let wired = render(|| {
+            rsx! {
+                Field {
+                    id: "description",
+                    name: "description",
+                    label: "Description",
+                    kind: FieldKind::Text { maxlength: Some(120) },
+                    value: "AI coding workshop",
+                    required: true,
+                    help: "Visible only to admins.",
+                    error: "Description is required.",
+                    oninput: move |_event: FormEvent| {},
+                    onchange: move |_event: FormEvent| {},
+                    onblur: move |_event: FocusEvent| {},
+                }
+            }
+        });
+
+        assert_eq!(wired, plain);
+        assert!(!wired.contains("oninput"));
+        assert!(!wired.contains("onchange"));
+        assert!(!wired.contains("onblur"));
+    }
+
+    #[test]
+    fn textarea_field_with_handlers_renders_the_same_markup_as_without() {
+        let plain = render(|| {
+            rsx! {
+                Field {
+                    id: "internal_note",
+                    name: "internal_note",
+                    label: "Internal note",
+                    kind: FieldKind::Textarea { rows: None },
+                    value: "Keep this note",
+                    help: "Optional admin-only notes.",
+                }
+            }
+        });
+        let wired = render(|| {
+            rsx! {
+                Field {
+                    id: "internal_note",
+                    name: "internal_note",
+                    label: "Internal note",
+                    kind: FieldKind::Textarea { rows: None },
+                    value: "Keep this note",
+                    help: "Optional admin-only notes.",
+                    oninput: move |_event: FormEvent| {},
+                    onblur: move |_event: FocusEvent| {},
+                }
+            }
+        });
+
+        assert_eq!(wired, plain);
     }
 
     #[test]
