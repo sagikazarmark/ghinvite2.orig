@@ -1,7 +1,7 @@
 //! Invitation-link views: create form + detail page.
 
+use crate::field::{Field, FieldKind};
 use crate::flash::Flash;
-use crate::forms::{Field, FieldKind};
 use crate::layouts::ConsoleLayout;
 use crate::link_form::{CreateLinkForm, LinkFormErrors, RepositoryChoice};
 use chrono::{DateTime, Utc};

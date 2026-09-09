@@ -87,15 +87,27 @@ per-request from `state.github_transport` plus the session's access token.
 ### Views and the `ghinvite-ui` crate
 
 The Dioxus components (layouts, pages, the `Field` form primitive, `Flash`)
-live in `crates/ghinvite-ui`, which depends only on `dioxus`, `ghinvite-core`,
-`chrono`, and `serde` — never on this crate, the GitHub client, or storage
+and the shared new-invitation-link form model (`link_form`) live in
+`crates/ghinvite-ui`, which depends only on `dioxus`, `dioform-core` +
+`dioform-derive`, `ghinvite-core`, `chrono`, and `serde` — never on this
+crate, the GitHub client, or storage
 ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). This crate
 re-exports them as `ghinvite_web::views::*` and adds `views::render`, the
 `dioxus_ssr` renderer the routes call. `session::Flash` is a re-export of
 `ghinvite_ui::flash::Flash`. Data crosses into the views as plain props: for
 example the console route maps the GitHub `GhRepo` payload into
-`views::links::RepositoryChoice` once, where repositories are loaded, and both
-`forms::create_link::validate` and the form page work on that type.
+`views::link_form::RepositoryChoice` once, where repositories are loaded, and
+both validation and the form page work on that type.
+
+### Form validation
+
+`forms::create_link` is a thin adapter over the shared model: it parses the
+raw POST body (`CreateLinkSubmission`) into `link_form::CreateLinkForm` with
+the shared parsers, runs `link_form::register_validators` through a
+`dioform_core::FormCore`, and maps each error to `LinkFormErrors` by field
+identity. The `FormCore` holds `Rc` and is not `Send`, so the route loads the
+available repositories first and validates synchronously afterwards; the
+core never crosses an `.await`. No validation rule lives in this crate.
 
 **Build client-side crates with `-p`, never
 `cargo build --workspace --target wasm32-unknown-unknown`.** Throughout this
