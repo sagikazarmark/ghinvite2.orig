@@ -15,89 +15,15 @@ pub struct NavProps {
     pub signed_in_login: Option<String>,
 }
 
-const THEME_SYNC_SCRIPT: &str = r#"
-(function () {
-  var key = 'ghinvite-theme';
-  var light = 'ghinvite';
-  var dark = 'ghinvite-dark';
-
-  function valid(value) {
-    return value === light || value === dark;
-  }
-
-  function toggleLabel(theme) {
-    return theme === dark ? 'Switch to light theme' : 'Switch to dark theme';
-  }
-
-  function nextTheme(theme) {
-    return theme === dark ? light : dark;
-  }
-
-  var moonPath = 'M20.25 14.15A7.5 7.5 0 0 1 9.85 3.75a8.25 8.25 0 1 0 10.4 10.4Z';
-  var sunPath = 'M12 4.5V3m0 18v-1.5M4.5 12H3m18 0h-1.5M6.34 6.34 5.28 5.28m13.44 13.44-1.06-1.06m0-11.32 1.06-1.06M5.28 18.72l1.06-1.06M16.5 12a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Z';
-
-  function syncToggle(button, theme) {
-    var label = toggleLabel(theme);
-    var darkActive = theme === dark;
-    button.setAttribute('aria-label', label);
-    button.setAttribute('title', label);
-    button.setAttribute('aria-pressed', darkActive ? 'true' : 'false');
-    button.setAttribute('data-current-theme', theme);
-    button.setAttribute('data-theme-value', nextTheme(theme));
-
-    var icon = button.querySelector('[data-theme-icon]');
-    if (icon) {
-      icon.setAttribute('data-current-icon', darkActive ? 'sun' : 'moon');
-    }
-    var path = button.querySelector('[data-theme-icon-path]');
-    if (path) {
-      path.setAttribute('d', darkActive ? sunPath : moonPath);
-    }
-  }
-
-  function apply(value) {
-    var theme = valid(value) ? value : light;
-    document.documentElement.setAttribute('data-theme', theme);
-    if (document.body) {
-      document.body.setAttribute('data-theme', theme);
-    }
-    var toggleSelector = '[data-theme-' + 'toggle]';
-    var toggles = document.querySelectorAll(toggleSelector);
-    for (var i = 0; i < toggles.length; i += 1) {
-      syncToggle(toggles[i], theme);
-    }
-  }
-
-  var stored = light;
-  try {
-    stored = window.localStorage.getItem(key) || light;
-  } catch (_) {
-    stored = light;
-  }
-  apply(stored);
-
-  document.addEventListener('DOMContentLoaded', function () {
-    apply(stored);
-  });
-
-  document.addEventListener('click', function (event) {
-    var button = event.target.closest(toggleSelector);
-    if (!button) {
-      return;
-    }
-    var next = valid(button.getAttribute('data-theme-value')) ? button.getAttribute('data-theme-value') : nextTheme(stored);
-    stored = next;
-    apply(next);
-    try {
-      window.localStorage.setItem(key, next);
-    } catch (_) {}
-  });
-})();
-"#;
-
+/// The one shared client script (`assets/app.js`, served at `/static/app.js`).
+///
+/// Rendered in every layout's `<head>` as a classic synchronous script — no
+/// `defer`/`async` — so the theme sync runs before first paint. The enforced
+/// Content-Security-Policy (`script-src 'self'`) blocks inline `<script>`
+/// blocks; put new client behaviour in `assets/app.js` or a Dioxus island.
 #[component]
-pub fn ThemeSyncScript() -> Element {
-    rsx! { script { "{THEME_SYNC_SCRIPT}" } }
+pub fn AppScript() -> Element {
+    rsx! { script { src: "/static/app.js" } }
 }
 
 #[component]
@@ -140,7 +66,6 @@ pub fn Nav(props: NavProps) -> Element {
                     }
                 }}
             }
-            ThemeSyncScript {}
         }
     }
 }
@@ -187,8 +112,10 @@ mod tests {
         assert!(html.contains("Console"));
         assert!(html.contains("Sign out"));
         assert!(html.contains("@admin"));
-        assert!(html.contains("window.localStorage.getItem(key)"));
-        assert!(html.contains("window.localStorage.setItem(key, next)"));
+        assert!(
+            !html.contains("<script"),
+            "Nav must not render a script; the shared bundle is loaded from the layout head"
+        );
         assert!(!html.contains("<select"));
         assert!(!html.contains("Install on another account"));
     }

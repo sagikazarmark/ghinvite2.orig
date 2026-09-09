@@ -1,7 +1,7 @@
 //! Three Dioxus layouts: HomeLayout, ConsoleLayout, InvitationLayout.
 //! Each wraps page content in zone-specific chrome (per spec §12).
 
-use crate::views::components::{Footer, Nav, ThemeSyncScript};
+use crate::views::components::{AppScript, Footer, Nav};
 use dioxus::prelude::*;
 
 #[derive(Clone, PartialEq, Props)]
@@ -29,6 +29,7 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
         head {
             title { "{props.title}" }
             link { rel: "stylesheet", href: "/static/styles.css" }
+            AppScript {}
         }
         body {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
@@ -74,6 +75,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
         head {
             title { "{props.title}" }
             link { rel: "stylesheet", href: "/static/styles.css" }
+            AppScript {}
         }
         body {
             class: "console-page min-h-screen bg-base-200 text-base-content antialiased",
@@ -136,6 +138,7 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
                 meta { http_equiv: "refresh", content: "{seconds}" }
             }
             link { rel: "stylesheet", href: "/static/styles.css" }
+            AppScript {}
         }
         body {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
@@ -146,7 +149,6 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
                 span { class: "grid size-5 place-items-center rounded-md bg-primary text-[0.7rem] font-bold text-primary-content", "g" }
                 span { "ghinvite" }
             }
-            ThemeSyncScript {}
             main { class: "min-h-[calc(100vh-3rem)] px-4 py-6",
                 div { class: "mx-auto flex min-h-[calc(100vh-6rem)] w-full max-w-lg items-center",
                     div { class: "mac-panel w-full",
@@ -161,6 +163,81 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const APP_SCRIPT_TAG: &str = "<script src=\"/static/app.js\"></script>";
+
+    /// The shared bundle is loaded once, synchronously, from `<head>` (so theme
+    /// sync runs before first paint) and no inline `<script>` body is rendered.
+    fn assert_head_loads_app_script_only(html: &str) {
+        let head_end = html.find("</head>").expect("layout renders a <head>");
+        let script_at = html
+            .find(APP_SCRIPT_TAG)
+            .expect("layout renders the shared app script");
+        assert!(script_at < head_end, "app script must be in <head>");
+        assert_eq!(html.matches(APP_SCRIPT_TAG).count(), 1);
+        assert_eq!(
+            html.matches("<script").count(),
+            1,
+            "layout must not render inline <script> blocks"
+        );
+        assert!(!html.contains("defer"));
+        assert!(!html.contains("async"));
+    }
+
+    #[test]
+    fn home_layout_loads_app_script_from_head() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                HomeLayout {
+                    signed_in_login: Some("admin".to_string()),
+                    title: "Home".to_string(),
+                    account_login: None,
+                    active_nav: None,
+                    flash: None,
+                    children: rsx! { p { "Home" } },
+                }
+            }
+        });
+
+        assert_head_loads_app_script_only(&html);
+        assert!(html.contains("theme-toggle"));
+    }
+
+    #[test]
+    fn console_layout_loads_app_script_from_head() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                ConsoleLayout {
+                    signed_in_login: Some("admin".to_string()),
+                    title: "Requests".to_string(),
+                    account_login: Some("acme".to_string()),
+                    active_nav: Some("requests".to_string()),
+                    flash: None,
+                    children: rsx! { p { "Queue" } },
+                }
+            }
+        });
+
+        assert_head_loads_app_script_only(&html);
+    }
+
+    #[test]
+    fn invitation_layout_loads_app_script_from_head() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                InvitationLayout {
+                    signed_in_login: None,
+                    title: "Invite".to_string(),
+                    account_login: None,
+                    active_nav: None,
+                    flash: None,
+                    children: rsx! { p { "Invitation" } },
+                }
+            }
+        });
+
+        assert_head_loads_app_script_only(&html);
+    }
 
     #[test]
     fn console_layout_renders_real_sidebar_and_account_control() {
@@ -240,7 +317,7 @@ mod tests {
         assert!(html.contains("href=\"/\""));
         assert!(html.contains("Invitation"));
         assert!(html.contains("mac-panel"));
-        assert!(html.contains("window.localStorage.getItem(key)"));
+        assert!(!html.contains("window.localStorage.getItem(key)"));
         assert!(!html.contains("app-header"));
         assert!(!html.contains("theme-toggle"));
         assert!(!html.contains("Sign in"));

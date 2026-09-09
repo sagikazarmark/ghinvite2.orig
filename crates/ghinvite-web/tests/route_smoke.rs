@@ -13,6 +13,24 @@ fn encoded_return_to(path: &str) -> String {
     url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
 }
 
+/// Every `<script>` in rendered HTML must be the shared static bundle; inline
+/// script bodies are blocked by the CSP.
+fn assert_only_external_app_script(html: &str) {
+    let external = "<script src=\"/static/app.js\"></script>";
+    assert!(html.contains(external), "missing {external}");
+    assert_eq!(
+        html.matches("<script").count(),
+        html.matches(external).count(),
+        "rendered HTML contains an inline <script> block"
+    );
+}
+
+fn csp_header(resp: &axum::response::Response) -> Option<String> {
+    resp.headers()
+        .get("content-security-policy")
+        .map(|v| v.to_str().unwrap().to_string())
+}
+
 async fn build_test_app() -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
     let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
@@ -42,6 +60,11 @@ async fn health_returns_ok() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        csp_header(&resp),
+        None,
+        "non-HTML responses must not carry a CSP"
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
 }
@@ -130,6 +153,11 @@ async fn static_styles_returns_css() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        csp_header(&resp),
+        None,
+        "static assets must not carry a CSP"
+    );
     let ct = resp
         .headers()
         .get("content-type")
@@ -165,6 +193,43 @@ async fn static_styles_returns_css() {
 }
 
 #[tokio::test]
+async fn static_app_js_returns_javascript() {
+    let app = build_test_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/static/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        csp_header(&resp),
+        None,
+        "static assets must not carry a CSP"
+    );
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(ct, "text/javascript; charset=utf-8");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    // Theme sync.
+    assert!(text.contains("'ghinvite-theme'"));
+    assert!(text.contains("window.localStorage.getItem"));
+    assert!(text.contains("data-theme-toggle"));
+    // Invitation-code shortcut.
+    assert!(text.contains("[data-open-invitation-code]"));
+    assert!(text.contains("[data-invitation-code-input]"));
+    assert!(text.contains("Enter an invitation code first."));
+}
+
+#[tokio::test]
 async fn home_returns_html() {
     let app = build_test_app().await;
     let resp = app
@@ -172,6 +237,10 @@ async fn home_returns_html() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        csp_header(&resp).as_deref(),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY)
+    );
     let ct = resp
         .headers()
         .get("content-type")
@@ -181,6 +250,7 @@ async fn home_returns_html() {
     assert!(ct.contains("text/html"));
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
+    assert_only_external_app_script(&text);
     assert!(text.contains("ghinvite"));
     assert!(text.contains("Sign in with GitHub"));
     assert!(text.contains("GitHub repository access"));
@@ -204,8 +274,14 @@ async fn public_unknown_get_returns_html_404() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        csp_header(&resp).as_deref(),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY),
+        "HTML error pages carry the CSP too"
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
+    assert_only_external_app_script(&text);
     assert!(text.contains("Page not found"));
     assert!(text.contains("The link may be incorrect or no longer available."));
     assert!(text.contains("Go home"));
@@ -228,6 +304,7 @@ async fn missing_static_asset_returns_plain_404() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(csp_header(&resp), None);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Not Found");
 }
