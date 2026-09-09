@@ -3,23 +3,10 @@
 use crate::flash::Flash;
 use crate::forms::{Field, FieldKind};
 use crate::layouts::ConsoleLayout;
+use crate::link_form::{LinkFormErrors, RepositoryChoice};
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission};
-
-/// One of the account's available repositories, offered as a repository-scope
-/// option on the new invitation link form.
-///
-/// This is the view's own shape, not the GitHub API payload: the web route
-/// maps the installation's repository list into it at the boundary, so the
-/// views (and any browser build of them) never depend on the GitHub client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepositoryChoice {
-    /// GitHub repository id, submitted as the `repo_ids` checkbox value.
-    pub id: u64,
-    /// `owner/name`, shown as the checkbox label.
-    pub full_name: String,
-}
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormProps {
@@ -31,6 +18,9 @@ pub struct LinkCreateFormProps {
     pub form: LinkFormValues,
 }
 
+/// The new invitation link form as the view renders it: the submitted values
+/// verbatim (so an admin sees exactly what they typed when correcting a
+/// mistake) plus the errors to show next to each control.
 #[derive(Clone, PartialEq)]
 pub struct LinkFormValues {
     pub description: String,
@@ -41,17 +31,6 @@ pub struct LinkFormValues {
     pub internal_note: String,
     pub selected_repo_ids: Vec<u64>,
     pub errors: LinkFormErrors,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LinkFormErrors {
-    pub summary: Vec<String>,
-    pub description: Option<String>,
-    pub permission: Option<String>,
-    pub max_uses: Option<String>,
-    pub expires_in_days: Option<String>,
-    /// Section-level error for the repository checkbox group.
-    pub repo_scope: Option<String>,
 }
 
 impl Default for LinkFormValues {

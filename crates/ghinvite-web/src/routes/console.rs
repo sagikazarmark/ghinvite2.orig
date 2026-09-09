@@ -8,7 +8,7 @@ use crate::forms::create_link::{self as create_link_form, CreateLinkForm};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
-use crate::views::links::RepositoryChoice;
+use crate::views::link_form::RepositoryChoice;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;

@@ -11,7 +11,8 @@
 //! one slot in the match inside [`validate`], and one field on
 //! [`LinkFormErrors`].
 
-use crate::views::links::{LinkFormErrors, LinkFormValues, RepositoryChoice};
+use crate::views::link_form::{LinkFormErrors, RepositoryChoice};
+use crate::views::links::LinkFormValues;
 use chrono::{DateTime, TimeDelta, Utc};
 use ghinvite_core::{InvitationLinkRepo, Permission};
 use serde::Deserialize;
