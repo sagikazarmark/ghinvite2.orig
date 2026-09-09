@@ -297,28 +297,17 @@ async fn create_link(
             .into_response();
         }
     };
-    let validated = match create_link_form::validate(&form, now) {
+
+    // Loaded once, before validating: the validator needs the available
+    // repositories to resolve the repository scope, and the error path needs
+    // the same list to re-render the form.
+    let repos = load_installation_repos_for_form(&state, &admin).await;
+    let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
         Err(errors) => {
-            let repos = load_installation_repos_for_form(&state, &admin).await;
             return link_form_response(&admin, None, repos, form.into_view_values(errors));
         }
     };
-
-    let installation_repos = load_installation_repos_for_form(&state, &admin).await;
-    let repos: Vec<ghinvite_core::InvitationLinkRepo> = installation_repos
-        .into_iter()
-        .filter(|r| form.repo_ids.contains(&r.id))
-        .map(|r| ghinvite_core::InvitationLinkRepo {
-            repo_id: r.id,
-            repo_full_name: r.full_name,
-        })
-        .collect();
-
-    if repos.is_empty() {
-        return crate::error::WebError::BadRequest("select at least one repository".into())
-            .into_response();
-    }
 
     let output = match state
         .commands
@@ -333,7 +322,7 @@ async fn create_link(
             approval_required: validated.approval_required,
             description: validated.description,
             internal_note: validated.internal_note,
-            repos,
+            repos: validated.repos,
         })
         .await
     {

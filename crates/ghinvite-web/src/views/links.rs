@@ -35,6 +35,8 @@ pub struct LinkFormErrors {
     pub description: Option<String>,
     pub max_uses: Option<String>,
     pub expires_in_days: Option<String>,
+    /// Section-level error for the repository checkbox group.
+    pub repo_scope: Option<String>,
 }
 
 impl Default for LinkFormValues {
@@ -175,14 +177,36 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                     section { class: "mac-panel",
                         div { class: "space-y-4 p-4",
                             div {
-                                h2 { class: "text-base font-semibold", "Repository scope" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
+                                h2 { id: "repo_ids-label", class: "text-base font-semibold", "Repository scope" }
+                                p { id: "repo_ids-help", class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
                             }
                             {if props.repos.is_empty() {
                                 rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
                             } else {
+                                // The checkbox group is the "control" for the
+                                // repository scope: labelled by the heading,
+                                // described by the help text and, on failure,
+                                // the error under the list (same id scheme as
+                                // `Field`).
+                                let has_error = props.form.errors.repo_scope.is_some();
+                                let group_class = if has_error {
+                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-error bg-base-200 p-3"
+                                } else {
+                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3"
+                                };
+                                let described_by = if has_error {
+                                    "repo_ids-help repo_ids-error"
+                                } else {
+                                    "repo_ids-help"
+                                };
                                 rsx! {
-                                    div { class: "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3",
+                                    div {
+                                        id: "repo_ids",
+                                        role: "group",
+                                        class: "{group_class}",
+                                        aria_labelledby: "repo_ids-label",
+                                        aria_describedby: "{described_by}",
+                                        aria_invalid: if has_error { "true" },
                                         {props.repos.iter().map(|repo| {
                                             let id = repo.id;
                                             let checked = props.form.selected_repo_ids.contains(&id);
@@ -197,6 +221,9 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                     }
                                 }
                             }}
+                            {props.form.errors.repo_scope.as_ref().map(|message| rsx! {
+                                p { id: "repo_ids-error", class: "text-sm font-medium text-error", "{message}" }
+                            })}
                         }
                     }
                     div { class: "flex justify-end",
@@ -543,6 +570,7 @@ mod tests {
                 expires_in_days: Some(
                     "Expiration must be a whole number of days, 1 or more.".to_string(),
                 ),
+                repo_scope: None,
             },
             ..LinkFormValues::default()
         };
@@ -580,6 +608,136 @@ mod tests {
         assert!(html.contains("value=\"10\" checked"));
         assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
         assert!(!html.contains("disabled"));
+    }
+
+    fn acme_repos() -> Vec<ghinvite_github::payloads::GhRepo> {
+        vec![
+            ghinvite_github::payloads::GhRepo {
+                id: 10,
+                full_name: "acme/api".to_string(),
+                private: true,
+            },
+            ghinvite_github::payloads::GhRepo {
+                id: 11,
+                full_name: "acme/web".to_string(),
+                private: true,
+            },
+        ]
+    }
+
+    #[test]
+    fn link_create_form_repository_group_is_labelled_and_described_without_error() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: LinkFormValues::default(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"repo_ids-label\""));
+        assert!(html.contains("id=\"repo_ids-help\""));
+        assert!(html.contains("id=\"repo_ids\""));
+        assert!(html.contains("role=\"group\""));
+        assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
+        assert!(html.contains("aria-describedby=\"repo_ids-help\""));
+        assert!(!html.contains("repo_ids-error"));
+        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("border-error"));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("value=\"11\" checked"));
+    }
+
+    #[test]
+    fn link_create_form_renders_repository_scope_error_under_group_with_preserved_selection() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            // 11 is available and stays checked; 999 is unknown and must not
+            // surface anywhere in the markup.
+            selected_repo_ids: vec![999, 11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                repo_scope: Some(
+                    "Repository scope is required. Select at least one available repository for this invitation link."
+                        .to_string(),
+                ),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: acme_repos(),
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains(
+            "<p id=\"repo_ids-error\" class=\"text-sm font-medium text-error\">Repository scope is required. Select at least one available repository for this invitation link.</p>"
+        ));
+        assert!(html.contains("role=\"group\""));
+        assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
+        assert!(html.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
+        assert!(html.contains("border-error"));
+        assert!(
+            html.find("name=\"repo_ids\"").unwrap() < html.find("id=\"repo_ids-error\"").unwrap(),
+            "error is rendered under the repository list"
+        );
+        assert!(html.contains("value=\"11\" checked"));
+        assert!(html.contains("value=\"10\""));
+        assert!(!html.contains("value=\"10\" checked"));
+        assert!(!html.contains("999"));
+        assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
+        assert!(!html.contains("description-error"));
+        assert!(!html.contains("input-error"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
+    }
+
+    #[test]
+    fn link_create_form_renders_repository_scope_error_when_no_repositories_are_available() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                repo_scope: Some("Repository scope is required. Select at least one available repository for this invitation link.".to_string()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: vec![],
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("No repositories are available for this installation."));
+        assert!(html.contains("id=\"repo_ids-error\""));
+        assert!(html.contains("Repository scope is required."));
+        assert!(!html.contains("name=\"repo_ids\""));
     }
 
     #[test]

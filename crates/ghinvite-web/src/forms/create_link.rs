@@ -1,10 +1,11 @@
 //! Validation for the new invitation link form.
 //!
 //! [`validate`] is the deep end of the form: it accepts the raw
-//! [`CreateLinkForm`] the browser posted and returns either the guardrails
-//! the command facade may act on ([`ValidatedCreateLink`]) or every field
-//! error at once ([`LinkFormErrors`]) so the route can re-render the form with
-//! the admin's values preserved and each problem shown next to its field.
+//! [`CreateLinkForm`] the browser posted plus the account's available
+//! repositories, and returns either the guardrails the command facade may act
+//! on ([`ValidatedCreateLink`]) or every field error at once
+//! ([`LinkFormErrors`]) so the route can re-render the form with the admin's
+//! values preserved and each problem shown next to its field.
 //!
 //! Adding a rule is one validator function returning `Result<T, FieldError>`,
 //! one slot in the match inside [`validate`], and one field on
@@ -12,6 +13,8 @@
 
 use crate::views::links::{LinkFormErrors, LinkFormValues};
 use chrono::{DateTime, TimeDelta, Utc};
+use ghinvite_core::InvitationLinkRepo;
+use ghinvite_github::payloads::GhRepo;
 use serde::Deserialize;
 
 /// Raw POST body of the new invitation link form, exactly as submitted.
@@ -36,7 +39,9 @@ impl CreateLinkForm {
     /// The submitted values as the form view model with `errors` attached.
     ///
     /// Values are preserved verbatim (untrimmed, unparsed) so an admin sees
-    /// exactly what they typed when correcting a mistake.
+    /// exactly what they typed when correcting a mistake. Submitted repository
+    /// IDs are carried as-is: the view only renders a checkbox per available
+    /// repository, so an unknown or tampered ID can never appear checked.
     pub fn into_view_values(self, errors: LinkFormErrors) -> LinkFormValues {
         LinkFormValues {
             description: self.description.unwrap_or_default(),
@@ -62,34 +67,42 @@ pub struct ValidatedCreateLink {
     /// `None` is an intentional "no expiration" (the field was left blank).
     /// Otherwise `now` plus the submitted whole number of days.
     pub expires_at: Option<DateTime<Utc>>,
+    /// The repository scope: a non-empty subset of the available
+    /// repositories, in the order the account makes them available.
+    pub repos: Vec<InvitationLinkRepo>,
 }
 
 /// Validate a submitted new invitation link form.
 ///
-/// Runs every rule and reports all failures together. `now` anchors the
-/// expiration timestamp; callers pass the same instant they record as
-/// `created_at` so the two agree.
+/// Runs every rule and reports all failures together. `available_repos` are
+/// the repositories the installation currently exposes; only those can enter
+/// the repository scope. `now` anchors the expiration timestamp; callers pass
+/// the same instant they record as `created_at` so the two agree.
 pub fn validate(
     form: &CreateLinkForm,
+    available_repos: &[GhRepo],
     now: DateTime<Utc>,
 ) -> Result<ValidatedCreateLink, LinkFormErrors> {
     let description = validate_description(form.description.as_deref());
     let max_uses = validate_max_uses(form.max_uses.as_deref());
     let expires_at = validate_expires_in_days(form.expires_in_days.as_deref(), now);
+    let repos = validate_repo_scope(&form.repo_ids, available_repos);
 
-    match (description, max_uses, expires_at) {
-        (Ok(description), Ok(max_uses), Ok(expires_at)) => Ok(ValidatedCreateLink {
+    match (description, max_uses, expires_at, repos) {
+        (Ok(description), Ok(max_uses), Ok(expires_at), Ok(repos)) => Ok(ValidatedCreateLink {
             description,
             internal_note: normalize_internal_note(form.internal_note.as_deref()),
             approval_required: form.approval_required.is_some(),
             max_uses,
             expires_at,
+            repos,
         }),
-        (description, max_uses, expires_at) => Err(LinkFormErrors {
+        (description, max_uses, expires_at, repos) => Err(LinkFormErrors {
             summary: vec![SUMMARY.to_string()],
             description: description.err().map(|e| e.message),
             max_uses: max_uses.err().map(|e| e.message),
             expires_in_days: expires_at.err().map(|e| e.message),
+            repo_scope: repos.err().map(|e| e.message),
         }),
     }
 }
@@ -191,6 +204,33 @@ fn expiration_after(now: DateTime<Utc>, days: u64) -> Option<DateTime<Utc>> {
     now.checked_add_signed(delta)
 }
 
+/// Repository scope: the selected IDs intersected with the available
+/// repositories, in available order, each repository at most once.
+///
+/// The server is the authority on what is available, so an ID the
+/// installation does not expose (stale page, tampered request) is dropped
+/// without comment and can never become a scope entry. What remains must be
+/// non-empty, because a repository scope is by definition a non-empty set.
+fn validate_repo_scope(
+    selected: &[u64],
+    available: &[GhRepo],
+) -> Result<Vec<InvitationLinkRepo>, FieldError> {
+    let repos: Vec<InvitationLinkRepo> = available
+        .iter()
+        .filter(|repo| selected.contains(&repo.id))
+        .map(|repo| InvitationLinkRepo {
+            repo_id: repo.id,
+            repo_full_name: repo.full_name.clone(),
+        })
+        .collect();
+    if repos.is_empty() {
+        return Err(FieldError::new(
+            "Repository scope is required. Select at least one available repository for this invitation link.",
+        ));
+    }
+    Ok(repos)
+}
+
 /// `Some(trimmed)` when the admin typed something; `None` for a missing key,
 /// an empty value, or whitespace only.
 fn non_blank(raw: Option<&str>) -> Option<&str> {
@@ -241,6 +281,31 @@ mod tests {
         }
     }
 
+    fn repo(id: u64, full_name: &str) -> GhRepo {
+        GhRepo {
+            id,
+            full_name: full_name.into(),
+            private: true,
+        }
+    }
+
+    /// The available repositories the installation exposes, in the order
+    /// GitHub returned them (which is the order the form lists them).
+    fn available_repos() -> Vec<GhRepo> {
+        vec![
+            repo(10, "acme/api"),
+            repo(11, "acme/web"),
+            repo(12, "acme/docs"),
+        ]
+    }
+
+    fn scope_repo(repo_id: u64, full_name: &str) -> InvitationLinkRepo {
+        InvitationLinkRepo {
+            repo_id,
+            repo_full_name: full_name.into(),
+        }
+    }
+
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-04T12:00:00Z")
             .unwrap()
@@ -249,7 +314,7 @@ mod tests {
 
     #[test]
     fn valid_form_yields_normalized_creation_data() {
-        let validated = validate(&valid_form(), now()).unwrap();
+        let validated = validate(&valid_form(), &available_repos(), now()).unwrap();
 
         assert_eq!(
             validated,
@@ -263,6 +328,7 @@ mod tests {
                         .unwrap()
                         .with_timezone(&Utc)
                 ),
+                repos: vec![scope_repo(10, "acme/api")],
             }
         );
     }
@@ -275,7 +341,7 @@ mod tests {
             ..valid_form()
         };
 
-        let validated = validate(&form, now()).unwrap();
+        let validated = validate(&form, &available_repos(), now()).unwrap();
 
         assert_eq!(validated.internal_note, None);
         assert!(!validated.approval_required);
@@ -288,7 +354,7 @@ mod tests {
             ..valid_form()
         };
 
-        let errors = validate(&form, now()).unwrap_err();
+        let errors = validate(&form, &available_repos(), now()).unwrap_err();
 
         assert_eq!(
             errors.summary,
@@ -373,8 +439,9 @@ mod tests {
     }
 
     fn max_uses_error(raw: &str) -> String {
-        let errors = validate(&with_max_uses(Some(raw)), now()).unwrap_err();
+        let errors = validate(&with_max_uses(Some(raw)), &available_repos(), now()).unwrap_err();
         assert_eq!(errors.description, None, "only max use should fail");
+        assert_eq!(errors.repo_scope, None, "only max use should fail");
         assert!(
             !errors.summary.is_empty(),
             "summary line accompanies field errors"
@@ -387,29 +454,22 @@ mod tests {
     #[test]
     fn max_uses_blank_or_missing_means_unlimited() {
         for raw in [None, Some(""), Some("   "), Some("\t\n")] {
-            let validated = validate(&with_max_uses(raw), now()).unwrap();
+            let validated = validate(&with_max_uses(raw), &available_repos(), now()).unwrap();
             assert_eq!(validated.max_uses, None, "max_uses={raw:?}");
         }
     }
 
     #[test]
     fn max_uses_accepts_positive_whole_numbers_and_trims() {
-        assert_eq!(
-            validate(&with_max_uses(Some("1")), now()).unwrap().max_uses,
-            Some(1)
-        );
-        assert_eq!(
-            validate(&with_max_uses(Some(" 25 ")), now())
+        let max_uses = |raw: &str| {
+            validate(&with_max_uses(Some(raw)), &available_repos(), now())
                 .unwrap()
-                .max_uses,
-            Some(25)
-        );
-        assert_eq!(
-            validate(&with_max_uses(Some("4294967295")), now())
-                .unwrap()
-                .max_uses,
-            Some(u32::MAX)
-        );
+                .max_uses
+        };
+
+        assert_eq!(max_uses("1"), Some(1));
+        assert_eq!(max_uses(" 25 "), Some(25));
+        assert_eq!(max_uses("4294967295"), Some(u32::MAX));
     }
 
     #[test]
@@ -444,9 +504,11 @@ mod tests {
     }
 
     fn expires_in_days_error(raw: &str) -> String {
-        let errors = validate(&with_expires_in_days(Some(raw)), now()).unwrap_err();
+        let errors =
+            validate(&with_expires_in_days(Some(raw)), &available_repos(), now()).unwrap_err();
         assert_eq!(errors.description, None, "only expiration should fail");
         assert_eq!(errors.max_uses, None, "only expiration should fail");
+        assert_eq!(errors.repo_scope, None, "only expiration should fail");
         assert!(
             !errors.summary.is_empty(),
             "summary line accompanies field errors"
@@ -459,7 +521,8 @@ mod tests {
     #[test]
     fn expires_in_days_blank_or_missing_means_no_expiration() {
         for raw in [None, Some(""), Some("   "), Some("\t\n")] {
-            let validated = validate(&with_expires_in_days(raw), now()).unwrap();
+            let validated =
+                validate(&with_expires_in_days(raw), &available_repos(), now()).unwrap();
             assert_eq!(validated.expires_at, None, "expires_in_days={raw:?}");
         }
     }
@@ -467,7 +530,7 @@ mod tests {
     #[test]
     fn expires_in_days_accepts_positive_whole_numbers_anchored_at_now() {
         let expires_at = |raw: &str| {
-            validate(&with_expires_in_days(Some(raw)), now())
+            validate(&with_expires_in_days(Some(raw)), &available_repos(), now())
                 .unwrap()
                 .expires_at
                 .unwrap()
@@ -512,10 +575,11 @@ mod tests {
             description: Some("".into()),
             max_uses: Some("0".into()),
             expires_in_days: Some("abc".into()),
+            repo_ids: vec![],
             ..valid_form()
         };
 
-        let errors = validate(&form, now()).unwrap_err();
+        let errors = validate(&form, &available_repos(), now()).unwrap_err();
 
         assert_eq!(
             errors.summary,
@@ -529,6 +593,94 @@ mod tests {
         assert_eq!(
             errors.expires_in_days.as_deref(),
             Some("Expiration must be a whole number of days, 1 or more.")
+        );
+        assert_eq!(errors.repo_scope.as_deref(), Some(REPO_SCOPE_REQUIRED));
+    }
+
+    const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
+
+    fn with_repo_ids(repo_ids: Vec<u64>) -> CreateLinkForm {
+        CreateLinkForm {
+            repo_ids,
+            ..valid_form()
+        }
+    }
+
+    /// Only the repository scope should fail; returns its message.
+    fn repo_scope_error(repo_ids: Vec<u64>) -> String {
+        let errors =
+            validate(&with_repo_ids(repo_ids.clone()), &available_repos(), now()).unwrap_err();
+        assert_eq!(
+            errors.description, None,
+            "only repository scope should fail"
+        );
+        assert_eq!(errors.max_uses, None, "only repository scope should fail");
+        assert_eq!(
+            errors.expires_in_days, None,
+            "only repository scope should fail"
+        );
+        assert!(
+            !errors.summary.is_empty(),
+            "summary line accompanies field errors"
+        );
+        errors.repo_scope.unwrap_or_else(|| {
+            panic!("repo_ids={repo_ids:?} should produce a repository scope error")
+        })
+    }
+
+    #[test]
+    fn repo_scope_rejects_empty_selection() {
+        assert_eq!(repo_scope_error(vec![]), REPO_SCOPE_REQUIRED);
+    }
+
+    #[test]
+    fn repo_scope_rejects_selection_of_only_unknown_repositories() {
+        assert_eq!(repo_scope_error(vec![999]), REPO_SCOPE_REQUIRED);
+        assert_eq!(repo_scope_error(vec![999, 1000]), REPO_SCOPE_REQUIRED);
+    }
+
+    #[test]
+    fn repo_scope_rejects_any_selection_when_no_repositories_are_available() {
+        let errors = validate(&with_repo_ids(vec![10]), &[], now()).unwrap_err();
+
+        assert_eq!(errors.repo_scope.as_deref(), Some(REPO_SCOPE_REQUIRED));
+    }
+
+    #[test]
+    fn repo_scope_accepts_available_repositories_with_their_full_names() {
+        let validated = validate(&with_repo_ids(vec![11]), &available_repos(), now()).unwrap();
+
+        assert_eq!(validated.repos, vec![scope_repo(11, "acme/web")]);
+    }
+
+    #[test]
+    fn repo_scope_drops_unknown_repositories_and_keeps_the_available_ones() {
+        let validated = validate(
+            &with_repo_ids(vec![999, 10, 1000]),
+            &available_repos(),
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(validated.repos, vec![scope_repo(10, "acme/api")]);
+    }
+
+    #[test]
+    fn repo_scope_follows_available_repository_order_and_ignores_duplicates() {
+        let validated = validate(
+            &with_repo_ids(vec![12, 10, 12, 11, 10]),
+            &available_repos(),
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            validated.repos,
+            vec![
+                scope_repo(10, "acme/api"),
+                scope_repo(11, "acme/web"),
+                scope_repo(12, "acme/docs"),
+            ]
         );
     }
 }

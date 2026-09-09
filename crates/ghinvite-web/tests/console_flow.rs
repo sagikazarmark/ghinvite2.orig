@@ -1116,6 +1116,128 @@ async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration()
     assert_eq!(*expires_at, None);
 }
 
+const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
+
+/// POST the new invitation link form as a signed-in admin whose installation
+/// exposes `acme/api` (10) and `acme/web` (11), returning the response and the
+/// recorded command calls.
+async fn post_create_link(
+    body: &'static str,
+) -> (axum::response::Response, Arc<Mutex<Vec<RecordedCommand>>>) {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    (resp, calls)
+}
+
+#[tokio::test]
+async fn create_link_without_repositories_rerenders_form_with_repository_scope_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains(REPO_SCOPE_REQUIRED));
+    assert!(text.contains("id=\"repo_ids-error\""));
+    assert!(text.contains("role=\"group\""));
+    assert!(text.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 1);
+    assert!(!text.contains("description-error"));
+    assert!(!text.contains("Bad Request"));
+    assert!(!text.contains("select at least one repository"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("value=\"push\" selected"));
+    assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert!(text.contains("name=\"max_uses\" value=\"7\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("acme/api"));
+    assert!(text.contains("acme/web"));
+    assert!(!text.contains("value=\"10\" checked"));
+    assert!(!text.contains("value=\"11\" checked"));
+}
+
+#[tokio::test]
+async fn create_link_with_only_unknown_repositories_rerenders_form_with_repository_scope_error() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=1000",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains(REPO_SCOPE_REQUIRED));
+    assert!(text.contains("id=\"repo_ids-error\""));
+    assert!(!text.contains("Bad Request"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("value=\"999\""));
+    assert!(!text.contains("value=\"1000\""));
+    assert!(!text.contains("value=\"10\" checked"));
+    assert!(!text.contains("value=\"11\" checked"));
+}
+
+#[tokio::test]
+async fn create_link_with_valid_and_unknown_repositories_scopes_only_the_available_ones() {
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=11&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("/console/accounts/acme/links/"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink { repo_ids, .. } = &calls[0];
+    assert_eq!(
+        *repo_ids,
+        vec![10, 11],
+        "available order, unknown 999 dropped"
+    );
+}
+
+#[tokio::test]
+async fn create_link_validation_failure_keeps_available_repositories_checked_and_drops_unknown() {
+    let (resp, calls) =
+        post_create_link("description=&permission=push&repo_ids=10&repo_ids=999").await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("id=\"description-error\""));
+    assert!(
+        !text.contains("repo_ids-error"),
+        "a valid available repository was selected, so repository scope passes"
+    );
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("value=\"11\""));
+    assert!(!text.contains("value=\"11\" checked"));
+    assert!(!text.contains("value=\"999\""));
+}
+
 #[tokio::test]
 async fn console_unknown_post_route_stays_plain_404() {
     let app = build_test_app().await;
