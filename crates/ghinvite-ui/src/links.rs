@@ -44,6 +44,8 @@ pub struct LinkCreateFormPageProps {
     pub now: DateTime<Utc>,
 }
 
+/// The Console page for creating an invitation link: header, the form inside
+/// the island root, the island's props blob and module script.
 #[component]
 pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
@@ -350,14 +352,20 @@ pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
                         let id = repo.id;
                         let checked = props.selected.contains(&id);
                         let full_name = repo.full_name.clone();
-                        let onchange = props.onchange;
-                        let listeners = listeners(
-                            None,
-                            onchange.map(|handler| {
-                                EventHandler::new(move |event: FormEvent| handler.call((id, event.checked())))
-                            }),
-                            props.onblur,
-                        );
+                        // Built from plain closures (`ListenerCallback`, an
+                        // `Rc`) rather than wrapped in a new `EventHandler`:
+                        // `EventHandler::new` allocates in the component's
+                        // scope and would not be freed until unmount, so a
+                        // reactive caller would leak one per option per render.
+                        let mut listeners: Vec<Attribute> = Vec::new();
+                        if let Some(handler) = props.onchange {
+                            listeners.push(dioxus_elements::events::onchange(
+                                move |event: FormEvent| handler.call((id, event.checked())),
+                            ));
+                        }
+                        if let Some(handler) = props.onblur {
+                            listeners.push(dioxus_elements::events::onblur(handler));
+                        }
                         rsx! {
                             label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
                                 input { r#type: "checkbox", name: "{props.name}", value: "{id}", checked: checked, class: "checkbox checkbox-sm", ..listeners }
