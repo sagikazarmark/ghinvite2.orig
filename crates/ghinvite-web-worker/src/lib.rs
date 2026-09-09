@@ -149,6 +149,9 @@ fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
             .secret("GHINVITE_WEBHOOK_SECRET")?
             .to_string()
             .into_bytes(),
+        // Cloudflare Static Assets serve `/assets/*` before the Worker is
+        // invoked (`[assets]` in wrangler/web.toml); no in-Worker route.
+        island_assets_dir: None,
     })
 }
 

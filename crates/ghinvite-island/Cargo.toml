@@ -1,0 +1,46 @@
+[package]
+name = "ghinvite-island"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The browser island for the new invitation link form (ADR 0001): the one
+# crate in the workspace that depends on the `dioform` facade and, on wasm32,
+# on `dioxus-web`. Here `cfg(target_arch = "wasm32")` means "browser", so
+# build it on its own — `scripts/build-island.sh` (dx bundle) or
+# `cargo check -p ghinvite-island --target wasm32-unknown-unknown` — never
+# through `--workspace --target wasm32-unknown-unknown`, where the Worker
+# crates' wasm32 gates mean "Cloudflare Workers" (see the README).
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "ghinvite-island"
+path = "src/main.rs"
+
+# The component itself compiles natively too, so the markup-parity test can
+# render it with `dioxus_ssr` next to the server's `LinkCreateForm`. Nothing
+# here activates `dioxus/web`: the workspace `dioxus` features are the
+# renderer-free set (`html`, `macro`, `signals`, `hooks`).
+[dependencies]
+dioform.workspace = true
+dioxus.workspace = true
+ghinvite-ui.workspace = true
+serde_json.workspace = true
+
+# Browser-only: the `dioxus-web` renderer and `LaunchBuilder`, plus the
+# `web-sys` calls the entrypoint needs to read the props blob and clear the
+# mount point. Target-specific so a native `cargo build --workspace` never
+# sees `dioxus-web` (verified: `cargo tree -p ghinvite-web -e features |
+# grep dioxus-web` is empty on the host).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus = { workspace = true, features = ["web", "launch"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "console"] }
+
+# SSR is only used by the parity test and the `ssr_fixture` example; the
+# browser bundle never includes it.
+[dev-dependencies]
+chrono.workspace = true
+dioxus-ssr.workspace = true

@@ -1,6 +1,7 @@
 //! Web binary runtime configuration.
 
 use ghinvite_github::oauth::OAuthConfig;
+use std::path::PathBuf;
 
 /// Configuration parsed at server boot. Production sources fields from
 /// Workers secrets (Plan 7); local dev uses [`WebConfig::for_local_dev`].
@@ -25,6 +26,12 @@ pub struct WebConfig {
     /// to verify `X-Hub-Signature-256`. Loaded from Workers secrets in production;
     /// empty in local dev (webhook delivery not expected locally without ngrok).
     pub webhook_secret: Vec<u8>,
+    /// Directory the native binary serves under `/assets/*`: the Dioxus island
+    /// bundle (`scripts/build-island.sh` writes it to `dist/public/assets`).
+    /// `None` registers no route. On Workers this is always `None` — Cloudflare
+    /// Static Assets serve `/assets/*` before the Worker runs (see
+    /// `wrangler/web.toml`). Only read on non-wasm32 builds.
+    pub island_assets_dir: Option<PathBuf>,
 }
 
 impl WebConfig {
@@ -64,6 +71,12 @@ impl WebConfig {
             webhook_secret: std::env::var("GHINVITE_WEBHOOK_SECRET")
                 .map(|s| s.into_bytes())
                 .unwrap_or_default(),
+            // Relative to the working directory: `cargo run -p ghinvite-web`
+            // from the repo root, where `scripts/build-island.sh` writes.
+            island_assets_dir: Some(PathBuf::from(
+                std::env::var("GHINVITE_ISLAND_ASSETS_DIR")
+                    .unwrap_or_else(|_| "dist/public/assets".into()),
+            )),
         }
     }
 }

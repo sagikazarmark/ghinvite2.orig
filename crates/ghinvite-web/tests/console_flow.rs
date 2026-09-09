@@ -899,6 +899,146 @@ async fn console_overview_carries_csp_and_only_external_script() {
 }
 
 #[tokio::test]
+async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_script() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, _calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let before = Utc::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme/links/new")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = Utc::now();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap()),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY)
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+
+    // Island root wraps the form.
+    assert!(text.contains(
+        "<div id=\"link-form-island\"><form method=\"post\" action=\"/console/accounts/acme/links\""
+    ));
+    assert!(text.contains("</form></div>"));
+
+    // The props blob is a data block carrying action, values, repos and the
+    // server's instant.
+    let props_open = "<script type=\"application/json\" id=\"link-form-props\">";
+    let blob_at = text.find(props_open).expect("props blob present");
+    let blob = &text[blob_at + props_open.len()..];
+    let blob = &blob[..blob.find("</script>").unwrap()];
+    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
+        serde_json::from_str(blob).unwrap();
+    assert_eq!(props.action, "/console/accounts/acme/links");
+    assert_eq!(
+        props.values,
+        ghinvite_web::views::links::LinkFormValues::default()
+    );
+    assert_eq!(
+        props.repos,
+        vec![
+            ghinvite_web::views::link_form::RepositoryChoice {
+                id: 10,
+                full_name: "acme/api".to_string(),
+            },
+            ghinvite_web::views::link_form::RepositoryChoice {
+                id: 11,
+                full_name: "acme/web".to_string(),
+            },
+        ]
+    );
+    assert!(
+        before <= props.now && props.now <= after,
+        "now is the server's instant"
+    );
+
+    // The module script follows, with a stable src under /assets.
+    let module = "<script type=\"module\" src=\"/assets/ghinvite-island.js\"></script>";
+    assert!(text.contains(module));
+    assert!(blob_at < text.find(module).unwrap());
+
+    // Exactly three script elements — app script, data block, module — and
+    // therefore nothing inline and executable.
+    let external = "<script src=\"/static/app.js\"></script>";
+    assert_eq!(text.matches(external).count(), 1);
+    assert_eq!(
+        text.matches("<script").count(),
+        text.matches(external).count()
+            + text.matches(props_open).count()
+            + text.matches(module).count(),
+        "new-link HTML contains an inline executable <script> block"
+    );
+}
+
+#[tokio::test]
+async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_values() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, _calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E&permission=owner&max_uses=7&expires_in_days=45&repo_ids=999&repo_ids=10";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+
+    let props_open = "<script type=\"application/json\" id=\"link-form-props\">";
+    let blob_at = text.find(props_open).expect("props blob present");
+    let blob = &text[blob_at + props_open.len()..];
+    let blob = &blob[..blob.find("</script>").unwrap()];
+    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
+        serde_json::from_str(blob).unwrap();
+
+    // Values verbatim, errors as the server attached them.
+    assert_eq!(
+        props.values.description,
+        "</script><script>alert(1)</script>"
+    );
+    assert_eq!(props.values.permission, "owner");
+    assert_eq!(props.values.max_uses, "7");
+    assert_eq!(props.values.expires_in_days, "45");
+    assert_eq!(props.values.selected_repo_ids, vec![999, 10]);
+    assert_eq!(
+        props.values.errors.permission.as_deref(),
+        Some("Choose a supported permission level: pull, triage, push, maintain, or admin.")
+    );
+    assert!(props.values.errors.description.is_none());
+    assert!(props.values.errors.repo_scope.is_none());
+    assert!(!props.values.errors.summary.is_empty());
+
+    // The description cannot break out of the data block: the raw bytes hold
+    // no `<`, and the page has exactly three script elements.
+    assert!(!blob.contains('<'));
+    assert_eq!(text.matches("</script>").count(), 3);
+}
+
+#[tokio::test]
 async fn create_link_invalid_description_rerenders_form_with_errors_and_preserved_values() {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
@@ -1286,8 +1426,11 @@ async fn create_link_tampered_permission_rerenders_form_with_permission_error() 
     assert!(text.contains("select-error"));
     assert!(!text.contains("Bad Request"));
     assert!(!text.contains("invalid permission"));
-    // The tampered value is not echoed; the select offers only supported levels.
-    assert!(!text.contains("owner"));
+    // The tampered value is not echoed into the form (the island props blob
+    // after it carries the submitted values verbatim, JSON-escaped); the
+    // select offers only supported levels.
+    let form_markup = &text[text.find("<form").unwrap()..text.find("</form>").unwrap()];
+    assert!(!form_markup.contains("owner"));
     assert_eq!(text.matches("<option").count(), 5);
     // Every other submitted value and selection survives the re-render.
     assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));

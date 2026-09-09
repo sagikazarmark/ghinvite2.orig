@@ -232,16 +232,21 @@ async fn new_link_form(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let form = crate::views::links::LinkFormValues::default();
 
-    link_form_response(&admin, flash, repos, form)
+    link_form_response(&admin, flash, repos, form, Utc::now())
 }
 
 /// Render the new invitation link page, both fresh and re-rendered with
 /// validation errors and preserved values after a failed POST.
+///
+/// `now` is the instant the island validates against in the browser (it is
+/// serialised into the page's props blob): on a failed POST it is the same
+/// instant the server just validated with, so both sides agree.
 fn link_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
     repos: Vec<RepositoryChoice>,
     form: crate::views::links::LinkFormValues,
+    now: chrono::DateTime<Utc>,
 ) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
@@ -254,6 +259,7 @@ fn link_form_response(
                 account_login: account_login.clone(),
                 repos: repos.clone(),
                 form: form.clone(),
+                now,
             }
         }
     });
@@ -305,7 +311,7 @@ async fn create_link(
     let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
         Err(errors) => {
-            return link_form_response(&admin, None, repos, form.into_view_values(*errors));
+            return link_form_response(&admin, None, repos, form.into_view_values(*errors), now);
         }
     };
 

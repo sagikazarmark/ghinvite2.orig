@@ -545,3 +545,146 @@ async fn webhook_valid_hmac_returns_ok() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+// --- island assets (native dev only; Workers Static Assets serve these) -----
+
+async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf>) -> axum::Router {
+    use ghinvite_github::mocks::MockTransport;
+    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let transport: Arc<dyn ghinvite_github::HttpTransport> =
+        Arc::new(MockTransport::scripted(vec![]));
+    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
+    let commands = Arc::new(RestateCommands::new(restate));
+    let config = WebConfig {
+        island_assets_dir,
+        ..WebConfig::for_local_dev()
+    };
+    let state = AppState::new(storage, transport, commands, config);
+    let session_store = tower_sessions::MemoryStore::default();
+    build_app(state, session_store)
+}
+
+/// A throwaway assets directory shaped like `dist/public/assets` after the
+/// island build: the stable loader plus one hashed file of each kind.
+fn island_assets_fixture() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "ghinvite-island-assets-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("ghinvite-island.js"),
+        "import \"/assets/island-dxh0123.js\";\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("island-dxh0123.js"), "export {};\n").unwrap();
+    std::fs::write(dir.join("island_bg-dxh0123.wasm"), b"\0asm\x01\0\0\0").unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn island_assets_are_served_from_the_configured_directory() {
+    let dir = island_assets_fixture();
+    let app = build_test_app_with_assets(Some(dir.clone())).await;
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/ghinvite-island.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(csp_header(&resp), None, "assets must not carry a CSP");
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(ct.contains("javascript"), "content-type was {ct}");
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"import \"/assets/island-dxh0123.js\";\n");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/island_bg-dxh0123.wasm")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(ct, "application/wasm");
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn missing_island_asset_is_a_plain_404() {
+    // The module tag on the new-link page points here; before the bundle is
+    // built the browser must get a 404 (and keep the plain form), not an HTML
+    // page or an error.
+    let dir = island_assets_fixture();
+    let app = build_test_app_with_assets(Some(dir.clone())).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/does-not-exist.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(csp_header(&resp), None);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn island_assets_route_is_absent_without_a_directory() {
+    let app = build_test_app_with_assets(None).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/ghinvite-island.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Falls through to the ordinary not-found handling.
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn local_dev_config_defaults_island_assets_to_dist_public_assets() {
+    let cfg = WebConfig::for_local_dev();
+    assert_eq!(
+        cfg.island_assets_dir.as_deref(),
+        Some(std::path::Path::new("dist/public/assets"))
+    );
+}

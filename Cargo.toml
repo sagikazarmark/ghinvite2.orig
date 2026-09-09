@@ -8,6 +8,7 @@ members = [
     "crates/ghinvite-workflows",
     "crates/ghinvite-workflows-worker",
     "crates/ghinvite-ui",
+    "crates/ghinvite-island",
     "crates/ghinvite-web",
     "crates/ghinvite-web-worker",
 ]
@@ -24,6 +25,10 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 cookie = { version = "0.18", default-features = false }
+# The `dioform` facade (Dioxus bindings) is for the browser island only; the
+# server and the shared form model use `dioform-core` + `dioform-derive`
+# (Dioxus-free validators).
+dioform = { version = "0.6.0" }
 dioform-core = { version = "0.6.0", default-features = false }
 dioform-derive = { version = "0.6.0" }
 dioxus = { version = "0.7.10", default-features = false, features = ["html", "macro", "signals", "hooks"] }
@@ -64,3 +69,16 @@ ghinvite-github = { path = "crates/ghinvite-github" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }
 ghinvite-ui = { path = "crates/ghinvite-ui" }
 ghinvite-web = { path = "crates/ghinvite-web" }
+
+# Browser island bundle (`scripts/build-island.sh` → `dx bundle --profile
+# island`). A dedicated profile, not `[profile.release]`, so the Workers build
+# (`worker-build --release`) and native release builds keep cargo's defaults.
+# dx's own `wasm-release` profile only sets `opt-level = "s"` on top of
+# `release`; with these settings the shipped wasm is ~30% smaller.
+[profile.island]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,62 +1,65 @@
 //! Invitation-link views: create form + detail page.
+//!
+//! The new invitation link form is split so the browser island (ADR 0001) can
+//! render exactly what the server rendered by calling the same components:
+//! [`LinkCreateFormPage`] is the Console page, [`LinkCreateForm`] is just the
+//! `<form>` inside it, and [`PermissionSelect`] / [`RepositoryScopeGroup`] are
+//! the two controls that [`crate::field::Field`] does not cover. All of them
+//! are props-in, markup-out; the optional event-handler props
+//! ([`LinkFormHandlers`]) are for the island and change nothing in
+//! server-rendered HTML.
+//!
+//! The page also emits the island's mount points: the form is wrapped in
+//! `<div id="link-form-island">`, followed by a `<script type="application/json"
+//! id="link-form-props">` data block (a serialised
+//! [`crate::link_form::LinkFormIslandProps`]) and one `<script type="module" src>`
+//! tag. Neither script is inline executable code, so both are clean under the
+//! `script-src 'self'` Content-Security-Policy; if the module is missing (no
+//! bundle built), the browser 404s it and the plain form keeps working.
 
-use crate::field::{Field, FieldKind};
+use crate::field::{
+    ControlHandlers, Field, FieldKind, described_by, error_text, help_text, listeners,
+};
 use crate::flash::Flash;
 use crate::layouts::ConsoleLayout;
-use crate::link_form::{CreateLinkForm, LinkFormErrors, RepositoryChoice};
+use crate::link_form::{
+    CreateLinkForm, LINK_FORM_ISLAND_MODULE_SRC, LINK_FORM_ISLAND_PROPS_ID,
+    LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps, RepositoryChoice,
+};
 use chrono::{DateTime, Utc};
 use dioform_core::Form;
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission};
 
+pub use crate::link_form::{LinkFormErrors, LinkFormValues};
+
 #[derive(Clone, PartialEq, Props)]
-pub struct LinkCreateFormProps {
+pub struct LinkCreateFormPageProps {
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
     /// Available repositories, in the order the account makes them available.
     pub repos: Vec<RepositoryChoice>,
     pub form: LinkFormValues,
+    /// The server's instant: what the route validated (or will validate)
+    /// against. Handed to the island through the props blob so browser-side
+    /// validation judges expiration from the same anchor.
+    pub now: DateTime<Utc>,
 }
 
-/// The new invitation link form as the view renders it: the submitted values
-/// verbatim (so an admin sees exactly what they typed when correcting a
-/// mistake) plus the errors to show next to each control.
-#[derive(Clone, PartialEq)]
-pub struct LinkFormValues {
-    pub description: String,
-    pub permission: String,
-    pub approval_required: bool,
-    pub max_uses: String,
-    pub expires_in_days: String,
-    pub internal_note: String,
-    pub selected_repo_ids: Vec<u64>,
-    pub errors: LinkFormErrors,
-}
-
-impl Default for LinkFormValues {
-    fn default() -> Self {
-        Self {
-            description: String::new(),
-            permission: "pull".into(),
-            approval_required: false,
-            max_uses: String::new(),
-            expires_in_days: "30".into(),
-            internal_note: String::new(),
-            selected_repo_ids: Vec::new(),
-            errors: LinkFormErrors::default(),
-        }
-    }
-}
-
+/// The Console page for creating an invitation link: header, the form inside
+/// the island root, the island's props blob and module script.
 #[component]
-pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
+pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
-    let perms = ["pull", "triage", "push", "maintain", "admin"];
-    // Rendered `name`s come from the shared model so the POST keys the server
-    // parses and the controls the browser submits cannot drift apart.
-    let fields = CreateLinkForm::fields();
-    let repo_ids_name = fields.repo_ids().field_name().to_string();
+    let action = format!("/console/accounts/{login}/links");
+    let island_props = LinkFormIslandProps {
+        action: action.clone(),
+        values: props.form.clone(),
+        repos: props.repos.clone(),
+        now: props.now,
+    }
+    .script_json();
 
     rsx! {
         ConsoleLayout {
@@ -73,188 +76,363 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                         "Create a controlled invitation link that lets GitHub users request repository access to selected repositories."
                     }
                 }
-                form { method: "post", action: "/console/accounts/{login}/links", class: "max-w-3xl space-y-5",
-                    {if props.form.errors.summary.is_empty() {
-                        rsx! {}
-                    } else {
-                        rsx! {
-                            div { id: "link-form-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
-                                div {
-                                    h2 { class: "font-semibold", dangerous_inner_html: "We couldn't create this invitation link" }
-                                    ul { class: "mt-1 list-disc space-y-1 pl-5 text-sm",
-                                        {props.form.errors.summary.iter().map(|message| rsx! { li { "{message}" } })}
-                                    }
-                                }
-                            }
-                        }
-                    }}
-                    section { class: "mac-panel",
-                        div { class: "space-y-4 p-4",
-                            div {
-                                h2 { class: "text-base font-semibold", "Link details" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Name the admin purpose for this invitation link and keep optional notes separate." }
-                            }
-                            Field {
-                                id: "description",
-                                name: fields.description().field_name().to_string(),
-                                label: "Description",
-                                kind: FieldKind::Text { maxlength: Some(120) },
-                                value: props.form.description.clone(),
-                                required: true,
-                                placeholder: "AI coding workshop",
-                                help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
-                                error: props.form.errors.description.clone(),
-                            }
-                            Field {
-                                id: "internal_note",
-                                name: fields.internal_note().field_name().to_string(),
-                                label: "Internal note",
-                                kind: FieldKind::Textarea { rows: None },
-                                value: props.form.internal_note.clone(),
-                                placeholder: "Why this link exists",
-                                help: "Optional admin-only notes. Not visible in the invitation request flow.",
-                            }
-                        }
-                    }
-                    section { class: "mac-panel",
-                        div { class: "space-y-4 p-4",
-                            div {
-                                h2 { class: "text-base font-semibold", "Access configuration" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and repositories included in this invitation link." }
-                            }
-                            // Hand-written rather than a `Field` (which has no
-                            // select kind yet); same id scheme and aria wiring.
-                            {
-                                let has_error = props.form.errors.permission.is_some();
-                                let select_class = if has_error {
-                                    "select select-bordered select-error w-full"
-                                } else {
-                                    "select select-bordered w-full"
-                                };
-                                let described_by = if has_error {
-                                    "permission-help permission-error"
-                                } else {
-                                    "permission-help"
-                                };
-                                rsx! {
-                                    div { class: "form-control gap-2",
-                                        label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
-                                        select {
-                                            id: "permission",
-                                            name: fields.permission().field_name().to_string(),
-                                            class: "{select_class}",
-                                            aria_describedby: "{described_by}",
-                                            aria_invalid: if has_error { "true" },
-                                            {perms.iter().map(|p| {
-                                                let selected = props.form.permission == *p;
-                                                rsx! { option { value: "{p}", selected: selected, "{p}" } }
-                                            })}
-                                        }
-                                        p { id: "permission-help", class: "text-sm text-base-content/65", "Use pull for read-only access. Maintain and admin can change repository settings." }
-                                        {props.form.errors.permission.as_ref().map(|message| rsx! {
-                                            p { id: "permission-error", class: "text-sm font-medium text-error", "{message}" }
-                                        })}
-                                    }
-                                }
-                            }
-                            div { class: "alert alert-warning shadow-sm",
-                                span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
-                            }
-                        }
-                    }
-                    section { class: "mac-panel",
-                        div { class: "space-y-4 p-4",
-                            div {
-                                h2 { class: "text-base font-semibold", "Request handling" }
-                                p { class: "mt-1 text-sm text-base-content/65", "Set approval, usage, and expiration guardrails." }
-                            }
-                            div { class: "form-control",
-                                label { class: "label cursor-pointer justify-start gap-3",
-                                    input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: props.form.approval_required, class: "checkbox" }
-                                    span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
-                                }
-                                p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
-                            }
-                            div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
-                                Field {
-                                    id: "max_uses",
-                                    name: fields.max_uses().field_name().to_string(),
-                                    label: "Max use",
-                                    kind: FieldKind::Number { min: Some(1), max: None },
-                                    value: props.form.max_uses.clone(),
-                                    placeholder: "Unlimited",
-                                    help: "Blank means unlimited invitation requests.",
-                                    error: props.form.errors.max_uses.clone(),
-                                }
-                                Field {
-                                    id: "expires_in_days",
-                                    name: fields.expires_in_days().field_name().to_string(),
-                                    label: "Expires in days",
-                                    kind: FieldKind::Number { min: Some(1), max: None },
-                                    value: props.form.expires_in_days.clone(),
-                                    help: "Default is 30 days. Blank creates an invitation link with no expiration.",
-                                    error: props.form.errors.expires_in_days.clone(),
-                                }
-                            }
-                        }
-                    }
-                    section { class: "mac-panel",
-                        div { class: "space-y-4 p-4",
-                            div {
-                                h2 { id: "repo_ids-label", class: "text-base font-semibold", "Repository scope" }
-                                p { id: "repo_ids-help", class: "mt-1 text-sm text-base-content/65", "Select every repository this invitation link may grant access to." }
-                            }
-                            {if props.repos.is_empty() {
-                                rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
-                            } else {
-                                // The checkbox group is the "control" for the
-                                // repository scope: labelled by the heading,
-                                // described by the help text and, on failure,
-                                // the error under the list (same id scheme as
-                                // `Field`).
-                                let has_error = props.form.errors.repo_scope.is_some();
-                                let group_class = if has_error {
-                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-error bg-base-200 p-3"
-                                } else {
-                                    "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3"
-                                };
-                                let described_by = if has_error {
-                                    "repo_ids-help repo_ids-error"
-                                } else {
-                                    "repo_ids-help"
-                                };
-                                rsx! {
-                                    div {
-                                        id: "repo_ids",
-                                        role: "group",
-                                        class: "{group_class}",
-                                        aria_labelledby: "repo_ids-label",
-                                        aria_describedby: "{described_by}",
-                                        {props.repos.iter().map(|repo| {
-                                            let id = repo.id;
-                                            let checked = props.form.selected_repo_ids.contains(&id);
-                                            let full_name = repo.full_name.clone();
-                                            rsx! {
-                                                label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
-                                                    input { r#type: "checkbox", name: repo_ids_name.clone(), value: "{id}", checked: checked, class: "checkbox checkbox-sm" }
-                                                    span { class: "text-sm", "{full_name}" }
-                                                }
-                                            }
-                                        })}
-                                    }
-                                }
-                            }}
-                            {props.form.errors.repo_scope.as_ref().map(|message| rsx! {
-                                p { id: "repo_ids-error", class: "text-sm font-medium text-error", "{message}" }
-                            })}
-                        }
-                    }
-                    div { class: "flex justify-end",
-                        button { r#type: "submit", class: "btn btn-primary", "Create invitation link" }
+                // The island root: `dioxus-web` mounts here and re-renders
+                // `LinkCreateForm` from the props blob below.
+                div { id: LINK_FORM_ISLAND_ROOT_ID,
+                    LinkCreateForm {
+                        action: action.clone(),
+                        form: props.form.clone(),
+                        repos: props.repos.clone(),
                     }
                 }
+                // Data, not code: a JSON script block is inert for the browser
+                // and for the CSP. `dangerous_inner_html` writes it verbatim,
+                // which is why `script_json` escapes `<`.
+                script { r#type: "application/json", id: LINK_FORM_ISLAND_PROPS_ID, dangerous_inner_html: "{island_props}" }
+                // Module scripts are deferred wherever they sit, so this can
+                // live next to the island it drives instead of in the shared
+                // layout head; it runs after the whole document is parsed.
+                script { r#type: "module", src: LINK_FORM_ISLAND_MODULE_SRC }
             },
         }
+    }
+}
+
+/// The five collaborator permission levels, in the order the select lists
+/// them. These are the exact strings the `<select>` submits and
+/// [`ghinvite_core::Permission`] parses.
+pub const PERMISSION_LEVELS: [&str; 5] = ["pull", "triage", "push", "maintain", "admin"];
+
+/// The listeners the browser island attaches to [`LinkCreateForm`], one
+/// bundle per control plus the form's `onsubmit`. All optional: the server
+/// renders with [`LinkFormHandlers::default`] and, because SSR never emits
+/// listener attributes, the markup is byte-identical with or without them
+/// (tested). This is what lets the island render the very same component the
+/// server rendered instead of a copy of its layout.
+#[derive(Clone, Default, PartialEq)]
+pub struct LinkFormHandlers {
+    /// Fired when the form is submitted; the island's progressive submit
+    /// preflight, which cancels the native POST only on a known blocker.
+    pub onsubmit: Option<EventHandler<FormEvent>>,
+    pub description: ControlHandlers,
+    pub internal_note: ControlHandlers,
+    pub permission: ControlHandlers,
+    pub approval_required: ControlHandlers,
+    pub max_uses: ControlHandlers,
+    pub expires_in_days: ControlHandlers,
+    pub repo_scope: RepositoryScopeHandlers,
+}
+
+/// Listeners for the repository checkbox group ([`RepositoryScopeGroup`]).
+#[derive(Clone, Default, PartialEq)]
+pub struct RepositoryScopeHandlers {
+    /// Fired with `(repository id, checked)` when a checkbox changes.
+    pub onchange: Option<EventHandler<(u64, bool)>>,
+    /// Fired when focus leaves any checkbox.
+    pub onblur: Option<EventHandler<FocusEvent>>,
+}
+
+/// The `<form>` of the new invitation link page: summary alert, the four
+/// sections, and the submit button. Rendered by [`LinkCreateFormPage`] on the
+/// server and again by the island in the browser, from the same inputs.
+///
+/// Rendered `name`s come from the shared model so the POST keys the server
+/// parses and the controls the browser submits cannot drift apart.
+#[component]
+pub fn LinkCreateForm(
+    /// `action` of the form; the route that handles the POST.
+    action: String,
+    form: LinkFormValues,
+    /// Available repositories, in the order the account makes them available.
+    repos: Vec<RepositoryChoice>,
+    /// Listeners for the island; the server passes none.
+    #[props(default)]
+    handlers: LinkFormHandlers,
+) -> Element {
+    let fields = CreateLinkForm::fields();
+    let mut form_listeners: Vec<Attribute> = Vec::new();
+    if let Some(handler) = handlers.onsubmit {
+        form_listeners.push(dioxus_elements::events::onsubmit(handler));
+    }
+    let approval_listeners = handlers.approval_required.attributes();
+
+    rsx! {
+        form { method: "post", action: "{action}", class: "max-w-3xl space-y-5", ..form_listeners,
+            {if form.errors.summary.is_empty() {
+                rsx! {}
+            } else {
+                rsx! {
+                    div { id: "link-form-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
+                        div {
+                            h2 { class: "font-semibold", dangerous_inner_html: "We couldn't create this invitation link" }
+                            ul { class: "mt-1 list-disc space-y-1 pl-5 text-sm",
+                                {form.errors.summary.iter().map(|message| rsx! { li { "{message}" } })}
+                            }
+                        }
+                    }
+                }
+            }}
+            section { class: "mac-panel",
+                div { class: "space-y-4 p-4",
+                    div {
+                        h2 { class: "text-base font-semibold", "Link details" }
+                        p { class: "mt-1 text-sm text-base-content/65", "Name the admin purpose for this invitation link and keep optional notes separate." }
+                    }
+                    Field {
+                        id: "description",
+                        name: fields.description().field_name().to_string(),
+                        label: "Description",
+                        kind: FieldKind::Text { maxlength: Some(120) },
+                        value: form.description.clone(),
+                        required: true,
+                        placeholder: "AI coding workshop",
+                        help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
+                        error: form.errors.description.clone(),
+                        oninput: handlers.description.oninput,
+                        onchange: handlers.description.onchange,
+                        onblur: handlers.description.onblur,
+                    }
+                    Field {
+                        id: "internal_note",
+                        name: fields.internal_note().field_name().to_string(),
+                        label: "Internal note",
+                        kind: FieldKind::Textarea { rows: None },
+                        value: form.internal_note.clone(),
+                        placeholder: "Why this link exists",
+                        help: "Optional admin-only notes. Not visible in the invitation request flow.",
+                        oninput: handlers.internal_note.oninput,
+                        onchange: handlers.internal_note.onchange,
+                        onblur: handlers.internal_note.onblur,
+                    }
+                }
+            }
+            section { class: "mac-panel",
+                div { class: "space-y-4 p-4",
+                    div {
+                        h2 { class: "text-base font-semibold", "Access configuration" }
+                        p { class: "mt-1 text-sm text-base-content/65", "Choose the GitHub permission level and repositories included in this invitation link." }
+                    }
+                    PermissionSelect {
+                        id: "permission",
+                        name: fields.permission().field_name().to_string(),
+                        value: form.permission.clone(),
+                        help: "Use pull for read-only access. Maintain and admin can change repository settings.",
+                        error: form.errors.permission.clone(),
+                        onchange: handlers.permission.onchange,
+                        onblur: handlers.permission.onblur,
+                    }
+                    div { class: "alert alert-warning shadow-sm",
+                        span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
+                    }
+                }
+            }
+            section { class: "mac-panel",
+                div { class: "space-y-4 p-4",
+                    div {
+                        h2 { class: "text-base font-semibold", "Request handling" }
+                        p { class: "mt-1 text-sm text-base-content/65", "Set approval, usage, and expiration guardrails." }
+                    }
+                    div { class: "form-control",
+                        label { class: "label cursor-pointer justify-start gap-3",
+                            input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: form.approval_required, class: "checkbox", ..approval_listeners }
+                            span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
+                        }
+                        p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
+                    }
+                    div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
+                        Field {
+                            id: "max_uses",
+                            name: fields.max_uses().field_name().to_string(),
+                            label: "Max use",
+                            kind: FieldKind::Number { min: Some(1), max: None },
+                            value: form.max_uses.clone(),
+                            placeholder: "Unlimited",
+                            help: "Blank means unlimited invitation requests.",
+                            error: form.errors.max_uses.clone(),
+                            oninput: handlers.max_uses.oninput,
+                            onchange: handlers.max_uses.onchange,
+                            onblur: handlers.max_uses.onblur,
+                        }
+                        Field {
+                            id: "expires_in_days",
+                            name: fields.expires_in_days().field_name().to_string(),
+                            label: "Expires in days",
+                            kind: FieldKind::Number { min: Some(1), max: None },
+                            value: form.expires_in_days.clone(),
+                            help: "Default is 30 days. Blank creates an invitation link with no expiration.",
+                            error: form.errors.expires_in_days.clone(),
+                            oninput: handlers.expires_in_days.oninput,
+                            onchange: handlers.expires_in_days.onchange,
+                            onblur: handlers.expires_in_days.onblur,
+                        }
+                    }
+                }
+            }
+            section { class: "mac-panel",
+                div { class: "space-y-4 p-4",
+                    RepositoryScopeGroup {
+                        name: fields.repo_ids().field_name().to_string(),
+                        repos: repos.clone(),
+                        selected: form.selected_repo_ids.clone(),
+                        help: "Select every repository this invitation link may grant access to.",
+                        error: form.errors.repo_scope.clone(),
+                        onchange: handlers.repo_scope.onchange,
+                        onblur: handlers.repo_scope.onblur,
+                    }
+                }
+            }
+            div { class: "flex justify-end",
+                button { r#type: "submit", class: "btn btn-primary", "Create invitation link" }
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Props)]
+pub struct PermissionSelectProps {
+    /// DOM id of the select; prefixes the `{id}-help` / `{id}-error` ids.
+    pub id: String,
+    /// Form field name submitted with the POST.
+    pub name: String,
+    /// The level to pre-select. A value that is not one of
+    /// [`PERMISSION_LEVELS`] (a tampered POST) selects nothing and is never
+    /// echoed into the markup; the browser falls back to the first option.
+    pub value: String,
+    pub help: Option<String>,
+    /// Field-level error; its presence sets `aria-invalid` and error styling.
+    pub error: Option<String>,
+    /// Fired when the selection changes (island only; ignored by SSR).
+    pub onchange: Option<EventHandler<FormEvent>>,
+    /// Fired when focus leaves the select (island only; ignored by SSR).
+    pub onblur: Option<EventHandler<FocusEvent>>,
+}
+
+/// The permission-level `<select>`: a labelled control listing exactly the
+/// five supported levels, with help and error wired like [`Field`].
+#[component]
+pub fn PermissionSelect(props: PermissionSelectProps) -> Element {
+    let has_error = props.error.is_some();
+    let help_id = format!("{}-help", props.id);
+    let error_id = format!("{}-error", props.id);
+    let described_by = described_by(
+        props.help.as_ref().map(|_| help_id.as_str()),
+        props.error.as_ref().map(|_| error_id.as_str()),
+    );
+    let listeners = listeners(None, props.onchange, props.onblur);
+    let select_class = if has_error {
+        "select select-bordered select-error w-full"
+    } else {
+        "select select-bordered w-full"
+    };
+
+    rsx! {
+        div { class: "form-control gap-2",
+            label { class: "label", r#for: "{props.id}", span { class: "label-text font-medium", "Permission level" } }
+            select {
+                id: "{props.id}",
+                name: "{props.name}",
+                class: "{select_class}",
+                aria_describedby: described_by,
+                aria_invalid: if has_error { "true" },
+                ..listeners,
+                {PERMISSION_LEVELS.iter().map(|level| {
+                    let selected = props.value == *level;
+                    rsx! { option { value: "{level}", selected: selected, "{level}" } }
+                })}
+            }
+            {help_text(&help_id, props.help.as_deref())}
+            {error_text(&error_id, props.error.as_deref())}
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Props)]
+pub struct RepositoryScopeGroupProps {
+    /// Form field name of every checkbox (repeated per repository).
+    pub name: String,
+    /// Available repositories, in the order the account makes them available.
+    pub repos: Vec<RepositoryChoice>,
+    /// Repository ids to render checked. Ids not in `repos` are ignored and
+    /// never surface in the markup.
+    pub selected: Vec<u64>,
+    pub help: Option<String>,
+    /// Section-level error rendered under the list; its presence sets the
+    /// error border and extends `aria-describedby`.
+    pub error: Option<String>,
+    /// Fired with `(repository id, checked)` when a checkbox changes (island
+    /// only; ignored by SSR).
+    pub onchange: Option<EventHandler<(u64, bool)>>,
+    /// Fired when focus leaves any checkbox (island only; ignored by SSR).
+    pub onblur: Option<EventHandler<FocusEvent>>,
+}
+
+/// The repository-scope section body: heading, help, the checkbox group (or
+/// the "no repositories" notice), and the error under it.
+///
+/// The group is the "control" for the repository scope: labelled by the
+/// heading, described by the help text and, on failure, the error under the
+/// list — the same `repo_ids` / `repo_ids-help` / `repo_ids-error` id scheme
+/// as [`Field`]. ARIA does not permit `aria-invalid` on `role="group"`, so the
+/// error is associated through `aria-describedby` and the visible border only.
+#[component]
+pub fn RepositoryScopeGroup(props: RepositoryScopeGroupProps) -> Element {
+    let has_error = props.error.is_some();
+    let described_by = described_by(
+        props.help.as_ref().map(|_| "repo_ids-help"),
+        props.error.as_ref().map(|_| "repo_ids-error"),
+    );
+    let group_class = if has_error {
+        "max-h-80 space-y-1 overflow-y-auto rounded-box border border-error bg-base-200 p-3"
+    } else {
+        "max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3"
+    };
+
+    rsx! {
+        div {
+            h2 { id: "repo_ids-label", class: "text-base font-semibold", "Repository scope" }
+            {props.help.as_ref().map(|help| rsx! {
+                p { id: "repo_ids-help", class: "mt-1 text-sm text-base-content/65", "{help}" }
+            })}
+        }
+        {if props.repos.is_empty() {
+            rsx! { div { class: "alert shadow-sm", span { "No repositories are available for this installation." } } }
+        } else {
+            rsx! {
+                div {
+                    id: "repo_ids",
+                    role: "group",
+                    class: "{group_class}",
+                    aria_labelledby: "repo_ids-label",
+                    aria_describedby: described_by,
+                    {props.repos.iter().map(|repo| {
+                        let id = repo.id;
+                        let checked = props.selected.contains(&id);
+                        let full_name = repo.full_name.clone();
+                        // Built from plain closures (`ListenerCallback`, an
+                        // `Rc`) rather than wrapped in a new `EventHandler`:
+                        // `EventHandler::new` allocates in the component's
+                        // scope and would not be freed until unmount, so a
+                        // reactive caller would leak one per option per render.
+                        let mut listeners: Vec<Attribute> = Vec::new();
+                        if let Some(handler) = props.onchange {
+                            listeners.push(dioxus_elements::events::onchange(
+                                move |event: FormEvent| handler.call((id, event.checked())),
+                            ));
+                        }
+                        if let Some(handler) = props.onblur {
+                            listeners.push(dioxus_elements::events::onblur(handler));
+                        }
+                        rsx! {
+                            label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
+                                input { r#type: "checkbox", name: "{props.name}", value: "{id}", checked: checked, class: "checkbox checkbox-sm", ..listeners }
+                                span { class: "text-sm", "{full_name}" }
+                            }
+                        }
+                    })}
+                }
+            }
+        }}
+        {error_text("repo_ids-error", props.error.as_deref())}
     }
 }
 
@@ -469,6 +647,452 @@ mod tests {
         assert!(!form.approval_required);
     }
 
+    // --- extracted form pieces (the island renders these directly) --------
+
+    /// The whole page, and just the `<form>` it embeds, for the same inputs.
+    fn render_page_and_form(
+        form: LinkFormValues,
+        repos: Vec<RepositoryChoice>,
+    ) -> (String, String) {
+        let (page_form, page_repos) = (form.clone(), repos.clone());
+        let page = crate::testing::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: page_repos.clone(),
+                    form: page_form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
+                }
+            }
+        });
+        let standalone = crate::testing::render(move || {
+            rsx! {
+                LinkCreateForm {
+                    action: "/console/accounts/acme/links".to_string(),
+                    form: form.clone(),
+                    repos: repos.clone(),
+                }
+            }
+        });
+        (page, standalone)
+    }
+
+    /// The `<form>…</form>` slice of a rendered page: what the admin sees and
+    /// submits, as opposed to the props blob that follows it.
+    fn form_markup(page: &str) -> &str {
+        let start = page.find("<form").expect("page renders a form");
+        let end = page.find("</form>").expect("page closes the form") + "</form>".len();
+        &page[start..end]
+    }
+
+    // --- island mount points ------------------------------------------------
+
+    const APP_SCRIPT: &str = "<script src=\"/static/app.js\"></script>";
+    const PROPS_SCRIPT_OPEN: &str = "<script type=\"application/json\" id=\"link-form-props\">";
+    const MODULE_SCRIPT: &str =
+        "<script type=\"module\" src=\"/assets/ghinvite-island.js\"></script>";
+
+    /// Every `<script` on the page is one of: the shared app script, the JSON
+    /// data block, the island module. Nothing inline and executable.
+    fn assert_no_inline_executable_script(html: &str) {
+        let app = html.matches(APP_SCRIPT).count();
+        let data = html.matches(PROPS_SCRIPT_OPEN).count();
+        let module = html.matches(MODULE_SCRIPT).count();
+        assert_eq!(app, 1);
+        assert_eq!(data, 1);
+        assert_eq!(module, 1);
+        assert_eq!(
+            html.matches("<script").count(),
+            app + data + module,
+            "page contains an inline executable <script>"
+        );
+    }
+
+    #[test]
+    fn link_create_form_page_wraps_the_form_in_the_island_root() {
+        let (page, form) = render_page_and_form(LinkFormValues::default(), acme_repos());
+
+        let wrapped = format!("<div id=\"link-form-island\">{form}</div>");
+        assert!(
+            page.contains(&wrapped),
+            "island root does not wrap exactly the form"
+        );
+        assert_eq!(page.matches("id=\"link-form-island\"").count(), 1);
+    }
+
+    #[test]
+    fn link_create_form_page_emits_props_blob_then_module_script_after_the_island() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            permission: "push".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: Some("d".to_string()),
+                ..LinkFormErrors::default()
+            },
+        };
+        let (page, _) = render_page_and_form(form.clone(), acme_repos());
+
+        assert_no_inline_executable_script(&page);
+
+        let blob_start = page.find(PROPS_SCRIPT_OPEN).unwrap();
+        let blob = &page[blob_start + PROPS_SCRIPT_OPEN.len()..];
+        let blob = &blob[..blob.find("</script>").unwrap()];
+        let props: LinkFormIslandProps = serde_json::from_str(blob).unwrap();
+        assert_eq!(
+            props,
+            LinkFormIslandProps {
+                action: "/console/accounts/acme/links".to_string(),
+                values: form,
+                repos: acme_repos(),
+                now: dt("2026-05-04T12:00:00Z"),
+            }
+        );
+        assert!(blob.contains("\"now\":\"2026-05-04T12:00:00Z\""));
+
+        let island_at = page.find("id=\"link-form-island\"").unwrap();
+        let module_at = page.find(MODULE_SCRIPT).unwrap();
+        assert!(
+            island_at < blob_start,
+            "props blob must follow the island root"
+        );
+        assert!(
+            blob_start < module_at,
+            "module script must follow the props blob"
+        );
+        assert!(module_at < page.find("</main>").unwrap());
+    }
+
+    #[test]
+    fn link_create_form_page_props_blob_cannot_be_closed_by_a_description() {
+        let form = LinkFormValues {
+            description: "</script><script>alert(1)</script>".to_string(),
+            ..LinkFormValues::default()
+        };
+        let (page, _) = render_page_and_form(form, acme_repos());
+
+        assert_no_inline_executable_script(&page);
+        // Three script elements in total: app, data block, module.
+        assert_eq!(page.matches("</script>").count(), 3);
+        assert!(page.contains("\\u003c/script>\\u003cscript>alert(1)\\u003c/script>"));
+        // The form itself still escapes it as HTML.
+        assert!(
+            page.contains("value=\"&#60;/script&#62;&#60;script&#62;alert(1)&#60;/script&#62;\"")
+        );
+    }
+
+    #[test]
+    fn link_create_form_is_only_the_form_element() {
+        let (_, html) = render_page_and_form(LinkFormValues::default(), acme_repos());
+
+        assert!(html.starts_with(
+            "<form method=\"post\" action=\"/console/accounts/acme/links\" class=\"max-w-3xl space-y-5\">"
+        ));
+        assert!(html.ends_with("</form>"));
+        assert!(!html.contains("<html"));
+        assert!(!html.contains("<title>"));
+        assert!(!html.contains("<h1"));
+        assert!(html.contains("Create invitation link"));
+    }
+
+    #[test]
+    fn link_create_form_page_embeds_the_standalone_form_byte_for_byte() {
+        // Fresh form and a re-render with every kind of error: the island
+        // re-renders `LinkCreateForm` from the props blob, so what the page
+        // emits and what the component emits on its own must not drift.
+        let with_errors = LinkFormValues {
+            description: "   ".to_string(),
+            permission: "owner".to_string(),
+            approval_required: true,
+            max_uses: "abc".to_string(),
+            expires_in_days: "0".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: Some("d".to_string()),
+                permission: Some("p".to_string()),
+                max_uses: Some("m".to_string()),
+                expires_in_days: Some("e".to_string()),
+                repo_scope: Some("r".to_string()),
+            },
+        };
+
+        for (form, repos) in [
+            (LinkFormValues::default(), acme_repos()),
+            (with_errors.clone(), acme_repos()),
+            (with_errors, vec![]),
+        ] {
+            let (page, standalone) = render_page_and_form(form, repos);
+            assert!(
+                page.contains(&standalone),
+                "page does not embed the standalone form verbatim"
+            );
+            assert_eq!(page.matches("<form").count(), 1);
+        }
+    }
+
+    #[test]
+    fn link_create_form_with_every_handler_wired_renders_the_same_markup_as_without() {
+        // The island renders `LinkCreateForm` with `LinkFormHandlers` filled
+        // in; the server renders it with none. SSR emits no listener
+        // attributes, so the two must be byte-identical — this is what makes
+        // "the island renders the same component" hold literally.
+        let with_errors = LinkFormValues {
+            description: "   ".to_string(),
+            permission: "owner".to_string(),
+            approval_required: true,
+            max_uses: "abc".to_string(),
+            expires_in_days: "0".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![11, 999],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: Some("d".to_string()),
+                permission: Some("p".to_string()),
+                max_uses: Some("m".to_string()),
+                expires_in_days: Some("e".to_string()),
+                repo_scope: Some("r".to_string()),
+            },
+        };
+
+        for (form, repos) in [
+            (LinkFormValues::default(), acme_repos()),
+            (with_errors.clone(), acme_repos()),
+            (with_errors, vec![]),
+        ] {
+            let (plain_form, plain_repos) = (form.clone(), repos.clone());
+            let plain = crate::testing::render(move || {
+                rsx! {
+                    LinkCreateForm {
+                        action: "/console/accounts/acme/links".to_string(),
+                        form: plain_form.clone(),
+                        repos: plain_repos.clone(),
+                    }
+                }
+            });
+            let wired = crate::testing::render(move || {
+                let control = || ControlHandlers {
+                    oninput: Some(EventHandler::new(|_event: FormEvent| {})),
+                    onchange: Some(EventHandler::new(|_event: FormEvent| {})),
+                    onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
+                };
+                let handlers = LinkFormHandlers {
+                    onsubmit: Some(EventHandler::new(|_event: FormEvent| {})),
+                    description: control(),
+                    internal_note: control(),
+                    permission: control(),
+                    approval_required: control(),
+                    max_uses: control(),
+                    expires_in_days: control(),
+                    repo_scope: RepositoryScopeHandlers {
+                        onchange: Some(EventHandler::new(|_change: (u64, bool)| {})),
+                        onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
+                    },
+                };
+                rsx! {
+                    LinkCreateForm {
+                        action: "/console/accounts/acme/links".to_string(),
+                        form: form.clone(),
+                        repos: repos.clone(),
+                        handlers: handlers,
+                    }
+                }
+            });
+
+            assert_eq!(wired, plain);
+            for listener in ["onsubmit", "oninput", "onchange", "onblur"] {
+                assert!(
+                    !wired.contains(listener),
+                    "SSR emitted a {listener} listener"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn permission_select_renders_five_options_help_and_no_error() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                PermissionSelect {
+                    id: "permission".to_string(),
+                    name: "permission".to_string(),
+                    value: "push".to_string(),
+                    help: "Use pull for read-only access.".to_string(),
+                }
+            }
+        });
+
+        assert!(html.starts_with("<div class=\"form-control gap-2\">"));
+        assert!(html.contains("<label class=\"label\" for=\"permission\">"));
+        assert!(html.contains("<span class=\"label-text font-medium\">Permission level</span>"));
+        assert!(html.contains(
+            "<select id=\"permission\" name=\"permission\" class=\"select select-bordered w-full\" aria-describedby=\"permission-help\">"
+        ));
+        assert_eq!(html.matches("<option").count(), 5);
+        assert!(html.contains("<option value=\"pull\">pull</option>"));
+        // Dioxus SSR writes boolean attributes as `name=true`.
+        assert!(html.contains("<option value=\"push\" selected=true>push</option>"));
+        assert!(html.contains(
+            "<p id=\"permission-help\" class=\"text-sm text-base-content/65\">Use pull for read-only access.</p>"
+        ));
+        assert!(!html.contains("permission-error"));
+        assert!(!html.contains("aria-invalid"));
+    }
+
+    #[test]
+    fn permission_select_with_error_and_unknown_value_selects_nothing() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                PermissionSelect {
+                    id: "permission".to_string(),
+                    name: "permission".to_string(),
+                    value: "owner".to_string(),
+                    help: "Use pull for read-only access.".to_string(),
+                    error: "Choose a supported permission level.".to_string(),
+                    onchange: move |_event: FormEvent| {},
+                    onblur: move |_event: FocusEvent| {},
+                }
+            }
+        });
+
+        assert!(html.contains(
+            "<select id=\"permission\" name=\"permission\" class=\"select select-bordered select-error w-full\" aria-describedby=\"permission-help permission-error\" aria-invalid=\"true\">"
+        ));
+        assert!(!html.contains("owner"));
+        assert!(!html.contains(" selected"));
+        assert!(html.contains(
+            "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">Choose a supported permission level.</p>"
+        ));
+        assert!(!html.contains("onchange"));
+        assert!(!html.contains("onblur"));
+    }
+
+    #[test]
+    fn repository_scope_group_renders_checkboxes_with_selection_and_no_error() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                RepositoryScopeGroup {
+                    name: "repo_ids".to_string(),
+                    repos: acme_repos(),
+                    selected: vec![11],
+                    help: "Select every repository.".to_string(),
+                }
+            }
+        });
+
+        assert!(html.contains(
+            "<h2 id=\"repo_ids-label\" class=\"text-base font-semibold\">Repository scope</h2>"
+        ));
+        assert!(html.contains(
+            "<p id=\"repo_ids-help\" class=\"mt-1 text-sm text-base-content/65\">Select every repository.</p>"
+        ));
+        assert!(html.contains(
+            "<div id=\"repo_ids\" role=\"group\" class=\"max-h-80 space-y-1 overflow-y-auto rounded-box border border-base-300 bg-base-200 p-3\" aria-labelledby=\"repo_ids-label\" aria-describedby=\"repo_ids-help\">"
+        ));
+        assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
+        assert!(html.contains(
+            "<input type=\"checkbox\" name=\"repo_ids\" value=\"10\" class=\"checkbox checkbox-sm\"/>"
+        ));
+        assert!(html.contains(
+            "<input type=\"checkbox\" name=\"repo_ids\" value=\"11\" checked=true class=\"checkbox checkbox-sm\"/>"
+        ));
+        assert!(html.contains("acme/api"));
+        assert!(html.contains("acme/web"));
+        assert!(!html.contains("repo_ids-error"));
+        assert!(!html.contains("No repositories are available"));
+    }
+
+    #[test]
+    fn repository_scope_group_with_error_and_handlers_renders_error_under_list() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                RepositoryScopeGroup {
+                    name: "repo_ids".to_string(),
+                    repos: acme_repos(),
+                    selected: vec![],
+                    help: "Select every repository.".to_string(),
+                    error: "Repository scope is required.".to_string(),
+                    onchange: move |_change: (u64, bool)| {},
+                    onblur: move |_event: FocusEvent| {},
+                }
+            }
+        });
+
+        assert!(html.contains("border-error"));
+        assert!(html.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
+        assert!(html.contains(
+            "<p id=\"repo_ids-error\" class=\"text-sm font-medium text-error\">Repository scope is required.</p>"
+        ));
+        assert!(
+            html.find("name=\"repo_ids\"").unwrap() < html.find("id=\"repo_ids-error\"").unwrap()
+        );
+        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("onchange"));
+        assert!(!html.contains("onblur"));
+    }
+
+    #[test]
+    fn repository_scope_group_without_repositories_renders_notice_and_error() {
+        let html = crate::testing::render(|| {
+            rsx! {
+                RepositoryScopeGroup {
+                    name: "repo_ids".to_string(),
+                    repos: vec![],
+                    selected: vec![],
+                    help: "Select every repository.".to_string(),
+                    error: "Repository scope is required.".to_string(),
+                }
+            }
+        });
+
+        assert!(html.contains("No repositories are available for this installation."));
+        assert!(html.contains("id=\"repo_ids-error\""));
+        assert!(!html.contains("name=\"repo_ids\""));
+        assert!(!html.contains("role=\"group\""));
+    }
+
+    #[test]
+    fn link_form_values_round_trip_through_json() {
+        // The island deserialises these from the props blob.
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            permission: "push".to_string(),
+            approval_required: true,
+            max_uses: "7".to_string(),
+            expires_in_days: "45".to_string(),
+            internal_note: "Keep this note".to_string(),
+            selected_repo_ids: vec![10, 11],
+            errors: LinkFormErrors {
+                summary: vec!["summary".to_string()],
+                description: Some("d".to_string()),
+                ..LinkFormErrors::default()
+            },
+        };
+
+        let json = serde_json::to_string(&form).unwrap();
+        let back: LinkFormValues = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, form);
+
+        let repos = acme_repos();
+        let json = serde_json::to_string(&repos).unwrap();
+        let back: Vec<RepositoryChoice> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, repos);
+    }
+
     #[test]
     fn link_create_form_renders_sectioned_console_form() {
         let html = crate::testing::render(|| {
@@ -482,6 +1106,7 @@ mod tests {
                         full_name: "acme/api".to_string(),
                     }],
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -552,6 +1177,7 @@ mod tests {
                         RepositoryChoice { id: 11, full_name: "acme/web".to_string() },
                     ],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -606,6 +1232,7 @@ mod tests {
                         RepositoryChoice { id: 10, full_name: "acme/api".to_string() },
                     ],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -663,6 +1290,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -681,9 +1309,11 @@ mod tests {
                 < html.find("id=\"permission-error\"").unwrap(),
             "error is rendered under the permission select"
         );
-        // The tampered value is never echoed into the markup; the select
-        // still lists exactly the five supported levels, none pre-selected.
-        assert!(!html.contains("owner"));
+        // The tampered value is never echoed into the form markup (the props
+        // blob carries the submitted values verbatim, JSON-escaped, so the
+        // island starts from the same state); the select still lists exactly
+        // the five supported levels, none pre-selected.
+        assert!(!form_markup(&html).contains("owner"));
         assert_eq!(html.matches("<option").count(), 5);
         assert!(!html.contains("\" selected"));
         assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
@@ -710,6 +1340,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -748,6 +1379,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: LinkFormValues::default(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -793,6 +1425,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: acme_repos(),
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });
@@ -815,7 +1448,9 @@ mod tests {
         assert!(html.contains("value=\"11\" checked"));
         assert!(html.contains("value=\"10\""));
         assert!(!html.contains("value=\"10\" checked"));
-        assert!(!html.contains("999"));
+        // The unknown id never reaches the form markup (the props blob carries
+        // the submitted selection verbatim).
+        assert!(!form_markup(&html).contains("999"));
         assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
         assert!(!html.contains("description-error"));
         assert!(!html.contains("input-error"));
@@ -845,6 +1480,7 @@ mod tests {
                     account_login: "acme".to_string(),
                     repos: vec![],
                     form: form.clone(),
+                    now: dt("2026-05-04T12:00:00Z"),
                 }
             }
         });

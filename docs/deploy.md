@@ -5,6 +5,7 @@
 - Cloudflare account with Workers paid plan (or free tier for testing)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed: `npm install -g wrangler`
 - [`worker-build`](https://crates.io/crates/worker-build) installed: `cargo install worker-build`
+- [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) 0.7.x installed (`cargo binstall dioxus-cli@0.7.9`) and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`), for the island bundle
 - GitHub App created and configured (see GitHub App Setup below)
 - Restate Cloud account (or self-hosted Restate server)
 
@@ -81,14 +82,39 @@ base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PR
 wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
 ```
 
-### 7. Deploy
+### 7. Build the island bundle
+
+`wrangler/web.toml` declares `[assets] directory = "../dist/public"`, the
+Dioxus island bundle served by Cloudflare Static Assets. Build it before every
+`wrangler deploy` (the directory must exist, and its hashed file names change
+with the code):
 
 ```bash
+scripts/build-island.sh   # dx bundle → dist/public/assets/ + dist/public/_headers
+```
+
+The script runs `dx bundle -p ghinvite-island --platform web --profile
+island`, recreates `dist/public/` and copies into it only the hashed
+`.js`/`.wasm` files, the stable `assets/ghinvite-island.js` loader the SSR
+page references, and a `_headers` file marking the hashed files immutable. It
+prints the raw and gzipped sizes and fails if the gzipped bundle exceeds
+600 KB. Requires the Dioxus CLI 0.7.x (`cargo binstall dioxus-cli@0.7.9`, or
+`cargo install dioxus-cli --version 0.7.9`) and the `wasm32-unknown-unknown`
+target; `dx` runs the `cargo` on your `PATH`, so keep the rustup-managed one
+first so `rust-toolchain.toml` applies. Do not put anything else in
+`dist/public/` — in particular no `index.html`, which Static Assets would
+serve for `/`. (The `ssr_fixture` example in `crates/ghinvite-island` writes
+one for local smoke tests; re-run the script before deploying.)
+
+### 8. Deploy
+
+```bash
+scripts/build-island.sh   # always first: Static Assets pick up dist/public
 wrangler deploy --config wrangler/web.toml
 wrangler deploy --config wrangler/restate-svc.toml
 ```
 
-### 8. Register with Restate Cloud
+### 9. Register with Restate Cloud
 
 ```bash
 restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers.dev
@@ -96,7 +122,7 @@ restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers
 
 Re-register after any service interface changes.
 
-### 9. Smoke test
+### 10. Smoke test
 
 ```bash
 curl -s https://ghinvite.workers.dev/health           # → ok
@@ -104,6 +130,8 @@ curl -s https://ghinvite.workers.dev/ | grep ghinvite # → HTML
 curl -s -o /dev/null -w "%{http_code}" \
   -X POST https://ghinvite.workers.dev/webhooks/github \
   -d '{}'                                             # → 401
+curl -s -o /dev/null -w "%{http_code}" \
+  https://ghinvite.workers.dev/assets/ghinvite-island.js  # → 200 (island loader)
 ```
 
 ## Local Development
@@ -123,10 +151,13 @@ wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
 ### 3. Run web Worker locally
 
 ```bash
+scripts/build-island.sh   # once; wrangler refuses to start if dist/public is missing
 wrangler dev --local --config wrangler/web.toml
 ```
 
-Available at `http://localhost:8787`.
+Available at `http://localhost:8787`. (Without the island bundle you can
+`mkdir -p dist/public` to satisfy wrangler; the new invitation link form then
+works as the plain server-rendered form.)
 
 ### 4. Run restate-svc Worker locally
 

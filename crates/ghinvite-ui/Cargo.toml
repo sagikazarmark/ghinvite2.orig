@@ -23,6 +23,8 @@ dioform-derive.workspace = true
 dioxus.workspace = true
 ghinvite-core.workspace = true
 serde.workspace = true
+# Serialises the island props blob (`link_form::LinkFormIslandProps`).
+serde_json.workspace = true
 
 # SSR is only needed to assert on rendered markup in this crate's tests. The
 # production renderer lives in `ghinvite-web` (`views::render`).

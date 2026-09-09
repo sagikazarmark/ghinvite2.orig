@@ -44,7 +44,7 @@ where
             tower_sessions::cookie::time::Duration::days(30),
         ));
 
-    Router::new()
+    let router = Router::new()
         .merge(routes::health::router())
         .merge(routes::home::router())
         .merge(routes::oauth::router())
@@ -53,11 +53,36 @@ where
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
         .route("/static/styles.css", axum::routing::get(serve_styles_css))
-        .route("/static/app.js", axum::routing::get(serve_app_js))
+        .route("/static/app.js", axum::routing::get(serve_app_js));
+
+    let router = island_assets(router, &state.config);
+
+    router
         .fallback(routes::not_found::public)
         .layer(middleware::csp::layer())
         .layer(session_layer)
         .with_state(state)
+}
+
+/// Serve the Dioxus island bundle under `/assets/*` from
+/// `WebConfig::island_assets_dir` — native builds only. A missing file is a
+/// plain 404, which is what the new-link page's `<script type="module">`
+/// relies on to degrade to the server-rendered form when no bundle is built.
+///
+/// On Workers, Cloudflare Static Assets answer `/assets/*` before the Worker
+/// is invoked (`[assets]` in `wrangler/web.toml`), so no route exists there
+/// and `tower-http/fs` is not compiled in.
+#[cfg(not(target_arch = "wasm32"))]
+fn island_assets(router: Router<AppState>, config: &WebConfig) -> Router<AppState> {
+    match &config.island_assets_dir {
+        Some(dir) => router.nest_service("/assets", tower_http::services::ServeDir::new(dir)),
+        None => router,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn island_assets(router: Router<AppState>, _config: &WebConfig) -> Router<AppState> {
+    router
 }
 
 /// Built Tailwind/DaisyUI stylesheet (`npm run build:css`), embedded at

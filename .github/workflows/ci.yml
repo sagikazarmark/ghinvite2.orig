@@ -44,12 +44,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Each crate is built with `-p` on purpose: `cfg(target_arch = "wasm32")`
       # means "Cloudflare Workers" in the Worker crates and "browser" in
-      # ghinvite-ui, and a `--workspace --target wasm32-unknown-unknown` build
-      # would unify features across both (ADR 0001).
+      # ghinvite-ui / ghinvite-island, and a `--workspace --target
+      # wasm32-unknown-unknown` build would unify features across both (ADR 0001).
       - run: cargo check -p ghinvite-ui --target wasm32-unknown-unknown
+      - run: cargo check -p ghinvite-island --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
+
+  island:
+    name: Island bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # The Dioxus CLI as a prebuilt binary: `cargo install dioxus-cli` compiles
+      # the CLI from source (~10 min per run, and rust-cache does not cache
+      # installed binaries), whereas binstall downloads the release asset in
+      # seconds. Pinned to the version the bundle was verified with.
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall -y dioxus-cli@0.7.9
+      # dx bundle → dist/public (hashed js/wasm, stable loader, _headers);
+      # fails if the gzipped bundle exceeds the 600 KB budget.
+      - run: scripts/build-island.sh
+      # Markup parity: the island's first frame must equal the server's HTML.
+      - run: cargo test -p ghinvite-island
+      - run: cargo clippy -p ghinvite-island --target wasm32-unknown-unknown -- -D warnings
+      - uses: actions/upload-artifact@v4
+        with:
+          name: island-bundle
+          path: dist/public
+          if-no-files-found: error
 
   integration:
     name: Restate integration tests
