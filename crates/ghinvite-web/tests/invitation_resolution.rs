@@ -549,6 +549,7 @@ async fn signed_in_landing_renders_merged_request_form() {
     assert!(text.contains("Justification"));
     assert!(text.contains("action=\"/i/abcdEFGH01234567\""));
     assert!(!text.contains("AI coding workshop"));
+    assert!(!text.contains("http-equiv=\"refresh\""));
 }
 
 #[tokio::test]
@@ -579,6 +580,8 @@ async fn signed_in_landing_shows_pending_status_instead_of_form() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Awaiting review"));
     assert!(text.contains("account admins have your request"));
+    assert!(text.contains("<meta http-equiv=\"refresh\" content=\"20\""));
+    assert!(text.contains("Check again"));
     assert!(!text.contains("Submit request"));
     assert!(!text.contains("textarea"));
 }
@@ -617,6 +620,7 @@ async fn signed_in_landing_shows_approved_status_instead_of_form() {
     assert!(text.contains("Approved"));
     assert!(text.contains("GitHub notifications and email"));
     assert!(!text.contains("Submit request"));
+    assert!(!text.contains("http-equiv=\"refresh\""));
 }
 
 #[tokio::test]
@@ -771,6 +775,7 @@ async fn inactive_link_with_existing_pending_request_shows_status() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Awaiting review"));
+    assert!(text.contains("<meta http-equiv=\"refresh\" content=\"20\""));
     assert!(!text.contains("revoked"));
 }
 

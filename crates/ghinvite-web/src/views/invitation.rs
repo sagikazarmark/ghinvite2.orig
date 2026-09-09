@@ -18,6 +18,10 @@ fn permission_label(p: Permission) -> &'static str {
 
 // ── RequestPage ──────────────────────────────────────────────────────────────
 
+/// How often the pending invitation request page reloads itself while waiting
+/// for an account-admin decision. Manual "Check again" remains as fallback.
+const PENDING_REFRESH_SECONDS: u32 = 20;
+
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestPageProps {
     pub slug: String,
@@ -169,6 +173,11 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
         },
     };
 
+    let refresh_seconds = match props.current_status {
+        Some(RequestState::Pending) => Some(PENDING_REFRESH_SECONDS),
+        _ => None,
+    };
+
     rsx! {
         InvitationLayout {
             signed_in_login: Some(props.signed_in_login.clone()),
@@ -176,6 +185,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
             account_login: None,
             active_nav: None,
             flash: None,
+            refresh_seconds,
             children: rsx! { {content} },
         }
     }
@@ -278,6 +288,51 @@ mod tests {
         assert!(!html.contains("textarea"));
         assert!(!html.contains("Submit request"));
         assert!(!html.contains("Create your own invitation link"));
+    }
+
+    fn render_request_page_with_status(current_status: Option<RequestState>) -> String {
+        let link = sample_link();
+        crate::views::render::render(move || {
+            rsx! {
+                RequestPage {
+                    slug: "abcdEFGH01234567".to_string(),
+                    link: link.clone(),
+                    signed_in_login: "octocat".to_string(),
+                    flash: None,
+                    request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+                    current_status,
+                    retry_notice: None,
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn request_page_pending_status_auto_refreshes_and_keeps_manual_fallback() {
+        let html = render_request_page_with_status(Some(RequestState::Pending));
+
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"20\""));
+        assert!(html.contains("Check again"));
+        assert!(html.contains("href=\"/i/abcdEFGH01234567\""));
+    }
+
+    #[test]
+    fn request_page_non_pending_states_do_not_auto_refresh() {
+        let states = [
+            None,
+            Some(RequestState::Approved),
+            Some(RequestState::Declined),
+            Some(RequestState::Expired),
+            Some(RequestState::Cancelled),
+        ];
+
+        for state in states {
+            let html = render_request_page_with_status(state);
+            assert!(
+                !html.contains("http-equiv=\"refresh\""),
+                "unexpected meta refresh for status {state:?}"
+            );
+        }
     }
 
     #[test]

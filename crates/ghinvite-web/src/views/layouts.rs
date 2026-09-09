@@ -15,6 +15,10 @@ pub struct LayoutProps {
     pub active_nav: Option<String>,
     /// One-shot status message rendered above `children`.
     pub flash: Option<crate::session::Flash>,
+    /// When set, the page emits `<meta http-equiv="refresh">` so the browser
+    /// reloads it after this many seconds. Only InvitationLayout honours it;
+    /// used by the pending invitation request page (no client runtime).
+    pub refresh_seconds: Option<u32>,
     /// The page content rendered inside the layout.
     pub children: Element,
 }
@@ -128,6 +132,9 @@ pub fn InvitationLayout(props: LayoutProps) -> Element {
     rsx! {
         head {
             title { "{props.title}" }
+            if let Some(seconds) = props.refresh_seconds {
+                meta { http_equiv: "refresh", content: "{seconds}" }
+            }
             link { rel: "stylesheet", href: "/static/styles.css" }
         }
         body {
@@ -239,5 +246,30 @@ mod tests {
         assert!(!html.contains("Sign in"));
         assert!(!html.contains("Sign out"));
         assert!(!html.contains("Console"));
+        assert!(!html.contains("http-equiv=\"refresh\""));
+    }
+
+    #[test]
+    fn invitation_layout_emits_meta_refresh_only_when_interval_is_set() {
+        let html = crate::views::render::render(|| {
+            rsx! {
+                InvitationLayout {
+                    signed_in_login: None,
+                    title: "Invite".to_string(),
+                    account_login: None,
+                    active_nav: None,
+                    flash: None,
+                    refresh_seconds: Some(20),
+                    children: rsx! { p { "Invitation" } },
+                }
+            }
+        });
+
+        assert!(html.contains("<meta http-equiv=\"refresh\" content=\"20\""));
+        let head_end = html.find("</head>").expect("layout renders a head element");
+        let meta_pos = html
+            .find("http-equiv=\"refresh\"")
+            .expect("meta refresh is rendered");
+        assert!(meta_pos < head_end, "meta refresh must be inside <head>");
     }
 }
