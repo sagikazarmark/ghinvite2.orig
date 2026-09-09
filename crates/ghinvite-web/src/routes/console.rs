@@ -284,7 +284,6 @@ async fn create_link(
     admin: RequireConsoleAdminOf,
     serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
 ) -> impl IntoResponse {
-    use chrono::Duration;
     use std::str::FromStr;
 
     let now = Utc::now();
@@ -305,15 +304,6 @@ async fn create_link(
             return link_form_response(&admin, None, repos, form.into_view_values(errors));
         }
     };
-    let max_uses: Option<u32> = form
-        .max_uses
-        .as_deref()
-        .and_then(|s: &str| s.trim().parse::<u32>().ok());
-    let expires_at = form
-        .expires_in_days
-        .as_deref()
-        .and_then(|s: &str| s.trim().parse::<i64>().ok())
-        .map(|d| now + Duration::days(d));
 
     let installation_repos = load_installation_repos_for_form(&state, &admin).await;
     let repos: Vec<ghinvite_core::InvitationLinkRepo> = installation_repos
@@ -337,8 +327,8 @@ async fn create_link(
             account_id: admin.account.account_id,
             created_by: admin.session.user_id,
             created_at: now,
-            expires_at,
-            max_uses,
+            expires_at: validated.expires_at,
+            max_uses: validated.max_uses,
             permission,
             approval_required: validated.approval_required,
             description: validated.description,

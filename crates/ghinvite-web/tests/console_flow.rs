@@ -2,7 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use ghinvite_core::storage::Storage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
@@ -115,6 +115,7 @@ enum RecordedCommand {
         permission: ghinvite_core::Permission,
         approval_required: bool,
         max_uses: Option<u32>,
+        expires_at: Option<DateTime<Utc>>,
         repo_ids: Vec<u64>,
     },
 }
@@ -139,6 +140,7 @@ impl GhinviteCommands for RecordingCommands {
                 permission: command.permission,
                 approval_required: command.approval_required,
                 max_uses: command.max_uses,
+                expires_at: command.expires_at,
                 repo_ids: command.repos.into_iter().map(|repo| repo.repo_id).collect(),
             });
         Ok(CreateInvitationLinkOutput {
@@ -943,6 +945,152 @@ async fn create_link_valid_submission_invokes_command_and_redirects() {
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let before = Utc::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = Utc::now();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.starts_with("/console/accounts/acme/links/"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        description,
+        internal_note,
+        permission,
+        approval_required,
+        max_uses,
+        expires_at,
+        repo_ids,
+    } = &calls[0];
+    assert_eq!(description, "AI coding workshop");
+    assert_eq!(internal_note.as_deref(), Some("Keep this note"));
+    assert_eq!(*permission, ghinvite_core::Permission::Push);
+    assert!(approval_required);
+    assert_eq!(*max_uses, Some(7));
+    assert_expires_days_from(*expires_at, 45, before, after);
+    assert_eq!(*repo_ids, vec![10]);
+}
+
+/// `expires_at` must be exactly `days` after some instant between `before`
+/// and `after` (the request's `now`), i.e. `now + days` without drift.
+fn assert_expires_days_from(
+    expires_at: Option<DateTime<Utc>>,
+    days: i64,
+    before: DateTime<Utc>,
+    after: DateTime<Utc>,
+) {
+    let expires_at = expires_at.expect("expires_at should be set");
+    let earliest = before + Duration::days(days);
+    let latest = after + Duration::days(days);
+    assert!(
+        expires_at >= earliest && expires_at <= latest,
+        "expires_at {expires_at} should be {days} days after a now in [{before}, {after}]"
+    );
+}
+
+#[tokio::test]
+async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=AI+coding+workshop&permission=push&max_uses=abc&expires_in_days=0&internal_note=Keep+this+note&repo_ids=10";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("New invitation link"));
+    assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
+    assert!(text.contains("Max use must be a whole number of 1 or more."));
+    assert!(text.contains("Expiration must be a whole number of days, 1 or more."));
+    assert!(text.contains("id=\"max_uses-error\""));
+    assert!(text.contains("id=\"expires_in_days-error\""));
+    assert!(text.contains("aria-describedby=\"max_uses-help max_uses-error\""));
+    assert!(text.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 2);
+    assert!(!text.contains("description-error"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("name=\"max_uses\" value=\"abc\""));
+    assert!(text.contains("name=\"expires_in_days\" value=\"0\""));
+    assert!(text.contains("value=\"push\" selected"));
+    assert!(text.contains("Keep this note"));
+    assert!(text.contains("value=\"10\" checked"));
+    assert!(text.contains("acme/api"));
+    assert!(!text.contains("Bad Request"));
+}
+
+#[tokio::test]
+async fn create_link_valid_numeric_guardrails_reach_command() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body = "description=AI+coding+workshop&permission=pull&max_uses=+3+&expires_in_days=+10+&repo_ids=11";
+    let before = Utc::now();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/console/accounts/acme/links")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let after = Utc::now();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        max_uses,
+        expires_at,
+        repo_ids,
+        ..
+    } = &calls[0];
+    assert_eq!(*max_uses, Some(3));
+    assert_expires_days_from(*expires_at, 10, before, after);
+    assert_eq!(*repo_ids, vec![11]);
+}
+
+#[tokio::test]
+async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(expectations).await;
+
+    let body =
+        "description=AI+coding+workshop&permission=pull&max_uses=&expires_in_days=&repo_ids=10";
     let resp = app
         .oneshot(
             Request::builder()
@@ -957,20 +1105,15 @@ async fn create_link_valid_submission_invokes_command_and_redirects() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.starts_with("/console/accounts/acme/links/"));
-    assert_eq!(calls.lock().unwrap().len(), 1);
-    assert_eq!(
-        calls.lock().unwrap()[0],
-        RecordedCommand::CreateInvitationLink {
-            description: "AI coding workshop".to_string(),
-            internal_note: Some("Keep this note".to_string()),
-            permission: ghinvite_core::Permission::Push,
-            approval_required: true,
-            max_uses: Some(7),
-            repo_ids: vec![10],
-        }
-    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    let RecordedCommand::CreateInvitationLink {
+        max_uses,
+        expires_at,
+        ..
+    } = &calls[0];
+    assert_eq!(*max_uses, None);
+    assert_eq!(*expires_at, None);
 }
 
 #[tokio::test]

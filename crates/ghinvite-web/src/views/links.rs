@@ -33,6 +33,8 @@ pub struct LinkFormValues {
 pub struct LinkFormErrors {
     pub summary: Vec<String>,
     pub description: Option<String>,
+    pub max_uses: Option<String>,
+    pub expires_in_days: Option<String>,
 }
 
 impl Default for LinkFormValues {
@@ -156,6 +158,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                     value: props.form.max_uses.clone(),
                                     placeholder: "Unlimited",
                                     help: "Blank means unlimited invitation requests.",
+                                    error: props.form.errors.max_uses.clone(),
                                 }
                                 Field {
                                     id: "expires_in_days",
@@ -164,6 +167,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                     kind: FieldKind::Number { min: Some(1), max: None },
                                     value: props.form.expires_in_days.clone(),
                                     help: "Default is 30 days. Blank creates an invitation link with no expiration.",
+                                    error: props.form.errors.expires_in_days.clone(),
                                 }
                             }
                         }
@@ -484,6 +488,7 @@ mod tests {
                 summary: vec!["Fix the highlighted fields before creating this invitation link."
                     .to_string()],
                 description: Some("Description is required. Use short, single-line admin-only context for this invitation link.".to_string()),
+                ..LinkFormErrors::default()
             },
         };
 
@@ -520,6 +525,61 @@ mod tests {
         assert!(html.contains("Keep this note"));
         assert!(html.contains("value=\"10\" checked"));
         assert!(html.contains("value=\"11\""));
+    }
+
+    #[test]
+    fn link_create_form_renders_numeric_guardrail_errors_and_preserved_raw_values() {
+        let form = LinkFormValues {
+            description: "AI coding workshop".to_string(),
+            max_uses: "abc".to_string(),
+            expires_in_days: "0".to_string(),
+            selected_repo_ids: vec![10],
+            errors: LinkFormErrors {
+                summary: vec![
+                    "Fix the highlighted fields before creating this invitation link.".to_string(),
+                ],
+                description: None,
+                max_uses: Some("Max use must be a whole number of 1 or more.".to_string()),
+                expires_in_days: Some(
+                    "Expiration must be a whole number of days, 1 or more.".to_string(),
+                ),
+            },
+            ..LinkFormValues::default()
+        };
+
+        let html = crate::views::render::render(move || {
+            rsx! {
+                LinkCreateFormPage {
+                    signed_in_login: Some("admin".to_string()),
+                    flash: None,
+                    account_login: "acme".to_string(),
+                    repos: vec![
+                        ghinvite_github::payloads::GhRepo { id: 10, full_name: "acme/api".to_string(), private: true },
+                    ],
+                    form: form.clone(),
+                }
+            }
+        });
+
+        assert!(html.contains("id=\"link-form-errors\""));
+        assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
+        assert!(html.contains(
+            "<p id=\"max_uses-error\" class=\"text-sm font-medium text-error\">Max use must be a whole number of 1 or more.</p>"
+        ));
+        assert!(html.contains(
+            "<p id=\"expires_in_days-error\" class=\"text-sm font-medium text-error\">Expiration must be a whole number of days, 1 or more.</p>"
+        ));
+        assert!(html.contains("aria-describedby=\"max_uses-help max_uses-error\""));
+        assert!(html.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 2);
+        assert_eq!(html.matches("input-error").count(), 2);
+        assert!(html.contains("name=\"max_uses\" value=\"abc\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"0\""));
+        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(!html.contains("description-error"));
+        assert!(html.contains("value=\"10\" checked"));
+        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert!(!html.contains("disabled"));
     }
 
     #[test]

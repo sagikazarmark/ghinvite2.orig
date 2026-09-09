@@ -11,7 +11,7 @@
 //! [`LinkFormErrors`].
 
 use crate::views::links::{LinkFormErrors, LinkFormValues};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::Deserialize;
 
 /// Raw POST body of the new invitation link form, exactly as submitted.
@@ -57,28 +57,39 @@ pub struct ValidatedCreateLink {
     pub description: String,
     pub internal_note: Option<String>,
     pub approval_required: bool,
+    /// `None` is an intentional "unlimited" (the field was left blank).
+    pub max_uses: Option<u32>,
+    /// `None` is an intentional "no expiration" (the field was left blank).
+    /// Otherwise `now` plus the submitted whole number of days.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Validate a submitted new invitation link form.
 ///
-/// Runs every rule and reports all failures together. `now` is unused until
-/// the expiration rule lands but is part of the contract so callers anchor
-/// time once per request.
+/// Runs every rule and reports all failures together. `now` anchors the
+/// expiration timestamp; callers pass the same instant they record as
+/// `created_at` so the two agree.
 pub fn validate(
     form: &CreateLinkForm,
-    _now: DateTime<Utc>,
+    now: DateTime<Utc>,
 ) -> Result<ValidatedCreateLink, LinkFormErrors> {
     let description = validate_description(form.description.as_deref());
+    let max_uses = validate_max_uses(form.max_uses.as_deref());
+    let expires_at = validate_expires_in_days(form.expires_in_days.as_deref(), now);
 
-    match description {
-        Ok(description) => Ok(ValidatedCreateLink {
+    match (description, max_uses, expires_at) {
+        (Ok(description), Ok(max_uses), Ok(expires_at)) => Ok(ValidatedCreateLink {
             description,
             internal_note: normalize_internal_note(form.internal_note.as_deref()),
             approval_required: form.approval_required.is_some(),
+            max_uses,
+            expires_at,
         }),
-        Err(error) => Err(LinkFormErrors {
+        (description, max_uses, expires_at) => Err(LinkFormErrors {
             summary: vec![SUMMARY.to_string()],
-            description: Some(error.message),
+            description: description.err().map(|e| e.message),
+            max_uses: max_uses.err().map(|e| e.message),
+            expires_in_days: expires_at.err().map(|e| e.message),
         }),
     }
 }
@@ -129,6 +140,91 @@ fn normalize_internal_note(raw: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Max use: blank means unlimited; otherwise a positive whole number that
+/// fits the `u32` the invitation link stores.
+fn validate_max_uses(raw: Option<&str>) -> Result<Option<u32>, FieldError> {
+    let Some(typed) = non_blank(raw) else {
+        return Ok(None);
+    };
+    positive_whole_number(typed)
+        .and_then(|count| u32::try_from(count).map_err(|_| NumberProblem::TooLarge))
+        .map(Some)
+        .map_err(|problem| match problem {
+            NumberProblem::NotPositiveWholeNumber => {
+                FieldError::new("Max use must be a whole number of 1 or more.")
+            }
+            NumberProblem::TooLarge => FieldError::new(
+                "Max use is too large. Use a smaller number, or leave it blank for unlimited invitation requests.",
+            ),
+        })
+}
+
+/// Expiration: blank means no expiration; otherwise a positive whole number
+/// of days that `now` can safely be advanced by. There is no product maximum;
+/// the only upper bound is what chrono can represent as a timestamp.
+fn validate_expires_in_days(
+    raw: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>, FieldError> {
+    let Some(typed) = non_blank(raw) else {
+        return Ok(None);
+    };
+    positive_whole_number(typed)
+        .and_then(|days| expiration_after(now, days).ok_or(NumberProblem::TooLarge))
+        .map(Some)
+        .map_err(|problem| match problem {
+            NumberProblem::NotPositiveWholeNumber => {
+                FieldError::new("Expiration must be a whole number of days, 1 or more.")
+            }
+            NumberProblem::TooLarge => FieldError::new(
+                "Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.",
+            ),
+        })
+}
+
+/// `now + days`, or `None` when the day count or the resulting instant is
+/// outside what chrono can represent. Every step is checked; nothing here can
+/// panic on adversarial input.
+fn expiration_after(now: DateTime<Utc>, days: u64) -> Option<DateTime<Utc>> {
+    let days = i64::try_from(days).ok()?;
+    let delta = TimeDelta::try_days(days)?;
+    now.checked_add_signed(delta)
+}
+
+/// `Some(trimmed)` when the admin typed something; `None` for a missing key,
+/// an empty value, or whitespace only.
+fn non_blank(raw: Option<&str>) -> Option<&str> {
+    raw.map(str::trim).filter(|typed| !typed.is_empty())
+}
+
+/// Why a typed value is not a usable positive whole number. The two cases get
+/// different messages: one is a typo, the other is a number the guardrail
+/// cannot represent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NumberProblem {
+    /// Zero, negative, decimal, signed, or not digits at all.
+    NotPositiveWholeNumber,
+    /// Digits only, but larger than the guardrail can represent: past the
+    /// storage type for max use, past a representable timestamp for
+    /// expiration.
+    TooLarge,
+}
+
+/// Read a non-blank typed value as a positive whole number written in ASCII
+/// digits: no sign, decimal point, exponent, or separators. Callers narrow
+/// the `u64` further to their storage type.
+fn positive_whole_number(typed: &str) -> Result<u64, NumberProblem> {
+    if !typed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(NumberProblem::NotPositiveWholeNumber);
+    }
+    match typed.parse::<u64>() {
+        Ok(0) => Err(NumberProblem::NotPositiveWholeNumber),
+        Ok(number) => Ok(number),
+        // All digits and non-empty, so the only way to fail is overflow.
+        Err(_) => Err(NumberProblem::TooLarge),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +257,12 @@ mod tests {
                 description: "AI coding workshop".into(),
                 internal_note: Some("Keep this note".into()),
                 approval_required: true,
+                max_uses: Some(7),
+                expires_at: Some(
+                    DateTime::parse_from_rfc3339("2026-06-18T12:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                ),
             }
         );
     }
@@ -261,5 +363,172 @@ mod tests {
         let too_long = "x".repeat(121);
         let err = validate_description(Some(&too_long)).unwrap_err();
         assert_eq!(err.message, "Description must be 120 characters or fewer.");
+    }
+
+    fn with_max_uses(raw: Option<&str>) -> CreateLinkForm {
+        CreateLinkForm {
+            max_uses: raw.map(str::to_string),
+            ..valid_form()
+        }
+    }
+
+    fn max_uses_error(raw: &str) -> String {
+        let errors = validate(&with_max_uses(Some(raw)), now()).unwrap_err();
+        assert_eq!(errors.description, None, "only max use should fail");
+        assert!(
+            !errors.summary.is_empty(),
+            "summary line accompanies field errors"
+        );
+        errors
+            .max_uses
+            .unwrap_or_else(|| panic!("max_uses={raw:?} should produce a max use error"))
+    }
+
+    #[test]
+    fn max_uses_blank_or_missing_means_unlimited() {
+        for raw in [None, Some(""), Some("   "), Some("\t\n")] {
+            let validated = validate(&with_max_uses(raw), now()).unwrap();
+            assert_eq!(validated.max_uses, None, "max_uses={raw:?}");
+        }
+    }
+
+    #[test]
+    fn max_uses_accepts_positive_whole_numbers_and_trims() {
+        assert_eq!(
+            validate(&with_max_uses(Some("1")), now()).unwrap().max_uses,
+            Some(1)
+        );
+        assert_eq!(
+            validate(&with_max_uses(Some(" 25 ")), now())
+                .unwrap()
+                .max_uses,
+            Some(25)
+        );
+        assert_eq!(
+            validate(&with_max_uses(Some("4294967295")), now())
+                .unwrap()
+                .max_uses,
+            Some(u32::MAX)
+        );
+    }
+
+    #[test]
+    fn max_uses_rejects_zero_negative_decimal_and_text() {
+        for raw in [
+            "0", "00", "-1", "-0", "1.5", "2.0", "abc", "5x", "+5", "1e3", "1,000",
+        ] {
+            assert_eq!(
+                max_uses_error(raw),
+                "Max use must be a whole number of 1 or more.",
+                "max_uses={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_uses_rejects_values_too_large_to_store() {
+        for raw in ["4294967296", "99999999999999999999999"] {
+            assert_eq!(
+                max_uses_error(raw),
+                "Max use is too large. Use a smaller number, or leave it blank for unlimited invitation requests.",
+                "max_uses={raw:?}"
+            );
+        }
+    }
+
+    fn with_expires_in_days(raw: Option<&str>) -> CreateLinkForm {
+        CreateLinkForm {
+            expires_in_days: raw.map(str::to_string),
+            ..valid_form()
+        }
+    }
+
+    fn expires_in_days_error(raw: &str) -> String {
+        let errors = validate(&with_expires_in_days(Some(raw)), now()).unwrap_err();
+        assert_eq!(errors.description, None, "only expiration should fail");
+        assert_eq!(errors.max_uses, None, "only expiration should fail");
+        assert!(
+            !errors.summary.is_empty(),
+            "summary line accompanies field errors"
+        );
+        errors
+            .expires_in_days
+            .unwrap_or_else(|| panic!("expires_in_days={raw:?} should produce an expiration error"))
+    }
+
+    #[test]
+    fn expires_in_days_blank_or_missing_means_no_expiration() {
+        for raw in [None, Some(""), Some("   "), Some("\t\n")] {
+            let validated = validate(&with_expires_in_days(raw), now()).unwrap();
+            assert_eq!(validated.expires_at, None, "expires_in_days={raw:?}");
+        }
+    }
+
+    #[test]
+    fn expires_in_days_accepts_positive_whole_numbers_anchored_at_now() {
+        let expires_at = |raw: &str| {
+            validate(&with_expires_in_days(Some(raw)), now())
+                .unwrap()
+                .expires_at
+                .unwrap()
+        };
+
+        assert_eq!(expires_at("1").to_rfc3339(), "2026-05-05T12:00:00+00:00");
+        assert_eq!(expires_at(" 45 ").to_rfc3339(), "2026-06-18T12:00:00+00:00");
+        assert_eq!(
+            expires_at("36500").to_rfc3339(),
+            "2126-04-10T12:00:00+00:00"
+        );
+    }
+
+    #[test]
+    fn expires_in_days_rejects_zero_negative_decimal_and_text() {
+        for raw in [
+            "0", "00", "-1", "-30", "1.5", "30.0", "abc", "30d", "+30", "1e2", "1,000",
+        ] {
+            assert_eq!(
+                expires_in_days_error(raw),
+                "Expiration must be a whole number of days, 1 or more.",
+                "expires_in_days={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn expires_in_days_rejects_values_that_cannot_produce_a_timestamp() {
+        // Past chrono's representable calendar, past i64 days, past u64 digits.
+        for raw in ["100000000", "9223372036854775808", "18446744073709551616"] {
+            assert_eq!(
+                expires_in_days_error(raw),
+                "Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.",
+                "expires_in_days={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_reports_every_field_error_at_once() {
+        let form = CreateLinkForm {
+            description: Some("".into()),
+            max_uses: Some("0".into()),
+            expires_in_days: Some("abc".into()),
+            ..valid_form()
+        };
+
+        let errors = validate(&form, now()).unwrap_err();
+
+        assert_eq!(
+            errors.summary,
+            vec!["Fix the highlighted fields before creating this invitation link.".to_string()]
+        );
+        assert!(errors.description.is_some());
+        assert_eq!(
+            errors.max_uses.as_deref(),
+            Some("Max use must be a whole number of 1 or more.")
+        );
+        assert_eq!(
+            errors.expires_in_days.as_deref(),
+            Some("Expiration must be a whole number of days, 1 or more.")
+        );
     }
 }
