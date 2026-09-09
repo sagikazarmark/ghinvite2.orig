@@ -29,7 +29,7 @@ pub struct LinkFormValues {
     pub errors: LinkFormErrors,
 }
 
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct LinkFormErrors {
     pub summary: Vec<String>,
     pub description: Option<String>,

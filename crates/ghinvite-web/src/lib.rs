@@ -6,6 +6,7 @@ pub(crate) mod account_admin_reads;
 pub mod commands;
 pub mod config;
 pub mod error;
+pub(crate) mod forms;
 pub(crate) mod invitation_link_resolution;
 pub mod middleware;
 pub mod restate_client;
