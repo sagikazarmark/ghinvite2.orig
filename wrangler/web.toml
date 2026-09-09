@@ -10,6 +10,28 @@ compatibility_flags = ["nodejs_compat"]
 [build]
 command = "worker-build --release -p ghinvite-web-worker"
 
+# Static assets: the Dioxus island bundle (ADR 0001), served by Cloudflare
+# before the Worker is invoked. `scripts/build-island.sh` writes the bundle to
+# `dist/public/assets/` (path relative to this config file, like
+# `migrations_dir` below); it must exist when `wrangler deploy` runs.
+#
+# Routing: any request whose path matches a file under `directory` is answered
+# by Static Assets; everything else falls through to the Worker (axum), so the
+# SSR 404 page still works. Because of that the directory must contain ONLY
+# `assets/*` — never an `index.html` or other HTML, which would shadow `/`.
+# `not_found_handling` is deliberately unset (the "single-page-application"
+# mode would serve index.html for every unmatched navigation and hijack `/`,
+# `/i/{code}`, `/login`). `run_worker_first` is unnecessary: no SSR route lives
+# under `/assets/`, so asset-first routing cannot intercept a Worker route.
+#
+# Cache headers: Static Assets default to `Cache-Control: public, max-age=0,
+# must-revalidate` + ETag. The dx output is content-hashed, so the build script
+# also writes `dist/public/_headers` marking `/assets/*-dxh*` as
+# `public, max-age=31536000, immutable`; the stable loader
+# `/assets/ghinvite-island.js` keeps the revalidating default.
+[assets]
+directory = "../dist/public"
+
 # D1 database binding (matches env.d1("DB") in ghinvite-web-worker/src/lib.rs)
 [[d1_databases]]
 binding = "DB"

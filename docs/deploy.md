@@ -81,14 +81,32 @@ base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PR
 wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
 ```
 
-### 7. Deploy
+### 7. Build the island bundle
+
+`wrangler/web.toml` declares `[assets] directory = "../dist/public"`, the
+Dioxus island bundle served by Cloudflare Static Assets. The directory must
+exist before `wrangler deploy` runs:
+
+```bash
+scripts/build-island.sh   # dx bundle → dist/public/assets/ + dist/public/_headers
+```
+
+The script (added with the island crate) runs `dx bundle --platform web
+--release` for the island, copies the hashed `.js`/`.wasm` files to
+`dist/public/assets/`, writes the stable `ghinvite-island.js` loader the SSR
+page references, and a `_headers` file marking the hashed files immutable.
+Requires the Dioxus CLI (`cargo install dioxus-cli`) and the
+`wasm32-unknown-unknown` target. Do not put anything else in `dist/public/` —
+in particular no `index.html`, which Static Assets would serve for `/`.
+
+### 8. Deploy
 
 ```bash
 wrangler deploy --config wrangler/web.toml
 wrangler deploy --config wrangler/restate-svc.toml
 ```
 
-### 8. Register with Restate Cloud
+### 9. Register with Restate Cloud
 
 ```bash
 restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers.dev
@@ -96,7 +114,7 @@ restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers
 
 Re-register after any service interface changes.
 
-### 9. Smoke test
+### 10. Smoke test
 
 ```bash
 curl -s https://ghinvite.workers.dev/health           # → ok
@@ -104,6 +122,8 @@ curl -s https://ghinvite.workers.dev/ | grep ghinvite # → HTML
 curl -s -o /dev/null -w "%{http_code}" \
   -X POST https://ghinvite.workers.dev/webhooks/github \
   -d '{}'                                             # → 401
+curl -s -o /dev/null -w "%{http_code}" \
+  https://ghinvite.workers.dev/assets/ghinvite-island.js  # → 200 (island loader)
 ```
 
 ## Local Development
@@ -123,10 +143,13 @@ wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
 ### 3. Run web Worker locally
 
 ```bash
+scripts/build-island.sh   # once; wrangler refuses to start if dist/public is missing
 wrangler dev --local --config wrangler/web.toml
 ```
 
-Available at `http://localhost:8787`.
+Available at `http://localhost:8787`. (Without the island bundle you can
+`mkdir -p dist/public` to satisfy wrangler; the new invitation link form then
+works as the plain server-rendered form.)
 
 ### 4. Run restate-svc Worker locally
 

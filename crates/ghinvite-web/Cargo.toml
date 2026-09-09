@@ -47,6 +47,10 @@ url.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
 ghinvite-storage-sqlx.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+# `ServeDir` for the island bundle under `/assets/*` in local dev. The `fs`
+# feature pulls tokio's filesystem support, which the Workers build must not
+# see; on Workers, Static Assets serve `/assets/*` instead.
+tower-http = { workspace = true, features = ["fs"] }
 tower-sessions-sqlx-store.workspace = true
 
 # Wasm32 / Workers build: same axum, minus the `tokio` feature.

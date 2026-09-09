@@ -61,6 +61,10 @@ page. `/login` redirects to GitHub OAuth — set `GHINVITE_GITHUB_CLIENT_ID` and
 `GHINVITE_GITHUB_CLIENT_SECRET` in your environment to point at a real GitHub
 App, otherwise the redirect lands on GitHub's "App not found" page.
 
+Run it from the repo root so `/assets/*` resolves to `dist/public/assets`
+(see [Island assets](#island-assets)); without the island bundle the new
+invitation link form is simply the server-rendered form.
+
 ### Run tests
 
 ```bash
@@ -166,6 +170,43 @@ Every HTML response carries an enforced `Content-Security-Policy`
 
 The header is only set on `text/html` responses — static assets, the JSON
 webhook receiver, plain-text errors, and redirects are left alone.
+
+## Island assets
+
+The new invitation link page (`/console/accounts/{login}/links/new`) hosts
+the first Dioxus island ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)).
+The server-rendered page references exactly one client file for it:
+
+```html
+<script type="module" src="/assets/ghinvite-island.js"></script>
+```
+
+That name is **stable** (`ghinvite_ui::link_form::LINK_FORM_ISLAND_MODULE_SRC`).
+`dx bundle` emits content-hashed files (`island-dxh<hash>.js`,
+`island_bg-dxh<hash>.wasm`), so the island build script
+(`scripts/build-island.sh`) also writes a tiny `ghinvite-island.js` loader
+that `import`s the hashed bundle. The SSR page never learns the hash, and the
+Rust build has no dependency on the `dx` build.
+
+- **Where the files come from:** `scripts/build-island.sh` runs `dx bundle`
+  for the island crate and copies the output to `dist/public/assets/`
+  (plus `dist/public/_headers`, which marks the hashed files
+  `immutable`). `dist/` is git-ignored.
+- **Native dev** (`cargo run -p ghinvite-web`): `build_app` nests a
+  `tower_http::services::ServeDir` at `/assets` over
+  `WebConfig::island_assets_dir` — `dist/public/assets` relative to the
+  working directory by default, overridable with `GHINVITE_ISLAND_ASSETS_DIR`,
+  `None` to register no route. `tower-http/fs` is a non-wasm32 dependency
+  only.
+- **Workers:** Cloudflare Static Assets serve `/assets/*` before the Worker is
+  invoked (`[assets] directory = "../dist/public"` in `wrangler/web.toml`);
+  the Worker has no `/assets` route and `island_assets_dir` is `None`. The
+  directory must contain only `assets/*` (no `index.html`), and
+  `not_found_handling` must stay unset — see the comments in that file.
+- **Missing assets degrade to the plain form.** If the bundle has not been
+  built (tests, a fresh checkout, CI without `dx`), the browser gets a 404 for
+  the module and the server-rendered form works exactly as before; nothing
+  else on the page depends on it.
 
 ## What this crate does NOT do (yet)
 
