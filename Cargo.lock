@@ -1336,6 +1336,7 @@ dependencies = [
  "base64",
  "chrono",
  "cookie",
+ "dioform-core",
  "dioxus",
  "dioxus-ssr",
  "ghinvite-core",
