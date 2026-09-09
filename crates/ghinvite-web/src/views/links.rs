@@ -232,7 +232,6 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                         class: "{group_class}",
                                         aria_labelledby: "repo_ids-label",
                                         aria_describedby: "{described_by}",
-                                        aria_invalid: if has_error { "true" },
                                         {props.repos.iter().map(|repo| {
                                             let id = repo.id;
                                             let checked = props.form.selected_repo_ids.contains(&id);
@@ -810,7 +809,9 @@ mod tests {
         assert!(html.contains("role=\"group\""));
         assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
         assert!(html.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
-        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
+        // ARIA does not permit aria-invalid on role="group"; the error is
+        // associated through aria-describedby and the visible border only.
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 0);
         assert!(html.contains("border-error"));
         assert!(
             html.find("name=\"repo_ids\"").unwrap() < html.find("id=\"repo_ids-error\"").unwrap(),

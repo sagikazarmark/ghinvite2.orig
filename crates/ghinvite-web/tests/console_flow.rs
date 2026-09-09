@@ -1161,7 +1161,8 @@ async fn create_link_without_repositories_rerenders_form_with_repository_scope_e
     assert!(text.contains("id=\"repo_ids-error\""));
     assert!(text.contains("role=\"group\""));
     assert!(text.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
-    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 1);
+    // aria-invalid is not permitted on role="group"; no field is invalid here.
+    assert_eq!(text.matches("aria-invalid=\"true\"").count(), 0);
     assert!(!text.contains("description-error"));
     assert!(!text.contains("Bad Request"));
     assert!(!text.contains("select at least one repository"));
@@ -1240,6 +1241,27 @@ async fn create_link_validation_failure_keeps_available_repositories_checked_and
 
 const PERMISSION_UNSUPPORTED: &str =
     "Choose a supported permission level: pull, triage, push, maintain, or admin.";
+
+#[tokio::test]
+async fn create_link_missing_permission_key_rerenders_form_with_permission_error() {
+    // The select always submits a value, so a POST without the key is tampering.
+    // It must get the same inline error path as a wrong value, not a bare 400
+    // from form deserialization.
+    let (resp, calls) = post_create_link(
+        "description=AI+coding+workshop&approval_required=true&max_uses=7&expires_in_days=45&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(calls.lock().unwrap().is_empty());
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains(PERMISSION_UNSUPPORTED));
+    assert!(text.contains("id=\"permission-error\""));
+    assert!(!text.contains("Bad Request"));
+    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert!(text.contains("value=\"10\" checked"));
+}
 
 #[tokio::test]
 async fn create_link_tampered_permission_rerenders_form_with_permission_error() {

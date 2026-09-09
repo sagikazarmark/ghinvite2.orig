@@ -26,7 +26,10 @@ use std::str::FromStr;
 #[derive(Debug, Deserialize)]
 pub struct CreateLinkForm {
     pub description: Option<String>,
-    pub permission: String,
+    /// `Option` so a POST that omits the key (tampering — the `<select>` always
+    /// submits one) reaches `validate` and gets the inline permission error
+    /// instead of failing deserialization with a bare 400.
+    pub permission: Option<String>,
     #[serde(default)]
     pub approval_required: Option<String>,
     pub max_uses: Option<String>,
@@ -49,7 +52,7 @@ impl CreateLinkForm {
     pub fn into_view_values(self, errors: LinkFormErrors) -> LinkFormValues {
         LinkFormValues {
             description: self.description.unwrap_or_default(),
-            permission: self.permission,
+            permission: self.permission.unwrap_or_default(),
             approval_required: self.approval_required.is_some(),
             max_uses: self.max_uses.unwrap_or_default(),
             expires_in_days: self.expires_in_days.unwrap_or_default(),
@@ -93,7 +96,7 @@ pub fn validate(
     now: DateTime<Utc>,
 ) -> Result<ValidatedCreateLink, Box<LinkFormErrors>> {
     let description = validate_description(form.description.as_deref());
-    let permission = validate_permission(&form.permission);
+    let permission = validate_permission(form.permission.as_deref());
     let max_uses = validate_max_uses(form.max_uses.as_deref());
     let expires_at = validate_expires_in_days(form.expires_in_days.as_deref(), now);
     let repos = validate_repo_scope(&form.repo_ids, available_repos);
@@ -170,14 +173,15 @@ fn normalize_internal_note(raw: Option<&str>) -> Option<String> {
 /// Permission level: exactly one of the supported GitHub collaborator levels.
 ///
 /// The `<select>` only ever submits those exact lowercase values, so nothing
-/// is trimmed or case-folded here: any other string did not come from the
-/// form and is treated as tampering, not a typo.
-fn validate_permission(raw: &str) -> Result<Permission, FieldError> {
-    Permission::from_str(raw).map_err(|_| {
-        FieldError::new(
-            "Choose a supported permission level: pull, triage, push, maintain, or admin.",
-        )
-    })
+/// is trimmed or case-folded here: any other string — or a missing key — did
+/// not come from the form and is treated as tampering, not a typo.
+fn validate_permission(raw: Option<&str>) -> Result<Permission, FieldError> {
+    raw.and_then(|raw| Permission::from_str(raw).ok())
+        .ok_or_else(|| {
+            FieldError::new(
+                "Choose a supported permission level: pull, triage, push, maintain, or admin.",
+            )
+        })
 }
 
 /// Max use: blank means unlimited; otherwise a positive whole number that
@@ -299,7 +303,7 @@ mod tests {
     fn valid_form() -> CreateLinkForm {
         CreateLinkForm {
             description: Some("AI coding workshop".into()),
-            permission: "push".into(),
+            permission: Some("push".into()),
             approval_required: Some("true".into()),
             max_uses: Some("7".into()),
             expires_in_days: Some("45".into()),
@@ -603,7 +607,7 @@ mod tests {
     fn validate_reports_every_field_error_at_once() {
         let form = CreateLinkForm {
             description: Some("".into()),
-            permission: "owner".into(),
+            permission: Some("owner".into()),
             max_uses: Some("0".into()),
             expires_in_days: Some("abc".into()),
             repo_ids: vec![],
@@ -634,7 +638,7 @@ mod tests {
 
     fn with_permission(permission: &str) -> CreateLinkForm {
         CreateLinkForm {
-            permission: permission.into(),
+            permission: Some(permission.into()),
             ..valid_form()
         }
     }
@@ -688,9 +692,23 @@ mod tests {
     }
 
     #[test]
+    fn permission_rejects_a_missing_key_as_tampering() {
+        // The select always submits a value; a POST without the key is a
+        // tampered submission and must get the inline error, not a bare 400.
+        let form = CreateLinkForm {
+            permission: None,
+            ..valid_form()
+        };
+        let errors = validate(&form, &available_repos(), now()).unwrap_err();
+        assert_eq!(errors.permission.as_deref(), Some(PERMISSION_UNSUPPORTED));
+        assert_eq!(errors.description, None, "only permission should fail");
+        assert_eq!(errors.repo_scope, None, "only permission should fail");
+    }
+
+    #[test]
     fn tampered_permission_is_reported_alongside_other_field_errors() {
         let form = CreateLinkForm {
-            permission: "owner".into(),
+            permission: Some("owner".into()),
             max_uses: Some("0".into()),
             ..valid_form()
         };
