@@ -1298,6 +1298,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghinvite-ui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dioxus",
+ "dioxus-ssr",
+ "ghinvite-core",
+ "serde",
+]
+
+[[package]]
 name = "ghinvite-web"
 version = "0.1.0"
 dependencies = [
@@ -1311,6 +1322,7 @@ dependencies = [
  "ghinvite-core",
  "ghinvite-github",
  "ghinvite-storage-sqlx",
+ "ghinvite-ui",
  "hex",
  "hmac",
  "http-body-util",

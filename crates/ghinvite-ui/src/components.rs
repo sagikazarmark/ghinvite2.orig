@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 
-pub(crate) fn account_type_label(account_type: ghinvite_core::AccountType) -> &'static str {
+/// Human-readable label for an account type, shared by the console pages and
+/// the console route's account picker.
+pub fn account_type_label(account_type: ghinvite_core::AccountType) -> &'static str {
     match account_type {
         ghinvite_core::AccountType::User => "Personal account",
         ghinvite_core::AccountType::Organization => "Organization",
@@ -90,7 +92,7 @@ mod tests {
 
     #[test]
     fn nav_renders_single_theme_toggle_and_signed_in_controls() {
-        let html = crate::views::render::render(|| {
+        let html = crate::testing::render(|| {
             rsx! { Nav { signed_in_login: Some("admin".to_string()) } }
         });
 
@@ -122,7 +124,7 @@ mod tests {
 
     #[test]
     fn footer_uses_glossary_repository_access_language() {
-        let html = crate::views::render::render(|| rsx! { Footer {} });
+        let html = crate::testing::render(|| rsx! { Footer {} });
 
         assert!(html.contains("controlled GitHub repository access requests"));
         assert!(!html.contains("repo collaborator invitations"));

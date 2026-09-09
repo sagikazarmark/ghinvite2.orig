@@ -7,6 +7,7 @@ members = [
     "crates/ghinvite-github",
     "crates/ghinvite-workflows",
     "crates/ghinvite-workflows-worker",
+    "crates/ghinvite-ui",
     "crates/ghinvite-web",
     "crates/ghinvite-web-worker",
 ]
@@ -59,4 +60,5 @@ ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
 ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
 ghinvite-github = { path = "crates/ghinvite-github" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }
+ghinvite-ui = { path = "crates/ghinvite-ui" }
 ghinvite-web = { path = "crates/ghinvite-web" }

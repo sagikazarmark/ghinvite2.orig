@@ -79,20 +79,10 @@ pub async fn clear(tower: &TowerSession) {
     tower.flush().await.ok();
 }
 
-/// One-shot status message shown to the user after a redirect.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-pub struct Flash {
-    pub level: FlashLevel,
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum FlashLevel {
-    Success,
-    Error,
-    Info,
-}
+/// One-shot status message shown to the user after a redirect. Defined in
+/// `ghinvite-ui` (the layouts render it); re-exported here because the session
+/// is where it is stored and read.
+pub use ghinvite_ui::flash::{Flash, FlashLevel};
 
 const FLASH_KEY: &str = "ghinvite_flash";
 

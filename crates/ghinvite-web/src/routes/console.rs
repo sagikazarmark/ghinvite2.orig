@@ -8,6 +8,7 @@ use crate::forms::create_link::{self as create_link_form, CreateLinkForm};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
+use crate::views::links::RepositoryChoice;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;
@@ -239,7 +240,7 @@ async fn new_link_form(
 fn link_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
-    repos: Vec<ghinvite_github::payloads::GhRepo>,
+    repos: Vec<RepositoryChoice>,
     form: crate::views::links::LinkFormValues,
 ) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
@@ -259,10 +260,13 @@ fn link_form_response(
     Html(html).into_response()
 }
 
+/// The installation's available repositories as the form offers them. This is
+/// the one place the GitHub payload becomes the view's [`RepositoryChoice`];
+/// validation and rendering downstream both work on that shape.
 async fn load_installation_repos_for_form(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
-) -> Vec<ghinvite_github::payloads::GhRepo> {
+) -> Vec<RepositoryChoice> {
     let user_api = ghinvite_github::oauth::UserApiClient::new(
         state.github_transport.clone(),
         admin.session.access_token.clone(),
@@ -271,7 +275,14 @@ async fn load_installation_repos_for_form(
         .list_user_installation_repos(admin.account.installation_id)
         .await
     {
-        Ok(r) => r.repositories,
+        Ok(r) => r
+            .repositories
+            .into_iter()
+            .map(|repo| RepositoryChoice {
+                id: repo.id,
+                full_name: repo.full_name,
+            })
+            .collect(),
         Err(e) => {
             tracing::warn!(error = ?e, "failed to list installation repos; rendering form with empty list");
             vec![]
