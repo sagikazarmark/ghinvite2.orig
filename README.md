@@ -11,6 +11,8 @@ Two Cloudflare Workers sharing one D1 database:
 
 The core business logic lives in native Rust crates (`crates/ghinvite-workflows`, `crates/ghinvite-web`, `crates/ghinvite-storage-sqlx`, etc.) compiled for both the host (tests) and wasm32 (Workers).
 
+The Dioxus view components live in their own crate, `crates/ghinvite-ui`, which depends only on Dioxus and `crates/ghinvite-core` — no axum, sessions, GitHub client, or storage. `ghinvite-web` renders them on the server with `dioxus_ssr`; per [ADR 0001](docs/adr/0001-ssr-first-with-dioxus-islands.md) it is also the only crate a browser-side Dioxus island may depend on. Because `cfg(target_arch = "wasm32")` means "Cloudflare Workers" in the server crates and "browser" in `ghinvite-ui`, wasm32 builds are always per crate (`cargo build -p <crate> --target wasm32-unknown-unknown`), never `--workspace`.
+
 ## Prerequisites
 
 - Rust 1.92 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
@@ -165,7 +167,8 @@ crates/
                            examples/stub.rs is the API stub for integration tests
   ghinvite-workflows/    — Restate handler logic (native, tested without Workers)
   ghinvite-workflows-worker/ — wasm32 entry point wiring workflows + D1
-  ghinvite-web/          — axum app + Dioxus SSR layouts (native, tested without Workers)
+  ghinvite-ui/           — Dioxus view components (Dioxus + core only; browser-buildable)
+  ghinvite-web/          — axum app + Dioxus SSR of ghinvite-ui (native, tested without Workers)
   ghinvite-web-worker/   — wasm32 entry point wiring web + D1
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 wrangler/          — wrangler.toml configs for both workers
@@ -180,5 +183,5 @@ GitHub Actions runs on every push and PR to `main`:
 
 - **Test** — `cargo test --workspace`
 - **Lint** — `cargo fmt --check` + `cargo clippy`
-- **wasm32 build** — `cargo build` for all three wasm32 targets
+- **wasm32 build** — `cargo check -p ghinvite-ui` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Integration** (main branch only) — Restate-in-Docker + the github stub example + `cargo test --features integration`

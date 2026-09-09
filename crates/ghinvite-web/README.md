@@ -29,7 +29,15 @@ npm run build:css
 
 This produces `crates/ghinvite-web/assets/styles.built.css`, which is `include_str!`'d
 into the binary at compile time. Re-run after editing `assets/styles.css`,
-adding new utility classes in `src/views/*.rs`, or upgrading DaisyUI.
+adding new utility classes in the views (`crates/ghinvite-ui/src/*.rs`), or
+upgrading DaisyUI, and commit the result — the built file is tracked so
+`cargo build` never depends on npm.
+
+Tailwind v4 auto-detects class names only under the directory the CLI runs
+in (this crate). The views live in `crates/ghinvite-ui`, so `assets/styles.css`
+registers them explicitly with `@source "../../ghinvite-ui/src";` (paths are
+relative to the stylesheet). If views ever move again, update that directive
+or their utility classes silently disappear from the built CSS.
 
 For continuous build during dev:
 
@@ -76,13 +84,41 @@ upserts the `users` row directly via `state.storage.upsert_user`.
 For OAuth, every authenticated route constructs a `github::oauth::UserApiClient`
 per-request from `state.github_transport` plus the session's access token.
 
+### Views and the `ghinvite-ui` crate
+
+The Dioxus components (layouts, pages, the `Field` form primitive, `Flash`)
+live in `crates/ghinvite-ui`, which depends only on `dioxus`, `ghinvite-core`,
+`chrono`, and `serde` — never on this crate, the GitHub client, or storage
+([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). This crate
+re-exports them as `ghinvite_web::views::*` and adds `views::render`, the
+`dioxus_ssr` renderer the routes call. `session::Flash` is a re-export of
+`ghinvite_ui::flash::Flash`. Data crosses into the views as plain props: for
+example the console route maps the GitHub `GhRepo` payload into
+`views::links::RepositoryChoice` once, where repositories are loaded, and both
+`forms::create_link::validate` and the form page work on that type.
+
+**Build client-side crates with `-p`, never
+`cargo build --workspace --target wasm32-unknown-unknown`.** Throughout this
+crate, `ghinvite-github`, and `ghinvite-storage-d1`, `cfg(target_arch =
+"wasm32")` means "Cloudflare Workers"; in `ghinvite-ui` it means "browser". A
+workspace-wide wasm32 build would unify features across both and drag
+Worker-only dependencies into the browser build (and vice versa). The
+canonical checks are:
+
+```bash
+cargo check -p ghinvite-ui --target wasm32-unknown-unknown          # browser
+cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown  # Worker
+```
+
 ## Style stack
 
 - **Tailwind CSS v4** with **DaisyUI v5** (npm-driven build).
 - The Tailwind v4 CSS-first config (`@import "tailwindcss"; @plugin "daisyui";`)
-  in `assets/styles.css` replaces the old `tailwind.config.js`.
-- Built CSS is `.gitignore`d — it's a build artifact. CI / Plan 7 deploy runs
-  `npm run build:css` before `cargo build`.
+  in `assets/styles.css` replaces the old `tailwind.config.js`. It also
+  carries the `@source` directive that points Tailwind at `crates/ghinvite-ui`.
+- Built CSS (`assets/styles.built.css`) is a build artifact but is **tracked**,
+  so `cargo build` and the Workers deploy never depend on npm. Rebuild and
+  commit it whenever the views or `styles.css` change.
 
 ## Client-side JavaScript and the Content-Security-Policy
 
