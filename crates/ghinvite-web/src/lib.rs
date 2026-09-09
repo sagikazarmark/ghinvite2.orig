@@ -52,14 +52,31 @@ where
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
         .route("/static/styles.css", axum::routing::get(serve_styles_css))
+        .route("/static/app.js", axum::routing::get(serve_app_js))
         .fallback(routes::not_found::public)
+        .layer(middleware::csp::layer())
         .layer(session_layer)
         .with_state(state)
 }
 
+/// Built Tailwind/DaisyUI stylesheet (`npm run build:css`), embedded at
+/// compile time.
 async fn serve_styles_css() -> impl axum::response::IntoResponse {
+    static_asset("text/css", include_str!("../assets/styles.built.css"))
+}
+
+/// The one shared client script. Loaded synchronously from every layout's
+/// `<head>`; the CSP forbids inline `<script>` blocks, so all client behaviour
+/// goes here (see `crates/ghinvite-web/README.md`).
+async fn serve_app_js() -> impl axum::response::IntoResponse {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../assets/app.js"),
+    )
+}
+
+fn static_asset(content_type: &'static str, body: &'static str) -> axum::response::Response {
     use axum::http::header;
     use axum::response::IntoResponse;
-    let css = include_str!("../assets/styles.built.css");
-    ([(header::CONTENT_TYPE, "text/css")], css).into_response()
+    ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }

@@ -864,6 +864,39 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
 }
 
 #[tokio::test]
+async fn console_overview_carries_csp_and_only_external_script() {
+    let (app, cookie) = build_signed_in_admin_app().await;
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap()),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY)
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("console-frame"));
+    let external = "<script src=\"/static/app.js\"></script>";
+    assert!(text.contains(external));
+    assert_eq!(
+        text.matches("<script").count(),
+        text.matches(external).count(),
+        "console HTML contains an inline <script> block"
+    );
+}
+
+#[tokio::test]
 async fn create_link_invalid_description_rerenders_form_with_errors_and_preserved_values() {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());

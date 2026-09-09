@@ -549,6 +549,47 @@ async fn signed_in_landing_renders_merged_request_form() {
     assert!(text.contains("Justification"));
     assert!(text.contains("action=\"/i/abcdEFGH01234567\""));
     assert!(!text.contains("AI coding workshop"));
+    assert!(!text.contains("http-equiv=\"refresh\""));
+}
+
+#[tokio::test]
+async fn signed_in_landing_carries_csp_and_only_external_script() {
+    let (app, _calls) = build_test_app(
+        active_link(ACTIVE_SLUG),
+        None,
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-security-policy")
+            .map(|v| v.to_str().unwrap()),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY)
+    );
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("Request repository access"));
+    let external = "<script src=\"/static/app.js\"></script>";
+    assert!(text.contains(external));
+    assert_eq!(
+        text.matches("<script").count(),
+        text.matches(external).count(),
+        "invitation HTML contains an inline <script> block"
+    );
 }
 
 #[tokio::test]
@@ -579,6 +620,8 @@ async fn signed_in_landing_shows_pending_status_instead_of_form() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Awaiting review"));
     assert!(text.contains("account admins have your request"));
+    assert!(text.contains("<meta http-equiv=\"refresh\" content=\"20\""));
+    assert!(text.contains("Check again"));
     assert!(!text.contains("Submit request"));
     assert!(!text.contains("textarea"));
 }
@@ -617,6 +660,7 @@ async fn signed_in_landing_shows_approved_status_instead_of_form() {
     assert!(text.contains("Approved"));
     assert!(text.contains("GitHub notifications and email"));
     assert!(!text.contains("Submit request"));
+    assert!(!text.contains("http-equiv=\"refresh\""));
 }
 
 #[tokio::test]
@@ -771,6 +815,7 @@ async fn inactive_link_with_existing_pending_request_shows_status() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Awaiting review"));
+    assert!(text.contains("<meta http-equiv=\"refresh\" content=\"20\""));
     assert!(!text.contains("revoked"));
 }
 
