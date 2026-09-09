@@ -13,7 +13,7 @@ The core business logic lives in native Rust crates (`crates/ghinvite-workflows`
 
 ## Prerequisites
 
-- Rust 1.85 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
+- Rust 1.92 (managed by `rust-toolchain.toml` — `rustup` picks it up automatically)
 - Node.js 20+ (for building CSS)
 - Docker (for Restate)
 
