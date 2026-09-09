@@ -42,21 +42,25 @@ dependencies of this crate.
 
 ## The new invitation link form and its island (`links`)
 
-`links::LinkCreateFormPage` is the Console page. Inside it, the form is split
-into dumb components the island calls too, so browser and server render the
-same markup from the same inputs:
+`links::LinkCreateFormPage` is the Console page. Inside it, the form is one
+component the island renders too, so browser and server produce the same
+markup from the same inputs:
 
-- `LinkCreateForm { action, form: LinkFormValues, repos }` — just the
-  `<form>`: summary alert, four sections, submit button.
+- `LinkCreateForm { action, form: LinkFormValues, repos, handlers }` — just
+  the `<form>`: summary alert, four sections, submit button. `handlers` is an
+  optional `links::LinkFormHandlers` (the form's `onsubmit`, a
+  `field::ControlHandlers { oninput, onchange, onblur }` per control, and
+  `RepositoryScopeHandlers` for the checkbox group); the server passes none.
 - `field::Field` — text / textarea / number controls.
 - `links::PermissionSelect { id, name, value, help, error, onchange, onblur }`
   — the permission-level `<select>` (`PERMISSION_LEVELS`).
 - `links::RepositoryScopeGroup { name, repos, selected, help, error, onchange, onblur }`
   — the repository checkbox group; `onchange` receives `(repo_id, checked)`.
 
-The `on*` props are `Option<EventHandler<…>>` for the island; server-side
+Every handler is an `Option<EventHandler<…>>` for the island; server-side
 rendering emits no listener attributes, so with or without them the SSR
-markup is byte-identical (tested).
+markup is byte-identical (tested for each component and for the whole
+`LinkCreateForm`).
 
 The page emits the island's mount points after the page header:
 
@@ -80,7 +84,10 @@ plain form keeps working.
   `views::render` (the `dioxus_ssr` renderer; `dioxus-ssr` is deliberately not
   a dependency here), and re-exports `flash::{Flash, FlashLevel}` from
   `ghinvite_web::session`.
-- A future browser island (`dioxus-web`) depends on this crate directly.
+- `ghinvite-island` (the browser island, `dioxus-web` + the `dioform` facade)
+  depends on this crate directly and renders `links::LinkCreateForm` with a
+  `links::LinkFormHandlers` bundle of listeners; its parity test asserts the
+  island's first frame equals the server's HTML.
 
 ## Checks
 

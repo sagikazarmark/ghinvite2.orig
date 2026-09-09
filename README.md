@@ -11,7 +11,7 @@ Two Cloudflare Workers sharing one D1 database:
 
 The core business logic lives in native Rust crates (`crates/ghinvite-workflows`, `crates/ghinvite-web`, `crates/ghinvite-storage-sqlx`, etc.) compiled for both the host (tests) and wasm32 (Workers).
 
-The Dioxus view components live in their own crate, `crates/ghinvite-ui`, which depends only on Dioxus and `crates/ghinvite-core` — no axum, sessions, GitHub client, or storage. `ghinvite-web` renders them on the server with `dioxus_ssr`; per [ADR 0001](docs/adr/0001-ssr-first-with-dioxus-islands.md) it is also the only crate a browser-side Dioxus island may depend on. Because `cfg(target_arch = "wasm32")` means "Cloudflare Workers" in the server crates and "browser" in `ghinvite-ui`, wasm32 builds are always per crate (`cargo build -p <crate> --target wasm32-unknown-unknown`), never `--workspace`.
+The Dioxus view components live in their own crate, `crates/ghinvite-ui`, which depends only on Dioxus, dioform-core and `crates/ghinvite-core` — no axum, sessions, GitHub client, or storage. `ghinvite-web` renders them on the server with `dioxus_ssr`; per [ADR 0001](docs/adr/0001-ssr-first-with-dioxus-islands.md) it is also the only crate a browser-side Dioxus island may depend on. The first such island is `crates/ghinvite-island`: a `dioxus-web` bundle (built with `scripts/build-island.sh`, served from Cloudflare Static Assets under `/assets/`) that mounts on the new invitation link form and re-renders the same component with dioform bindings — inline validation with the server's own rules, and a plain browser POST when nothing blocks. Because `cfg(target_arch = "wasm32")` means "Cloudflare Workers" in the server crates and "browser" in `ghinvite-ui` / `ghinvite-island`, wasm32 builds are always per crate (`cargo build -p <crate> --target wasm32-unknown-unknown`), never `--workspace`.
 
 ## Prerequisites
 
@@ -66,6 +66,14 @@ First-time only — build the CSS:
 
 ```bash
 cd crates/ghinvite-web && npm install && npm run build:css && cd ../..
+```
+
+Optional — build the browser island for the new invitation link form (needs
+`dx` 0.7.x and the `wasm32-unknown-unknown` target; without it the form is the
+plain server-rendered one):
+
+```bash
+scripts/build-island.sh   # → dist/public, served by the native binary under /assets
 ```
 
 Three terminals:
@@ -167,10 +175,12 @@ crates/
                            examples/stub.rs is the API stub for integration tests
   ghinvite-workflows/    — Restate handler logic (native, tested without Workers)
   ghinvite-workflows-worker/ — wasm32 entry point wiring workflows + D1
-  ghinvite-ui/           — Dioxus view components (Dioxus + core only; browser-buildable)
+  ghinvite-ui/           — Dioxus view components + shared form model (Dioxus + core only; browser-buildable)
+  ghinvite-island/       — browser island (dioxus-web + dioform) for the new-link form; built by scripts/build-island.sh
   ghinvite-web/          — axum app + Dioxus SSR of ghinvite-ui (native, tested without Workers)
   ghinvite-web-worker/   — wasm32 entry point wiring web + D1
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
+scripts/           — build-island.sh: dx bundle → dist/public (Static Assets)
 wrangler/          — wrangler.toml configs for both workers
 docs/
   deploy.md        — production deployment guide
@@ -183,5 +193,6 @@ GitHub Actions runs on every push and PR to `main`:
 
 - **Test** — `cargo test --workspace`
 - **Lint** — `cargo fmt --check` + `cargo clippy`
-- **wasm32 build** — `cargo check -p ghinvite-ui` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
+- **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
+- **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
 - **Integration** (main branch only) — Restate-in-Docker + the github stub example + `cargo test --features integration`

@@ -116,13 +116,14 @@ core never crosses an `.await`. No validation rule lives in this crate.
 **Build client-side crates with `-p`, never
 `cargo build --workspace --target wasm32-unknown-unknown`.** Throughout this
 crate, `ghinvite-github`, and `ghinvite-storage-d1`, `cfg(target_arch =
-"wasm32")` means "Cloudflare Workers"; in `ghinvite-ui` it means "browser". A
-workspace-wide wasm32 build would unify features across both and drag
-Worker-only dependencies into the browser build (and vice versa). The
-canonical checks are:
+"wasm32")` means "Cloudflare Workers"; in `ghinvite-ui` and `ghinvite-island`
+it means "browser". A workspace-wide wasm32 build would unify features across
+both and drag Worker-only dependencies into the browser build (and vice
+versa). The canonical checks are:
 
 ```bash
-cargo check -p ghinvite-ui --target wasm32-unknown-unknown          # browser
+cargo check -p ghinvite-ui --target wasm32-unknown-unknown          # browser (views)
+cargo check -p ghinvite-island --target wasm32-unknown-unknown      # browser (island)
 cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown  # Worker
 ```
 
@@ -174,34 +175,54 @@ webhook receiver, plain-text errors, and redirects are left alone.
 ## Island assets
 
 The new invitation link page (`/console/accounts/{login}/links/new`) hosts
-the first Dioxus island ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)).
-The server-rendered page references exactly one client file for it:
+the first Dioxus island ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)),
+`crates/ghinvite-island` (see [its README](../ghinvite-island/README.md) for
+how it mounts and validates). The server-rendered page references exactly
+one client file for it:
 
 ```html
 <script type="module" src="/assets/ghinvite-island.js"></script>
 ```
 
 That name is **stable** (`ghinvite_ui::link_form::LINK_FORM_ISLAND_MODULE_SRC`).
-`dx bundle` emits content-hashed files (`island-dxh<hash>.js`,
-`island_bg-dxh<hash>.wasm`), so the island build script
-(`scripts/build-island.sh`) also writes a tiny `ghinvite-island.js` loader
-that `import`s the hashed bundle. The SSR page never learns the hash, and the
-Rust build has no dependency on the `dx` build.
+`dx bundle` emits content-hashed files (`ghinvite-island-dxh<hash>.js`,
+`ghinvite-island_bg-dxh<hash>.wasm`), so the island build script also writes
+a one-line `ghinvite-island.js` loader that `import`s the hashed bundle. The
+SSR page never learns the hash, and the Rust build has no dependency on the
+`dx` build.
 
-- **Where the files come from:** `scripts/build-island.sh` runs `dx bundle`
-  for the island crate and copies the output to `dist/public/assets/`
-  (plus `dist/public/_headers`, which marks the hashed files
-  `immutable`). `dist/` is git-ignored.
-- **Native dev** (`cargo run -p ghinvite-web`): `build_app` nests a
-  `tower_http::services::ServeDir` at `/assets` over
+- **Building:** `scripts/build-island.sh` (needs `dx` 0.7.x and the
+  `wasm32-unknown-unknown` target) runs `dx bundle -p ghinvite-island
+  --platform web --profile island`, recreates `dist/public/` from scratch and
+  writes into it only `assets/<hashed>.js`, `assets/<hashed>.wasm`, the
+  `assets/ghinvite-island.js` loader and `_headers` (hashed files
+  `Cache-Control: public, max-age=31536000, immutable`; the loader
+  `no-cache`). It prints raw and gzipped sizes and fails if the gzipped
+  `.wasm` + `.js` exceed 600 KB (currently ≈ 246 KB). `dist/` is
+  git-ignored; CI (`island` job) builds it on every run.
+- **Markup parity:** `cargo test -p ghinvite-island` renders the island and
+  the server's `LinkCreateForm` with `dioxus_ssr` for the same props and
+  asserts identical HTML, so the frame that replaces the server-rendered form
+  on mount is what was already on screen. `LinkCreateForm` takes an optional
+  `LinkFormHandlers` bundle for the island's listeners; SSR ignores
+  listeners, so the server passes none and the markup is unchanged (tested in
+  `ghinvite-ui` too).
+- **Native dev** (`cargo run -p ghinvite-web` from the repo root): `build_app`
+  nests a `tower_http::services::ServeDir` at `/assets` over
   `WebConfig::island_assets_dir` — `dist/public/assets` relative to the
   working directory by default, overridable with `GHINVITE_ISLAND_ASSETS_DIR`,
   `None` to register no route. `tower-http/fs` is a non-wasm32 dependency
-  only.
+  only. Smoke test: run `scripts/build-island.sh`, start the server, open
+  the new-link page; `#link-form-island` gains `data-island="mounted"`,
+  submitting with an empty description shows the errors without navigating,
+  and a valid submit is a normal POST. Without the full stack,
+  `cargo run -p ghinvite-island --example ssr_fixture` prints the page as a
+  static document (see the island README; never deploy that file).
 - **Workers:** Cloudflare Static Assets serve `/assets/*` before the Worker is
   invoked (`[assets] directory = "../dist/public"` in `wrangler/web.toml`);
-  the Worker has no `/assets` route and `island_assets_dir` is `None`. The
-  directory must contain only `assets/*` (no `index.html`), and
+  the Worker has no `/assets` route and `island_assets_dir` is `None`. Run
+  `scripts/build-island.sh` before `wrangler deploy`. The directory must
+  contain only `assets/*` and `_headers` (no `index.html`), and
   `not_found_handling` must stay unset — see the comments in that file.
 - **Missing assets degrade to the plain form.** If the bundle has not been
   built (tests, a fresh checkout, CI without `dx`), the browser gets a 404 for

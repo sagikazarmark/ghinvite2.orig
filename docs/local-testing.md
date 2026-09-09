@@ -53,16 +53,29 @@ cargo test -p ghinvite-storage-d1 --features d1-suite -- --ignored
 ### wasm32 build check
 
 One crate per command, always with `-p`. `cfg(target_arch = "wasm32")` means
-"Cloudflare Workers" in the Worker crates and "browser" in `ghinvite-ui`, so a
-`--workspace --target wasm32-unknown-unknown` build would unify features across
-both and is never what you want (ADR 0001).
+"Cloudflare Workers" in the Worker crates and "browser" in `ghinvite-ui` and
+`ghinvite-island`, so a `--workspace --target wasm32-unknown-unknown` build
+would unify features across both and is never what you want (ADR 0001).
 
 ```bash
 cargo check -p ghinvite-ui --target wasm32-unknown-unknown
+cargo check -p ghinvite-island --target wasm32-unknown-unknown
 cargo build -p ghinvite-storage-d1 --target wasm32-unknown-unknown
 cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
 cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
 ```
+
+### Island bundle (requires dx 0.7.x)
+
+```bash
+scripts/build-island.sh          # dx bundle → dist/public, prints sizes, enforces the 600 KB gzipped budget
+cargo test -p ghinvite-island    # markup parity: island first frame == server HTML
+```
+
+Then browser-check it: `cargo run -p ghinvite-web` from the repo root serves
+`dist/public/assets` under `/assets/`, or render a static fixture with
+`cargo run -p ghinvite-island --example ssr_fixture > dist/public/index.html`
+(local only — see `crates/ghinvite-island/README.md`).
 
 ## CI vs Local
 
@@ -71,5 +84,6 @@ cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
 | Unit tests | ✅ always | ✅ push + PR |
 | Lint | ✅ always | ✅ push + PR |
 | wasm32 build | ✅ always | ✅ push + PR |
+| Island bundle | ✅ requires dx | ✅ push + PR |
 | Restate integration | ✅ 3-terminal setup | ✅ main branch only |
 | D1 suite | ✅ requires wrangler | ❌ not in CI v1 |

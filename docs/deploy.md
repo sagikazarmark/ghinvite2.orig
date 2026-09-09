@@ -5,6 +5,7 @@
 - Cloudflare account with Workers paid plan (or free tier for testing)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed: `npm install -g wrangler`
 - [`worker-build`](https://crates.io/crates/worker-build) installed: `cargo install worker-build`
+- [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) 0.7.x installed (`cargo binstall dioxus-cli@0.7.9`) and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`), for the island bundle
 - GitHub App created and configured (see GitHub App Setup below)
 - Restate Cloud account (or self-hosted Restate server)
 
@@ -84,24 +85,31 @@ wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
 ### 7. Build the island bundle
 
 `wrangler/web.toml` declares `[assets] directory = "../dist/public"`, the
-Dioxus island bundle served by Cloudflare Static Assets. The directory must
-exist before `wrangler deploy` runs:
+Dioxus island bundle served by Cloudflare Static Assets. Build it before every
+`wrangler deploy` (the directory must exist, and its hashed file names change
+with the code):
 
 ```bash
 scripts/build-island.sh   # dx bundle → dist/public/assets/ + dist/public/_headers
 ```
 
-The script (added with the island crate) runs `dx bundle --platform web
---release` for the island, copies the hashed `.js`/`.wasm` files to
-`dist/public/assets/`, writes the stable `ghinvite-island.js` loader the SSR
-page references, and a `_headers` file marking the hashed files immutable.
-Requires the Dioxus CLI (`cargo install dioxus-cli`) and the
-`wasm32-unknown-unknown` target. Do not put anything else in `dist/public/` —
-in particular no `index.html`, which Static Assets would serve for `/`.
+The script runs `dx bundle -p ghinvite-island --platform web --profile
+island`, recreates `dist/public/` and copies into it only the hashed
+`.js`/`.wasm` files, the stable `assets/ghinvite-island.js` loader the SSR
+page references, and a `_headers` file marking the hashed files immutable. It
+prints the raw and gzipped sizes and fails if the gzipped bundle exceeds
+600 KB. Requires the Dioxus CLI 0.7.x (`cargo binstall dioxus-cli@0.7.9`, or
+`cargo install dioxus-cli --version 0.7.9`) and the `wasm32-unknown-unknown`
+target; `dx` runs the `cargo` on your `PATH`, so keep the rustup-managed one
+first so `rust-toolchain.toml` applies. Do not put anything else in
+`dist/public/` — in particular no `index.html`, which Static Assets would
+serve for `/`. (The `ssr_fixture` example in `crates/ghinvite-island` writes
+one for local smoke tests; re-run the script before deploying.)
 
 ### 8. Deploy
 
 ```bash
+scripts/build-island.sh   # always first: Static Assets pick up dist/public
 wrangler deploy --config wrangler/web.toml
 wrangler deploy --config wrangler/restate-svc.toml
 ```
