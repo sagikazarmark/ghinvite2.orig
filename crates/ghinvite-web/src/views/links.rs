@@ -1,6 +1,7 @@
 //! Invitation-link views: create form + detail page.
 
 use crate::session::Flash;
+use crate::views::forms::{Field, FieldKind};
 use crate::views::layouts::ConsoleLayout;
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
@@ -53,17 +54,6 @@ impl Default for LinkFormValues {
 pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     let login = props.account_login.clone();
     let perms = ["pull", "triage", "push", "maintain", "admin"];
-    let has_description_error = props.form.errors.description.is_some();
-    let description_class = if has_description_error {
-        "input input-bordered input-error w-full"
-    } else {
-        "input input-bordered w-full"
-    };
-    let description_described_by = if has_description_error {
-        "description-help description-error"
-    } else {
-        "description-help"
-    };
 
     rsx! {
         ConsoleLayout {
@@ -101,28 +91,25 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 h2 { class: "text-base font-semibold", "Link details" }
                                 p { class: "mt-1 text-sm text-base-content/65", "Name the admin purpose for this invitation link and keep optional notes separate." }
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "description", span { class: "label-text font-medium", "Description" } }
-                                {if has_description_error {
-                                    rsx! {
-                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_invalid: "true", aria_describedby: "{description_described_by}" }
-                                    }
-                                } else {
-                                    rsx! {
-                                        input { id: "description", r#type: "text", name: "description", value: "{props.form.description}", class: "{description_class}", required: true, maxlength: "120", placeholder: "AI coding workshop", aria_describedby: "{description_described_by}" }
-                                    }
-                                }}
-                                p { id: "description-help", class: "text-sm text-base-content/65", "Visible only to admins. Use a short purpose or audience for this invitation link." }
-                                {if let Some(message) = props.form.errors.description.as_ref() {
-                                    rsx! { p { id: "description-error", class: "text-sm font-medium text-error", "{message}" } }
-                                } else {
-                                    rsx! {}
-                                }}
+                            Field {
+                                id: "description",
+                                name: "description",
+                                label: "Description",
+                                kind: FieldKind::Text { maxlength: Some(120) },
+                                value: props.form.description.clone(),
+                                required: true,
+                                placeholder: "AI coding workshop",
+                                help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
+                                error: props.form.errors.description.clone(),
                             }
-                            div { class: "form-control gap-2",
-                                label { class: "label", r#for: "internal_note", span { class: "label-text font-medium", "Internal note" } }
-                                textarea { id: "internal_note", name: "internal_note", class: "textarea textarea-bordered w-full", placeholder: "Why this link exists", "{props.form.internal_note}" }
-                                p { class: "text-sm text-base-content/65", "Optional admin-only notes. Not visible in the invitation request flow." }
+                            Field {
+                                id: "internal_note",
+                                name: "internal_note",
+                                label: "Internal note",
+                                kind: FieldKind::Textarea { rows: None },
+                                value: props.form.internal_note.clone(),
+                                placeholder: "Why this link exists",
+                                help: "Optional admin-only notes. Not visible in the invitation request flow.",
                             }
                         }
                     }
@@ -161,15 +148,22 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
                             }
                             div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
-                                div { class: "form-control gap-2",
-                                    label { class: "label", r#for: "max_uses", span { class: "label-text font-medium", "Max use" } }
-                                    input { id: "max_uses", r#type: "number", name: "max_uses", value: "{props.form.max_uses}", class: "input input-bordered w-full", min: "1", placeholder: "Unlimited" }
-                                    p { class: "text-sm text-base-content/65", "Blank means unlimited invitation requests." }
+                                Field {
+                                    id: "max_uses",
+                                    name: "max_uses",
+                                    label: "Max use",
+                                    kind: FieldKind::Number { min: Some(1), max: None },
+                                    value: props.form.max_uses.clone(),
+                                    placeholder: "Unlimited",
+                                    help: "Blank means unlimited invitation requests.",
                                 }
-                                div { class: "form-control gap-2",
-                                    label { class: "label", r#for: "expires_in_days", span { class: "label-text font-medium", "Expires in days" } }
-                                    input { id: "expires_in_days", r#type: "number", name: "expires_in_days", value: "{props.form.expires_in_days}", class: "input input-bordered w-full", min: "1" }
-                                    p { class: "text-sm text-base-content/65", "Default is 30 days. Blank creates an invitation link with no expiration." }
+                                Field {
+                                    id: "expires_in_days",
+                                    name: "expires_in_days",
+                                    label: "Expires in days",
+                                    kind: FieldKind::Number { min: Some(1), max: None },
+                                    value: props.form.expires_in_days.clone(),
+                                    help: "Default is 30 days. Blank creates an invitation link with no expiration.",
                                 }
                             }
                         }
@@ -442,9 +436,20 @@ mod tests {
         assert!(html.contains("Access configuration"));
         assert!(html.contains("Link details"));
         assert!(html.contains("name=\"description\""));
+        assert_eq!(html.matches("name=\"description\"").count(), 1);
         assert!(html.contains("required"));
         assert!(html.contains("maxlength=\"120\""));
         assert!(html.contains("AI coding workshop"));
+        assert!(html.contains("aria-describedby=\"description-help\""));
+        assert!(html.contains("id=\"description-help\""));
+        assert!(!html.contains("aria-invalid"));
+        assert!(html.contains("aria-describedby=\"internal_note-help\""));
+        assert!(html.contains("id=\"internal_note-help\""));
+        assert!(html.contains("aria-describedby=\"max_uses-help\""));
+        assert!(html.contains("aria-describedby=\"expires_in_days-help\""));
+        assert!(html.contains("name=\"max_uses\" value=\"\""));
+        assert!(html.contains("name=\"expires_in_days\" value=\"30\""));
+        assert!(html.contains("min=\"1\""));
         assert!(html.find("Link details").unwrap() < html.find("Access configuration").unwrap());
         assert!(html.contains("<title>New invitation link · acme</title>"));
         assert!(!html.contains("{props.account_login}"));
@@ -504,7 +509,10 @@ mod tests {
         assert!(html.contains("aria-live=\"polite\""));
         assert!(html.contains("id=\"description-error\""));
         assert!(html.contains("aria-invalid=\"true\""));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
         assert!(html.contains("aria-describedby=\"description-help description-error\""));
+        assert!(html.contains("input-error"));
+        assert_eq!(html.matches("name=\"description\"").count(), 1);
         assert!(html.contains("value=\"push\" selected"));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
         assert!(html.contains("name=\"max_uses\" value=\"7\""));
