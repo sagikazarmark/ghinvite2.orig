@@ -16,10 +16,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ghinvite_core::RequestId;
-use ghinvite_core::storage::{SqlxStorage, Storage};
+use ghinvite_core::storage::Storage;
 use ghinvite_github::InstallationClient;
 use ghinvite_github::jwt::AppJwtSigner;
 use ghinvite_github::transport::ReqwestTransport;
+use ghinvite_storage_sqlx::SqlxStorage;
 use restate_sdk::http_server::HttpServer;
 use tokio::net::TcpListener;
 
@@ -37,7 +38,7 @@ async fn setup_restate() -> SocketAddr {
                 user_id,
                 login: login.to_string(),
                 avatar_url: None,
-                last_seen_at: last_seen_at.clone(),
+                last_seen_at,
             })
             .await
             .unwrap();
