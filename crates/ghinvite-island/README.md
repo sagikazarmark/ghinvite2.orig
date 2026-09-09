@@ -78,18 +78,22 @@ cargo test   -p ghinvite-island                                       # parity t
 ```
 
 `scripts/build-island.sh` runs `dx bundle -p ghinvite-island --platform web
---release`, reads `target/dx/ghinvite-island/release/web/.manifest.json` for
-the hashed file names, copies only those files to `dist/public/assets/`,
-writes the stable loader `dist/public/assets/ghinvite-island.js`
-(`import "/assets/<hashed>.js";`) and `dist/public/_headers`, prints raw and
-gzipped sizes, and fails if the gzipped `.wasm` + `.js` exceed 600 KB. It
-needs the Dioxus CLI (`dx` 0.7.x) and the `wasm32-unknown-unknown` target;
-`dx` invokes the `cargo` on your `PATH`, so keep the rustup-managed one first
-so `rust-toolchain.toml` is honoured.
+--profile island --debug-symbols false`, reads
+`target/dx/ghinvite-island/release/web/.manifest.json` for the hashed file
+names, copies only those files to `dist/public/assets/`, writes the stable
+loader `dist/public/assets/ghinvite-island.js` (`import "/assets/<hashed>.js";`)
+and `dist/public/_headers`, prints raw and gzipped sizes, and fails if the
+gzipped `.wasm` + `.js` exceed 600 KB. It needs the Dioxus CLI (`dx` 0.7.x)
+and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
+`PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
+honoured.
 
-`dx --release` builds with its own `wasm-release` profile (`opt-level = "s"`,
-`lto`, `codegen-units = 1`, `panic = "abort"`), so the workspace needs no
-`[profile.release]` overrides that would also affect the Workers build.
+`[profile.island]` in the root `Cargo.toml` (inherits `release`; `opt-level =
+"z"`, `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`) exists for this
+bundle alone, so the Workers build (`worker-build --release`) keeps cargo's
+defaults. dx's own `wasm-release` profile only sets `opt-level = "s"` on top
+of `release` and produced a ~30% larger wasm here (838 KB / 330 KB gzipped vs
+574 KB / 238 KB). dx runs `wasm-bindgen` and `wasm-opt -Oz` either way.
 
 Native dependencies stay clean: `dioxus/web` is a `[target.'cfg(target_arch
 = "wasm32")']` dependency, so `cargo tree -p ghinvite-web -e features | grep

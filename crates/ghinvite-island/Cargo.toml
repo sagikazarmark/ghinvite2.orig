@@ -8,7 +8,7 @@ publish.workspace = true
 # The browser island for the new invitation link form (ADR 0001): the one
 # crate in the workspace that depends on the `dioform` facade and, on wasm32,
 # on `dioxus-web`. Here `cfg(target_arch = "wasm32")` means "browser", so
-# build it on its own — `dx bundle -p ghinvite-island --platform web` or
+# build it on its own — `scripts/build-island.sh` (dx bundle) or
 # `cargo check -p ghinvite-island --target wasm32-unknown-unknown` — never
 # through `--workspace --target wasm32-unknown-unknown`, where the Worker
 # crates' wasm32 gates mean "Cloudflare Workers" (see the README).
