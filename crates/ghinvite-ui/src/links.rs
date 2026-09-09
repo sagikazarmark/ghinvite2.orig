@@ -1,25 +1,13 @@
 //! Invitation-link views: create form + detail page.
 
+use crate::field::{Field, FieldKind};
 use crate::flash::Flash;
-use crate::forms::{Field, FieldKind};
 use crate::layouts::ConsoleLayout;
+use crate::link_form::{CreateLinkForm, LinkFormErrors, RepositoryChoice};
 use chrono::{DateTime, Utc};
+use dioform_core::Form;
 use dioxus::prelude::*;
 use ghinvite_core::{InvitationLink, Permission};
-
-/// One of the account's available repositories, offered as a repository-scope
-/// option on the new invitation link form.
-///
-/// This is the view's own shape, not the GitHub API payload: the web route
-/// maps the installation's repository list into it at the boundary, so the
-/// views (and any browser build of them) never depend on the GitHub client.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RepositoryChoice {
-    /// GitHub repository id, submitted as the `repo_ids` checkbox value.
-    pub id: u64,
-    /// `owner/name`, shown as the checkbox label.
-    pub full_name: String,
-}
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormProps {
@@ -31,6 +19,9 @@ pub struct LinkCreateFormProps {
     pub form: LinkFormValues,
 }
 
+/// The new invitation link form as the view renders it: the submitted values
+/// verbatim (so an admin sees exactly what they typed when correcting a
+/// mistake) plus the errors to show next to each control.
 #[derive(Clone, PartialEq)]
 pub struct LinkFormValues {
     pub description: String,
@@ -41,17 +32,6 @@ pub struct LinkFormValues {
     pub internal_note: String,
     pub selected_repo_ids: Vec<u64>,
     pub errors: LinkFormErrors,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LinkFormErrors {
-    pub summary: Vec<String>,
-    pub description: Option<String>,
-    pub permission: Option<String>,
-    pub max_uses: Option<String>,
-    pub expires_in_days: Option<String>,
-    /// Section-level error for the repository checkbox group.
-    pub repo_scope: Option<String>,
 }
 
 impl Default for LinkFormValues {
@@ -73,6 +53,10 @@ impl Default for LinkFormValues {
 pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
     let login = props.account_login.clone();
     let perms = ["pull", "triage", "push", "maintain", "admin"];
+    // Rendered `name`s come from the shared model so the POST keys the server
+    // parses and the controls the browser submits cannot drift apart.
+    let fields = CreateLinkForm::fields();
+    let repo_ids_name = fields.repo_ids().field_name().to_string();
 
     rsx! {
         ConsoleLayout {
@@ -112,7 +96,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                             Field {
                                 id: "description",
-                                name: "description",
+                                name: fields.description().field_name().to_string(),
                                 label: "Description",
                                 kind: FieldKind::Text { maxlength: Some(120) },
                                 value: props.form.description.clone(),
@@ -123,7 +107,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                             Field {
                                 id: "internal_note",
-                                name: "internal_note",
+                                name: fields.internal_note().field_name().to_string(),
                                 label: "Internal note",
                                 kind: FieldKind::Textarea { rows: None },
                                 value: props.form.internal_note.clone(),
@@ -157,7 +141,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                         label { class: "label", r#for: "permission", span { class: "label-text font-medium", "Permission level" } }
                                         select {
                                             id: "permission",
-                                            name: "permission",
+                                            name: fields.permission().field_name().to_string(),
                                             class: "{select_class}",
                                             aria_describedby: "{described_by}",
                                             aria_invalid: if has_error { "true" },
@@ -186,7 +170,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             }
                             div { class: "form-control",
                                 label { class: "label cursor-pointer justify-start gap-3",
-                                    input { r#type: "checkbox", name: "approval_required", value: "true", checked: props.form.approval_required, class: "checkbox" }
+                                    input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: props.form.approval_required, class: "checkbox" }
                                     span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
                                 }
                                 p { class: "text-sm text-base-content/65", "Leave unchecked to auto-approve invitation requests that use this invitation link." }
@@ -194,7 +178,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                             div { class: "grid grid-cols-1 gap-4 md:grid-cols-2",
                                 Field {
                                     id: "max_uses",
-                                    name: "max_uses",
+                                    name: fields.max_uses().field_name().to_string(),
                                     label: "Max use",
                                     kind: FieldKind::Number { min: Some(1), max: None },
                                     value: props.form.max_uses.clone(),
@@ -204,7 +188,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                 }
                                 Field {
                                     id: "expires_in_days",
-                                    name: "expires_in_days",
+                                    name: fields.expires_in_days().field_name().to_string(),
                                     label: "Expires in days",
                                     kind: FieldKind::Number { min: Some(1), max: None },
                                     value: props.form.expires_in_days.clone(),
@@ -252,7 +236,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormProps) -> Element {
                                             let full_name = repo.full_name.clone();
                                             rsx! {
                                                 label { class: "repo-choice-row flex cursor-pointer items-center gap-3 rounded-lg px-2 py-1.5 text-sm hover:bg-base-100",
-                                                    input { r#type: "checkbox", name: "repo_ids", value: "{id}", checked: checked, class: "checkbox checkbox-sm" }
+                                                    input { r#type: "checkbox", name: repo_ids_name.clone(), value: "{id}", checked: checked, class: "checkbox checkbox-sm" }
                                                     span { class: "text-sm", "{full_name}" }
                                                 }
                                             }

@@ -1,10 +1,11 @@
-//! Form primitives shared by server-rendered forms.
+//! The `Field` form primitive shared by server-rendered forms.
 //!
 //! Every mutation in ghinvite is a native `<form method="post">` rendered on the
 //! server (ADR 0001). [`Field`] is the one place that knows how a labelled
 //! control, its help text, and its field-level error fit together, so pages
 //! never hand-write two near-identical control branches to toggle
-//! `aria-invalid`.
+//! `aria-invalid`. (Form *models* and their validators live in modules such
+//! as [`crate::link_form`]; this module is markup only.)
 
 use dioxus::prelude::*;
 

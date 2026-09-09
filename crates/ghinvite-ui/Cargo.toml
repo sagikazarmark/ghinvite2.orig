@@ -14,6 +14,12 @@ publish.workspace = true
 # never `--workspace --target wasm32-unknown-unknown`.
 [dependencies]
 chrono.workspace = true
+# The shared form model (ADR 0001): `dioform-core` is Dioxus-free and runs the
+# validators on the server; `dioform-derive` generates the typed field paths.
+# The `dioform` facade (browser bindings) is deliberately NOT a dependency here
+# — the island that needs it depends on this crate, not the other way round.
+dioform-core.workspace = true
+dioform-derive.workspace = true
 dioxus.workspace = true
 ghinvite-core.workspace = true
 serde.workspace = true

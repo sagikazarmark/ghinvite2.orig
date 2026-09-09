@@ -4,11 +4,11 @@ use crate::account_admin_reads::{
     find_account_admin_invitation_link, find_account_admin_request, pending_request_queue,
 };
 use crate::commands::{CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink};
-use crate::forms::create_link::{self as create_link_form, CreateLinkForm};
+use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
-use crate::views::links::RepositoryChoice;
+use crate::views::link_form::RepositoryChoice;
 use crate::views::render::render;
 use axum::Router;
 use axum::extract::State;
@@ -293,13 +293,14 @@ async fn load_installation_repos_for_form(
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkForm>,
+    serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkSubmission>,
 ) -> impl IntoResponse {
     let now = Utc::now();
 
-    // Loaded once, before validating: the validator needs the available
+    // Loaded once, before validating: the validators need the available
     // repositories to resolve the repository scope, and the error path needs
-    // the same list to re-render the form.
+    // the same list to re-render the form. Validation itself is synchronous
+    // (the dioform `FormCore` holds `Rc` and must not cross an `.await`).
     let repos = load_installation_repos_for_form(&state, &admin).await;
     let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
