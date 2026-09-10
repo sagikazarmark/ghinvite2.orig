@@ -33,6 +33,11 @@ adding new utility classes in the views (`crates/ghinvite-ui/src/*.rs`), or
 upgrading DaisyUI, and commit the result — the built file is tracked so
 `cargo build` never depends on npm.
 
+CI's **CSS freshness** job runs `npm ci` and `npm run build:css` and fails
+if the generated file differs from the tracked artifact. To fix a failure,
+run `npm ci` followed by `npm run build:css` in `crates/ghinvite-web` and
+commit the updated `assets/styles.built.css`.
+
 Tailwind v4 auto-detects class names only under the directory the CLI runs
 in (this crate). The views live in `crates/ghinvite-ui`, so `assets/styles.css`
 registers them explicitly with `@source "../../ghinvite-ui/src";` (paths are

@@ -33,6 +33,22 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
 
+  css:
+    name: CSS freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: crates/ghinvite-web/package-lock.json
+      - name: Build production CSS
+        working-directory: crates/ghinvite-web
+        run: npm ci && npm run build:css
+      - name: Check tracked CSS is up to date
+        run: git diff --exit-code -- crates/ghinvite-web/assets/styles.built.css
+
   wasm32:
     name: wasm32 build
     runs-on: ubuntu-latest
