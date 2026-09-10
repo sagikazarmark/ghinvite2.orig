@@ -49,6 +49,13 @@ Routes handle `repository_invitation.accepted/declined`, `installation.deleted`,
 and `installation_repositories.added/removed`. GitHub does not automatically
 redeliver failures; redelivery must be requested separately.
 
+Repository-selection deliveries require `repository_selection` (`all` or
+`selected`) and both repository arrays, as specified by
+[GitHub's payload contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation_repositories).
+Each repository must have an unsigned integer `id`; unrelated extra fields are
+ignored. Missing or malformed consumed fields fail decoding instead of being
+silently defaulted or skipped.
+
 The signed HTTP and event-to-command tests run without GitHub or Restate:
 
 ```bash

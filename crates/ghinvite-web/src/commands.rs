@@ -572,13 +572,16 @@ struct InstallationPayload {
 #[payload(EventKind::InstallationRepositories)]
 struct InstallationRepositoriesPayload {
     installation: WebhookId,
-    // Keep GitHub's partial repository deltas tolerant of malformed entries.
-    #[serde(default)]
-    repository_selection: serde_json::Value,
-    #[serde(default)]
-    repositories_removed: serde_json::Value,
-    #[serde(default)]
-    repositories_added: serde_json::Value,
+    repository_selection: RepositorySelection,
+    repositories_removed: Vec<WebhookId>,
+    repositories_added: Vec<WebhookId>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RepositorySelection {
+    All,
+    Selected,
 }
 
 /// Builds routes for one delivery, using its receipt time for emitted commands.
@@ -644,7 +647,7 @@ pub fn github_webhook_dispatcher(
                             ))
                         })?;
                     let Some(selected_repos) =
-                        selected_repos_from_repository_event(&payload, &current.selected_repos)?
+                        selected_repos_from_repository_event(&payload, &current.selected_repos)
                     else {
                         return Ok(());
                     };
@@ -661,41 +664,29 @@ pub fn github_webhook_dispatcher(
         .build()
 }
 
-fn repository_ids(value: &serde_json::Value) -> Vec<u64> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|repo| repo.get("id").and_then(|id| id.as_u64()))
-        .collect()
-}
-
 fn selected_repos_from_repository_event(
     payload: &InstallationRepositoriesPayload,
     current: &ghinvite_core::SelectedRepos,
-) -> Result<Option<ghinvite_core::SelectedRepos>> {
-    match payload.repository_selection.as_str().unwrap_or("selected") {
-        "all" => Ok(Some(ghinvite_core::SelectedRepos::All)),
-        "selected" => {
+) -> Option<ghinvite_core::SelectedRepos> {
+    match payload.repository_selection {
+        RepositorySelection::All => Some(ghinvite_core::SelectedRepos::All),
+        RepositorySelection::Selected => {
             let mut ids: BTreeSet<u64> = match current {
-                ghinvite_core::SelectedRepos::All => return Ok(None),
+                ghinvite_core::SelectedRepos::All => return None,
                 ghinvite_core::SelectedRepos::Subset(existing) => {
                     existing.iter().copied().collect()
                 }
             };
-            for id in repository_ids(&payload.repositories_removed) {
-                ids.remove(&id);
+            for repo in &payload.repositories_removed {
+                ids.remove(&repo.id);
             }
-            for id in repository_ids(&payload.repositories_added) {
-                ids.insert(id);
+            for repo in &payload.repositories_added {
+                ids.insert(repo.id);
             }
-            Ok(Some(ghinvite_core::SelectedRepos::Subset(
+            Some(ghinvite_core::SelectedRepos::Subset(
                 ids.into_iter().collect(),
-            )))
+            ))
         }
-        other => Err(WebError::Internal(format!(
-            "unsupported repository_selection: {other}"
-        ))),
     }
 }
 
@@ -1518,7 +1509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_repository_deltas_default_selection_filter_invalid_ids_and_sort_unique_ids() {
+    async fn github_repository_deltas_sort_unique_ids_and_ignore_extra_fields() {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
@@ -1540,10 +1531,11 @@ mod tests {
             EventKind::InstallationRepositories,
             br#"{
                 "action": "removed",
+                "repository_selection": "selected",
                 "installation": {"id": 77},
-                "repositories_removed": [{"id": 10}, {"id": "11"}, null, {}],
-                "repositories_added": [{"id": 12}, {"id": 5}, {"id": 12},
-                    {"id": "13"}, {"id": -1}, {"id": 1.5}, null, {}, 14]
+                "repositories_removed": [{"id": 10}, {"id": 12}],
+                "repositories_added": [{"id": 12, "full_name": "acme/api"}, {"id": 5}, {"id": 12}],
+                "future_field": true
             }"#,
         ))
         .await
@@ -1558,6 +1550,73 @@ mod tests {
                 source: RepositorySelectionChangeSource::Webhook,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn github_repository_deltas_reject_missing_or_malformed_fields_without_commands() {
+        let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap();
+        seed_installation_with_repos(&storage, ghinvite_core::SelectedRepos::Subset(vec![10]))
+            .await;
+        let commands = RecordingCommands::default();
+        let calls = commands.calls.clone();
+        let dispatcher = github_webhook_dispatcher(
+            Arc::new(storage),
+            Arc::new(commands),
+            at("2026-05-20T14:20:00Z"),
+        );
+        let valid = serde_json::json!({
+            "action": "added", "installation": {"id": 77},
+            "repository_selection": "selected",
+            "repositories_removed": [], "repositories_added": [{"id": 12}]
+        });
+        for field in [
+            "repository_selection",
+            "repositories_removed",
+            "repositories_added",
+        ] {
+            let invalid_values = if field == "repository_selection" {
+                vec![
+                    Value::Null,
+                    serde_json::json!(true),
+                    serde_json::json!("unknown"),
+                ]
+            } else {
+                vec![
+                    Value::Null,
+                    serde_json::json!({}),
+                    serde_json::json!([{}]),
+                    serde_json::json!([{"id": "12"}]),
+                    serde_json::json!([{"id": -1}]),
+                    serde_json::json!([{"id": 1.5}]),
+                    serde_json::json!([null]),
+                ]
+            };
+            for replacement in std::iter::once(None).chain(invalid_values.into_iter().map(Some)) {
+                let mut payload = valid.clone();
+                match replacement {
+                    Some(value) => {
+                        payload[field] = value;
+                    }
+                    None => {
+                        payload.as_object_mut().unwrap().remove(field);
+                    }
+                }
+                let outcome = dispatcher
+                    .dispatch(Envelope::new(
+                        "delivery-1",
+                        EventKind::InstallationRepositories,
+                        serde_json::to_vec(&payload).unwrap(),
+                    ))
+                    .await;
+                assert!(
+                    outcome.result.is_err(),
+                    "accepted invalid payload: {payload}"
+                );
+                assert!(calls.lock().unwrap().is_empty());
+            }
+        }
     }
 
     #[tokio::test]

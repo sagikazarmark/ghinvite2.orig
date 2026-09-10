@@ -603,7 +603,7 @@ async fn webhook_handler_failure_returns_bare_500() {
     // Unknown installation fails the storage lookup without a Restate call.
     let request = signed_webhook(
         "installation_repositories",
-        r#"{"action":"added","installation":{"id":77}}"#,
+        r#"{"action":"added","installation":{"id":77},"repository_selection":"selected","repositories_added":[],"repositories_removed":[]}"#,
     );
     let response = build_test_app().await.oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
