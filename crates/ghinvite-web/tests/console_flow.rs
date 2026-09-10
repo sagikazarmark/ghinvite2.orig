@@ -1738,8 +1738,8 @@ async fn create_link_invalid_description_rerenders_form_with_errors_and_preserve
     assert!(text.contains("aria-describedby=\"description-help description-error\""));
     assert!(text.contains("value=\"push\" selected"));
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
-    assert!(text.contains("name=\"max_uses\" value=\"7\""));
-    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert_numeric_input(&text, "max_uses", "7", None);
+    assert_numeric_input(&text, "expires_in_days", "45", None);
     assert!(text.contains("Keep this note"));
     assert!(text.contains("value=\"10\" checked"));
     assert!(text.contains("acme/api"));
@@ -1820,6 +1820,50 @@ fn assert_preserved_description_input(html: &str) {
     assert!(input.contains("value=\"AI coding workshop\""));
 }
 
+fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) {
+    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
+    let mut inputs = form
+        .split("<input ")
+        .skip(1)
+        .map(|input| input.split_once('>').unwrap().0)
+        .filter(|input| input.contains(&format!("name=\"{name}\"")));
+    let input = inputs.next().expect("numeric input is present");
+    assert!(inputs.next().is_none(), "numeric input is unique");
+    for attribute in [
+        format!("id=\"{name}\""),
+        format!("value=\"{raw}\""),
+        "type=\"number\"".into(),
+        "inputmode=\"numeric\"".into(),
+        "min=\"1\"".into(),
+        format!("aria-labelledby=\"{name}-label\""),
+        format!("aria-invalid=\"{}\"", error.is_some()),
+    ] {
+        assert!(input.contains(&attribute), "missing {attribute}: {input}");
+    }
+    assert!(!input.contains(" max="));
+    assert!(!input.contains(" required="));
+    let descriptions = if error.is_some() {
+        format!("{name}-help {name}-error")
+    } else {
+        format!("{name}-help")
+    };
+    assert!(input.contains(&format!("aria-describedby=\"{descriptions}\"")));
+    assert_eq!(
+        input.contains(&format!("aria-errormessage=\"{name}-error\"")),
+        error.is_some()
+    );
+    assert_eq!(input.contains("input-error"), error.is_some());
+    let region = form.split_once(&format!("id=\"{name}-error\"")).unwrap().1;
+    let (attributes, content) = region.split_once('>').unwrap();
+    assert!(attributes.contains("aria-live=\"polite\""));
+    assert!(!attributes.contains("hidden"));
+    if let Some(error) = error {
+        assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+    } else {
+        assert!(content.starts_with("</div>"));
+    }
+}
+
 #[tokio::test]
 async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors() {
     let mut expectations = oauth_expectations();
@@ -1856,8 +1900,18 @@ async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors(
     assert_eq!(text.matches("aria-invalid=\"true\"").count(), 2);
     assert_description_error_empty(&text);
     assert_preserved_description_input(&text);
-    assert!(text.contains("name=\"max_uses\" value=\"abc\""));
-    assert!(text.contains("name=\"expires_in_days\" value=\"0\""));
+    assert_numeric_input(
+        &text,
+        "max_uses",
+        "abc",
+        Some(ghinvite_ui::link_form::MAX_USES_NOT_POSITIVE),
+    );
+    assert_numeric_input(
+        &text,
+        "expires_in_days",
+        "0",
+        Some(ghinvite_ui::link_form::EXPIRES_IN_DAYS_NOT_POSITIVE),
+    );
     assert!(text.contains("value=\"push\" selected"));
     assert!(text.contains("Keep this note"));
     assert!(text.contains("value=\"10\" checked"));
@@ -1989,8 +2043,8 @@ async fn create_link_without_repositories_rerenders_form_with_repository_scope_e
     assert_preserved_description_input(&text);
     assert!(text.contains("value=\"push\" selected"));
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
-    assert!(text.contains("name=\"max_uses\" value=\"7\""));
-    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert_numeric_input(&text, "max_uses", "7", None);
+    assert_numeric_input(&text, "expires_in_days", "45", None);
     assert!(text.contains("Keep this note"));
     assert!(text.contains("acme/api"));
     assert!(text.contains("acme/web"));
@@ -2184,8 +2238,8 @@ async fn create_link_tampered_permission_rerenders_form_with_permission_error() 
     // Every other submitted value and selection survives the re-render.
     assert_preserved_description_input(&text);
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
-    assert!(text.contains("name=\"max_uses\" value=\"7\""));
-    assert!(text.contains("name=\"expires_in_days\" value=\"45\""));
+    assert_numeric_input(&text, "max_uses", "7", None);
+    assert_numeric_input(&text, "expires_in_days", "45", None);
     assert!(text.contains("Keep this note"));
     assert!(text.contains("value=\"10\" checked"));
     assert!(text.contains("acme/api"));

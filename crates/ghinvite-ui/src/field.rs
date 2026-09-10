@@ -32,6 +32,8 @@ pub enum FieldKind {
     Text { maxlength: Option<u32> },
     /// Native registry input; initially used only by link creation's description.
     RegistryText { maxlength: Option<u32> },
+    /// Registry input backed by a raw-text parsed binding in the island.
+    RegistryNumber { min: Option<i64>, max: Option<i64> },
     /// Multi-line `<textarea>`; the value is rendered as its text content.
     Textarea { rows: Option<u32> },
     /// `<input type="number" inputmode="numeric">`.
@@ -99,8 +101,11 @@ impl ControlHandlers {
 /// a separate hook-backed Field context with an always-mounted error region.
 #[component]
 pub fn Field(props: FieldProps) -> Element {
-    if let FieldKind::RegistryText { maxlength } = props.kind {
-        return rsx! { RegistryTextField { field: props, maxlength } };
+    if matches!(
+        props.kind,
+        FieldKind::RegistryText { .. } | FieldKind::RegistryNumber { .. }
+    ) {
+        return rsx! { RegistryInputField { field: props } };
     }
     let has_error = props.error.is_some();
     let help_id = format!("{}-help", props.id);
@@ -112,7 +117,7 @@ pub fn Field(props: FieldProps) -> Element {
     let listeners = listeners(props.oninput, props.onchange, props.onblur);
 
     let control = match &props.kind {
-        FieldKind::RegistryText { .. } => unreachable!(),
+        FieldKind::RegistryText { .. } | FieldKind::RegistryNumber { .. } => unreachable!(),
         FieldKind::Textarea { rows } => {
             let class = if has_error {
                 "textarea textarea-bordered textarea-error w-full"
@@ -175,8 +180,13 @@ pub fn Field(props: FieldProps) -> Element {
 
 /// Keep registry hooks in their own scope, separate from the native controls.
 #[component]
-fn RegistryTextField(field: FieldProps, maxlength: Option<u32>) -> Element {
+fn RegistryInputField(field: FieldProps) -> Element {
     let props = field;
+    let (input_type, inputmode, maxlength, min, max) = match props.kind {
+        FieldKind::RegistryText { maxlength } => ("text", None, maxlength, None, None),
+        FieldKind::RegistryNumber { min, max } => ("number", Some("numeric"), None, min, max),
+        _ => unreachable!(),
+    };
     let value = use_memo(use_reactive(&props.value, |value| value));
     let help_id = format!("{}-help", props.id);
     let error_id = format!("{}-error", props.id);
@@ -210,9 +220,12 @@ fn RegistryTextField(field: FieldProps, maxlength: Option<u32>) -> Element {
                 // The island reads directly from the binding; only SSR needs
                 // the preserved-value override without a form producer.
                 value: if bound { None } else { Some(value.into()) },
-                r#type: "text",
+                r#type: input_type,
+                inputmode,
                 class: "input-bordered w-full",
                 maxlength: maxlength.map(|limit| limit.to_string()),
+                min: min.map(|limit| limit.to_string()),
+                max: max.map(|limit| limit.to_string()),
                 placeholder: props.placeholder,
                 // Later sibling registrations cannot supply first-pass SSR
                 // associations. Keep these explicit until upstream supports it.
@@ -322,6 +335,115 @@ pub(crate) fn error_text(id: &str, message: Option<&str>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_number_metadata_is_complete_after_one_rebuild() {
+        for name in ["max_uses", "expires_in_days"] {
+            for (raw, error) in [
+                ("7", None),
+                ("", None),
+                ("0", Some("Must be positive.")),
+                ("abc", Some("Must be positive.")),
+            ] {
+                for (min, max) in [(None, None), (Some(1), None), (Some(1), Some(365))] {
+                    for help in [None, Some("Optional guardrail.")] {
+                        let mut vdom = VirtualDom::new_with_props(
+                            move || {
+                                rsx! {
+                                    Field {
+                                        id: "guardrail",
+                                        name,
+                                        label: "Guardrail",
+                                        kind: FieldKind::RegistryNumber { min, max },
+                                        value: raw,
+                                        help: help.map(str::to_string),
+                                        error: error.map(str::to_string),
+                                    }
+                                }
+                            },
+                            (),
+                        );
+                        vdom.rebuild_in_place();
+                        let html = dioxus_ssr::render(&vdom);
+                        let input = html
+                            .split_once("<input ")
+                            .unwrap()
+                            .1
+                            .split_once('>')
+                            .unwrap()
+                            .0;
+                        for attribute in [
+                            "id=\"guardrail\"".to_string(),
+                            format!("name=\"{name}\""),
+                            format!("value=\"{raw}\""),
+                            "type=\"number\"".to_string(),
+                            "inputmode=\"numeric\"".to_string(),
+                            "aria-labelledby=\"guardrail-label\"".to_string(),
+                            format!("aria-invalid=\"{}\"", error.is_some()),
+                        ] {
+                            assert!(input.contains(&attribute), "missing {attribute}: {html}");
+                        }
+                        for (attribute, value) in [("min", min), ("max", max)] {
+                            if let Some(value) = value {
+                                assert!(input.contains(&format!(" {attribute}=\"{value}\"")));
+                            } else {
+                                assert!(!input.contains(&format!(" {attribute}=")));
+                            }
+                        }
+                        assert!(!input.contains("maxlength="));
+                        assert!(!input.contains(" required="));
+                        assert_eq!(input.contains("input-error"), error.is_some());
+                        let descriptions = [
+                            help.map(|_| "guardrail-help"),
+                            error.map(|_| "guardrail-error"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                        if descriptions.is_empty() {
+                            assert!(!input.contains("aria-describedby="));
+                        } else {
+                            assert!(
+                                input.contains(&format!("aria-describedby=\"{descriptions}\""))
+                            );
+                        }
+                        assert_eq!(
+                            input.contains("aria-errormessage=\"guardrail-error\""),
+                            error.is_some()
+                        );
+                        let label = html
+                            .split_once("<label ")
+                            .unwrap()
+                            .1
+                            .split_once('>')
+                            .unwrap()
+                            .0;
+                        assert!(label.contains("id=\"guardrail-label\""));
+                        assert!(label.contains("for=\"guardrail\""));
+                        assert!(html.contains(">Guardrail</span>"));
+                        let region = html.split_once("id=\"guardrail-error\"").unwrap().1;
+                        let (attributes, content) = region.split_once('>').unwrap();
+                        assert!(attributes.contains("aria-live=\"polite\""));
+                        assert!(!attributes.contains("hidden"));
+                        if let Some(error) = error {
+                            assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+                        } else {
+                            assert!(content.starts_with("</div>"));
+                        }
+                        for id in ["guardrail", "guardrail-label", "guardrail-error"] {
+                            assert_eq!(html.matches(&format!(" id=\"{id}\"")).count(), 1);
+                        }
+                        assert_eq!(
+                            html.matches(" id=\"guardrail-help\"").count(),
+                            usize::from(help.is_some())
+                        );
+                        assert_eq!(html.matches("<input ").count(), 1);
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn registry_text_metadata_is_complete_after_one_rebuild() {

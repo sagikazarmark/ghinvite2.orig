@@ -7,6 +7,56 @@ const submit = (page) => page.getByRole('button', { name: 'Create invitation lin
 const approval = (page) => page.getByRole('checkbox', { name: /Require account admin approval/ });
 const permissions = ['pull', 'triage', 'push', 'maintain', 'admin'];
 const permissionError = 'Choose a supported permission level: pull, triage, push, maintain, or admin.';
+const numericFields = [
+  {
+    id: 'max_uses', label: 'Max use', initial: '', valid: '4294967295',
+    help: 'Blank means unlimited invitation requests.',
+    invalid: 'Max use must be a whole number of 1 or more.',
+    overflow: 'Max use is too large. Use a smaller number, or leave it blank for unlimited invitation requests.',
+  },
+  {
+    id: 'expires_in_days', label: 'Expires in days', initial: '30', valid: '45',
+    help: 'Default is 30 days. Blank creates an invitation link with no expiration.',
+    invalid: 'Expiration must be a whole number of days, 1 or more.',
+    overflow: 'Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.',
+  },
+];
+
+async function expectNumeric(page, field, value, message = null) {
+  const { id, label, help } = field;
+  const control = page.getByRole('spinbutton', { name: label, exact: true });
+  await expect(control).toHaveValue(value);
+  await expect(control).toHaveAttribute('id', id);
+  await expect(control).toHaveAttribute('name', id);
+  await expect(control).toHaveAttribute('type', 'number');
+  await expect(control).toHaveAttribute('min', '1');
+  await expect(control).not.toHaveAttribute('max');
+  await expect(control).toHaveJSProperty('required', false);
+  await expect(control).toHaveAttribute('aria-labelledby', `${id}-label`);
+  await expect(control).not.toHaveAttribute('aria-label');
+  await expect(page.locator(`label#${id}-label`)).toHaveAttribute('for', id);
+  await expect(page.locator(`p#${id}-help`)).toHaveText(help);
+  await expect(control).toHaveAttribute('aria-invalid', String(message !== null));
+  await expect(control).toHaveAttribute('aria-describedby',
+    message === null ? `${id}-help` : `${id}-help ${id}-error`);
+  const error = page.locator(`div#${id}-error`);
+  await expect(error).toHaveAttribute('aria-live', 'polite');
+  await expect(error).not.toHaveAttribute('hidden');
+  if (message === null) {
+    await expect(control).not.toHaveClass(/\binput-error\b/);
+    await expect(control).not.toHaveAttribute('aria-errormessage');
+    await expect(error).toBeEmpty();
+  } else {
+    await expect(control).toHaveClass(/\binput-error\b/);
+    await expect(control).toHaveAttribute('aria-errormessage', `${id}-error`);
+    await expect(error.locator(':scope > div')).toHaveCount(1);
+    await expect(error).toHaveText(message);
+  }
+  for (const suffix of ['', '-label', '-help', '-error']) {
+    await expect(page.locator(`[id="${id}${suffix}"]`)).toHaveCount(1);
+  }
+  await expect(page.locator(`[name="${id}"]`)).toHaveCount(1);
+}
 
 async function expectPermission(page, value, invalid) {
   const control = page.getByRole('combobox', { name: 'Permission level', exact: true });
@@ -274,12 +324,131 @@ test('permission validates on unchanged focus exit and ignores malformed DOM inp
   expect((await post(page)).getAll('permission')).toEqual(['push']);
 });
 
+for (const field of numericFields) {
+  test(`numeric ${field.id} preserves repeated same-error raw edits and clears metadata when corrected`, async ({ page }) => {
+    await open(page);
+    await expectNumeric(page, field, field.initial);
+    const control = page.locator(`#${field.id}`);
+    await page.locator(`#${field.id}-label`).click();
+    await expect(control).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expectNumeric(page, field, field.initial);
+    const error = await page.locator(`#${field.id}-error`).elementHandle();
+    for (const raw of ['0', '00', '000']) {
+      await control.fill(raw);
+      await expectNumeric(page, field, raw, field.invalid);
+      // A different control forces a render even when the parse error is unchanged.
+      await page.locator('#internal_note').fill(`Raw edit ${raw}`);
+      await expectNumeric(page, field, raw, field.invalid);
+    }
+    for (const raw of ['7', '', '0', '9']) {
+      await control.fill(raw);
+      await page.keyboard.press('Tab');
+      await expectNumeric(page, field, raw, raw === '0' ? field.invalid : null);
+    }
+    expect(await error.evaluate((element) => element.isConnected)).toBe(true);
+  });
+
+  test(`numeric ${field.id} blocks native-valid parser failures before allowing a native POST`, async ({ page }) => {
+    await open(page);
+    await page.locator('#description').fill('Numeric workshop');
+    await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+    const posts = [];
+    page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+    // 1.0 is an integer for native step validation but not an ASCII digit string.
+    // Do not use abc, which Chromium sanitizes, or min/step failures as proof
+    // that the progressive submit handler ran.
+    const cases = [['4294967296', field.overflow], ['1e2', field.invalid], ['1.0', field.invalid]];
+    if (field.id === 'expires_in_days') cases.push(['4294967295', field.overflow]);
+    for (const [raw, message] of cases) {
+      await page.locator(`#${field.id}`).fill(raw);
+      await page.keyboard.press('Tab');
+      await expectNumeric(page, field, raw, message);
+      expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+      await submit(page).click();
+      await expect(page.locator('#link-form-errors')).toHaveAttribute('role', 'alert');
+      await expectNumeric(page, field, raw, message);
+      await expect(page).toHaveURL('/');
+      expect(posts).toEqual([]);
+    }
+    await page.locator(`#${field.id}`).fill(field.valid);
+    await page.keyboard.press('Tab');
+    await expectNumeric(page, field, field.valid);
+    expect((await post(page)).getAll(field.id)).toEqual([field.valid]);
+    expect(posts).toHaveLength(1);
+  });
+
+  test(`numeric ${field.id} does not silently repair seeded abc on blur or unrelated edits`, async ({ page }) => {
+    const path = `/${field.id}-invalid`;
+    await open(page, path);
+    const props = JSON.parse(await page.locator('#link-form-props').textContent());
+    expect(props.values[field.id]).toBe('abc');
+    await expectNumeric(page, field, '', field.invalid);
+    const posts = [];
+    page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+    await page.locator(`#${field.id}-label`).click();
+    await expect(page.locator(`#${field.id}`)).toBeFocused();
+    await page.keyboard.press('Tab');
+    await page.locator('#description').fill('   ');
+    await page.keyboard.press('Tab');
+    await expect(page.locator('#description-error')).not.toBeEmpty();
+    await page.locator('#description').fill('Corrected numeric workshop');
+    await page.locator('#permission').selectOption('push');
+    await page.locator('#internal_note').fill('Unrelated edit');
+    const other = field.id === 'max_uses' ? 'expires_in_days' : 'max_uses';
+    await page.locator(`#${other}`).fill('7');
+    await page.keyboard.press('Tab');
+    await expect(page.locator('#description-error')).toBeEmpty();
+    await expectNumeric(page, field, '', field.invalid);
+    expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+    await submit(page).click();
+    await expect(page.locator('#link-form-errors')).toBeVisible();
+    await expectNumeric(page, field, '', field.invalid);
+    await expect(page).toHaveURL(path);
+    expect(posts).toEqual([]);
+    // Filling an already-sanitized empty input need not fire input. Make a
+    // real numeric edit before clearing it to explicitly choose None.
+    await page.locator(`#${field.id}`).fill('1');
+    await page.locator(`#${field.id}`).fill('');
+    await page.keyboard.press('Tab');
+    await expectNumeric(page, field, '');
+    const data = await post(page);
+    expect(data.getAll(field.id)).toEqual(['']);
+    expect(data.getAll(other)).toEqual(['7']);
+    expect(data.get('description')).toBe('Corrected numeric workshop');
+    expect(posts).toHaveLength(1);
+  });
+}
+
 for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
   test.describe(mode, () => {
     if (mode === 'no-js') test.use({ javaScriptEnabled: false });
     test.beforeEach(async ({ page }) => {
       if (mode === 'blocked-bundle') await page.route('**/assets/**', (route) => route.abort('blockedbyclient'));
     });
+
+    for (const field of numericFields) {
+      test(`numeric ${field.id} retains SSR error metadata and submits exact corrected or empty values`, async ({ page }) => {
+        await open(page, `/${field.id}-invalid`, mode === 'mounted');
+        const props = JSON.parse(await page.locator('#link-form-props').textContent());
+        expect(props.values[field.id]).toBe('abc');
+        await expectNumeric(page, field, '', field.invalid);
+        await page.locator(`#${field.id}`).fill(field.valid);
+        await page.keyboard.press('Tab');
+        if (mode === 'mounted') await expectNumeric(page, field, field.valid);
+        expect((await post(page)).getAll(field.id)).toEqual([field.valid]);
+
+        await open(page, '/', mode === 'mounted');
+        await expectNumeric(page, field, field.initial);
+        await page.locator('#description').fill('Blank numeric workshop');
+        await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+        await page.locator(`#${field.id}`).fill('1');
+        await page.locator(`#${field.id}`).fill('');
+        await page.keyboard.press('Tab');
+        await expectNumeric(page, field, '');
+        expect((await post(page)).getAll(field.id)).toEqual(['']);
+      });
+    }
 
     for (const permission of permissions) {
       test(`permission ${permission} submits its explicit native form value`, async ({ page }) => {
@@ -345,6 +514,8 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
       // preserve the failed submission; expecting the DOM value "abc" is wrong.
       await expect(page.locator('#max_uses')).toHaveValue('');
       await expect(page.locator('#expires_in_days')).toHaveValue('0');
+      await expectNumeric(page, numericFields[0], '', numericFields[0].invalid);
+      await expectNumeric(page, numericFields[1], '0', numericFields[1].invalid);
       const props = JSON.parse(await page.locator('#link-form-props').textContent());
       expect(props.values.max_uses).toBe('abc');
       expect(props.values.permission).toBe('owner');

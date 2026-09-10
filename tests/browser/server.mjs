@@ -34,6 +34,8 @@ for (const [path, args] of [
   ['/permission-invalid', ['--permission-only-invalid']],
   ['/permission-empty', ['--permission-only-invalid', '--empty-permission']],
   ['/permission-unvalidated', ['--permission-only-invalid', '--unvalidated']],
+  ['/max_uses-invalid', ['--numeric-only-invalid']],
+  ['/expires_in_days-invalid', ['--numeric-only-invalid', '--expiration']],
 ]) {
   pages.set(path, execFileSync('cargo', [
     'run', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture', '--', ...args,

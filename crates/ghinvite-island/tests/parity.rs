@@ -126,6 +126,106 @@ fn failed_submission_renders_identically() {
 }
 
 #[test]
+fn numeric_guardrails_preserve_raw_values_and_metadata_on_the_first_pass() {
+    for raw in ["0", "00", "abc", "4294967296", "", "7"] {
+        let (max_error, expires_error) = match raw {
+            "" | "7" => (None, None),
+            "4294967296" => (
+                Some(link_form::MAX_USES_TOO_LARGE),
+                Some(link_form::EXPIRES_IN_DAYS_TOO_FAR),
+            ),
+            _ => (
+                Some(link_form::MAX_USES_NOT_POSITIVE),
+                Some(link_form::EXPIRES_IN_DAYS_NOT_POSITIVE),
+            ),
+        };
+        let values = LinkFormValues {
+            description: "Workshop".into(),
+            selected_repo_ids: vec![10],
+            max_uses: raw.into(),
+            expires_in_days: raw.into(),
+            errors: LinkFormErrors {
+                summary: if max_error.is_some() || expires_error.is_some() {
+                    vec![link_form::SUMMARY_MESSAGE.into()]
+                } else {
+                    vec![]
+                },
+                max_uses: max_error.map(str::to_string),
+                expires_in_days: expires_error.map(str::to_string),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+        // Repeated independent mounts must not leak registry associations or
+        // replace a failed raw value with the typed model's blank fallback.
+        for _ in 0..2 {
+            let (server, island) = render_both(values.clone(), acme_repos());
+            assert_eq!(island, server, "numeric raw={raw:?}");
+            assert_numeric_input(&island, "max_uses", raw, max_error);
+            assert_numeric_input(&island, "expires_in_days", raw, expires_error);
+        }
+    }
+}
+
+fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) {
+    let mut inputs = html
+        .split("<input ")
+        .skip(1)
+        .map(|input| input.split_once('>').unwrap().0)
+        .filter(|input| input.contains(&format!("name=\"{name}\"")));
+    let input = inputs.next().expect("numeric input is present");
+    assert!(inputs.next().is_none(), "numeric input is unique");
+    for attribute in [
+        format!("id=\"{name}\""),
+        format!("value=\"{raw}\""),
+        "type=\"number\"".into(),
+        "inputmode=\"numeric\"".into(),
+        "min=\"1\"".into(),
+        format!("aria-labelledby=\"{name}-label\""),
+        format!("aria-invalid=\"{}\"", error.is_some()),
+    ] {
+        assert!(input.contains(&attribute), "missing {attribute}: {input}");
+    }
+    assert!(!input.contains(" max="));
+    assert!(!input.contains(" required="));
+    let descriptions = if error.is_some() {
+        format!("{name}-help {name}-error")
+    } else {
+        format!("{name}-help")
+    };
+    assert!(input.contains(&format!("aria-describedby=\"{descriptions}\"")));
+    assert_eq!(
+        input.contains(&format!("aria-errormessage=\"{name}-error\"")),
+        error.is_some()
+    );
+    assert_eq!(input.contains("input-error"), error.is_some());
+    let label = html
+        .split("<label ")
+        .skip(1)
+        .map(|label| label.split_once('>').unwrap().0)
+        .find(|label| label.contains(&format!("id=\"{name}-label\"")))
+        .unwrap();
+    assert!(label.contains(&format!("for=\"{name}\"")));
+    let region = html.split_once(&format!("id=\"{name}-error\"")).unwrap().1;
+    let (attributes, content) = region.split_once('>').unwrap();
+    assert!(attributes.contains("aria-live=\"polite\""));
+    assert!(!attributes.contains("hidden"));
+    if let Some(error) = error {
+        assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+    } else {
+        assert!(content.starts_with("</div>"));
+    }
+    for id in [
+        name.to_string(),
+        format!("{name}-label"),
+        format!("{name}-help"),
+        format!("{name}-error"),
+    ] {
+        assert_eq!(html.matches(&format!(" id=\"{id}\"")).count(), 1);
+    }
+}
+
+#[test]
 fn every_permission_and_display_fallback_renders_identically_on_the_first_pass() {
     for raw in [
         "pull", "triage", "push", "maintain", "admin", "owner", "", "Push", " pull ",
@@ -250,21 +350,22 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
         "<div>{}</div></div>",
         link_form::PERMISSION_UNSUPPORTED
     )));
-    assert!(island.contains(&format!(
-        "<p id=\"max_uses-error\" class=\"text-sm font-medium text-error\">{}</p>",
-        link_form::MAX_USES_NOT_POSITIVE
-    )));
-    assert!(island.contains(&format!(
-        "<p id=\"expires_in_days-error\" class=\"text-sm font-medium text-error\">{}</p>",
-        link_form::EXPIRES_IN_DAYS_NOT_POSITIVE
-    )));
+    assert_numeric_input(
+        &island,
+        "max_uses",
+        "abc",
+        Some(link_form::MAX_USES_NOT_POSITIVE),
+    );
+    assert_numeric_input(
+        &island,
+        "expires_in_days",
+        "0",
+        Some(link_form::EXPIRES_IN_DAYS_NOT_POSITIVE),
+    );
     assert!(island.contains(&format!(
         "<p id=\"repo_ids-error\" class=\"text-sm font-medium text-error\">{}</p>",
         link_form::REPO_SCOPE_REQUIRED
     )));
-    // Raw numeric text preserved (the parse error keeps it), values verbatim.
-    assert!(island.contains("name=\"max_uses\" value=\"abc\""));
-    assert!(island.contains("name=\"expires_in_days\" value=\"0\""));
     let description = island
         .split("<input")
         .find(|input| {

@@ -120,8 +120,8 @@ pub struct LinkFormHandlers {
     pub internal_note: ControlHandlers,
     pub permission: Option<dioxus_field::Binding<Option<String>>>,
     pub approval_required: ControlHandlers,
-    pub max_uses: ControlHandlers,
-    pub expires_in_days: ControlHandlers,
+    pub max_uses: Option<dioxus_field::Binding<String>>,
+    pub expires_in_days: Option<dioxus_field::Binding<String>>,
     pub repo_scope: RepositoryScopeHandlers,
 }
 
@@ -243,26 +243,22 @@ pub fn LinkCreateForm(
                             id: "max_uses",
                             name: fields.max_uses().field_name().to_string(),
                             label: "Max use",
-                            kind: FieldKind::Number { min: Some(1), max: None },
+                            kind: FieldKind::RegistryNumber { min: Some(1), max: None },
                             value: form.max_uses.clone(),
                             placeholder: "Unlimited",
                             help: "Blank means unlimited invitation requests.",
                             error: form.errors.max_uses.clone(),
-                            oninput: handlers.max_uses.oninput,
-                            onchange: handlers.max_uses.onchange,
-                            onblur: handlers.max_uses.onblur,
+                            binding: handlers.max_uses,
                         }
                         Field {
                             id: "expires_in_days",
                             name: fields.expires_in_days().field_name().to_string(),
                             label: "Expires in days",
-                            kind: FieldKind::Number { min: Some(1), max: None },
+                            kind: FieldKind::RegistryNumber { min: Some(1), max: None },
                             value: form.expires_in_days.clone(),
                             help: "Default is 30 days. Blank creates an invitation link with no expiration.",
                             error: form.errors.expires_in_days.clone(),
-                            oninput: handlers.expires_in_days.oninput,
-                            onchange: handlers.expires_in_days.onchange,
-                            onblur: handlers.expires_in_days.onblur,
+                            binding: handlers.expires_in_days,
                         }
                     }
                 }
@@ -809,6 +805,49 @@ mod tests {
         assert!(!attributes.contains("aria-errormessage="));
     }
 
+    fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) {
+        let mut inputs = form_markup(html)
+            .split("<input ")
+            .skip(1)
+            .map(|input| input.split_once('>').unwrap().0)
+            .filter(|input| input.contains(&format!("name=\"{name}\"")));
+        let input = inputs.next().expect("numeric input is present");
+        assert!(inputs.next().is_none(), "numeric input is unique");
+        for attribute in [
+            format!("id=\"{name}\""),
+            format!("value=\"{raw}\""),
+            "type=\"number\"".into(),
+            "inputmode=\"numeric\"".into(),
+            "min=\"1\"".into(),
+            format!("aria-labelledby=\"{name}-label\""),
+            format!("aria-invalid=\"{}\"", error.is_some()),
+        ] {
+            assert!(input.contains(&attribute), "missing {attribute}: {input}");
+        }
+        assert!(!input.contains(" max="));
+        assert!(!input.contains(" required="));
+        let descriptions = if error.is_some() {
+            format!("{name}-help {name}-error")
+        } else {
+            format!("{name}-help")
+        };
+        assert!(input.contains(&format!("aria-describedby=\"{descriptions}\"")));
+        assert_eq!(
+            input.contains(&format!("aria-errormessage=\"{name}-error\"")),
+            error.is_some()
+        );
+        assert_eq!(input.contains("input-error"), error.is_some());
+        let region = html.split_once(&format!("id=\"{name}-error\"")).unwrap().1;
+        let (attributes, content) = region.split_once('>').unwrap();
+        assert!(attributes.contains("aria-live=\"polite\""));
+        assert!(!attributes.contains("hidden"));
+        if let Some(error) = error {
+            assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+        } else {
+            assert!(content.starts_with("</div>"));
+        }
+    }
+
     // --- island mount points ------------------------------------------------
 
     const APP_SCRIPT: &str = "<script src=\"/static/app.js\"></script>";
@@ -1009,6 +1048,8 @@ mod tests {
             let wired = crate::testing::render(move || {
                 let description = use_signal(|| form.description.clone());
                 let permission = use_signal(|| Some(form.permission.clone()));
+                let max_uses = use_signal(|| form.max_uses.clone());
+                let expires_in_days = use_signal(|| form.expires_in_days.clone());
                 let control = || ControlHandlers {
                     oninput: Some(EventHandler::new(|_event: FormEvent| {})),
                     onchange: Some(EventHandler::new(|_event: FormEvent| {})),
@@ -1020,8 +1061,8 @@ mod tests {
                     internal_note: control(),
                     permission: Some(permission.into()),
                     approval_required: control(),
-                    max_uses: control(),
-                    expires_in_days: control(),
+                    max_uses: Some(max_uses.into()),
+                    expires_in_days: Some(expires_in_days.into()),
                     repo_scope: RepositoryScopeHandlers {
                         onchange: Some(EventHandler::new(|_change: (u64, bool)| {})),
                         onblur: Some(EventHandler::new(|_event: FocusEvent| {})),
@@ -1337,8 +1378,8 @@ mod tests {
         assert!(html.contains("id=\"internal_note-help\""));
         assert!(html.contains("aria-describedby=\"max_uses-help\""));
         assert!(html.contains("aria-describedby=\"expires_in_days-help\""));
-        assert!(html.contains("name=\"max_uses\" value=\"\""));
-        assert!(html.contains("name=\"expires_in_days\" value=\"30\""));
+        assert_numeric_input(&html, "max_uses", "", None);
+        assert_numeric_input(&html, "expires_in_days", "30", None);
         assert!(html.contains("min=\"1\""));
         assert!(html.find("Link details").unwrap() < html.find("Access configuration").unwrap());
         assert!(html.contains("<title>New invitation link · acme</title>"));
@@ -1407,8 +1448,8 @@ mod tests {
         assert_eq!(html.matches("name=\"description\"").count(), 1);
         assert!(html.contains("value=\"push\" selected"));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
-        assert!(html.contains("name=\"max_uses\" value=\"7\""));
-        assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
+        assert_numeric_input(&html, "max_uses", "7", None);
+        assert_numeric_input(&html, "expires_in_days", "45", None);
         assert!(html.contains("Keep this note"));
         assert!(html.contains("value=\"10\" checked"));
         assert!(html.contains("value=\"11\""));
@@ -1451,18 +1492,22 @@ mod tests {
 
         assert!(html.contains("id=\"link-form-errors\""));
         assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
-        assert!(html.contains(
-            "<p id=\"max_uses-error\" class=\"text-sm font-medium text-error\">Max use must be a whole number of 1 or more.</p>"
-        ));
-        assert!(html.contains(
-            "<p id=\"expires_in_days-error\" class=\"text-sm font-medium text-error\">Expiration must be a whole number of days, 1 or more.</p>"
-        ));
+        assert_numeric_input(
+            &html,
+            "max_uses",
+            "abc",
+            Some(crate::link_form::MAX_USES_NOT_POSITIVE),
+        );
+        assert_numeric_input(
+            &html,
+            "expires_in_days",
+            "0",
+            Some(crate::link_form::EXPIRES_IN_DAYS_NOT_POSITIVE),
+        );
         assert!(html.contains("aria-describedby=\"max_uses-help max_uses-error\""));
         assert!(html.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
         assert_eq!(html.matches("aria-invalid=\"true\"").count(), 2);
         assert_eq!(html.matches("input-error").count(), 2);
-        assert!(html.contains("name=\"max_uses\" value=\"abc\""));
-        assert!(html.contains("name=\"expires_in_days\" value=\"0\""));
         assert!(html.contains("value=\"AI coding workshop\""));
         assert_description_error_empty(&html);
         assert!(html.contains("value=\"10\" checked"));
@@ -1532,8 +1577,8 @@ mod tests {
         assert!(html.contains("value=\"pull\" selected=true"));
         assert!(html.contains("value=\"AI coding workshop\""));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
-        assert!(html.contains("name=\"max_uses\" value=\"7\""));
-        assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
+        assert_numeric_input(&html, "max_uses", "7", None);
+        assert_numeric_input(&html, "expires_in_days", "45", None);
         assert!(html.contains("Keep this note"));
         assert!(html.contains("value=\"11\" checked"));
         assert!(!html.contains("value=\"10\" checked"));

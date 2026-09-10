@@ -47,6 +47,23 @@ fn main() {
             },
             ..LinkFormValues::default()
         }
+    } else if args.iter().any(|arg| arg == "--numeric-only-invalid") {
+        let expiration = args.iter().any(|arg| arg == "--expiration");
+        let mut form = LinkFormValues {
+            description: "Numeric workshop".into(),
+            selected_repo_ids: vec![10],
+            ..LinkFormValues::default()
+        };
+        form.errors.summary = vec![SUMMARY_MESSAGE.into()];
+        if expiration {
+            form.expires_in_days = "abc".into();
+            form.errors.expires_in_days =
+                Some(ghinvite_ui::link_form::EXPIRES_IN_DAYS_NOT_POSITIVE.into());
+        } else {
+            form.max_uses = "abc".into();
+            form.errors.max_uses = Some(ghinvite_ui::link_form::MAX_USES_NOT_POSITIVE.into());
+        }
+        form
     } else if args.iter().any(|arg| arg == "--preserved-values") {
         preserved_submission()
     } else if args.iter().any(|arg| arg == "--with-errors") {

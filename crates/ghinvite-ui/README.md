@@ -53,13 +53,16 @@ markup from the same inputs:
 - `LinkCreateForm { action, form: LinkFormValues, repos, handlers }` — just
   the `<form>`: summary alert, four sections, submit button. `handlers` is an
   optional `links::LinkFormHandlers` (the form's `onsubmit`, a
-  `dioxus_field::Binding<String>` for description and
+  `dioxus_field::Binding<String>` for description, max use, and expiration,
   `dioxus_field::Binding<Option<String>>` for permission,
   `field::ControlHandlers { oninput, onchange, onblur }` for other native controls, and
   `RepositoryScopeHandlers` for the checkbox group); the server uses the default.
-- `field::Field` - text / textarea / number controls; `RegistryText` delegates to
-  `RegistryTextField`, using registry Field context, FieldLabel, Input, and
-  FieldError while retaining the native help paragraph.
+- `field::Field` - text / textarea / number controls; `RegistryText` and
+  `RegistryNumber` delegate to `RegistryInputField` (renamed from
+  `RegistryTextField`), using registry Field context, FieldLabel, Input, and
+  FieldError while retaining the native help paragraph. The number variant
+  forwards native `type="number"`, `inputmode="numeric"`, and optional `min` / `max`;
+  both new-link numeric fields use `min="1"` with no `max`.
 - `links::PermissionSelect { id, name, value, help, error, binding }` renders
   the permission-level native `<select>` (`PERMISSION_LEVELS`), using registry
   Field context, FieldLabel, NativeSelect, native help, and FieldError.
@@ -72,13 +75,27 @@ markup is byte-identical (tested for each component and for the whole
 `LinkCreateForm`).
 
 The production registry integration covers the summary Alert, submit Button,
-description Input, and permission NativeSelect. `with_meta_values` supplies
-explicit control ID, name, and errors, plus required state for description;
+description, max-use, and expiration Inputs, and permission NativeSelect.
+`with_meta_values` supplies explicit control ID, name, and errors, plus required
+state for description;
 metadata drives `input-error` / `select-error` and `aria-invalid` (`"false"` when
 valid), without duplicate control overrides.
 FieldError is an always-mounted polite live-region `div` with nested error
-`div`s for both fields; clearing an error empties `description-error` or
-`permission-error` rather than removing the region.
+`div`s; clearing an error empties the corresponding `description-error`,
+`max_uses-error`, `expires_in_days-error`, or `permission-error` region rather
+than removing it.
+
+The island converts each numeric dioform
+`ParsedTextBinding<CreateLinkForm, Option<u32>>` to a raw-text `Binding<String>`
+and applies `commit_on_focus_exit`. The existing custom parsers and typed
+`Option<u32>` model are unchanged: blank means unlimited max use or no expiration,
+and expiration timestamp overflow is still checked by the shared server/browser
+validator. Errors still arrive through `LinkFormValues` props, folded with parse
+errors before visible validator errors, then passed into the same metadata.
+Unbound SSR uses the preserved raw-value memo; bound browser Inputs read directly
+from their bindings, including invalid raw text. Chromium sanitizes `abc` out of
+the native number display, but the binding retains it and its parse error until
+edited; unchanged blur or unrelated edits do not silently turn it into `None`.
 
 Permission has exactly five options, with explicit `NativeSelectOption::form_value`
 strings: `pull`, `triage`, `push`, `maintain`, and `admin`. Native POSTs submit
@@ -88,7 +105,7 @@ props and dioform model for validation, but display as `pull`. Previously no
 option had a `selected` attribute for unsupported values, leaving the browser to
 display the first option. Now the shared SSR/island component explicitly selects
 `pull`, preserving display and native POST semantics without silently repairing
-the model. Unlike description's direct bound display, permission always uses a
+the model. Unlike the Inputs' direct bound display, permission always uses a
 controlled memo: NativeSelect writes the DOM value property, so passing an
 unmatched raw value would blank the control. Real NativeSelect input writes
 through the binding; unchanged focus exit does not copy the fallback into it.
@@ -98,9 +115,10 @@ The application still owns stable IDs and explicit `aria-describedby` and
 first-pass SSR associations, and native help does not register with metadata. The help `p`
 retains its styling because registry FieldDescription forces the unsuitable
 `label` class even with appearance disabled. Metadata reduces duplication; it
-does not eliminate all application wiring. Checkboxes, textarea, and numbers
-keep their existing native listeners; installed upstream source is unchanged.
-NativeSelect adds no new dependencies. See
+does not eliminate all application wiring. Only the new-link numeric fields
+migrated; legacy `FieldKind::Number` controls elsewhere, textarea, and checkboxes
+keep their existing native rendering and listeners. Installed upstream source
+and installation instructions are unchanged, with no new dependencies. See
 [component provenance and update instructions](src/components/README.md) and the
 [island binding adapter](../ghinvite-island/README.md#registry-input-integration).
 

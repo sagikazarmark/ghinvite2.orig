@@ -117,16 +117,8 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
                 onchange: Some(EventHandler::new(approval_required.onchange())),
                 onblur: Some(EventHandler::new(approval_required.onblur())),
             },
-            max_uses: ControlHandlers {
-                oninput: Some(EventHandler::new(max_uses.oninput())),
-                onchange: None,
-                onblur: Some(EventHandler::new(max_uses.onblur())),
-            },
-            expires_in_days: ControlHandlers {
-                oninput: Some(EventHandler::new(expires_in_days.oninput())),
-                onchange: None,
-                onblur: Some(EventHandler::new(expires_in_days.onblur())),
-            },
+            max_uses: Some(commit_on_focus_exit(max_uses.into())),
+            expires_in_days: Some(commit_on_focus_exit(expires_in_days.into())),
             repo_scope: RepositoryScopeHandlers {
                 onchange: Some(EventHandler::new({
                     let repo_ids = repo_ids.clone();

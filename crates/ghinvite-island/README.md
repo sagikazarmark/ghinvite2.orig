@@ -66,9 +66,9 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 
 ## Registry Input Integration
 
-The island enables dioform's `dioxus-field` feature and converts description to
-`dioxus_field::Binding<String>` and permission to
-`dioxus_field::Binding<Option<String>>`. Both adapters use the shared
+The island enables dioform's `dioxus-field` feature and converts description,
+max use, and expiration to `dioxus_field::Binding<String>` and permission to
+`dioxus_field::Binding<Option<String>>`. All adapters use the shared
 `commit_on_focus_exit` helper, created inside the one-time handlers hook.
 It delegates writes, including their origin, to the original binding. Its
 native-change commit callback is a no-op; blur calls `binding.commit()` followed
@@ -78,13 +78,39 @@ duplicate commit from native change before blur, and does not add per-keystroke
 validation. Dioform still owns revalidation and stale-error clearing after errors.
 
 `LinkFormHandlers::description` carries that binding to the original UI `Field`
-wrapper's `RegistryText` variant. `RegistryTextField` puts it in registry Field
+wrapper's `RegistryText` variant; `max_uses` and `expires_in_days` carry their
+raw-text bindings to `RegistryNumber`. `RegistryInputField` (renamed from
+`RegistryTextField`) handles both variants and puts the binding in registry Field
 context and applies `with_meta_values` for explicit ID, name, required state, and
 visible errors. Bound Input reads that binding directly, with no `value` override;
 only unbound SSR uses a memo for preserved values. Metadata drives error color
 and `aria-invalid`, including `"false"` when valid. FieldLabel and FieldError
 consume the same context; the polite error region stays mounted and is emptied
 on correction.
+
+Both numeric bindings still come from
+`ParsedTextBinding<CreateLinkForm, Option<u32>>`, created by `use_number_with`
+using the existing `parse_max_uses` / `parse_expires_in_days` custom parsers and
+`format_count`. The registry conversion exposes the parsed binding's raw text,
+not a separate numeric model. Repeated invalid edits remain visible even when
+the error message is unchanged. Parse errors are folded into `LinkFormErrors`
+before visible validator errors; the view passes those errors through props to
+`with_meta_values`, rather than using a separate registry error source.
+
+`RegistryNumber` forwards `type="number"`, `inputmode="numeric"`, and optional
+`min` / `max`; both new-link fields retain `min="1"` with no `max`. Blank still
+parses to `None` (unlimited max use or no expiration), and valid values remain
+`Option<u32>` in the domain model. The shared expiration validator still checks
+timestamp overflow using the supplied `now`, just as the server does. The
+focus-exit adapter does not change immediate parse errors or add per-keystroke
+validator runs.
+
+Unbound SSR preserves raw numeric text through the value memo; bound browser
+Inputs read the parsed binding directly, with no value override. Chromium can
+sanitize seeded `abc` to an empty number display, but the binding retains the
+invalid text and blocks progressive submission. Unchanged blur and unrelated
+edits do not repair it or convert it to `None`; an actual numeric-field edit is
+needed to correct or explicitly clear it.
 
 `LinkFormHandlers::permission` carries the adapted select binding to
 `PermissionSelect`, which supplies registry Field context and `with_meta_values`
@@ -93,7 +119,7 @@ native input, not native change. Its five options have explicit `form_value`
 strings `pull`, `triage`, `push`, `maintain`, and `admin`, so native POSTs never
 submit positional indices. No placeholder or empty option is rendered.
 
-Unlike description's direct bound display, permission uses a controlled,
+Unlike the Inputs' direct bound display, permission uses a controlled,
 prop-derived display memo in both SSR and the browser. Raw unsupported values
 such as `owner` or an empty string remain in dioform for validation while the
 control displays `pull`. Passing the raw invalid value to NativeSelect would
@@ -114,8 +140,9 @@ Stable IDs, native help styling, and explicit `aria-describedby` and
 `aria-errormessage` remain application-owned. Later sibling registration is too
 late for Input's or NativeSelect's first SSR attributes; native help does not
 register, and registry FieldDescription's forced `label` class is unsuitable for
-that help text. Other controls keep their existing native listeners. Registry
-source is unchanged and NativeSelect adds no new dependencies. Pins and
+that help text. Only the new-link numeric fields migrated; legacy native number
+controls elsewhere, textarea, and checkboxes retain their rendering and listeners.
+Registry source and installation are unchanged, with no new dependencies. Pins and
 replacement boundaries are in the
 [component documentation](../ghinvite-ui/src/components/README.md).
 
@@ -124,7 +151,7 @@ After rebuilding CSS and the island as described in the
 the repository root:
 
 ```bash
-npm test --prefix tests/browser -- --grep 'description validates on focus exit|permission'
+npm test --prefix tests/browser -- --grep 'description validates on focus exit|permission|numeric'
 ```
 
 ## Building
@@ -151,8 +178,9 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
-The NativeSelect migration measured approximately 337 KiB gzipped Wasm + JS,
-up from the 328 KiB description Field-context migration and 243 KiB pre-registry baseline, below the
+The numeric Input migration measured approximately 338 KiB gzipped Wasm + JS,
+compared with 337 KiB for NativeSelect, 328 KiB for the description Field-context
+migration, and the 243 KiB pre-registry baseline, below the
 600 KiB budget. Sizes vary with toolchain and source; the build script reports
 and enforces the current total.
 
@@ -196,6 +224,12 @@ for an empty raw value, or `--unvalidated` to omit initial errors and exercise
 unchanged focus-exit validation. These permission fixtures have a valid
 description and selected repository; the browser server exposes them at
 `/permission-invalid`, `/permission-empty`, and `/permission-unvalidated`.
+
+`--numeric-only-invalid` seeds raw `abc` with only the max-use error and summary;
+add `--expiration` to target expiration instead. The remaining fields are valid.
+The browser server exposes these fixtures at `/max_uses-invalid` and
+`/expires_in_days-invalid` to check sanitized-empty displays without losing the
+underlying parse blocker.
 
 The form posts to `/console/accounts/acme/links`, which a static server 404s;
 that is fine for checking mount, inline validation and blocked submits. **This

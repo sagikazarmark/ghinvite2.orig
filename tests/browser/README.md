@@ -3,8 +3,9 @@
 Playwright tests the registry integration through the production new invitation
 link page: `LinkCreateFormPage`, the application's `Field` wrapper with registry
 Field context, FieldLabel, Input, and FieldError for description; Field context,
-FieldLabel, NativeSelect, and FieldError for permission; and the real browser
-island. There is no substitute UI, mock island, or test-only CSS.
+FieldLabel, NativeSelect, and FieldError for permission; registry numeric Inputs
+and FieldErrors for max use and expiration; and the real browser island.
+There is no substitute UI, mock island, or test-only CSS.
 The local Node server requires no GitHub login, database, Worker, or Restate.
 
 ## Run
@@ -32,6 +33,8 @@ Run one project, repeat for flakes, or inspect a failure:
 
 ```bash
 npm test --prefix tests/browser -- --project=desktop-light
+npm test --prefix tests/browser -- --project=desktop-light --grep 'numeric max_uses' --workers=2
+npm test --prefix tests/browser -- --grep 'numeric' --workers=2
 npm test --prefix tests/browser -- --project=mobile-light --project=mobile-dark
 npm test --prefix tests/browser -- --repeat-each=3 --workers=2
 npm run test:headed --prefix tests/browser -- --project=mobile-dark
@@ -56,6 +59,10 @@ if accidentally deployed.
   permission-only failure with an empty raw value.
 - `/permission-unvalidated`: `--permission-only-invalid --unvalidated`, raw
   `owner` without initial errors, for unchanged focus-exit validation.
+- `/max_uses-invalid`: `--numeric-only-invalid`, raw `abc` with only a max-use
+  error and summary, a valid description, and repository 10 selected.
+- `/expires_in_days-invalid`: `--numeric-only-invalid --expiration`, the same
+  numeric-only failure for expiration instead of max use.
 - `/assets/*`: real JS/Wasm staged by `scripts/build-island.sh`, with Wasm MIME.
 - `/static/styles.css` and `/static/app.js`: production CSS and theme script.
 - `POST /console/accounts/acme/links`: JSON echo of ordered form entries,
@@ -73,8 +80,21 @@ read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
   during initial typing. Correct-invalid-correct transitions update metadata's
   error color and `aria-invalid` (`"false"` when valid), retain unique IDs and
   label targeting, and update explicit help/error associations.
-- Description and permission FieldErrors are always-mounted polite live-region
+- Description, permission, and numeric FieldErrors are always-mounted polite live-region
   `div`s with nested error `div`s. Correction empties them instead of removing them.
+- Numeric controls retain unique IDs/names, native help paragraphs, label click
+  targeting, minimum 1, and explicit ARIA associations in mounted and SSR-only
+  modes. Valid controls report `aria-invalid="false"` without error styling.
+- Repeated invalid raw edits (`0`, `00`, `000`) keep the same parse error and
+  retain their text through unrelated renders. Invalid-valid-empty-invalid-valid
+  transitions update metadata without replacing the error region.
+- Native-valid `4294967296`, `1e2`, and `1.0` are rejected by the numeric parsers
+  and block progressive POST. Expiration also rejects `4294967295`, which fits
+  `u32` but overflows chrono's timestamp range. Max use accepts that `u32` limit.
+- Corrected numeric values and explicitly cleared optional numbers submit
+  exactly once under their native names in mounted, no-JS, and blocked-bundle
+  modes. The POST echo asserts empty strings, not Rust `None`; server-side
+  optional-value semantics remain the responsibility of the Rust tests.
 - Permission renders exactly five options with explicit `form_value` strings:
   `pull`, `triage`, `push`, `maintain`, and `admin`. Each submits exactly once as
   `permission` in mounted, JavaScript-disabled, and bundle-blocked modes, never
@@ -113,6 +133,13 @@ Important boundaries:
   before `submit` fires. Tests assert native validity, not validation-popup text.
 - Chromium sanitizes `value="abc"` in a number input to empty. The all-errors
   fixture checks the preserved props and visible error, not impossible DOM text.
+  Numeric-only fixtures additionally prove that unchanged blur and correction of
+  other controls cannot silently repair the raw invalid model: native validity
+  passes but progressive POST stays blocked until the numeric control is edited.
+  To explicitly clear a sanitized-empty field, tests enter a number first, then
+  clear it; filling an already empty DOM input need not emit an input event.
+  Decimal rejection uses `1.0`, which satisfies native integer-step constraints,
+  rather than mistaking native rejection of a fraction for progressive validation.
   Unavailable repository IDs are not selectable controls. Unsupported permission
   remains raw in props/dioform, but a controlled memo displays `pull` in both SSR
   and the browser, unlike description's direct bound display. The old markup
