@@ -187,7 +187,21 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
     // Raw numeric text preserved (the parse error keeps it), values verbatim.
     assert!(island.contains("name=\"max_uses\" value=\"abc\""));
     assert!(island.contains("name=\"expires_in_days\" value=\"0\""));
-    assert!(island.contains("name=\"description\" value=\"   \""));
+    let description = island
+        .split("<input")
+        .find(|input| {
+            input
+                .split('>')
+                .next()
+                .unwrap()
+                .contains("id=\"description\"")
+        })
+        .unwrap()
+        .split('>')
+        .next()
+        .unwrap();
+    assert!(description.contains("name=\"description\""));
+    assert!(description.contains("value=\"   \""));
     assert!(island.contains("name=\"approval_required\" value=\"true\" checked"));
     assert!(island.contains(">Keep this note</textarea>"));
     // Tampered values never reach the markup.

@@ -18,6 +18,9 @@
 //! markup is byte-identical.
 
 use dioxus::prelude::*;
+use dioxus_field::Binding;
+
+use crate::components::input::{Input, InputColor};
 
 /// Which control a [`Field`] renders, together with the constraints that only
 /// make sense for that control. Attributes shared by every kind (`placeholder`,
@@ -26,6 +29,8 @@ use dioxus::prelude::*;
 pub enum FieldKind {
     /// Single-line `<input type="text">`.
     Text { maxlength: Option<u32> },
+    /// Native registry input; initially used only by link creation's description.
+    RegistryText { maxlength: Option<u32> },
     /// Multi-line `<textarea>`; the value is rendered as its text content.
     Textarea { rows: Option<u32> },
     /// `<input type="number" inputmode="numeric">`.
@@ -60,6 +65,8 @@ pub struct FieldProps {
     pub onchange: Option<EventHandler<FormEvent>>,
     /// Fired when focus leaves the control (island only; ignored by SSR).
     pub onblur: Option<EventHandler<FocusEvent>>,
+    /// Registry control binding. The server supplies only the preserved value.
+    pub binding: Option<Binding<String>>,
 }
 
 /// The three listeners a reactive caller may attach to one control, bundled
@@ -103,6 +110,13 @@ pub fn Field(props: FieldProps) -> Element {
     let listeners = listeners(props.oninput, props.onchange, props.onblur);
 
     let control = match &props.kind {
+        FieldKind::RegistryText { maxlength } => rsx! {
+            RegistryTextInput {
+                field: props.clone(),
+                maxlength: *maxlength,
+                described_by,
+            }
+        },
         FieldKind::Textarea { rows } => {
             let class = if has_error {
                 "textarea textarea-bordered textarea-error w-full"
@@ -159,6 +173,33 @@ pub fn Field(props: FieldProps) -> Element {
             {control}
             {help_text(&help_id, props.help.as_deref())}
             {error_text(&error_id, props.error.as_deref())}
+        }
+    }
+}
+
+/// Keep registry hooks in their own scope, separate from the native controls.
+#[component]
+fn RegistryTextInput(
+    field: FieldProps,
+    maxlength: Option<u32>,
+    described_by: Option<String>,
+) -> Element {
+    let props = field;
+    let value = use_memo(use_reactive(&props.value, |value| value));
+    rsx! {
+        Input {
+            binding: props.binding,
+            value: Some(value.into()),
+            color: if props.error.is_some() { InputColor::Error } else { InputColor::Default },
+            id: props.id,
+            name: props.name,
+            r#type: "text",
+            class: "input-bordered w-full",
+            required: props.required,
+            maxlength: maxlength.map(|limit| limit.to_string()),
+            placeholder: props.placeholder,
+            aria_invalid: if props.error.is_some() { "true" },
+            aria_describedby: described_by,
         }
     }
 }

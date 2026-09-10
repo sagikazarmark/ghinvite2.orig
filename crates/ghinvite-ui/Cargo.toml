@@ -21,6 +21,8 @@ chrono.workspace = true
 dioform-core.workspace = true
 dioform-derive.workspace = true
 dioxus.workspace = true
+dioxus-field = { version = "0.7.0", default-features = false }
+dioxus-primitives = { git = "https://github.com/DioxusLabs/components", rev = "bf007c15d0cf4d04d3181cc46cf12325aa773955", version = "0.0.1", default-features = false, features = ["router"] }
 ghinvite-core.workspace = true
 serde.workspace = true
 # Serialises the island props blob (`link_form::LinkFormIslandProps`).

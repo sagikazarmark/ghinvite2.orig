@@ -91,6 +91,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn installed_registry_components_preserve_ssr_attributes() {
+        let html = crate::testing::render(|| {
+            let value = use_signal(|| "server value".to_string());
+            rsx! {
+                button::Button {
+                    color: button::ButtonColor::Primary,
+                    r#type: "submit",
+                    name: "action",
+                    value: "save",
+                    class: "custom-button",
+                    "Save"
+                }
+                alert::Alert {
+                    color: alert::AlertColor::Error,
+                    role: "alert",
+                    "Failure"
+                }
+                input::Input {
+                    value: Some(value.into()),
+                    id: "registry-input",
+                    name: "title",
+                    r#type: "text",
+                    required: true,
+                    readonly: true,
+                    aria_describedby: "title-help",
+                    class: "custom-input",
+                    "data-probe": "registry",
+                }
+            }
+        });
+
+        for expected in [
+            "btn-primary",
+            "custom-button",
+            "type=\"submit\"",
+            "name=\"action\"",
+            "value=\"save\"",
+            "alert-error",
+            "role=\"alert\"",
+            "value=\"server value\"",
+            "id=\"registry-input\"",
+            "name=\"title\"",
+            "type=\"text\"",
+            "required",
+            "readonly",
+            "aria-describedby=\"title-help\"",
+            "custom-input",
+            "data-probe=\"registry\"",
+        ] {
+            assert!(html.contains(expected), "missing {expected}: {html}");
+        }
+        assert_eq!(html.matches("id=\"registry-input\"").count(), 1);
+    }
+
+    #[test]
     fn nav_renders_single_theme_toggle_and_signed_in_controls() {
         let html = crate::testing::render(|| {
             rsx! { Nav { signed_in_login: Some("admin".to_string()) } }
@@ -131,3 +186,7 @@ mod tests {
         assert!(!html.contains("—"));
     }
 }
+pub mod alert;
+pub mod button;
+pub mod field;
+pub mod input;

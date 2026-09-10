@@ -105,11 +105,22 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
                 // already cancelled the event and made the errors visible.
                 let _ = submit.on_submit(event);
             })),
-            description: ControlHandlers {
-                oninput: Some(EventHandler::new(description.oninput())),
-                onchange: None,
-                onblur: Some(EventHandler::new(description.onblur())),
-            },
+            description: Some({
+                let binding: dioxus_field::Binding<String> = description.into();
+                let writer = binding.clone();
+                // Preserve the form's commit-on-blur policy, including an
+                // unchanged empty field. Ignore native change to avoid a
+                // second commit immediately before focus exit.
+                dioxus_field::Binding::new(
+                    binding.read,
+                    Callback::new(move |(value, origin)| writer.write(value, origin)),
+                    Callback::new(|()| {}),
+                )
+                .with_focus_exit(Callback::new(move |()| {
+                    binding.commit();
+                    binding.focus_exit();
+                }))
+            }),
             internal_note: ControlHandlers {
                 oninput: Some(EventHandler::new(internal_note.oninput())),
                 onchange: None,

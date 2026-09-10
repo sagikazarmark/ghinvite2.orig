@@ -1,0 +1,102 @@
+# Browser Regression Tests
+
+Playwright tests the registry pilot through the production new invitation link
+page: `LinkCreateFormPage`, the original `Field` wrapper, and the real browser
+island. There is no hand-written substitute UI, mock island, or test-only CSS.
+The local Node server requires no GitHub login, database, Worker, or Restate.
+
+## Run
+
+Requirements: Node.js 20+, the repo's Rust toolchain with the
+`wasm32-unknown-unknown` target, and Dioxus CLI **0.7.9** (`dx` on `PATH`).
+From the repository root:
+
+```bash
+npm ci --prefix crates/ghinvite-web
+npm run build:css --prefix crates/ghinvite-web
+scripts/build-island.sh
+npm ci --prefix tests/browser
+npm exec --prefix tests/browser -- playwright install --with-deps chromium
+npm test --prefix tests/browser
+```
+
+Rebuild CSS and the island after changing production components. The test server
+re-runs `cargo run -p ghinvite-island --example ssr_fixture` at startup, so SSR is
+always current. Missing CSS/bundle files or a changed CSP constant format fail
+startup rather than silently using fallback assets. Build the island on its own
+with `-p`, not a workspace-wide wasm build (ADR 0001).
+
+Run one project, repeat for flakes, or inspect a failure:
+
+```bash
+npm test --prefix tests/browser -- --project=desktop-light
+npm test --prefix tests/browser -- --project=mobile-light --project=mobile-dark
+npm test --prefix tests/browser -- --repeat-each=3 --workers=2
+npm run test:headed --prefix tests/browser -- --project=mobile-dark
+npm exec --prefix tests/browser -- playwright show-report tests/browser/playwright-report
+```
+
+Playwright owns `127.0.0.1:4173`, never reuses an existing server, and shuts it
+down afterward. For manual inspection, `npm run serve --prefix tests/browser`
+starts the same server. Generated reports, screenshots, and traces are ignored.
+No fixture HTML is written to `dist/public`, where it could shadow real routes
+if accidentally deployed.
+
+## Fixture Contract
+
+- `/`: fresh form with three real repository choices.
+- `/failed`: existing `--with-errors` fixture, with every validation error.
+- `/preserved`: `--preserved-values`, rejected description with otherwise valid
+  values, checked approval, and multiple selected repositories.
+- `/assets/*`: real JS/Wasm staged by `scripts/build-island.sh`, with Wasm MIME.
+- `/static/styles.css` and `/static/app.js`: production CSS and theme script.
+- `POST /console/accounts/acme/links`: JSON echo of ordered form entries,
+  preserving duplicate keys. It deliberately does not implement validation or
+  create links. Server validation remains covered by Rust route tests.
+
+HTML is the fixture's unmodified production renderer output. The HTTP CSP is
+read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
+`bypassCSP` option is used.
+
+## Coverage
+
+- Successful Wasm mount with one form, no runtime/CSP errors, and real assets.
+- Native `required` and `min` constraints block invalid submissions.
+- Whitespace description and missing repository scope pass native constraints
+  but are blocked by dioform; correcting them allows a document-navigation POST,
+  not fetch/XHR. Tests never bypass constraints with `form.submit()`.
+- Failed values, summary, inline errors, and `aria-describedby`/`aria-invalid`
+  survive mounting. Valid controls are not reset while correcting a failed one.
+- JavaScript-disabled and bundle-blocked forms remain usable and submit natively.
+- Label clicks, keyboard Space, repeated repository keys, checked approval and
+  unchecked omission, and empty optional numbers keep native behavior.
+- Desktop (1440 x 1000) and mobile Chromium (390 x 844), light and dark:
+  responsive navigation, horizontal overflow, reachable/named controls, keyboard
+  focus order, and targeted axe label/button/ARIA rules.
+
+Important boundaries:
+
+- Native constraint failures need not show dioform errors: the browser can stop
+  before `submit` fires. Tests assert native validity, not validation-popup text.
+- Chromium sanitizes `value="abc"` in a number input to empty. The all-errors
+  fixture checks the preserved props and visible error, not impossible DOM text.
+  Unsupported permission and unavailable repository IDs likewise are not valid
+  selectable controls.
+- The app reads `ghinvite-theme` from local storage, rather than the OS color
+  scheme. Tests set that preference before loading production `app.js`. With JS
+  disabled the production SSR theme stays light, even in a dark-named project.
+- Mobile projects enable Chromium's `isMobile` and `hasTouch` with a 390 x 844
+  phone viewport, not just a resized desktop window. Production `ConsoleLayout`
+  emits `width=device-width, initial-scale=1`; the fixture does not inject it.
+  The responsive test catches a missing viewport meta through navigation and
+  control geometry. No claim of physical-device or iOS/WebKit coverage is made.
+- Accessibility checks cover the pilot's names, error wiring, and valid ARIA,
+  not a full WCAG/contrast audit. Layout uses geometric assertions rather than
+  platform-dependent pixel snapshots. Failure screenshots/traces support review.
+
+## CI
+
+The existing **Island bundle** job builds the real island once, builds production
+CSS, installs the lockfile-pinned Playwright/Chromium version, and runs all four
+projects. It uploads HTML reports, screenshots, and traces on failure. Two workers
+and one CI retry limit resource contention while retaining failure diagnostics.

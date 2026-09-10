@@ -17,6 +17,8 @@
 //! `script-src 'self'` Content-Security-Policy; if the module is missing (no
 //! bundle built), the browser 404s it and the plain form keeps working.
 
+use crate::components::alert::{Alert, AlertColor};
+use crate::components::button::{Button, ButtonColor};
 use crate::field::{
     ControlHandlers, Field, FieldKind, described_by, error_text, help_text, listeners,
 };
@@ -114,7 +116,7 @@ pub struct LinkFormHandlers {
     /// Fired when the form is submitted; the island's progressive submit
     /// preflight, which cancels the native POST only on a known blocker.
     pub onsubmit: Option<EventHandler<FormEvent>>,
-    pub description: ControlHandlers,
+    pub description: Option<dioxus_field::Binding<String>>,
     pub internal_note: ControlHandlers,
     pub permission: ControlHandlers,
     pub approval_required: ControlHandlers,
@@ -162,7 +164,7 @@ pub fn LinkCreateForm(
                 rsx! {}
             } else {
                 rsx! {
-                    div { id: "link-form-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
+                    Alert { id: "link-form-errors", color: AlertColor::Error, class: "items-start", role: "alert", aria_live: "polite",
                         div {
                             h2 { class: "font-semibold", dangerous_inner_html: "We couldn't create this invitation link" }
                             ul { class: "mt-1 list-disc space-y-1 pl-5 text-sm",
@@ -182,15 +184,13 @@ pub fn LinkCreateForm(
                         id: "description",
                         name: fields.description().field_name().to_string(),
                         label: "Description",
-                        kind: FieldKind::Text { maxlength: Some(120) },
+                        kind: FieldKind::RegistryText { maxlength: Some(120) },
                         value: form.description.clone(),
                         required: true,
                         placeholder: "AI coding workshop",
                         help: "Visible only to admins. Use a short purpose or audience for this invitation link.",
                         error: form.errors.description.clone(),
-                        oninput: handlers.description.oninput,
-                        onchange: handlers.description.onchange,
-                        onblur: handlers.description.onblur,
+                        binding: handlers.description,
                     }
                     Field {
                         id: "internal_note",
@@ -233,7 +233,7 @@ pub fn LinkCreateForm(
                         p { class: "mt-1 text-sm text-base-content/65", "Set approval, usage, and expiration guardrails." }
                     }
                     div { class: "form-control",
-                        label { class: "label cursor-pointer justify-start gap-3",
+                        label { class: "label cursor-pointer justify-start gap-3 whitespace-normal",
                             input { r#type: "checkbox", name: fields.approval_required().field_name().to_string(), value: "true", checked: form.approval_required, class: "checkbox", ..approval_listeners }
                             span { class: "label-text", "Require account admin approval before GitHub invitations are sent" }
                         }
@@ -282,7 +282,7 @@ pub fn LinkCreateForm(
                 }
             }
             div { class: "flex justify-end",
-                button { r#type: "submit", class: "btn btn-primary", "Create invitation link" }
+                Button { r#type: "submit", color: ButtonColor::Primary, "Create invitation link" }
             }
         }
     }
@@ -744,6 +744,32 @@ mod tests {
         &page[start..end]
     }
 
+    fn assert_create_submit_button(html: &str) {
+        let form = form_markup(html);
+        let button = form
+            .split("<button ")
+            .skip(1)
+            .find(|button| {
+                button.split_once('>').is_some_and(|(_, content)| {
+                    content.starts_with("Create invitation link</button>")
+                })
+            })
+            .expect("create form renders its labelled submit button");
+        let attributes = button.split_once('>').unwrap().0;
+        assert!(attributes.contains("type=\"submit\""));
+        let classes = attributes
+            .split_once("class=\"")
+            .expect("submit button has classes")
+            .1
+            .split('"')
+            .next()
+            .unwrap()
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(classes, ["btn", "btn-primary"]);
+        assert!(!attributes.contains("disabled"));
+    }
+
     // --- island mount points ------------------------------------------------
 
     const APP_SCRIPT: &str = "<script src=\"/static/app.js\"></script>";
@@ -942,6 +968,7 @@ mod tests {
                 }
             });
             let wired = crate::testing::render(move || {
+                let description = use_signal(|| form.description.clone());
                 let control = || ControlHandlers {
                     oninput: Some(EventHandler::new(|_event: FormEvent| {})),
                     onchange: Some(EventHandler::new(|_event: FormEvent| {})),
@@ -949,7 +976,7 @@ mod tests {
                 };
                 let handlers = LinkFormHandlers {
                     onsubmit: Some(EventHandler::new(|_event: FormEvent| {})),
-                    description: control(),
+                    description: Some(description.into()),
                     internal_note: control(),
                     permission: control(),
                     approval_required: control(),
@@ -1308,10 +1335,10 @@ mod tests {
         assert_eq!(html.matches("input-error").count(), 2);
         assert!(html.contains("name=\"max_uses\" value=\"abc\""));
         assert!(html.contains("name=\"expires_in_days\" value=\"0\""));
-        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(html.contains("value=\"AI coding workshop\""));
         assert!(!html.contains("description-error"));
         assert!(html.contains("value=\"10\" checked"));
-        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert_create_submit_button(&html);
         assert!(!html.contains("disabled"));
     }
 
@@ -1373,7 +1400,7 @@ mod tests {
         assert!(!form_markup(&html).contains("owner"));
         assert_eq!(html.matches("<option").count(), 5);
         assert!(!html.contains("\" selected"));
-        assert!(html.contains("name=\"description\" value=\"AI coding workshop\""));
+        assert!(html.contains("value=\"AI coding workshop\""));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
         assert!(html.contains("name=\"max_uses\" value=\"7\""));
         assert!(html.contains("name=\"expires_in_days\" value=\"45\""));
@@ -1383,7 +1410,7 @@ mod tests {
         assert!(!html.contains("description-error"));
         assert!(!html.contains("repo_ids-error"));
         assert!(!html.contains("input-error"));
-        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert_create_submit_button(&html);
         assert!(!html.contains("disabled"));
     }
 
@@ -1511,7 +1538,7 @@ mod tests {
         assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
         assert!(!html.contains("description-error"));
         assert!(!html.contains("input-error"));
-        assert!(html.contains("<button type=\"submit\" class=\"btn btn-primary\">"));
+        assert_create_submit_button(&html);
         assert!(!html.contains("disabled"));
     }
 

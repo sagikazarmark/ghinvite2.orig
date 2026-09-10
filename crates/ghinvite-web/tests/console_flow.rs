@@ -1808,6 +1808,18 @@ fn assert_expires_days_from(
     );
 }
 
+fn assert_preserved_description_input(html: &str) {
+    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
+    let mut inputs = form
+        .split("<input ")
+        .skip(1)
+        .map(|input| input.split_once('>').unwrap().0)
+        .filter(|input| input.contains("name=\"description\""));
+    let input = inputs.next().expect("form renders the description input");
+    assert!(inputs.next().is_none(), "description input is unique");
+    assert!(input.contains("value=\"AI coding workshop\""));
+}
+
 #[tokio::test]
 async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors() {
     let mut expectations = oauth_expectations();
@@ -1843,7 +1855,7 @@ async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors(
     assert!(text.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
     assert_eq!(text.matches("aria-invalid=\"true\"").count(), 2);
     assert!(!text.contains("description-error"));
-    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert_preserved_description_input(&text);
     assert!(text.contains("name=\"max_uses\" value=\"abc\""));
     assert!(text.contains("name=\"expires_in_days\" value=\"0\""));
     assert!(text.contains("value=\"push\" selected"));
@@ -1974,7 +1986,7 @@ async fn create_link_without_repositories_rerenders_form_with_repository_scope_e
     assert!(!text.contains("description-error"));
     assert!(!text.contains("Bad Request"));
     assert!(!text.contains("select at least one repository"));
-    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert_preserved_description_input(&text);
     assert!(text.contains("value=\"push\" selected"));
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
     assert!(text.contains("name=\"max_uses\" value=\"7\""));
@@ -2067,7 +2079,7 @@ async fn create_link_missing_permission_key_rerenders_form_with_permission_error
     assert!(text.contains(PERMISSION_UNSUPPORTED));
     assert!(text.contains("id=\"permission-error\""));
     assert!(!text.contains("Bad Request"));
-    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert_preserved_description_input(&text);
     assert!(text.contains("value=\"10\" checked"));
 }
 
@@ -2101,7 +2113,7 @@ async fn create_link_tampered_permission_rerenders_form_with_permission_error() 
     assert!(!form_markup.contains("owner"));
     assert_eq!(text.matches("<option").count(), 5);
     // Every other submitted value and selection survives the re-render.
-    assert!(text.contains("name=\"description\" value=\"AI coding workshop\""));
+    assert_preserved_description_input(&text);
     assert!(text.contains("name=\"approval_required\" value=\"true\" checked"));
     assert!(text.contains("name=\"max_uses\" value=\"7\""));
     assert!(text.contains("name=\"expires_in_days\" value=\"45\""));

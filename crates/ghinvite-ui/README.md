@@ -3,13 +3,14 @@
 Dioxus view components for ghinvite: the three layouts (Home / Console /
 Invitation), every page, the `Field` form primitive (`field`), the `Flash`
 message type the layouts render, and the shared form model for the new
-invitation link form (`link_form`). Props in, markup out; no hooks, no I/O.
+invitation link form (`link_form`). Views consume props without I/O; the registry
+Input adapter uses a memo to keep its controlled value synchronized with props.
 
 This crate exists so the views can be built for the browser
 ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). It depends
-on `dioxus`, `dioform-core` + `dioform-derive`, `ghinvite-core`, `chrono`,
-`serde` and `serde_json` only — never on `ghinvite-web`, `ghinvite-github`, or
-either storage crate, all of which treat `cfg(target_arch = "wasm32")` as
+on `dioxus`, `dioxus-field`, `dioxus-primitives`, `dioform-core` + `dioform-derive`,
+`ghinvite-core`, `chrono`, `serde` and `serde_json`, never on `ghinvite-web`,
+`ghinvite-github`, or either storage crate, all of which treat `cfg(target_arch = "wasm32")` as
 "Cloudflare Workers". Data that originates on the server (a GitHub payload, a
 session) crosses into the views as plain props, e.g. `link_form::RepositoryChoice`
 rather than the GitHub client's `GhRepo`.
@@ -49,18 +50,26 @@ markup from the same inputs:
 - `LinkCreateForm { action, form: LinkFormValues, repos, handlers }` — just
   the `<form>`: summary alert, four sections, submit button. `handlers` is an
   optional `links::LinkFormHandlers` (the form's `onsubmit`, a
-  `field::ControlHandlers { oninput, onchange, onblur }` per control, and
-  `RepositoryScopeHandlers` for the checkbox group); the server passes none.
-- `field::Field` — text / textarea / number controls.
+  `dioxus_field::Binding<String>` for description,
+  `field::ControlHandlers { oninput, onchange, onblur }` for native controls, and
+  `RepositoryScopeHandlers` for the checkbox group); the server uses the default.
+- `field::Field` - text / textarea / number controls; `RegistryText` uses the
+  registry Input while preserving the application's label/help/error wrapper.
 - `links::PermissionSelect { id, name, value, help, error, onchange, onblur }`
   — the permission-level `<select>` (`PERMISSION_LEVELS`).
 - `links::RepositoryScopeGroup { name, repos, selected, help, error, onchange, onblur }`
   — the repository checkbox group; `onchange` receives `(repo_id, checked)`.
 
-Every handler is an `Option<EventHandler<…>>` for the island; server-side
-rendering emits no listener attributes, so with or without them the SSR
+The server supplies preserved values without browser bindings or listeners.
+Server-side rendering emits no listener attributes, so wired and unwired
 markup is byte-identical (tested for each component and for the whole
 `LinkCreateForm`).
+
+The production registry pilot is limited to the summary Alert, submit Button,
+and description Input. Registry Field parts are transitive source only; native
+checkboxes, textarea, select, and numbers are unchanged. See
+[component provenance and update instructions](src/components/README.md) and the
+[island binding adapter](../ghinvite-island/README.md#registry-input-integration).
 
 The page emits the island's mount points after the page header:
 
@@ -96,6 +105,10 @@ cargo test -p ghinvite-ui                                    # rendered-markup t
 cargo check -p ghinvite-ui --target wasm32-unknown-unknown   # browser build
 ```
 
+The [browser regression suite](../../tests/browser/README.md) exercises the real
+page and island under the production CSP, including native POST fallback,
+validation timing, error associations, and desktop/mobile light/dark layouts.
+
 Always `-p`, never `cargo build --workspace --target wasm32-unknown-unknown`:
 feature unification would drag Worker-only dependencies into the browser
 build and vice versa.
@@ -107,3 +120,7 @@ by Tailwind, which finds this crate through the `@source "../../ghinvite-ui/src"
 directive in `crates/ghinvite-web/assets/styles.css`. After adding or changing
 classes, run `npm run build:css` in `crates/ghinvite-web` and commit the result
 (see that crate's README).
+
+`ConsoleLayout` supplies the mobile viewport meta tag. The approval checkbox's
+label uses `whitespace-normal` so its text wraps at phone widths; retain both
+when changing the form layout.

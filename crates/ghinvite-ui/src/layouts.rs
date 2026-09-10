@@ -74,6 +74,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
     rsx! {
         head {
             title { "{props.title}" }
+            meta { name: "viewport", content: "width=device-width, initial-scale=1" }
             link { rel: "stylesheet", href: "/static/styles.css" }
             AppScript {}
         }
@@ -204,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn console_layout_loads_app_script_from_head() {
+    fn console_layout_loads_app_script_and_mobile_viewport_from_head() {
         let html = crate::testing::render(|| {
             rsx! {
                 ConsoleLayout {
@@ -219,6 +220,13 @@ mod tests {
         });
 
         assert_head_loads_app_script_only(&html);
+        let head = html.split_once("</head>").unwrap().0;
+        assert_eq!(html.matches("name=\"viewport\"").count(), 1);
+        assert!(
+            head.contains(
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\""
+            )
+        );
     }
 
     #[test]

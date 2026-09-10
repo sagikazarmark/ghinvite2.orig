@@ -64,6 +64,31 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    line added on the first attach; form-level messages appended), so the
    first frame matches the server's HTML exactly.
 
+## Registry Input Integration
+
+The island enables dioform's `dioxus-field` feature and converts the description
+binding to `dioxus_field::Binding<String>`. The adapter delegates writes, including
+their origin, to the original binding. Its native-change commit callback is a
+no-op; focus exit calls `binding.commit()` followed by `binding.focus_exit()`.
+This preserves validation when leaving even an unchanged empty field, avoids a
+duplicate commit from native change before blur, and does not add per-keystroke
+validation. Dioform still owns revalidation and stale-error clearing after errors.
+
+`LinkFormHandlers::description` carries that binding to the original UI `Field`
+wrapper's `RegistryText` variant. Its isolated component derives a controlled
+value memo from props; application labels, IDs, help/error markup, and ARIA remain
+authoritative. Other controls keep their existing native listeners. Registry source
+pins and replacement boundaries are in the
+[component documentation](../ghinvite-ui/src/components/README.md).
+
+After rebuilding CSS and the island as described in the
+[browser setup](../../tests/browser/README.md), run the timing regression from
+the repository root:
+
+```bash
+npm test --prefix tests/browser -- --grep 'description validates on focus exit'
+```
+
 ## Building
 
 Always with `-p`, never `--workspace --target wasm32-unknown-unknown`: in the
@@ -88,6 +113,10 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
+The registry pilot measured approximately 317 KiB gzipped Wasm + JS against a
+243 KiB baseline, below the 600 KiB budget. Sizes vary with toolchain and source;
+the build script reports and enforces the current total.
+
 `[profile.island]` in the root `Cargo.toml` (inherits `release`; `opt-level =
 "z"`, `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`) exists for this
 bundle alone, so the Workers build (`worker-build --release`) keeps cargo's
@@ -100,6 +129,11 @@ Native dependencies stay clean: `dioxus/web` is a `[target.'cfg(target_arch
 dioxus-web` on the host prints nothing.
 
 ## Smoke-testing locally
+
+For repeatable browser regressions without the full stack, see
+[`tests/browser`](../../tests/browser/README.md). Its Playwright suite serves the
+real SSR fixture, built CSS and island assets under the production CSP, with a
+native POST echo endpoint; CI runs desktop/mobile-layout and light/dark projects.
 
 Run the native web server from the repo root after `scripts/build-island.sh`;
 it serves `dist/public/assets` under `/assets/*` (override with

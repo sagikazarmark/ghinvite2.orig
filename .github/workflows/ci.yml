@@ -68,12 +68,38 @@ jobs:
       # seconds. Pinned to the version the bundle was verified with.
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall -y dioxus-cli@0.7.9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            crates/ghinvite-web/package-lock.json
+            tests/browser/package-lock.json
       # dx bundle → dist/public (hashed js/wasm, stable loader, _headers);
       # fails if the gzipped bundle exceeds the 600 KB budget.
       - run: scripts/build-island.sh
       # Markup parity: the island's first frame must equal the server's HTML.
       - run: cargo test -p ghinvite-island
       - run: cargo clippy -p ghinvite-island --target wasm32-unknown-unknown -- -D warnings
+      - name: Build production CSS
+        working-directory: crates/ghinvite-web
+        run: npm ci && npm run build:css
+      - name: Install browser tests
+        working-directory: tests/browser
+        run: npm ci && npx playwright install --with-deps chromium
+      - name: Browser regressions
+        working-directory: tests/browser
+        run: npm test
+      - name: Browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: |
+            tests/browser/playwright-report
+            tests/browser/test-results
+          retention-days: 7
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: island-bundle
