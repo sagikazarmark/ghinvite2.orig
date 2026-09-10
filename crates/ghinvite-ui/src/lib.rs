@@ -21,6 +21,7 @@ pub mod home;
 pub mod invitation;
 pub mod layouts;
 pub mod link_form;
+pub mod link_list;
 pub mod links;
 pub mod not_found;
 pub mod requests;

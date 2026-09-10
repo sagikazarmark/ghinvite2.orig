@@ -540,6 +540,267 @@ async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
 }
 
 #[tokio::test]
+async fn links_collection_renders_account_scoped_rows_and_native_controls() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let mut link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    link.id = ghinvite_core::InvitationLinkId::new();
+    link.slug = ghinvite_core::Slug::from_string("foreigncode00001".into()).unwrap();
+    link.account_id = 9002;
+    link.installation_id = 78;
+    link.description = "Other account secret".into();
+    storage.insert_invitation_link(&link).await.unwrap();
+
+    let (status, html) = get_links(&app, &cookie, "?account_id=9002&login=other").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Workshop 001</a>"));
+    assert!(!html.contains("Other account secret"));
+    assert!(html.contains("<form method=\"get\" action=\"/console/accounts/acme/links\""));
+    assert!(html.contains("name=\"page\" value=\"1\""));
+    for column in ["Description", "Status", "Uses", "Expiration", "Created"] {
+        assert!(html.contains(&format!("<th scope=\"col\">{column}</th>")));
+    }
+    assert!(html.contains("0 / unlimited"));
+    assert!(html.contains("No expiration"));
+    assert!(html.contains("href=\"/console/accounts/acme/links/new\""));
+}
+
+#[tokio::test]
+async fn links_collection_preserves_auth_and_concealment() {
+    let app = build_test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme/links?filter=all&page=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        "/login?return_to=%2Fconsole%2Faccounts%2Facme%2Flinks%3Ffilter%3Dall%26page%3D2"
+    );
+
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "member").await;
+    storage.insert_invitation_link(&list_link(1)).await.unwrap();
+    let (status, html) = get_links(&app, &cookie, "?filter=all&account_id=9001").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(html.contains("Page not found"));
+    assert!(!html.contains("Workshop 001"));
+    assert!(!html.contains("console-frame"));
+}
+
+#[tokio::test]
+async fn links_collection_url_state_filters_sorts_then_paginates() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    for n in 1..=60 {
+        let mut link = list_link(n);
+        if n % 2 == 0 {
+            link.revoked_at = Some(Utc::now());
+        }
+        storage.insert_invitation_link(&link).await.unwrap();
+    }
+    let (status, first) = get_links(&app, &cookie, "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("Invitation code:").count(), 25);
+    assert!(first.find("Workshop 059</a>").unwrap() < first.find("Workshop 011</a>").unwrap());
+    assert!(!first.contains("Workshop 060</a>"));
+    assert!(!first.contains(">Previous</a>"));
+    assert!(first.contains("filter=active&#38;sort=created&#38;direction=desc&#38;page=2"));
+
+    let query = "?filter=inactive&sort=description&direction=asc&page=2";
+    let (status, second) = get_links(&app, &cookie, query).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second.matches("Invitation code:").count(), 5);
+    assert!(second.find("Workshop 052</a>").unwrap() < second.find("Workshop 060</a>").unwrap());
+    assert!(second.contains("Page 2 of 2"));
+    assert!(second.contains("filter=inactive&#38;sort=description&#38;direction=asc&#38;page=1"));
+    assert!(!second.contains(">Next</a>"));
+    assert!(second.contains("name=\"page\" value=\"1\""));
+    assert_eq!(
+        get_links(&app, &cookie, query).await.1,
+        second,
+        "refresh restores the selected page"
+    );
+    assert_eq!(
+        get_links(&app, &cookie, "").await.1,
+        first,
+        "Back restores the previous URL"
+    );
+
+    let (_, last) = get_links(
+        &app,
+        &cookie,
+        "?filter=inactive&sort=description&direction=asc&page=999999999999999999999999999",
+    )
+    .await;
+    assert_eq!(last, second);
+    for query in [
+        "?filter=wrong&sort=wrong&direction=wrong&page=-1",
+        "?page=0",
+        "?page=abc",
+        "?filter=%FF&page=%00",
+    ] {
+        assert_eq!(get_links(&app, &cookie, query).await.1, first, "{query}");
+    }
+    // Duplicate recognized keys consistently use the last value.
+    assert_eq!(
+        get_links(&app, &cookie, "?filter=all&filter=active")
+            .await
+            .1,
+        first
+    );
+}
+
+#[tokio::test]
+async fn links_collection_distinguishes_empty_account_from_empty_filter() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let (status, empty) = get_links(&app, &cookie, "?page=5").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(empty.contains("No invitation links yet"));
+    assert!(!empty.contains("No invitation links match"));
+    assert!(!empty.contains(">Previous</a>"));
+
+    let mut link = list_link(1);
+    link.revoked_at = Some(Utc::now());
+    storage.insert_invitation_link(&link).await.unwrap();
+    let (_, filtered) = get_links(&app, &cookie, "").await;
+    assert!(filtered.contains("No invitation links match this filter"));
+    assert!(!filtered.contains("No invitation links yet"));
+    assert!(filtered.contains("filter=all&#38;sort=created&#38;direction=desc&#38;page=1"));
+    assert!(filtered.contains("href=\"/console/accounts/acme/links/new\""));
+}
+
+#[tokio::test]
+async fn links_collection_load_failure_is_not_an_empty_account() {
+    let path = std::env::temp_dir().join(format!(
+        "ghinvite-links-{}.sqlite",
+        ghinvite_core::InvitationLinkId::new()
+    ));
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    // Break only the collection read, leaving account authorization available.
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query("DROP TABLE invitation_link_repos")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, html) =
+        get_links(&app, &cookie, "?filter=all&sort=uses&direction=asc&page=2").await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(html.contains("Invitation links could not be loaded"));
+    assert!(html.contains("Try again"));
+    assert!(html.contains("filter=all&#38;sort=uses&#38;direction=asc&#38;page=2"));
+    assert!(!html.contains("No invitation links yet"));
+    assert!(!html.contains("No invitation links match"));
+    pool.close().await;
+    drop(app);
+    drop(storage);
+    std::fs::remove_file(path).unwrap();
+}
+
+fn list_link(n: u32) -> ghinvite_core::InvitationLink {
+    ghinvite_core::InvitationLink {
+        id: ghinvite_core::InvitationLinkId::new(),
+        slug: ghinvite_core::Slug::from_string(format!("code{n:012}")).unwrap(),
+        installation_id: 77,
+        account_id: 9001,
+        created_by: 42,
+        created_at: "2026-01-01T00:00:00Z".parse::<DateTime<Utc>>().unwrap()
+            + Duration::seconds(n.into()),
+        expires_at: None,
+        max_uses: None,
+        uses_count: 0,
+        permission: ghinvite_core::Permission::Pull,
+        approval_required: false,
+        description: format!("Workshop {n:03}"),
+        internal_note: None,
+        revoked_at: None,
+        revoked_by: None,
+        repos: vec![],
+    }
+}
+
+async fn links_app(
+    storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
+    role: &str,
+) -> (axum::Router, String) {
+    for (installation_id, account_id, login) in [(77, 9001, "acme"), (78, 9002, "other")] {
+        storage
+            .insert_installation(&Account {
+                installation_id,
+                account_id,
+                account_login: login.into(),
+                account_type: AccountType::Organization,
+                installed_at: Utc::now(),
+                uninstalled_at: None,
+                selected_repos: SelectedRepos::All,
+            })
+            .await
+            .unwrap();
+    }
+    let mut expectations = oauth_sign_in_expectations();
+    expectations.push(Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user/memberships/orgs/acme",
+        serde_json::json!({"role": role, "state": "active"}),
+    ));
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(expectations)),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev(),
+    );
+    sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
+}
+
+async fn get_links(app: &axum::Router, cookie: &str, query: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/console/accounts/acme/links{query}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+#[tokio::test]
 async fn console_index_unauthenticated_redirects_to_login() {
     let app = build_test_app().await;
     let resp = app

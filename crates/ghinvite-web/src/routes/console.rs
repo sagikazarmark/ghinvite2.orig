@@ -29,7 +29,7 @@ pub fn router() -> Router<AppState> {
         .route("/console/accounts/{login}/links/new", get(new_link_form))
         .route(
             "/console/accounts/{login}/links",
-            axum::routing::post(create_link),
+            get(links_list).post(create_link),
         )
         .route(
             "/console/accounts/{login}/links/{link_id}",
@@ -222,6 +222,46 @@ async fn overview(
         }
     });
     Html(html).into_response()
+}
+
+async fn links_list(
+    State(state): State<AppState>,
+    admin: RequireConsoleAdminOf,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let value = |key: &str| params.get(key).map(String::as_str).unwrap_or_default();
+    let query = crate::views::link_list::LinkListQuery::new(
+        value("filter"),
+        value("sort"),
+        value("direction"),
+        value("page"),
+    );
+    let (status, all_links) = match state
+        .storage
+        .list_invitation_links_for_account(admin.account.account_id)
+        .await
+    {
+        Ok(links) => (axum::http::StatusCode::OK, Some(links)),
+        Err(error) => {
+            tracing::warn!(error = ?error, "failed to load invitation links");
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, None)
+        }
+    };
+    let now = Utc::now();
+    let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
+    let html = render(move || {
+        rsx! {
+            crate::views::link_list::LinkListPage {
+                signed_in_login: Some(admin.session.login.clone()),
+                flash: flash.clone(),
+                account_login: admin.account.account_login.clone(),
+                query: query.clone(),
+                all_links: all_links.clone(),
+                now,
+            }
+        }
+    });
+    (status, Html(html))
 }
 
 async fn new_link_form(
