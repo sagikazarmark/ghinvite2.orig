@@ -54,7 +54,7 @@ impl SqlxStorage {
     }
 
     /// Test/debug-only: read all audit events for an account in occurrence order.
-    /// Not on the `Storage` trait because audit reads are a v1.1 feature.
+    /// Production browsing uses the bounded `Storage::list_audit_events`.
     #[cfg(any(test, feature = "test-util"))]
     pub async fn debug_list_audit(&self, account_id: u64) -> Result<Vec<AuditEvent>> {
         let rows: Vec<crate::records::AuditEventRow> = sqlx::query_as(
@@ -755,6 +755,77 @@ impl Storage for SqlxStorage {
         .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool> {
+        Ok(
+            sqlx::query("SELECT 1 FROM invitation_links WHERE id = ?1 AND account_id = ?2 LIMIT 1")
+                .bind(id.to_string())
+                .bind(u64_to_i64(account_id))
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(crate::to_db_err)?
+                .is_some(),
+        )
+    }
+
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<ghinvite_core::audit::EventType>,
+        position: ghinvite_core::storage::AuditPosition,
+    ) -> Result<ghinvite_core::storage::AuditPage> {
+        use ghinvite_core::storage::{AuditBoundary, AuditPage, AuditPosition, audit_read};
+        let boundary = position.boundary();
+        let rows: Vec<crate::records::AuditEventRow> =
+            sqlx::query_as(&audit_read::query(event, position, false))
+                .bind(u64_to_i64(account_id))
+                .bind(event.map(|e| e.as_str()))
+                .bind(boundary.map(audit_read::boundary_time))
+                .bind(boundary.map(|b| b.id.to_string()))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(crate::to_db_err)?;
+        let mut events = rows
+            .into_iter()
+            .map(|r| r.try_into_domain())
+            .collect::<Result<Vec<_>>>()?;
+        if matches!(position, AuditPosition::After(_)) {
+            events.reverse();
+        }
+        let mut page = AuditPage {
+            events,
+            has_older: false,
+            has_newer: false,
+        };
+        if let (Some(first), Some(last)) = (page.events.first(), page.events.last()) {
+            for (seek, flag) in [
+                (
+                    AuditPosition::After(AuditBoundary::from(first)),
+                    &mut page.has_newer,
+                ),
+                (
+                    AuditPosition::Before(AuditBoundary::from(last)),
+                    &mut page.has_older,
+                ),
+            ] {
+                let b = seek.boundary().unwrap();
+                *flag = sqlx::query(&audit_read::query(event, seek, true))
+                    .bind(u64_to_i64(account_id))
+                    .bind(event.map(|e| e.as_str()))
+                    .bind(audit_read::boundary_time(b))
+                    .bind(b.id.to_string())
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(crate::to_db_err)?
+                    .is_some();
+            }
+        }
+        Ok(page)
+    }
+
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
         let metadata_json = if event.metadata.is_null() {
             None
@@ -1510,6 +1581,123 @@ mod tests {
             target_id: target.into(),
             metadata: serde_json::json!({"k": "v"}),
             request_id: Some("inv-abc".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_mixed_timestamp_encodings_seek_exactly_using_indexes() {
+        use ghinvite_core::audit::EventType;
+        use ghinvite_core::storage::{AuditBoundary, AuditPosition, audit_read};
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let fixtures = [
+            "2026-05-04T12:00:00Z",
+            "2026-05-04T12:00:00+00:00",
+            "2026-05-04T12:00:00.000000001Z",
+            "2026-05-04T12:00:00.001+00:00",
+            "2026-05-04T12:00:00.100Z",
+            "2026-05-04T12:00:00.100000+00:00",
+            "2026-05-04T12:00:00.100000001+00:00",
+            "2026-05-04T12:00:01Z",
+        ];
+        let mut expected = Vec::new();
+        for (n, timestamp) in fixtures.iter().enumerate() {
+            let mut event = sample_audit(100, EventType::RequestCreated, "missing");
+            event.id = ghinvite_core::AuditEventId::from_ulid(ulid::Ulid::from(n as u128 + 1));
+            event.occurred_at = dt(timestamp);
+            s.audit(&event).await.unwrap();
+            sqlx::query("UPDATE audit_events SET occurred_at = ? WHERE id = ?")
+                .bind(timestamp)
+                .bind(event.id.to_string())
+                .execute(&s.pool)
+                .await
+                .unwrap();
+            expected.push(event);
+        }
+        expected.reverse();
+        let page = s
+            .list_audit_events(100, None, AuditPosition::Latest)
+            .await
+            .unwrap();
+        assert_eq!(page.events, expected);
+        for (i, event) in expected.iter().enumerate() {
+            let b = AuditBoundary::from(event);
+            assert_eq!(
+                s.list_audit_events(100, None, AuditPosition::Before(b))
+                    .await
+                    .unwrap()
+                    .events,
+                expected[i + 1..]
+            );
+            assert_eq!(
+                s.list_audit_events(100, None, AuditPosition::After(b))
+                    .await
+                    .unwrap()
+                    .events,
+                expected[..i]
+            );
+            for filter in [None, Some(EventType::RequestCreated)] {
+                for position in [
+                    AuditPosition::Latest,
+                    AuditPosition::Before(b),
+                    AuditPosition::After(b),
+                ] {
+                    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+                        "EXPLAIN QUERY PLAN {}",
+                        audit_read::query(filter, position, false)
+                    ))
+                    .bind(100)
+                    .bind(filter.map(|e| e.as_str()))
+                    .bind(position.boundary().map(audit_read::boundary_time))
+                    .bind(position.boundary().map(|b| b.id.to_string()))
+                    .fetch_all(&s.pool)
+                    .await
+                    .unwrap();
+                    let plan = format!("{plan:?}");
+                    assert!(
+                        plan.contains(if filter.is_some() {
+                            "idx_audit_account_event_order"
+                        } else {
+                            "idx_audit_account_order"
+                        }),
+                        "{plan}"
+                    );
+                    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+                    if position != AuditPosition::Latest {
+                        assert!(plan.contains("<expr>"), "{plan}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_corruption_fails_the_page_instead_of_dropping_rows() {
+        use ghinvite_core::audit::EventType;
+        use ghinvite_core::storage::AuditPosition;
+        for (column, value) in [
+            ("id", "bad"),
+            ("occurred_at", "bad"),
+            ("event_type", "unknown"),
+            ("actor_kind", "unknown"),
+            ("actor_id", "-1"),
+            ("target_kind", "unknown"),
+            ("metadata", "{bad"),
+        ] {
+            let s = SqlxStorage::in_memory().await.unwrap();
+            s.audit(&sample_audit(100, EventType::RequestCreated, "missing"))
+                .await
+                .unwrap();
+            sqlx::query(&format!("UPDATE audit_events SET {column} = ?"))
+                .bind(value)
+                .execute(&s.pool)
+                .await
+                .unwrap();
+            assert!(
+                s.list_audit_events(100, None, AuditPosition::Latest)
+                    .await
+                    .is_err(),
+                "{column}"
+            );
         }
     }
 

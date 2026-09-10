@@ -298,6 +298,47 @@ pub mod wasm_impl {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    #[derive(Deserialize)]
+    pub struct AuditEventRow {
+        pub id: String,
+        pub account_id: u64,
+        pub occurred_at: String,
+        pub event_type: ghinvite_core::audit::EventType,
+        pub actor_kind: ghinvite_core::audit::ActorKind,
+        pub actor_id: Option<u64>,
+        pub target_kind: ghinvite_core::audit::TargetKind,
+        pub target_id: String,
+        pub metadata: Option<String>,
+        pub request_id: Option<String>,
+    }
+
+    impl AuditEventRow {
+        pub fn try_into_domain(
+            self,
+        ) -> ghinvite_core::storage::Result<ghinvite_core::audit::AuditEvent> {
+            Ok(ghinvite_core::audit::AuditEvent {
+                id: self
+                    .id
+                    .parse()
+                    .map_err(|_| Error::Corrupt("audit id".into()))?,
+                account_id: self.account_id,
+                occurred_at: parse_dt(&self.occurred_at)?,
+                event_type: self.event_type,
+                actor_kind: self.actor_kind,
+                actor_id: self.actor_id,
+                target_kind: self.target_kind,
+                target_id: self.target_id,
+                metadata: self
+                    .metadata
+                    .map(|m| serde_json::from_str(&m))
+                    .transpose()
+                    .map_err(|_| Error::Corrupt("audit metadata".into()))?
+                    .unwrap_or(serde_json::Value::Null),
+                request_id: self.request_id,
+            })
+        }
+    }
+
     pub fn parse_dt(s: &str) -> ghinvite_core::storage::Result<chrono::DateTime<chrono::Utc>> {
         chrono::DateTime::parse_from_rfc3339(s)
             .map(|d| d.with_timezone(&chrono::Utc))

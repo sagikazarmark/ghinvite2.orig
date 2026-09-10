@@ -22,6 +22,8 @@ use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
 
+mod audit;
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/console", get(console_index))
@@ -57,7 +59,13 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(decline_request),
         )
         .route("/console/accounts/{login}/settings", get(settings_page))
-        .route("/console/accounts/{login}/audit", get(audit_page))
+        .route(
+            "/console/accounts/{login}/audit",
+            get(audit::page).layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("private, no-store"),
+            )),
+        )
         .route(
             "/console/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
@@ -683,23 +691,6 @@ async fn requests_queue(
                 flash: flash.clone(),
                 account_login: account_login.clone(),
                 rows: rows.clone(),
-            }
-        }
-    });
-    Html(html).into_response()
-}
-
-async fn audit_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
-    let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
-    let signed_in_login = Some(admin.session.login.clone());
-    let account_login = admin.account.account_login.clone();
-
-    let html = render(move || {
-        rsx! {
-            crate::views::audit::AuditLogPage {
-                signed_in_login: signed_in_login.clone(),
-                flash: flash.clone(),
-                account_login: account_login.clone(),
             }
         }
     });

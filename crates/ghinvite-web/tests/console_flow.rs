@@ -1447,7 +1447,7 @@ async fn console_trailing_slash_for_admin_renders_console_404() {
 }
 
 #[tokio::test]
-async fn console_audit_page_for_admin_renders_coming_soon_state() {
+async fn console_audit_page_for_admin_renders_empty_history() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
         .oneshot(
@@ -1461,20 +1461,19 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()["cache-control"], "private, no-store");
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("console-frame"));
-    assert!(text.contains("Audit log coming soon"));
-    assert!(text.contains("ghinvite records account activity for invitation links, invitation requests, and GitHub invitations. Console browsing is not available yet."));
-    assert!(text.contains("Back to overview"));
-    assert!(text.contains("href=\"/console/accounts/acme\""));
+    assert!(text.contains("No recorded events for this account."));
+    assert!(text.contains("method=\"get\""));
+    assert!(text.contains("All events"));
     assert!(text.contains("href=\"/console/accounts/acme/audit\""));
     assert!(text.contains("aria-current=\"page\""));
     assert!(text.contains("app-nav-row-active"));
     assert!(!text.contains("Audit log is not yet implemented."));
     assert!(!text.contains("<table"));
-    assert!(!text.contains("Filter"));
-    assert!(!text.contains("No events"));
+    assert!(text.contains("Event type"));
 }
 
 #[tokio::test]
@@ -1528,6 +1527,602 @@ async fn console_overview_keeps_five_recent_links_and_opens_filtered_collections
     assert_eq!(all.matches("Workshop ").count(), 6);
     assert!(all.contains("Workshop 001"));
     assert!(all.contains("Workshop 006"));
+}
+
+fn audit_event(n: u64, kind: ghinvite_core::audit::EventType) -> ghinvite_core::audit::AuditEvent {
+    ghinvite_core::audit::AuditEvent {
+        id: ghinvite_core::AuditEventId::new(),
+        account_id: 9001,
+        occurred_at: DateTime::parse_from_rfc3339("2026-05-04T12:00:00.123456789Z")
+            .unwrap()
+            .with_timezone(&Utc)
+            + Duration::seconds(n as i64),
+        event_type: kind,
+        actor_kind: ghinvite_core::audit::ActorKind::User,
+        actor_id: Some(42),
+        target_kind: ghinvite_core::audit::TargetKind::Installation,
+        target_id: format!("resource-{n:03}"),
+        metadata: serde_json::Value::Null,
+        request_id: None,
+    }
+}
+
+#[tokio::test]
+async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
+    use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    let mut foreign_link = list_link(2);
+    foreign_link.account_id = 9002;
+    foreign_link.installation_id = 78;
+    storage.insert_invitation_link(&foreign_link).await.unwrap();
+    let cases = [
+        (
+            EventType::InvitationLinkMetadataUpdated,
+            serde_json::json!({"changed_fields": ["internal_note", "description", "internal_note", "secret-key"], "description": "private-description", "internal_note": "private-note"}),
+            "Description; Internal note",
+        ),
+        (
+            EventType::RequestApproved,
+            serde_json::json!({"reason": "auto_approve"}),
+            "Auto-approved",
+        ),
+        (
+            EventType::InvitationAccepted,
+            serde_json::json!({"reason": "already_collaborator"}),
+            "Already a collaborator",
+        ),
+        (
+            EventType::InvitationAccepted,
+            serde_json::json!({"reconciled": true}),
+            "Observed during reconciliation",
+        ),
+        (
+            EventType::InvitationCancelled,
+            serde_json::json!({"reconciled": true}),
+            "Observed during reconciliation",
+        ),
+        (
+            EventType::InvitationLinkCreated,
+            serde_json::json!({"permission": "push", "approval_required": true, "max_uses": 7, "repo_count": 3}),
+            "Permission level: push; Account-admin approval required; Max use: 7; Repositories: 3",
+        ),
+        (
+            EventType::InvitationLinkCreated,
+            serde_json::json!({"permission": "pull", "approval_required": false, "max_uses": null}),
+            "Permission level: pull; Auto-approval; Max use: unlimited",
+        ),
+        (
+            EventType::InstallationReposChanged,
+            serde_json::json!({"selected_repos_kind": "all"}),
+            "All available repositories",
+        ),
+        (
+            EventType::InstallationReposChanged,
+            serde_json::json!({"selected_repos_kind": "subset"}),
+            "Selected repositories",
+        ),
+        (
+            EventType::InvitationSendFailed,
+            serde_json::json!({"error": "upstream-secret-error"}),
+            "—",
+        ),
+        (
+            EventType::RequestDeclined,
+            serde_json::json!({"reason": "private-decline-reason"}),
+            "—",
+        ),
+        (
+            EventType::InvitationExpired,
+            serde_json::json!({"reason": "private-expiration-reason"}),
+            "—",
+        ),
+        (
+            EventType::InvitationLinkCreated,
+            serde_json::json!({"permission": "owner", "approval_required": "true", "max_uses": -1, "repo_count": "2"}),
+            "—",
+        ),
+        (
+            EventType::InvitationAccepted,
+            serde_json::json!({"reason": "private-mechanism", "reconciled": "true"}),
+            "—",
+        ),
+        (
+            EventType::RequestApproved,
+            serde_json::json!({"reason": true}),
+            "—",
+        ),
+        (
+            EventType::InstallationReposChanged,
+            serde_json::json!({"selected_repos_kind": "selected"}),
+            "—",
+        ),
+        (
+            EventType::InvitationLinkMetadataUpdated,
+            serde_json::json!({"changed_fields": "description"}),
+            "—",
+        ),
+        (EventType::RequestCreated, serde_json::Value::Null, "—"),
+        (
+            EventType::RequestCreated,
+            serde_json::json!(["arbitrary-array"]),
+            "—",
+        ),
+    ];
+    for (n, (kind, metadata, _)) in cases.iter().enumerate() {
+        let mut event = audit_event(n as u64, *kind);
+        event.metadata = metadata.clone();
+        if let Some(m) = event.metadata.as_object_mut() {
+            m.insert(
+                "unknown".into(),
+                serde_json::json!("<img src=x onerror=private-script>"),
+            );
+            m.insert(
+                "justification".into(),
+                serde_json::json!("private-justification"),
+            );
+            m.insert(
+                "recipient_login".into(),
+                serde_json::json!("private-recipient"),
+            );
+            m.insert("repos".into(), serde_json::json!(["private-repository"]));
+            m.insert("invitation_code".into(), serde_json::json!("private-code"));
+        }
+        event.request_id = Some("private-restate-invocation".into());
+        match n {
+            0 => {
+                event.target_kind = TargetKind::InvitationLink;
+                event.target_id = link.id.to_string();
+            }
+            1 => {
+                event.target_kind = TargetKind::InvitationLink;
+                event.target_id = foreign_link.id.to_string();
+                event.actor_kind = ActorKind::System;
+            }
+            2 => {
+                event.target_kind = TargetKind::InvitationLink;
+                event.target_id = "missing-link".into();
+                event.actor_kind = ActorKind::Github;
+            }
+            3 => {
+                event.target_kind = TargetKind::GithubInvitation;
+                event.actor_id = None;
+            }
+            4 => {
+                event.target_kind = TargetKind::InvitationRequest;
+                event.actor_id = Some(987);
+            }
+            _ => {}
+        }
+        storage.audit(&event).await.unwrap();
+    }
+    let (_, html) = audit_get(&app, &cookie, "/console/accounts/acme/audit").await;
+    let body = html
+        .split("<tbody>")
+        .nth(1)
+        .unwrap()
+        .split("</tbody>")
+        .next()
+        .unwrap();
+    let rows: Vec<_> = body.split("<tr>").skip(1).collect();
+    assert_eq!(rows.len(), cases.len());
+    for (row, (_, _, summary)) in rows.iter().rev().zip(&cases) {
+        assert!(row.contains(&format!("<td>{summary}</td>")), "{row}");
+    }
+    for secret in [
+        "private-",
+        "secret-key",
+        "arbitrary-array",
+        "owner",
+        link.slug.as_str(),
+        foreign_link.slug.as_str(),
+        &link.description,
+    ] {
+        assert!(!html.contains(secret), "leaked {secret}");
+    }
+    assert!(html.contains(&format!(
+        "href=\"/console/accounts/acme/links/{}\"",
+        link.id
+    )));
+    assert!(!html.contains(&format!(
+        "href=\"/console/accounts/acme/links/{}\"",
+        foreign_link.id
+    )));
+    assert!(html.contains(&format!(
+        "Invitation link {} · Unavailable",
+        foreign_link.id
+    )));
+    assert!(html.contains("Invitation link missing-link · Unavailable"));
+    for actor in [
+        "<td>System</td>",
+        "<td>GitHub</td>",
+        "Unknown GitHub user",
+        "GitHub user ID 987",
+    ] {
+        assert!(body.contains(actor));
+    }
+    assert!(body.contains("GitHub invitation (internal ID)"));
+    assert!(!body.contains("href=\"https://github.com/"));
+    assert_eq!(html.matches("<script").count(), 1); // existing external theme script only
+    // Every vocabulary member remains offered, including events with no producer.
+    for label in [
+        "Installation created",
+        "Installation repositories changed",
+        "Installation uninstalled",
+        "Invitation link created",
+        "Invitation link metadata updated",
+        "Invitation link revoked",
+        "Invitation link expired",
+        "Invitation link exhausted",
+        "Invitation request created",
+        "Invitation request approved",
+        "Invitation request declined",
+        "Invitation request expired",
+        "GitHub invitation sent",
+        "GitHub invitation accepted",
+        "GitHub invitation declined",
+        "GitHub invitation expired",
+        "GitHub invitation cancelled",
+        "GitHub invitation send failed",
+    ] {
+        assert!(html.contains(label), "{label}");
+    }
+    for event in EventType::ALL {
+        assert!(html.contains(&format!("value=\"{}\"", event.as_str())));
+    }
+}
+
+#[tokio::test]
+async fn audit_optional_enrichment_failures_fall_back_but_core_failures_are_500() {
+    use ghinvite_core::audit::{EventType, TargetKind};
+    let path = std::env::temp_dir().join(format!(
+        "ghinvite-audit-{}.sqlite",
+        ghinvite_core::AuditEventId::new()
+    ));
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    let mut event = audit_event(1, EventType::InvitationLinkCreated);
+    event.target_kind = TargetKind::InvitationLink;
+    event.target_id = link.id.to_string();
+    storage.audit(&event).await.unwrap();
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    // Corrupt optional local lookup data; the recorded event must survive.
+    sqlx::query("UPDATE users SET last_seen_at = 'broken'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE invitation_links RENAME TO unavailable_links")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let base = "/console/accounts/acme/audit";
+    let (status, html) = audit_get(&app, &cookie, base).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("GitHub user ID 42"));
+    assert!(!html.contains("@octocat · GitHub user ID"));
+    assert!(html.contains(&format!("Invitation link {} · Unavailable", link.id)));
+    for sql in [
+        "UPDATE audit_events SET metadata = '{broken'",
+        "DROP TABLE audit_events",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+        let (status, html) = audit_get(
+            &app,
+            &cookie,
+            &format!("{base}?event=invitation_link.created&before=bad&account_id=9002"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(html.contains("Could not load the audit log."));
+        assert!(!html.contains("No recorded events"));
+        assert!(html.contains("console-frame"));
+        for marker in ["console-sidebar", "mobile-console-nav"] {
+            let nav = html
+                .split_once(marker)
+                .unwrap()
+                .1
+                .split("</nav>")
+                .next()
+                .unwrap();
+            assert!(nav.contains("aria-current=\"page\""));
+            assert!(nav.contains("/console/accounts/acme/audit"));
+        }
+        assert_eq!(
+            audit_anchor(&html, "Retry").unwrap(),
+            format!("{base}?event=invitation_link.created")
+        );
+    }
+    pool.close().await;
+    drop(app);
+    drop(storage);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accounts() {
+    let base = "/console/accounts/acme/audit?event=request.created&before=bad";
+    let app = build_test_app().await;
+    let response = app
+        .oneshot(Request::builder().uri(base).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        "/login?return_to=%2Fconsole%2Faccounts%2Facme%2Faudit%3Fevent%3Drequest.created%26before%3Dbad"
+    );
+    for role in ["member", "admin"] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let (app, cookie) = links_app(storage.clone(), role).await;
+        if role == "member" {
+            assert_eq!(
+                audit_get(&app, &cookie, base).await.0,
+                StatusCode::NOT_FOUND
+            );
+        } else {
+            let event = audit_event(1, ghinvite_core::audit::EventType::InstallationCreated);
+            storage.audit(&event).await.unwrap();
+            storage
+                .mark_installation_uninstalled(77, Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(
+                audit_get(&app, &cookie, base).await.0,
+                StatusCode::NOT_FOUND
+            );
+            storage
+                .insert_installation(&Account {
+                    installation_id: 79,
+                    account_id: 9001,
+                    account_login: "acme".into(),
+                    account_type: AccountType::Organization,
+                    installed_at: Utc::now(),
+                    uninstalled_at: None,
+                    selected_repos: SelectedRepos::All,
+                })
+                .await
+                .unwrap();
+            let (status, html) = audit_get(&app, &cookie, "/console/accounts/acme/audit").await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(html.contains("resource-001"));
+        }
+        assert_eq!(
+            audit_get(&app, &cookie, "/console/accounts/missing/audit")
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    // Personal-account owners use the established authorization path, without an org call.
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    storage
+        .insert_installation(&Account {
+            installation_id: 77,
+            account_id: 42,
+            account_login: "octocat".into(),
+            account_type: AccountType::User,
+            installed_at: Utc::now(),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        })
+        .await
+        .unwrap();
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev(),
+    );
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    assert_eq!(
+        audit_get(&app, &cookie, "/console/accounts/octocat/audit")
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+async fn audit_get(app: &axum::Router, cookie: &str, uri: &str) -> (StatusCode, String) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    (status, html)
+}
+
+fn audit_anchor(html: &str, label: &str) -> Option<String> {
+    html.split("<a ").skip(1).find_map(|tag| {
+        let (attrs, content) = tag.split_once('>')?;
+        if content.split("</a>").next()? != label {
+            return None;
+        }
+        Some(
+            attrs
+                .split("href=\"")
+                .nth(1)?
+                .split('"')
+                .next()?
+                .replace("&amp;", "&")
+                .replace("&#38;", "&"),
+        )
+    })
+}
+
+#[tokio::test]
+async fn audit_history_urls_filter_seek_normalize_and_remain_read_only() {
+    use ghinvite_core::audit::EventType;
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let commands = Arc::new(RecordingCommands::default());
+    let (app, cookie) = links_app_with_commands(storage.clone(), "admin", commands.clone()).await;
+    for n in 0..51 {
+        storage
+            .audit(&audit_event(n, EventType::RequestCreated))
+            .await
+            .unwrap();
+    }
+    let mut foreign = audit_event(999, EventType::RequestCreated);
+    foreign.account_id = 9002;
+    storage.audit(&foreign).await.unwrap();
+    storage
+        .audit(&audit_event(998, EventType::InvitationSent))
+        .await
+        .unwrap();
+    let base = "/console/accounts/acme/audit";
+    let first_uri = format!("{base}?event=request.created");
+    let (status, first) = audit_get(&app, &cookie, &first_uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.matches("<time ").count(), 25);
+    assert!(first.contains("resource-050") && first.contains("resource-026"));
+    assert!(!first.contains("resource-025") && !first.contains("resource-999"));
+    assert!(first.contains("datetime=\"2026-05-04T12:00:50.123456789Z\""));
+    assert!(first.contains("2026-05-04 12:00:50 UTC"));
+    assert!(first.contains("@octocat · GitHub user ID 42"));
+    assert!(first.contains("last known, not historical snapshots"));
+    assert!(first.contains("overflow-x-auto") && first.contains("tabindex=\"0\""));
+    assert_eq!(first.matches("scope=\"col\"").count(), 5);
+    assert!(audit_anchor(&first, "Newer").is_none());
+    let older_uri = audit_anchor(&first, "Older").unwrap();
+    assert!(
+        older_uri.contains("event=request.created&before="),
+        "{older_uri}"
+    );
+    let (_, second) = audit_get(&app, &cookie, &older_uri).await;
+    assert_eq!(second.matches("<time ").count(), 25);
+    assert!(second.contains("resource-025") && second.contains("resource-001"));
+    assert!(!second.contains("resource-026") && !second.contains("resource-000"));
+    assert_eq!(audit_anchor(&second, "Back to latest").unwrap(), first_uri);
+    let newer_uri = audit_anchor(&second, "Newer").unwrap();
+    let (_, newer) = audit_get(&app, &cookie, &newer_uri).await;
+    assert_eq!(
+        newer
+            .split("<tbody>")
+            .nth(1)
+            .unwrap()
+            .split("</tbody>")
+            .next(),
+        first
+            .split("<tbody>")
+            .nth(1)
+            .unwrap()
+            .split("</tbody>")
+            .next()
+    );
+    let last_uri = audit_anchor(&second, "Older").unwrap();
+    let (_, last) = audit_get(&app, &cookie, &last_uri).await;
+    assert_eq!(last.matches("<time ").count(), 1);
+    assert!(audit_anchor(&last, "Older").is_none());
+    // Refresh/bookmarks preserve the rows; a new front arrival cannot shift older pages.
+    storage
+        .audit(&audit_event(1000, EventType::RequestCreated))
+        .await
+        .unwrap();
+    assert_eq!(audit_get(&app, &cookie, &older_uri).await.1, second);
+    let form = second
+        .split("<form")
+        .nth(1)
+        .unwrap()
+        .split("</form>")
+        .next()
+        .unwrap();
+    assert!(form.contains("method=\"get\"") && form.contains("name=\"event\""));
+    assert!(!form.contains("before") && !form.contains("after"));
+    let (_, latest) = audit_get(&app, &cookie, &first_uri).await;
+    for query in [
+        "event=request.created&before=bad".to_string(),
+        format!("event=request.created&before={}", "x".repeat(513)),
+        format!("{}&after=bad", older_uri.split_once('?').unwrap().1),
+        "event=bad&event=request.created&before=bad&before=".into(),
+        "event=request.created&account_id=9002&installation_id=78&unknown=ignored".into(),
+    ] {
+        assert_eq!(
+            audit_get(&app, &cookie, &format!("{base}?{query}")).await.1,
+            latest,
+            "{query}"
+        );
+    }
+    let (_, all) = audit_get(&app, &cookie, base).await;
+    assert_eq!(
+        audit_get(&app, &cookie, &format!("{base}?event=unknown"))
+            .await
+            .1,
+        all
+    );
+    let changed = older_uri.replace("event=request.created", "event=invitation.sent");
+    let (_, changed) = audit_get(&app, &cookie, &changed).await;
+    assert_eq!(changed.matches("<time ").count(), 1);
+    assert!(changed.contains("resource-998"));
+    assert!(audit_anchor(&changed, "Back to latest").is_none());
+    let (_, none) = audit_get(&app, &cookie, &format!("{base}?event=request.declined")).await;
+    assert!(none.contains("No recorded events match this event type."));
+    assert_eq!(audit_anchor(&none, "All events").unwrap(), base);
+    // Forged, but syntactically valid, foreign-account boundary has no authority.
+    use base64::Engine;
+    let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+        "v": 1, "event": "request.created", "time": "2026-05-01T00:00:00.000000001Z", "id": foreign.id,
+    })).unwrap());
+    let (_, empty) = audit_get(&app, &cookie, &format!("{first_uri}&before={token}")).await;
+    assert!(empty.contains("No recorded events in this range."));
+    assert_eq!(audit_anchor(&empty, "Back to latest").unwrap(), first_uri);
+    assert!(!empty.contains("resource-999"));
+    assert!(commands.calls.lock().unwrap().is_empty());
+    // Public read boundary also proves browsing did not append history.
+    let page = storage
+        .list_audit_events(9001, None, ghinvite_core::storage::AuditPosition::Latest)
+        .await
+        .unwrap();
+    assert_eq!(page.events[0].target_id, "resource-1000");
+    assert!(
+        page.events
+            .iter()
+            .all(|e| e.event_type == EventType::RequestCreated
+                || e.event_type == EventType::InvitationSent)
+    );
 }
 
 #[tokio::test]

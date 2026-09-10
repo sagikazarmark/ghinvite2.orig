@@ -27,6 +27,26 @@ Without this PRAGMA, FK violations silently succeed and orphan rows accumulate.
 - No `CHECK (col IN (...))` on enum-shaped columns (see spec §7.2). Domain enums in `crates/ghinvite-core` validate values before write.
 - Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format.
 
+### Audit ordering
+
+Migration 0003 adds account/order and account/event/order expression indexes.
+Both audit writers serialize `DateTime<Utc>` with variable fractional precision
+and a `+00:00` suffix. The comparison key also handles equivalent `Z` timestamps:
+it right-pads the fractional seconds to nine digits without rounding. This avoids
+a stored-data normalization migration and preserves original event timestamps.
+Do not replace it with SQLite `datetime`/`julianday` (millisecond precision), or
+raw text sorting. Keep the expression in `storage::audit_read` and 0003 identical.
+Non-UTC offsets are not a format emitted by either audit writer.
+
+The scalar seek bound plus exclusive `(time key, id)` boundary uses these indexes
+without a temporary sort. SQLite tests assert query-plan index/seek use; targeted
+D1 runtime tests execute the same query builder, including mixed encodings:
+
+```sh
+wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
+cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignored
+```
+
 ## Adding a new migration
 
 1. Choose the next `NNNN`.

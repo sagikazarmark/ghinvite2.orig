@@ -892,6 +892,90 @@ impl Storage for D1Storage {
 
     // -------- audit --------
 
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool> {
+        wasm_send(async {
+            Ok(self.db.prepare("SELECT 1 AS present FROM invitation_links WHERE id = ?1 AND account_id = ?2 LIMIT 1")
+                .bind(&[JsValue::from_str(&id.to_string()), JsValue::from_f64(account_id as f64)]).map_err(bind_err)?
+                .first::<serde_json::Value>(None).await.map_err(classify_d1_error)?.is_some())
+        }).await
+    }
+
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<ghinvite_core::audit::EventType>,
+        position: ghinvite_core::storage::AuditPosition,
+    ) -> Result<ghinvite_core::storage::AuditPage> {
+        use ghinvite_core::storage::{AuditBoundary, AuditPage, AuditPosition, audit_read};
+        wasm_send(async {
+            let bindings = |position: AuditPosition| {
+                let boundary = position.boundary();
+                [
+                    JsValue::from_f64(account_id as f64),
+                    event
+                        .map(|e| JsValue::from_str(e.as_str()))
+                        .unwrap_or(JsValue::NULL),
+                    boundary
+                        .map(|b| JsValue::from_str(&audit_read::boundary_time(b)))
+                        .unwrap_or(JsValue::NULL),
+                    boundary
+                        .map(|b| JsValue::from_str(&b.id.to_string()))
+                        .unwrap_or(JsValue::NULL),
+                ]
+            };
+            let rows = self
+                .db
+                .prepare(&audit_read::query(event, position, false))
+                .bind(&bindings(position))
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<crate::bind::AuditEventRow>()
+                .map_err(classify_d1_error)?;
+            let mut events = rows
+                .into_iter()
+                .map(|r| r.try_into_domain())
+                .collect::<Result<Vec<_>>>()?;
+            if matches!(position, AuditPosition::After(_)) {
+                events.reverse();
+            }
+            let mut page = AuditPage {
+                events,
+                has_older: false,
+                has_newer: false,
+            };
+            if let (Some(first), Some(last)) = (page.events.first(), page.events.last()) {
+                for (seek, flag) in [
+                    (
+                        AuditPosition::After(AuditBoundary::from(first)),
+                        &mut page.has_newer,
+                    ),
+                    (
+                        AuditPosition::Before(AuditBoundary::from(last)),
+                        &mut page.has_older,
+                    ),
+                ] {
+                    *flag = self
+                        .db
+                        .prepare(&audit_read::query(event, seek, true))
+                        .bind(&bindings(seek))
+                        .map_err(bind_err)?
+                        .first::<serde_json::Value>(None)
+                        .await
+                        .map_err(classify_d1_error)?
+                        .is_some();
+                }
+            }
+            Ok(page)
+        })
+        .await
+    }
+
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
         let id_str = event.id.to_string();
         let account_id = event.account_id;

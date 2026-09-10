@@ -348,6 +348,23 @@ mod tests {
             unimplemented!()
         }
 
+        async fn list_audit_events(
+            &self,
+            _: u64,
+            _: Option<ghinvite_core::audit::EventType>,
+            _: ghinvite_core::storage::AuditPosition,
+        ) -> ghinvite_core::storage::Result<ghinvite_core::storage::AuditPage> {
+            unimplemented!()
+        }
+
+        async fn invitation_link_belongs_to_account(
+            &self,
+            _: u64,
+            _: InvitationLinkId,
+        ) -> ghinvite_core::storage::Result<bool> {
+            unimplemented!()
+        }
+
         async fn audit(&self, _event: &AuditEvent) -> ghinvite_core::storage::Result<()> {
             unimplemented!()
         }

@@ -104,6 +104,27 @@ pub enum EventType {
 }
 
 impl EventType {
+    pub const ALL: [Self; 18] = [
+        Self::InstallationCreated,
+        Self::InstallationReposChanged,
+        Self::InstallationUninstalled,
+        Self::InvitationLinkCreated,
+        Self::InvitationLinkMetadataUpdated,
+        Self::InvitationLinkRevoked,
+        Self::InvitationLinkExpired,
+        Self::InvitationLinkExhausted,
+        Self::RequestCreated,
+        Self::RequestApproved,
+        Self::RequestDeclined,
+        Self::RequestExpired,
+        Self::InvitationSent,
+        Self::InvitationAccepted,
+        Self::InvitationDeclined,
+        Self::InvitationExpired,
+        Self::InvitationCancelled,
+        Self::InvitationSendFailed,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InstallationCreated => "installation.created",

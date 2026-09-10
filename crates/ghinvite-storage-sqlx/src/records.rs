@@ -284,13 +284,18 @@ impl AuditEventRow {
             id: AuditEventId::from_ulid(
                 Ulid::from_str(&self.id).map_err(|e| Error::Corrupt(format!("audit id: {e}")))?,
             ),
-            account_id: self.account_id as u64,
+            account_id: u64::try_from(self.account_id)
+                .map_err(|_| Error::Corrupt("audit account id".into()))?,
             occurred_at: self.occurred_at,
             event_type: EventType::from_str(&self.event_type)
                 .map_err(|e| Error::Corrupt(e.to_string()))?,
             actor_kind: ActorKind::from_str(&self.actor_kind)
                 .map_err(|e| Error::Corrupt(e.to_string()))?,
-            actor_id: self.actor_id.map(|a| a as u64),
+            actor_id: self
+                .actor_id
+                .map(u64::try_from)
+                .transpose()
+                .map_err(|_| Error::Corrupt("audit actor id".into()))?,
             target_kind: TargetKind::from_str(&self.target_kind)
                 .map_err(|e| Error::Corrupt(e.to_string()))?,
             target_id: self.target_id,

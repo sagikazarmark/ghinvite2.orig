@@ -17,6 +17,9 @@ use thiserror::Error;
 #[cfg(feature = "test-suite")]
 pub mod test_suite;
 
+pub mod audit_read;
+pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Reasons a write may fail with [`Error::Conflict`]. Each variant pinpoints a
@@ -205,6 +208,14 @@ pub trait Storage: Send + Sync + 'static {
         id: InvitationLinkId,
     ) -> Result<Option<InvitationLink>>;
 
+    /// Bounded identity-only lookup for safe Console resource links. Does not
+    /// load private metadata or the link's (potentially large) repository scope.
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool>;
+
     /// Read an invitation link by its public slug. Slug is the URL-facing identifier;
     /// callers MUST compare in constant time against `Slug::ct_eq` *before* trusting
     /// the result, to defend against timing-based slug enumeration.
@@ -325,11 +336,21 @@ pub trait Storage: Send + Sync + 'static {
         installation_id: u64,
     ) -> Result<Vec<GithubInvitation>>;
 
-    // -------- audit (write-only) --------
+    // -------- audit --------
 
-    /// Append an audit event. The trait deliberately exposes no read or mutate
-    /// surface for audit data — that's a v1.1 feature handled by per-impl debug
-    /// helpers.
+    /// Read at most 25 account events in (occurred_at DESC, id DESC) order.
+    /// Exact event filtering precedes limiting. Boundaries are exclusive; After
+    /// returns the nearest newer rows. Navigation uses bounded existence probes.
+    /// Account scope is independent of cursors and includes all installations.
+    /// Malformed rows fail the read rather than silently producing partial pages.
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<crate::audit::EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage>;
+
+    /// Append an audit event. No update/delete surface is exposed.
     ///
     /// **Errors:** [`Error::Database`] only.
     /// **Idempotency:** safe to retry on transient failure as long as the caller

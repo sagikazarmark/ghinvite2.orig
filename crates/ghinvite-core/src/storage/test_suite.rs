@@ -104,7 +104,94 @@ where
     scenario_request_decision(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
     scenario_audit_appends(make_storage().await).await;
+    scenario_audit_pages(make_storage().await).await;
     scenario_timestamp_precision(make_storage().await).await;
+}
+
+/// Account history survives installation changes and missing actors/resources;
+/// filtering happens before the bounded page, with exclusive nanosecond/ID seeks.
+pub async fn scenario_audit_pages<S: Storage>(s: S) {
+    use super::{AuditBoundary, AuditPosition};
+    assert!(
+        s.list_audit_events(9001, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    let mut expected = Vec::new();
+    for n in 0..76 {
+        let event = AuditEvent {
+            id: AuditEventId::from_ulid(ulid::Ulid::from(n + 1)),
+            account_id: if n == 75 { 9002 } else { 9001 },
+            occurred_at: dt("2026-05-04T12:00:00.123456789Z")
+                + chrono::Duration::nanoseconds((n / 3) as i64),
+            event_type: if n < 50 {
+                EventType::RequestApproved
+            } else {
+                EventType::RequestCreated
+            },
+            actor_kind: ActorKind::User,
+            actor_id: Some(999),
+            target_kind: TargetKind::Installation,
+            target_id: "old-installation".into(),
+            metadata: serde_json::Value::Null,
+            request_id: None,
+        };
+        s.audit(&event).await.unwrap();
+        if n < 50 {
+            expected.push(event);
+        }
+    }
+    expected.reverse();
+    let filter = Some(EventType::RequestApproved);
+    let first = s
+        .list_audit_events(9001, filter, AuditPosition::Latest)
+        .await
+        .unwrap();
+    assert_eq!(first.events, expected[..25]);
+    assert!(first.has_older);
+    assert!(!first.has_newer);
+    let older = AuditPosition::Before(AuditBoundary::from(first.events.last().unwrap()));
+    let second = s.list_audit_events(9001, filter, older).await.unwrap();
+    assert_eq!(second.events, expected[25..]);
+    assert!(!second.has_older);
+    assert!(second.has_newer);
+    let newer = s
+        .list_audit_events(
+            9001,
+            filter,
+            AuditPosition::After(AuditBoundary::from(&second.events[0])),
+        )
+        .await
+        .unwrap();
+    assert_eq!(newer.events, first.events);
+    let mut arrival = expected[0].clone();
+    arrival.id = AuditEventId::new();
+    arrival.occurred_at += chrono::Duration::days(1);
+    s.audit(&arrival).await.unwrap();
+    assert_eq!(
+        s.list_audit_events(9001, filter, older)
+            .await
+            .unwrap()
+            .events,
+        second.events
+    );
+    let empty = s
+        .list_audit_events(
+            9001,
+            filter,
+            AuditPosition::Before(AuditBoundary::from(expected.last().unwrap())),
+        )
+        .await
+        .unwrap();
+    assert!(empty.events.is_empty());
+    let foreign = s
+        .list_audit_events(9002, None, AuditPosition::Latest)
+        .await
+        .unwrap();
+    assert_eq!(foreign.events.len(), 1);
+    assert!(!foreign.has_older && !foreign.has_newer);
 }
 
 async fn scenario_install_uninstall_reinstall<S: Storage>(s: S) {
