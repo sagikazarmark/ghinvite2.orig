@@ -8,7 +8,8 @@ preview, examples, or CSS is included; the application owns integration and styl
 ## Production Integration
 
 `links::LinkCreateForm` uses the registry Alert for its error summary, Button for
-submission, and Input for the description. The original `ghinvite_ui::field::Field`
+submission, Input for description, and NativeSelect for permission.
+The original `ghinvite_ui::field::Field`
 wrapper selects `FieldKind::RegistryText`, whose isolated `RegistryTextField`
 keeps hooks separate from native control branches. It supplies registry Field
 context with explicit ID, name, required state, and errors via `with_meta_values`,
@@ -16,28 +17,47 @@ and renders FieldLabel, Input, native help, and FieldError. Bound Input reads
 directly from the context binding without a `value` override; unbound SSR uses a
 prop-derived memo for preserved values.
 
-Metadata supplies Input's ID, name, required state, error color, and
-`aria-invalid` (`"false"` when valid). FieldLabel targets the metadata ID.
+`links::PermissionSelect` supplies its own registry Field context with explicit
+ID, name, and errors via `with_meta_values`, then renders FieldLabel,
+`NativeSelect::<String>`, native help, and FieldError. Its five options use
+explicit `form_value` strings: `pull`, `triage`, `push`, `maintain`, and `admin`,
+not NativeSelect's positional defaults. No placeholder or empty option is added.
+
+Unlike bound description, permission retains a controlled display memo even in
+the browser. Unsupported values such as `owner` and the empty string display
+`pull` but remain raw in dioform for validation. NativeSelect sets the DOM value
+property, so an unmatched value would otherwise blank the select. The old native
+markup left all options without `selected` for invalid values; shared SSR/island
+markup now explicitly selects `pull`, preserving the first-option display and
+native POST semantics. Display normalization never writes back to the binding.
+
+Metadata supplies both controls' ID, name, error color (`input-error` or
+`select-error`), and `aria-invalid` (`"false"` when valid), plus Input's required
+state. FieldLabel targets the metadata ID.
 FieldError owns an always-mounted `div` with `aria-live="polite"` and nested
-error `div`s; clearing errors empties it rather than removing the region.
+error `div`s; clearing errors empties `description-error` or `permission-error`
+rather than removing the region.
 
 Two upstream limitations keep some wiring application-owned:
 
 - Explicit `aria-describedby` and `aria-errormessage` preserve first-pass SSR
-  associations: help/error siblings render after Input, too late for their
-  registration to supply its initial attributes. Native help does not register
+  associations: help/error siblings render after Input or NativeSelect, too late
+  for their registration to supply the control's initial attributes. Native help does not register
   with metadata at all. Stable control and part IDs remain application-owned.
 - Help stays a native `p` with the existing prose classes. FieldDescription
   forces daisyUI's `label` class even with `FieldDescriptionAppearance::None`,
   which does not preserve the application's help styling.
 
 Metadata reduces duplication but does not remove all application wiring.
-Checkboxes, textarea, select, and number controls retain their native behavior.
+Checkboxes, textarea, and number controls retain their existing native listeners.
 No installed upstream source was edited for this migration.
 
 The [island adapter](../../../ghinvite-island/README.md#registry-input-integration)
-converts dioform's description binding while preserving commit-on-focus-exit
-timing. See the [browser regression suite](../../../../tests/browser/README.md)
+converts dioform's description and permission bindings through the shared
+`commit_on_focus_exit` helper. Writes preserve their origin; native-change commit
+is ignored, and blur calls `commit()` then `focus_exit()`, including for unchanged
+fields. NativeSelect writes on native input, not native change. See the
+[browser regression suite](../../../../tests/browser/README.md)
 for real-bundle, native POST, accessibility, and mobile coverage.
 
 ## Provenance
@@ -47,17 +67,18 @@ for real-bundle, native POST, accessibility, and mobile coverage.
 | `button/` | `src/components/button/` | `8bfd667ee335b4438f39808d6e9155dc808f18f4` |
 | `alert/` | `src/components/alert/` | `8bfd667ee335b4438f39808d6e9155dc808f18f4` |
 | `input/` | `src/components/input/` | `8bfd667ee335b4438f39808d6e9155dc808f18f4` |
+| `native_select/` | `src/components/native_select/` | `8bfd667ee335b4438f39808d6e9155dc808f18f4` |
 | `field/` | `src/components/field/` | `bb04b3e0d563d21c458fdd050ecd95f671c91408` |
 
-Field is installed transitively at the exact revision declared by Input's
-`component.json`, not at the top-level registry revision. Each installed
+Field is installed transitively at the exact revision declared by both Input's
+and NativeSelect's `component.json`, not at the top-level registry revision. Each installed
 directory contains upstream `component.rs` and `mod.rs`, byte-for-byte unchanged.
 Their Git blob hashes were checked against the respective upstream trees.
 The manifests exclude `component.json`, `README.md`, and `docs/` from installation.
 Use the commit-pinned upstream paths above to consult those authoring files.
 
 The root `mod.rs` is application-owned and contains shared application components,
-the four registry module declarations, and an SSR smoke test. Keep application
+the five registry module declarations, and an SSR smoke test. Keep application
 adaptations outside the replaceable upstream directories.
 
 ## Licenses
@@ -77,7 +98,7 @@ Installed using Dioxus CLI **0.7.9** (`dioxus 0.7.9 (3e43ffa)`). With that versi
 of `dx` on `PATH`, run from `crates/ghinvite-ui`:
 
 ```sh
-dx components add button alert input \
+dx components add button alert input native_select \
   --git https://github.com/sagikazarmark/dioxus-daisyui-components.git \
   --rev 8bfd667ee335b4438f39808d6e9155dc808f18f4 \
   --module-path src/components
@@ -86,6 +107,20 @@ dx components add button alert input \
 This is the initial-install command, for a tree without those component
 directories. If converting the old layout, move `src/components.rs` to
 `src/components/mod.rs` first; do not leave both module files in place.
+
+NativeSelect alone was added to the existing installation with the same CLI at
+`/tmp/opencode/dx`, without `--force` so the existing Field was not overwritten:
+
+```sh
+/tmp/opencode/dx components add native_select \
+  --git https://github.com/sagikazarmark/dioxus-daisyui-components.git \
+  --rev 8bfd667ee335b4438f39808d6e9155dc808f18f4 \
+  --module-path src/components
+```
+
+Its manifest's Field pin matches the existing `bb04b3e0d563d21c458fdd050ecd95f671c91408`.
+Its Cargo dependencies were already present; adding NativeSelect changed neither
+the UI Cargo manifest nor the workspace lockfile.
 
 The installer adds only these two direct dependencies to the UI Cargo manifest:
 
@@ -108,7 +143,7 @@ dx components add field --force \
   --git https://github.com/sagikazarmark/dioxus-daisyui-components.git \
   --rev bb04b3e0d563d21c458fdd050ecd95f671c91408 \
   --module-path src/components
-dx components add button alert input --force \
+dx components add button alert input native_select --force \
   --git https://github.com/sagikazarmark/dioxus-daisyui-components.git \
   --rev 8bfd667ee335b4438f39808d6e9155dc808f18f4 \
   --module-path src/components
@@ -118,7 +153,8 @@ cargo test -p ghinvite-ui
 
 Install Field explicitly first because `dx` skips already-present transitive
 components, even when `--force` overwrites the explicitly requested components.
-For an intentional upgrade, inspect the new Input manifest, replace both commit
+For an intentional upgrade, inspect the new Input and NativeSelect manifests,
+confirm their Field dependency pins agree, replace both commit
 arguments with the reviewed registry and dependency pins, and review all source
 and Cargo changes. Preserve any local work before using `--force`; it replaces
 the selected component directories. Refresh this provenance and the license
@@ -127,7 +163,7 @@ library/preview dependency.
 
 ## API And SSR Notes
 
-- Import through `ghinvite_ui::components::{button, alert, input, field}`.
+- Import through `ghinvite_ui::components::{button, alert, input, field, native_select}`.
   `components::field` is the registry wrapper, distinct from the existing
   application module `ghinvite_ui::field`.
 - Input is the sagikazarmark native, field-aware implementation. `binding` takes
@@ -135,7 +171,14 @@ library/preview dependency.
   Resolution is explicit prop, then Field context, then standalone state. These
   are not dioform bindings; the island enables dioform's `dioxus-field` feature
   and adapts the converted binding for the application's validation timing.
-- `value` is `Option<ReadSignal<String>>`, not a plain string or `Signal<String>`.
+- NativeSelect is generic over the option value type `T`; `binding` takes
+  `Option<dioxus_field::Binding<Option<T>>>`, and controlled `value` takes
+  `Option<ReadSignal<Option<T>>>`. Binding and metadata resolve from explicit
+  props, then Field context, then standalone state. An explicit display value
+  overrides the binding's read, not its writes. Native input maps the option's
+  form string back to `Some(T)` and writes with user origin; empty or unknown
+  strings are ignored. Native change calls commit; focus exit reports blur.
+- Input's `value` is `Option<ReadSignal<String>>`, not a plain string or `Signal<String>`.
   For a signal named `value`, pass `value: Some(value.into())`. A binding can be
   passed as `binding: Some(value.into())` instead. The explicit `value` overrides
   what is displayed but input events still write through the resolved binding;

@@ -66,10 +66,13 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 
 ## Registry Input Integration
 
-The island enables dioform's `dioxus-field` feature and converts the description
-binding to `dioxus_field::Binding<String>`. The adapter delegates writes, including
-their origin, to the original binding. Its native-change commit callback is a
-no-op; focus exit calls `binding.commit()` followed by `binding.focus_exit()`.
+The island enables dioform's `dioxus-field` feature and converts description to
+`dioxus_field::Binding<String>` and permission to
+`dioxus_field::Binding<Option<String>>`. Both adapters use the shared
+`commit_on_focus_exit` helper, created inside the one-time handlers hook.
+It delegates writes, including their origin, to the original binding. Its
+native-change commit callback is a no-op; blur calls `binding.commit()` followed
+by `binding.focus_exit()`.
 This preserves validation when leaving even an unchanged empty field, avoids a
 duplicate commit from native change before blur, and does not add per-keystroke
 validation. Dioform still owns revalidation and stale-error clearing after errors.
@@ -83,12 +86,37 @@ and `aria-invalid`, including `"false"` when valid. FieldLabel and FieldError
 consume the same context; the polite error region stays mounted and is emptied
 on correction.
 
+`LinkFormHandlers::permission` carries the adapted select binding to
+`PermissionSelect`, which supplies registry Field context and `with_meta_values`
+for ID, name, and visible errors. NativeSelect writes through this binding on
+native input, not native change. Its five options have explicit `form_value`
+strings `pull`, `triage`, `push`, `maintain`, and `admin`, so native POSTs never
+submit positional indices. No placeholder or empty option is rendered.
+
+Unlike description's direct bound display, permission uses a controlled,
+prop-derived display memo in both SSR and the browser. Raw unsupported values
+such as `owner` or an empty string remain in dioform for validation while the
+control displays `pull`. Passing the raw invalid value to NativeSelect would
+blank the DOM selection because it writes the value property. The old native
+select omitted `selected` on every option for an unsupported value; the shared
+component now explicitly selects `pull`, preserving first-option display and
+native POST semantics. Mounting or leaving an unchanged field never writes this
+fallback into the model; progressive submit remains blocked until a supported
+input corrects it. Empty or unknown DOM input strings are ignored by NativeSelect.
+
+Permission metadata drives `select-error` and `aria-invalid` (`"false"` when
+valid). Its FieldError at `permission-error` is also an always-mounted polite
+live-region `div` with nested error `div`s, emptied rather than removed on
+correction. First-frame parity tests cover every supported permission and
+unsupported/empty display fallbacks, including explicit selected-option markup.
+
 Stable IDs, native help styling, and explicit `aria-describedby` and
 `aria-errormessage` remain application-owned. Later sibling registration is too
-late for Input's first SSR attributes; native help does not register, and registry
-FieldDescription's forced `label` class is unsuitable for that help text. Other
-controls keep their existing native listeners. Registry source is unchanged;
-pins and replacement boundaries are in the
+late for Input's or NativeSelect's first SSR attributes; native help does not
+register, and registry FieldDescription's forced `label` class is unsuitable for
+that help text. Other controls keep their existing native listeners. Registry
+source is unchanged and NativeSelect adds no new dependencies. Pins and
+replacement boundaries are in the
 [component documentation](../ghinvite-ui/src/components/README.md).
 
 After rebuilding CSS and the island as described in the
@@ -96,7 +124,7 @@ After rebuilding CSS and the island as described in the
 the repository root:
 
 ```bash
-npm test --prefix tests/browser -- --grep 'description validates on focus exit'
+npm test --prefix tests/browser -- --grep 'description validates on focus exit|permission'
 ```
 
 ## Building
@@ -123,8 +151,8 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
-The Field-context migration measured approximately 328 KiB gzipped Wasm + JS,
-up from the 317 KiB registry pilot and 243 KiB pre-registry baseline, below the
+The NativeSelect migration measured approximately 337 KiB gzipped Wasm + JS,
+up from the 328 KiB description Field-context migration and 243 KiB pre-registry baseline, below the
 600 KiB budget. Sizes vary with toolchain and source; the build script reports
 and enforces the current total.
 
@@ -160,6 +188,14 @@ cargo run -p ghinvite-island --example ssr_fixture > dist/public/index.html     
 cargo run -p ghinvite-island --example ssr_fixture -- --with-errors > dist/public/index.html
 python3 -m http.server -d dist/public 8000    # then open http://127.0.0.1:8000/
 ```
+
+The fixture also accepts `--preserved-values` for a rejected description with
+otherwise valid values, or `--permission-only-invalid` for raw `owner` with only
+the permission error and summary. Combine the latter with `--empty-permission`
+for an empty raw value, or `--unvalidated` to omit initial errors and exercise
+unchanged focus-exit validation. These permission fixtures have a valid
+description and selected repository; the browser server exposes them at
+`/permission-invalid`, `/permission-empty`, and `/permission-unvalidated`.
 
 The form posts to `/console/accounts/acme/links`, which a static server 404s;
 that is fine for checking mount, inline validation and blocked submits. **This

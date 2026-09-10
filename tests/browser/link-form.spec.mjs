@@ -5,6 +5,43 @@ const action = '/console/accounts/acme/links';
 const form = (page) => page.locator('#link-form-island form');
 const submit = (page) => page.getByRole('button', { name: 'Create invitation link', exact: true });
 const approval = (page) => page.getByRole('checkbox', { name: /Require account admin approval/ });
+const permissions = ['pull', 'triage', 'push', 'maintain', 'admin'];
+const permissionError = 'Choose a supported permission level: pull, triage, push, maintain, or admin.';
+
+async function expectPermission(page, value, invalid) {
+  const control = page.getByRole('combobox', { name: 'Permission level', exact: true });
+  await expect(control).toHaveValue(value);
+  await expect(control).toHaveAttribute('id', 'permission');
+  await expect(control).toHaveAttribute('name', 'permission');
+  await expect(control).toHaveAttribute('aria-labelledby', 'permission-label');
+  await expect(page.locator('#permission-label')).toHaveAttribute('for', 'permission');
+  await expect(control).toHaveAttribute('aria-invalid', String(invalid));
+  await expect(control).toHaveAttribute('aria-describedby',
+    invalid ? 'permission-help permission-error' : 'permission-help');
+  await expect(control.locator('option')).toHaveText(permissions);
+  expect(await control.locator('option').evaluateAll((options) => options.map((option) => option.value)))
+    .toEqual(permissions);
+  await expect(control.locator('option:checked')).toHaveCount(1);
+  await expect(control.locator('option:checked')).toHaveAttribute('value', value);
+  await expect(control.locator('option[disabled], option[value=""]')).toHaveCount(0);
+  const error = page.locator('#permission-error');
+  await expect(error).toHaveAttribute('aria-live', 'polite');
+  await expect(error).not.toHaveAttribute('hidden');
+  if (invalid) {
+    await expect(control).toHaveClass(/\bselect-error\b/);
+    await expect(control).toHaveAttribute('aria-errormessage', 'permission-error');
+    await expect(error.locator(':scope > div')).toHaveCount(1);
+    await expect(error).toHaveText(permissionError);
+  } else {
+    await expect(control).not.toHaveClass(/\bselect-error\b/);
+    await expect(control).not.toHaveAttribute('aria-errormessage');
+    await expect(error).toBeEmpty();
+  }
+  for (const id of ['permission', 'permission-label', 'permission-help', 'permission-error']) {
+    await expect(page.locator(`[id="${id}"]`)).toHaveCount(1);
+  }
+  await expect(page.locator('[name="permission"]')).toHaveCount(1);
+}
 
 test.beforeEach(async ({ page }, testInfo) => {
   // The app uses a stored preference, not prefers-color-scheme, for its theme.
@@ -173,11 +210,101 @@ test('dioform blocks native-valid whitespace and missing scope, then allows a na
   expect(posts).toHaveLength(1);
 });
 
+for (const [path, raw] of [['/permission-invalid', 'owner'], ['/permission-empty', '']]) {
+  test(`permission ${JSON.stringify(raw)} remains invalid after mount despite displaying pull`, async ({ page }) => {
+    await open(page, path);
+    const posts = [];
+    page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+    const props = JSON.parse(await page.locator('#link-form-props').textContent());
+    expect(props.values.permission).toBe(raw);
+    await expectPermission(page, 'pull', true);
+    expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+    await submit(page).click();
+    await expect(page.locator('#link-form-errors')).toBeVisible();
+    await expectPermission(page, 'pull', true);
+    await expect(page).toHaveURL(path);
+    expect(posts).toEqual([]);
+    // An unchanged native option does not emit input/change. Focus and blur
+    // must not copy the displayed fallback into the still-invalid model.
+    await page.locator('#permission-label').click();
+    await expect(page.locator('#permission')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expectPermission(page, 'pull', true);
+    await submit(page).click();
+    await expect(page).toHaveURL(path);
+    expect(posts).toEqual([]);
+    // Choose another permitted value before pull to generate a real change.
+    await page.locator('#permission').selectOption('triage');
+    await page.locator('#permission').focus();
+    await page.keyboard.press('Tab');
+    await expectPermission(page, 'triage', false);
+    await page.locator('#permission').selectOption('pull');
+    await expectPermission(page, 'pull', false);
+    const data = await post(page);
+    expect(data.getAll('permission')).toEqual(['pull']);
+    expect(posts).toHaveLength(1);
+  });
+}
+
+test('permission validates on unchanged focus exit and ignores malformed DOM input', async ({ page }) => {
+  await open(page, '/permission-unvalidated');
+  await expectPermission(page, 'pull', false);
+  await page.locator('#permission-label').click();
+  await expect(page.locator('#permission')).toBeFocused();
+  await expect(page.locator('#permission-error')).toBeEmpty();
+  await page.keyboard.press('Tab');
+  await expectPermission(page, 'pull', true);
+  for (const raw of ['owner', '', '0']) {
+    // Unknown strings cannot be represented by an option. Neither the empty
+    // DOM value nor an injected input event may silently repair dioform state.
+    await page.locator('#permission').evaluate((select, raw) => {
+      select.value = raw;
+      select.dispatchEvent(new Event('input', { bubbles: true }));
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    }, raw);
+    await expect(page.locator('#permission-error')).toHaveText(permissionError);
+    await submit(page).click();
+    await expect(page).toHaveURL('/permission-unvalidated');
+    await expect(page.locator('#link-form-errors')).toBeVisible();
+  }
+  await page.locator('#permission').selectOption('push');
+  await page.locator('#permission').focus();
+  await page.keyboard.press('Tab');
+  await expectPermission(page, 'push', false);
+  expect((await post(page)).getAll('permission')).toEqual(['push']);
+});
+
 for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
   test.describe(mode, () => {
     if (mode === 'no-js') test.use({ javaScriptEnabled: false });
     test.beforeEach(async ({ page }) => {
       if (mode === 'blocked-bundle') await page.route('**/assets/**', (route) => route.abort('blockedbyclient'));
+    });
+
+    for (const permission of permissions) {
+      test(`permission ${permission} submits its explicit native form value`, async ({ page }) => {
+        await open(page, '/', mode === 'mounted');
+        await expectPermission(page, 'pull', false);
+        await page.locator('#description').fill('Permission workshop');
+        await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+        await page.locator('#permission').selectOption(permission);
+        await page.locator('#permission').focus();
+        await page.keyboard.press('Tab');
+        await expectPermission(page, permission, false);
+        const data = await post(page);
+        expect(data.getAll('permission')).toEqual([permission]);
+      });
+    }
+
+    test('permission keyboard selection updates the native POST value', async ({ page }) => {
+      await open(page, '/', mode === 'mounted');
+      await page.locator('#description').fill('Keyboard workshop');
+      await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+      await page.locator('#permission').focus();
+      await page.keyboard.press('t');
+      await page.keyboard.press('Tab');
+      await expectPermission(page, 'triage', false);
+      expect((await post(page)).getAll('permission')).toEqual(['triage']);
     });
 
     test('preserves failed values and error associations; correction submits the same values', async ({ page }) => {
@@ -220,6 +347,8 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
       await expect(page.locator('#expires_in_days')).toHaveValue('0');
       const props = JSON.parse(await page.locator('#link-form-props').textContent());
       expect(props.values.max_uses).toBe('abc');
+      expect(props.values.permission).toBe('owner');
+      await expectPermission(page, 'pull', true);
       for (const id of ['description', 'permission', 'max_uses', 'expires_in_days']) {
         await expect(page.locator(`#${id}`)).toHaveAttribute('aria-invalid', 'true');
         await expect(page.locator(`#${id}`)).toHaveAttribute('aria-describedby', `${id}-help ${id}-error`);

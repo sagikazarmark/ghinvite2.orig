@@ -2084,6 +2084,75 @@ async fn create_link_missing_permission_key_rerenders_form_with_permission_error
 }
 
 #[tokio::test]
+async fn create_link_malformed_permissions_keep_raw_props_and_never_reach_commands() {
+    for raw in [
+        None,
+        Some(""),
+        Some("owner"),
+        Some("Push"),
+        Some(" pull "),
+        Some("0"),
+    ] {
+        let mut body = url::form_urlencoded::Serializer::new(String::new());
+        body.append_pair("description", "Workshop")
+            .append_pair("repo_ids", "10");
+        if let Some(raw) = raw {
+            body.append_pair("permission", raw);
+        }
+        let (response, calls) = post_create_link(body.finish()).await;
+        assert_eq!(response.status(), StatusCode::OK, "permission={raw:?}");
+        assert!(calls.lock().unwrap().is_empty());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        let props = html
+            .split_once("<script type=\"application/json\" id=\"link-form-props\">")
+            .unwrap()
+            .1
+            .split_once("</script>")
+            .unwrap()
+            .0;
+        let props: ghinvite_ui::link_form::LinkFormIslandProps =
+            serde_json::from_str(props).unwrap();
+        assert_eq!(props.values.permission, raw.unwrap_or_default());
+        assert_eq!(
+            props.values.errors.permission.as_deref(),
+            Some(PERMISSION_UNSUPPORTED)
+        );
+        let select = html
+            .split_once("<select ")
+            .unwrap()
+            .1
+            .split_once("</select>")
+            .unwrap()
+            .0;
+        let (attributes, options) = select.split_once('>').unwrap();
+        for attribute in [
+            "id=\"permission\"",
+            "name=\"permission\"",
+            "aria-invalid=\"true\"",
+            "aria-labelledby=\"permission-label\"",
+            "aria-describedby=\"permission-help permission-error\"",
+            "aria-errormessage=\"permission-error\"",
+        ] {
+            assert!(attributes.contains(attribute), "{attributes}");
+        }
+        assert!(attributes.contains("select-error"));
+        assert_eq!(options.matches("<option ").count(), 5);
+        assert_eq!(options.matches(" selected=true").count(), 1);
+        assert!(options.contains("<option value=\"pull\" selected=true>pull</option>"));
+        assert!(!options.contains("owner"));
+        assert!(!options.contains("value=\"\""));
+        let region = html.split_once("id=\"permission-error\"").unwrap().1;
+        let (attributes, content) = region.split_once('>').unwrap();
+        assert!(attributes.contains("aria-live=\"polite\""));
+        assert!(!attributes.contains("hidden"));
+        assert!(content.starts_with(&format!("<div>{PERMISSION_UNSUPPORTED}</div></div>")));
+        assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
+        assert_description_error_empty(&html);
+    }
+}
+
+#[tokio::test]
 async fn create_link_tampered_permission_rerenders_form_with_permission_error() {
     let (resp, calls) = post_create_link(
         "description=AI+coding+workshop&permission=owner&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
@@ -2130,8 +2199,19 @@ fn assert_description_error_empty(html: &str) {
     assert!(attributes.contains("aria-live=\"polite\""));
     assert!(!attributes.contains("hidden"));
     assert!(content.starts_with("</div>"));
-    assert!(html.contains("aria-invalid=\"false\""));
-    assert!(!html.contains("aria-errormessage="));
+    let input = html
+        .split("<input")
+        .find(|input| {
+            input
+                .split('>')
+                .next()
+                .unwrap()
+                .contains("id=\"description\"")
+        })
+        .unwrap();
+    let attributes = input.split('>').next().unwrap();
+    assert!(attributes.contains("aria-invalid=\"false\""));
+    assert!(!attributes.contains("aria-errormessage="));
 }
 
 #[tokio::test]

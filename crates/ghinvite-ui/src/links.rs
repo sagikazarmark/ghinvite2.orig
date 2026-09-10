@@ -19,9 +19,9 @@
 
 use crate::components::alert::{Alert, AlertColor};
 use crate::components::button::{Button, ButtonColor};
-use crate::field::{
-    ControlHandlers, Field, FieldKind, described_by, error_text, help_text, listeners,
-};
+use crate::components::field::{Field as RegistryField, FieldAppearance, FieldError, FieldLabel};
+use crate::components::native_select::{NativeSelect, NativeSelectOption};
+use crate::field::{ControlHandlers, Field, FieldKind, described_by, error_text, help_text};
 use crate::flash::Flash;
 use crate::layouts::ConsoleLayout;
 use crate::link_form::{
@@ -118,7 +118,7 @@ pub struct LinkFormHandlers {
     pub onsubmit: Option<EventHandler<FormEvent>>,
     pub description: Option<dioxus_field::Binding<String>>,
     pub internal_note: ControlHandlers,
-    pub permission: ControlHandlers,
+    pub permission: Option<dioxus_field::Binding<Option<String>>>,
     pub approval_required: ControlHandlers,
     pub max_uses: ControlHandlers,
     pub expires_in_days: ControlHandlers,
@@ -218,8 +218,7 @@ pub fn LinkCreateForm(
                         value: form.permission.clone(),
                         help: "Use pull for read-only access. Maintain and admin can change repository settings.",
                         error: form.errors.permission.clone(),
-                        onchange: handlers.permission.onchange,
-                        onblur: handlers.permission.onblur,
+                        binding: handlers.permission,
                     }
                     div { class: "alert alert-warning shadow-sm",
                         span { "Review elevated permissions before sharing. Approved invitation requests send GitHub invitations." }
@@ -295,53 +294,72 @@ pub struct PermissionSelectProps {
     /// Form field name submitted with the POST.
     pub name: String,
     /// The level to pre-select. A value that is not one of
-    /// [`PERMISSION_LEVELS`] (a tampered POST) selects nothing and is never
-    /// echoed into the markup; the browser falls back to the first option.
+    /// [`PERMISSION_LEVELS`] (a tampered POST) displays `pull`, matching the
+    /// native first-option fallback, without changing the form model.
     pub value: String,
     pub help: Option<String>,
     /// Field-level error; its presence sets `aria-invalid` and error styling.
     pub error: Option<String>,
-    /// Fired when the selection changes (island only; ignored by SSR).
-    pub onchange: Option<EventHandler<FormEvent>>,
-    /// Fired when focus leaves the select (island only; ignored by SSR).
-    pub onblur: Option<EventHandler<FocusEvent>>,
+    /// Browser form producer; absent during server rendering.
+    pub binding: Option<dioxus_field::Binding<Option<String>>>,
 }
 
 /// The permission-level `<select>`: a labelled control listing exactly the
 /// five supported levels, with help and error wired like [`Field`].
 #[component]
 pub fn PermissionSelect(props: PermissionSelectProps) -> Element {
-    let has_error = props.error.is_some();
     let help_id = format!("{}-help", props.id);
     let error_id = format!("{}-error", props.id);
+    let label_id = format!("{}-label", props.id);
     let described_by = described_by(
         props.help.as_ref().map(|_| help_id.as_str()),
         props.error.as_ref().map(|_| error_id.as_str()),
     );
-    let listeners = listeners(None, props.onchange, props.onblur);
-    let select_class = if has_error {
-        "select select-bordered select-error w-full"
-    } else {
-        "select select-bordered w-full"
+    // NativeSelect writes its value property, so an unmatched value would
+    // blank the control rather than use the browser's first-option fallback.
+    // Normalize display only; the original value must still fail validation.
+    let displayed = use_memo(use_reactive(&props.value, |raw| {
+        Some(if PERMISSION_LEVELS.contains(&raw.as_str()) {
+            raw
+        } else {
+            PERMISSION_LEVELS[0].to_string()
+        })
+    }));
+    let metadata = dioxus_field::FieldMetaValues {
+        id: Some(props.id.into()),
+        name: Some(props.name.into()),
+        errors: props
+            .error
+            .iter()
+            .map(|error| error.as_str().into())
+            .collect(),
+        ..Default::default()
     };
+    let context = props
+        .binding
+        .map_or_else(
+            dioxus_field::FieldContext::empty,
+            dioxus_field::FieldContext::new,
+        )
+        .with_meta_values(metadata);
+    let options = PERMISSION_LEVELS
+        .iter()
+        .map(|&level| NativeSelectOption::new(level.to_string(), level).form_value(level))
+        .collect();
 
     rsx! {
-        div { class: "form-control gap-2",
-            label { class: "label", r#for: "{props.id}", span { class: "label-text font-medium", "Permission level" } }
-            select {
-                id: "{props.id}",
-                name: "{props.name}",
-                class: "{select_class}",
+        RegistryField { context, appearance: FieldAppearance::None, class: "form-control gap-2",
+            FieldLabel { id: label_id, span { class: "label-text font-medium", "Permission level" } }
+            NativeSelect::<String> {
+                options,
+                value: Some(displayed.into()),
+                class: "select-bordered w-full",
+                // Later sibling registrations cannot supply first-pass SSR.
                 aria_describedby: described_by,
-                aria_invalid: if has_error { "true" },
-                ..listeners,
-                {PERMISSION_LEVELS.iter().map(|level| {
-                    let selected = props.value == *level;
-                    rsx! { option { value: "{level}", selected: selected, "{level}" } }
-                })}
+                aria_errormessage: props.error.as_ref().map(|_| error_id.clone()),
             }
             {help_text(&help_id, props.help.as_deref())}
-            {error_text(&error_id, props.error.as_deref())}
+            FieldError { id: error_id, class: "text-sm font-medium" }
         }
     }
 }
@@ -776,8 +794,19 @@ mod tests {
         assert!(attributes.contains("aria-live=\"polite\""));
         assert!(!attributes.contains("hidden"));
         assert!(content.starts_with("</div>"));
-        assert!(html.contains("aria-invalid=\"false\""));
-        assert!(!html.contains("aria-errormessage="));
+        let input = html
+            .split("<input")
+            .find(|input| {
+                input
+                    .split('>')
+                    .next()
+                    .unwrap()
+                    .contains("id=\"description\"")
+            })
+            .unwrap();
+        let attributes = input.split('>').next().unwrap();
+        assert!(attributes.contains("aria-invalid=\"false\""));
+        assert!(!attributes.contains("aria-errormessage="));
     }
 
     // --- island mount points ------------------------------------------------
@@ -979,6 +1008,7 @@ mod tests {
             });
             let wired = crate::testing::render(move || {
                 let description = use_signal(|| form.description.clone());
+                let permission = use_signal(|| Some(form.permission.clone()));
                 let control = || ControlHandlers {
                     oninput: Some(EventHandler::new(|_event: FormEvent| {})),
                     onchange: Some(EventHandler::new(|_event: FormEvent| {})),
@@ -988,7 +1018,7 @@ mod tests {
                     onsubmit: Some(EventHandler::new(|_event: FormEvent| {})),
                     description: Some(description.into()),
                     internal_note: control(),
-                    permission: control(),
+                    permission: Some(permission.into()),
                     approval_required: control(),
                     max_uses: control(),
                     expires_in_days: control(),
@@ -1018,61 +1048,148 @@ mod tests {
     }
 
     #[test]
-    fn permission_select_renders_five_options_help_and_no_error() {
-        let html = crate::testing::render(|| {
-            rsx! {
-                PermissionSelect {
-                    id: "permission".to_string(),
-                    name: "permission".to_string(),
-                    value: "push".to_string(),
-                    help: "Use pull for read-only access.".to_string(),
+    fn permission_select_first_ssr_pass_preserves_every_supported_selection_and_association() {
+        for value in ["pull", "triage", "push", "maintain", "admin"] {
+            for help in [None, Some("Use pull for read-only access.")] {
+                for error in [None, Some("Choose a supported permission level.")] {
+                    let mut vdom = VirtualDom::new_with_props(
+                        move || {
+                            rsx! {
+                                PermissionSelect {
+                                    id: "permission", name: "permission", value,
+                                    help: help.map(str::to_string), error: error.map(str::to_string),
+                                }
+                            }
+                        },
+                        (),
+                    );
+                    // No extra render to let later sibling registrations settle.
+                    vdom.rebuild_in_place();
+                    let html = dioxus_ssr::render(&vdom);
+                    assert_permission_markup(&html, value, help.is_some(), error);
+                    if let Some(help) = help {
+                        assert!(html.contains(&format!(
+                            "<p id=\"permission-help\" class=\"text-sm text-base-content/65\">{help}</p>"
+                        )));
+                    }
                 }
             }
-        });
-
-        assert!(html.starts_with("<div class=\"form-control gap-2\">"));
-        assert!(html.contains("<label class=\"label\" for=\"permission\">"));
-        assert!(html.contains("<span class=\"label-text font-medium\">Permission level</span>"));
-        assert!(html.contains(
-            "<select id=\"permission\" name=\"permission\" class=\"select select-bordered w-full\" aria-describedby=\"permission-help\">"
-        ));
-        assert_eq!(html.matches("<option").count(), 5);
-        assert!(html.contains("<option value=\"pull\">pull</option>"));
-        // Dioxus SSR writes boolean attributes as `name=true`.
-        assert!(html.contains("<option value=\"push\" selected=true>push</option>"));
-        assert!(html.contains(
-            "<p id=\"permission-help\" class=\"text-sm text-base-content/65\">Use pull for read-only access.</p>"
-        ));
-        assert!(!html.contains("permission-error"));
-        assert!(!html.contains("aria-invalid"));
+        }
     }
 
     #[test]
-    fn permission_select_with_error_and_unknown_value_selects_nothing() {
-        let html = crate::testing::render(|| {
-            rsx! {
-                PermissionSelect {
-                    id: "permission".to_string(),
-                    name: "permission".to_string(),
-                    value: "owner".to_string(),
-                    help: "Use pull for read-only access.".to_string(),
-                    error: "Choose a supported permission level.".to_string(),
-                    onchange: move |_event: FormEvent| {},
-                    onblur: move |_event: FocusEvent| {},
+    fn permission_select_invalid_values_display_pull_without_exposing_an_extra_option() {
+        for value in ["owner", "", "Push", " pull "] {
+            let html = crate::testing::render(move || {
+                rsx! {
+                    PermissionSelect {
+                        id: "permission", name: "permission", value,
+                        error: "Choose a supported permission level.",
+                    }
                 }
-            }
-        });
+            });
+            assert_permission_markup(
+                &html,
+                "pull",
+                false,
+                Some("Choose a supported permission level."),
+            );
+            assert!(!html.contains("owner"));
+        }
+    }
 
-        assert!(html.contains(
-            "<select id=\"permission\" name=\"permission\" class=\"select select-bordered select-error w-full\" aria-describedby=\"permission-help permission-error\" aria-invalid=\"true\">"
-        ));
-        assert!(!html.contains("owner"));
-        assert!(!html.contains(" selected"));
-        assert!(html.contains(
-            "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">Choose a supported permission level.</p>"
-        ));
-        assert!(!html.contains("onchange"));
-        assert!(!html.contains("onblur"));
+    fn assert_permission_markup(html: &str, selected: &str, help: bool, error: Option<&str>) {
+        let select = html
+            .split_once("<select ")
+            .unwrap()
+            .1
+            .split_once("</select>")
+            .unwrap()
+            .0;
+        let (attributes, options) = select.split_once('>').unwrap();
+        for attribute in [
+            "id=\"permission\"",
+            "name=\"permission\"",
+            "aria-labelledby=\"permission-label\"",
+        ] {
+            assert!(
+                attributes.contains(attribute),
+                "missing {attribute}: {attributes}"
+            );
+        }
+        assert!(attributes.contains(&format!("aria-invalid=\"{}\"", error.is_some())));
+        let classes = attributes
+            .split_once("class=\"")
+            .unwrap()
+            .1
+            .split('"')
+            .next()
+            .unwrap()
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        for class in ["select", "select-bordered", "w-full"] {
+            assert!(classes.contains(&class));
+        }
+        assert_eq!(classes.contains(&"select-error"), error.is_some());
+        let descriptions = [
+            help.then_some("permission-help"),
+            error.map(|_| "permission-error"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        if descriptions.is_empty() {
+            assert!(!attributes.contains("aria-describedby="));
+        } else {
+            assert!(attributes.contains(&format!("aria-describedby=\"{descriptions}\"")));
+        }
+        assert_eq!(
+            attributes.contains("aria-errormessage=\"permission-error\""),
+            error.is_some()
+        );
+        let label = html
+            .split("<label ")
+            .skip(1)
+            .map(|label| label.split_once('>').unwrap().0)
+            .find(|label| label.contains("id=\"permission-label\""))
+            .unwrap();
+        assert!(label.contains("id=\"permission-label\""));
+        assert!(label.contains("for=\"permission\""));
+        assert!(html.contains("<span class=\"label-text font-medium\">Permission level</span>"));
+        assert_eq!(options.matches("<option ").count(), 5);
+        assert_eq!(options.matches(" selected=true").count(), 1);
+        for level in ["pull", "triage", "push", "maintain", "admin"] {
+            let selection = if level == selected {
+                " selected=true"
+            } else {
+                ""
+            };
+            assert!(
+                options.contains(&format!(
+                    "<option value=\"{level}\"{selection}>{level}</option>"
+                )),
+                "{options}"
+            );
+        }
+        assert!(!options.contains("disabled"));
+        assert!(!options.contains("value=\"\""));
+        assert_eq!(html.contains("id=\"permission-help\""), help);
+        let region = html.split_once("id=\"permission-error\"").unwrap().1;
+        let (attributes, content) = region.split_once('>').unwrap();
+        assert!(attributes.contains("aria-live=\"polite\""));
+        assert!(attributes.contains("text-sm font-medium"));
+        assert!(!attributes.contains("hidden"));
+        if let Some(error) = error {
+            assert!(attributes.contains("text-error"));
+            assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+        } else {
+            assert!(content.starts_with("</div>"));
+        }
+        for id in ["permission", "permission-label", "permission-error"] {
+            assert_eq!(html.matches(&format!(" id=\"{id}\"")).count(), 1);
+        }
+        assert_eq!(html.matches("name=\"permission\"").count(), 1);
     }
 
     #[test]
@@ -1357,8 +1474,7 @@ mod tests {
     fn link_create_form_renders_permission_error_under_select_with_preserved_values() {
         let form = LinkFormValues {
             description: "AI coding workshop".to_string(),
-            // A tampered value: not one of the rendered options, so no option
-            // can be marked selected and the browser falls back to the first.
+            // A tampered value displays pull without repairing the raw model.
             permission: "owner".to_string(),
             approval_required: true,
             max_uses: "7".to_string(),
@@ -1392,9 +1508,12 @@ mod tests {
 
         assert!(html.contains("id=\"link-form-errors\""));
         assert!(html.contains("Fix the highlighted fields before creating this invitation link."));
-        assert!(html.contains(
-            "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">Choose a supported permission level: pull, triage, push, maintain, or admin.</p>"
-        ));
+        assert_permission_markup(
+            &html,
+            "pull",
+            true,
+            Some(crate::link_form::PERMISSION_UNSUPPORTED),
+        );
         assert!(html.contains("aria-describedby=\"permission-help permission-error\""));
         assert!(html.contains("id=\"permission-help\""));
         assert_eq!(html.matches("aria-invalid=\"true\"").count(), 1);
@@ -1407,10 +1526,10 @@ mod tests {
         // The tampered value is never echoed into the form markup (the props
         // blob carries the submitted values verbatim, JSON-escaped, so the
         // island starts from the same state); the select still lists exactly
-        // the five supported levels, none pre-selected.
+        // the five supported levels, with pull explicitly selected.
         assert!(!form_markup(&html).contains("owner"));
         assert_eq!(html.matches("<option").count(), 5);
-        assert!(!html.contains("\" selected"));
+        assert!(html.contains("value=\"pull\" selected=true"));
         assert!(html.contains("value=\"AI coding workshop\""));
         assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
         assert!(html.contains("name=\"max_uses\" value=\"7\""));
@@ -1444,7 +1563,7 @@ mod tests {
         assert!(html.contains("name=\"permission\""));
         assert!(html.contains("id=\"permission-help\""));
         assert!(html.contains("aria-describedby=\"permission-help\""));
-        assert!(!html.contains("permission-error"));
+        assert_permission_markup(&html, "pull", true, None);
         assert!(!html.contains("select-error"));
         assert!(!html.contains("aria-invalid=\"true\""));
         assert_description_error_empty(&html);

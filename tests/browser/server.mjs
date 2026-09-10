@@ -29,7 +29,12 @@ if (!assets.has('/assets/ghinvite-island.js')) {
 }
 
 const pages = new Map();
-for (const [path, args] of [['/', []], ['/failed', ['--with-errors']], ['/preserved', ['--preserved-values']]]) {
+for (const [path, args] of [
+  ['/', []], ['/failed', ['--with-errors']], ['/preserved', ['--preserved-values']],
+  ['/permission-invalid', ['--permission-only-invalid']],
+  ['/permission-empty', ['--permission-only-invalid', '--empty-permission']],
+  ['/permission-unvalidated', ['--permission-only-invalid', '--unvalidated']],
+]) {
   pages.set(path, execFileSync('cargo', [
     'run', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture', '--', ...args,
   ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }));

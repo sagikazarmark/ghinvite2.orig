@@ -5,7 +5,9 @@ Invitation), every page, the `Field` form primitive (`field`), the `Flash`
 message type the layouts render, and the shared form model for the new
 invitation link form (`link_form`). Views consume props without I/O; the registry
 Input reads its binding from Field context when bound, or a prop-derived memo
-for preserved values in unbound SSR.
+for preserved values in unbound SSR. Permission's registry NativeSelect uses
+Field context for writes and metadata, with a controlled display memo in both
+SSR and the browser to handle unsupported values without changing the model.
 
 This crate exists so the views can be built for the browser
 ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). It depends
@@ -51,14 +53,16 @@ markup from the same inputs:
 - `LinkCreateForm { action, form: LinkFormValues, repos, handlers }` — just
   the `<form>`: summary alert, four sections, submit button. `handlers` is an
   optional `links::LinkFormHandlers` (the form's `onsubmit`, a
-  `dioxus_field::Binding<String>` for description,
-  `field::ControlHandlers { oninput, onchange, onblur }` for native controls, and
+  `dioxus_field::Binding<String>` for description and
+  `dioxus_field::Binding<Option<String>>` for permission,
+  `field::ControlHandlers { oninput, onchange, onblur }` for other native controls, and
   `RepositoryScopeHandlers` for the checkbox group); the server uses the default.
 - `field::Field` - text / textarea / number controls; `RegistryText` delegates to
   `RegistryTextField`, using registry Field context, FieldLabel, Input, and
   FieldError while retaining the native help paragraph.
-- `links::PermissionSelect { id, name, value, help, error, onchange, onblur }`
-  — the permission-level `<select>` (`PERMISSION_LEVELS`).
+- `links::PermissionSelect { id, name, value, help, error, binding }` renders
+  the permission-level native `<select>` (`PERMISSION_LEVELS`), using registry
+  Field context, FieldLabel, NativeSelect, native help, and FieldError.
 - `links::RepositoryScopeGroup { name, repos, selected, help, error, onchange, onblur }`
   — the repository checkbox group; `onchange` receives `(repo_id, checked)`.
 
@@ -67,20 +71,36 @@ Server-side rendering emits no listener attributes, so wired and unwired
 markup is byte-identical (tested for each component and for the whole
 `LinkCreateForm`).
 
-The production registry integration is limited to the summary Alert, submit
-Button, and description field. `with_meta_values` supplies explicit control ID,
-name, required state, and errors; metadata drives Input's error color and
-`aria-invalid` (`"false"` when valid), without duplicate Input overrides.
+The production registry integration covers the summary Alert, submit Button,
+description Input, and permission NativeSelect. `with_meta_values` supplies
+explicit control ID, name, and errors, plus required state for description;
+metadata drives `input-error` / `select-error` and `aria-invalid` (`"false"` when
+valid), without duplicate control overrides.
 FieldError is an always-mounted polite live-region `div` with nested error
-`div`s; clearing an error empties the region rather than removing it.
+`div`s for both fields; clearing an error empties `description-error` or
+`permission-error` rather than removing the region.
+
+Permission has exactly five options, with explicit `NativeSelectOption::form_value`
+strings: `pull`, `triage`, `push`, `maintain`, and `admin`. Native POSTs submit
+these strings, never positional indices. There is no placeholder or empty option.
+Unsupported values such as `owner` or an empty string remain verbatim in the
+props and dioform model for validation, but display as `pull`. Previously no
+option had a `selected` attribute for unsupported values, leaving the browser to
+display the first option. Now the shared SSR/island component explicitly selects
+`pull`, preserving display and native POST semantics without silently repairing
+the model. Unlike description's direct bound display, permission always uses a
+controlled memo: NativeSelect writes the DOM value property, so passing an
+unmatched raw value would blank the control. Real NativeSelect input writes
+through the binding; unchanged focus exit does not copy the fallback into it.
 
 The application still owns stable IDs and explicit `aria-describedby` and
-`aria-errormessage`: later sibling registration cannot supply Input's first-pass
-SSR associations, and native help does not register with metadata. The help `p`
+`aria-errormessage`: later sibling registration cannot supply the controls'
+first-pass SSR associations, and native help does not register with metadata. The help `p`
 retains its styling because registry FieldDescription forces the unsuitable
 `label` class even with appearance disabled. Metadata reduces duplication; it
-does not eliminate all application wiring. Native checkboxes, textarea, select,
-and numbers are unchanged, as is installed upstream source. See
+does not eliminate all application wiring. Checkboxes, textarea, and numbers
+keep their existing native listeners; installed upstream source is unchanged.
+NativeSelect adds no new dependencies. See
 [component provenance and update instructions](src/components/README.md) and the
 [island binding adapter](../ghinvite-island/README.md#registry-input-integration).
 

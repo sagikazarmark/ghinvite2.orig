@@ -126,6 +126,72 @@ fn failed_submission_renders_identically() {
 }
 
 #[test]
+fn every_permission_and_display_fallback_renders_identically_on_the_first_pass() {
+    for raw in [
+        "pull", "triage", "push", "maintain", "admin", "owner", "", "Push", " pull ",
+    ] {
+        let supported = ["pull", "triage", "push", "maintain", "admin"].contains(&raw);
+        let values = LinkFormValues {
+            description: "Workshop".into(),
+            permission: raw.into(),
+            selected_repo_ids: vec![10],
+            errors: if supported {
+                LinkFormErrors::default()
+            } else {
+                LinkFormErrors {
+                    summary: vec![link_form::SUMMARY_MESSAGE.into()],
+                    permission: Some(link_form::PERMISSION_UNSUPPORTED.into()),
+                    ..LinkFormErrors::default()
+                }
+            },
+            ..LinkFormValues::default()
+        };
+        let (server, island) = render_both(values, acme_repos());
+        assert_eq!(island, server, "permission={raw:?}");
+        let select = island
+            .split_once("<select ")
+            .unwrap()
+            .1
+            .split_once("</select>")
+            .unwrap()
+            .0;
+        let (attributes, options) = select.split_once('>').unwrap();
+        assert!(attributes.contains("name=\"permission\""));
+        assert!(attributes.contains("aria-labelledby=\"permission-label\""));
+        assert!(attributes.contains(&format!("aria-invalid=\"{}\"", !supported)));
+        assert!(attributes.contains(if supported {
+            "aria-describedby=\"permission-help\""
+        } else {
+            "aria-describedby=\"permission-help permission-error\""
+        }));
+        assert_eq!(
+            attributes.contains("aria-errormessage=\"permission-error\""),
+            !supported
+        );
+        let displayed = if supported { raw } else { "pull" };
+        assert!(options.contains(&format!(
+            "<option value=\"{displayed}\" selected=true>{displayed}</option>"
+        )));
+        assert_eq!(options.matches("<option ").count(), 5);
+        assert_eq!(options.matches(" selected=true").count(), 1);
+        assert!(!options.contains("owner"));
+        assert!(!options.contains("value=\"\""));
+        let region = island.split_once("id=\"permission-error\"").unwrap().1;
+        let (attributes, content) = region.split_once('>').unwrap();
+        assert!(attributes.contains("aria-live=\"polite\""));
+        if supported {
+            assert!(content.starts_with("</div>"));
+        } else {
+            assert!(content.starts_with(&format!(
+                "<div>{}</div></div>",
+                link_form::PERMISSION_UNSUPPORTED
+            )));
+            assert_eq!(island.matches("aria-invalid=\"true\"").count(), 1);
+        }
+    }
+}
+
+#[test]
 fn failed_submission_without_available_repositories_renders_identically() {
     assert_parity(failed_submission(), vec![]);
 }
@@ -174,8 +240,14 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
         "<div>{}</div></div>",
         link_form::DESCRIPTION_REQUIRED
     )));
-    assert!(island.contains(&format!(
-        "<p id=\"permission-error\" class=\"text-sm font-medium text-error\">{}</p>",
+    let region = island.split_once("id=\"permission-error\"").unwrap().1;
+    let (attributes, content) = region.split_once('>').unwrap();
+    assert!(attributes.contains("aria-live=\"polite\""));
+    assert!(attributes.contains("text-error"));
+    assert!(attributes.contains("text-sm font-medium"));
+    assert!(!attributes.contains("hidden"));
+    assert!(content.starts_with(&format!(
+        "<div>{}</div></div>",
         link_form::PERMISSION_UNSUPPORTED
     )));
     assert!(island.contains(&format!(

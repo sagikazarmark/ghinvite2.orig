@@ -26,7 +26,28 @@ use ghinvite_ui::links::LinkCreateFormPage;
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let form = if args.iter().any(|arg| arg == "--preserved-values") {
+    let form = if args.iter().any(|arg| arg == "--permission-only-invalid") {
+        LinkFormValues {
+            description: "Permission workshop".into(),
+            permission: if args.iter().any(|arg| arg == "--empty-permission") {
+                ""
+            } else {
+                "owner"
+            }
+            .into(),
+            selected_repo_ids: vec![10],
+            errors: if args.iter().any(|arg| arg == "--unvalidated") {
+                LinkFormErrors::default()
+            } else {
+                LinkFormErrors {
+                    summary: vec![SUMMARY_MESSAGE.into()],
+                    permission: Some(ghinvite_ui::link_form::PERMISSION_UNSUPPORTED.into()),
+                    ..LinkFormErrors::default()
+                }
+            },
+            ..LinkFormValues::default()
+        }
+    } else if args.iter().any(|arg| arg == "--preserved-values") {
         preserved_submission()
     } else if args.iter().any(|arg| arg == "--with-errors") {
         failed_submission()
