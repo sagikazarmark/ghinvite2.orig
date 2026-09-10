@@ -24,7 +24,8 @@ pub struct WebConfig {
     pub cookie_secure: bool,
     /// Raw bytes of the GitHub App webhook secret. Used by the webhook handler
     /// to verify `X-Hub-Signature-256`. Loaded from Workers secrets in production;
-    /// empty in local dev (webhook delivery not expected locally without ngrok).
+    /// Empty disables webhook reception (503); local deliveries require
+    /// `GHINVITE_WEBHOOK_SECRET` to be set.
     pub webhook_secret: Vec<u8>,
     /// Directory the native binary serves under `/assets/*`: the Dioxus island
     /// bundle (`scripts/build-island.sh` writes it to `dist/public/assets`).

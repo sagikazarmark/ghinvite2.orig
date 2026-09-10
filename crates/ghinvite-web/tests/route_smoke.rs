@@ -32,6 +32,10 @@ fn csp_header(resp: &axum::response::Response) -> Option<String> {
 }
 
 async fn build_test_app() -> axum::Router {
+    build_test_app_with_webhook_secret(b"test-webhook-secret").await
+}
+
+async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
     let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -42,7 +46,11 @@ async fn build_test_app() -> axum::Router {
         Arc::new(MockTransport::scripted(vec![]));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let config = WebConfig {
+        webhook_secret: webhook_secret.to_vec(),
+        ..WebConfig::for_local_dev()
+    };
+    let state = AppState::new(storage, transport, commands, config);
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }
@@ -497,7 +505,7 @@ async fn webhook_route_rejects_missing_signature() {
 
 #[tokio::test]
 async fn webhook_bad_hmac_returns_401() {
-    // A POST with a malformed/wrong HMAC signature must be rejected with 401.
+    // A well-formed but incorrect HMAC signature must be rejected with 401.
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -506,7 +514,7 @@ async fn webhook_bad_hmac_returns_401() {
                 .uri("/webhooks/github")
                 .header(
                     "x-hub-signature-256",
-                    "sha256=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+                    "sha256=0000000000000000000000000000000000000000000000000000000000000000",
                 )
                 .body(Body::from(r#"{"action":"ping"}"#))
                 .unwrap(),
@@ -516,34 +524,116 @@ async fn webhook_bad_hmac_returns_401() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// Verifies that a correctly-signed webhook payload returns 200.
-/// Uses empty secret key — matches `for_local_dev` default where
-/// `GHINVITE_WEBHOOK_SECRET` env var is unset.
+/// A verified ping is acknowledged without contacting Restate.
 #[tokio::test]
-async fn webhook_valid_hmac_returns_ok() {
+async fn webhook_valid_hmac_returns_no_content() {
+    let app = build_test_app().await;
+    let resp = app.oneshot(signed_webhook("ping", "{}")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+}
+
+fn signed_webhook(event: &str, body: &'static str) -> Request<Body> {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
-    let body = r#"{"action":"ping"}"#;
-    let mut mac = Hmac::<Sha256>::new_from_slice(b"").unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"test-webhook-secret").unwrap();
     mac.update(body.as_bytes());
-    let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
-
-    let app = build_test_app().await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/webhooks/github")
-                .header("x-github-event", "ping")
-                .header("x-github-delivery", "test-delivery-id")
-                .header("x-hub-signature-256", &sig)
-                .body(Body::from(body))
-                .unwrap(),
+    Request::builder()
+        .method("POST")
+        .uri("/webhooks/github")
+        .header("content-type", "application/json")
+        .header("x-github-event", event)
+        .header("x-github-delivery", "test-delivery-id")
+        .header(
+            "x-hub-signature-256",
+            format!("sha256={}", hex::encode(mac.finalize().into_bytes())),
         )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn webhook_requires_delivery_event_and_json_content_type() {
+    let app = build_test_app().await;
+    for header in ["x-github-delivery", "x-github-event", "content-type"] {
+        let mut request = signed_webhook("ping", "{}");
+        request.headers_mut().remove(header);
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{header}");
+    }
+    let mut request = signed_webhook("ping", "{}");
+    request.headers_mut().insert(
+        "content-type",
+        "application/x-www-form-urlencoded".parse().unwrap(),
+    );
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn webhook_rejects_malformed_signature() {
+    let mut request = signed_webhook("ping", "{}");
+    request
+        .headers_mut()
+        .insert("x-hub-signature-256", "sha256=invalid".parse().unwrap());
+    let response = build_test_app().await.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn webhook_acknowledges_unhandled_events_and_actions() {
+    let app = build_test_app().await;
+    for (event, body) in [
+        ("future_event", "{}"),
+        ("installation", r#"{"action":"created"}"#),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(signed_webhook(event, body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+}
+
+#[tokio::test]
+async fn webhook_handler_failure_returns_bare_500() {
+    // Unknown installation fails the storage lookup without a Restate call.
+    let request = signed_webhook(
+        "installation_repositories",
+        r#"{"action":"added","installation":{"id":77}}"#,
+    );
+    let response = build_test_app().await.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn webhook_without_configured_secret_is_unavailable() {
+    let response = build_test_app_with_webhook_secret(b"")
+        .await
+        .oneshot(signed_webhook("ping", "{}"))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn webhook_rejects_body_over_two_mib() {
+    let mut request = signed_webhook("ping", "{}");
+    *request.body_mut() = Body::from(vec![b' '; 2 * 1024 * 1024 + 1]);
+    let response = build_test_app().await.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 // --- island assets (native dev only; Workers Static Assets serve these) -----

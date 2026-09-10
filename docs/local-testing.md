@@ -30,6 +30,32 @@ Wait for: `github-stub listening on 0.0.0.0:3001`
 cargo test --workspace
 ```
 
+### GitHub webhooks
+
+`POST /webhooks/github` uses `octoevents` for signature verification, header
+validation, and event dispatch, without `octocrab`. Set a nonempty
+`GHINVITE_WEBHOOK_SECRET` for local webhook delivery; an unset or empty secret
+disables the endpoint with 503.
+
+Deliveries require `Content-Type: application/json`, `X-GitHub-Event`,
+`X-GitHub-Delivery`, and `X-Hub-Signature-256`. Sign the exact request bytes with
+HMAC-SHA256. Successful deliveries (including ping and unhandled events/actions)
+return 204. Missing or mismatched signatures return 401; malformed signatures,
+missing event/delivery headers, and unsupported content types return 400.
+Bodies above 2 MiB return 413. Matched payload decoding or downstream command
+failures return an empty 500 response, with details in tracing logs.
+
+Routes handle `repository_invitation.accepted/declined`, `installation.deleted`,
+and `installation_repositories.added/removed`. GitHub does not automatically
+redeliver failures; redelivery must be requested separately.
+
+The signed HTTP and event-to-command tests run without GitHub or Restate:
+
+```bash
+cargo test -p ghinvite-web --test route_smoke webhook
+cargo test -p ghinvite-web --lib commands::tests
+```
+
 ### Restate integration tests
 
 ```bash

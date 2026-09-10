@@ -22,6 +22,7 @@ dioxus-ssr.workspace = true
 ghinvite-core.workspace = true
 ghinvite-github.workspace = true
 ghinvite-ui.workspace = true
+octoevents.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 reqwest.workspace = true
@@ -56,6 +57,7 @@ tower-sessions-sqlx-store.workspace = true
 # Wasm32 / Workers build: same axum, minus the `tokio` feature.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
+send_wrapper = { version = "0.6", features = ["futures"] }
 
 [dev-dependencies]
 ghinvite-github = { workspace = true, features = ["test-mock"] }

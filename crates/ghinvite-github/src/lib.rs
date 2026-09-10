@@ -1,8 +1,7 @@
 //! GitHub-touching code paths for ghinvite. Two facade clients on top of one
 //! transport: [`oauth::UserApiClient`] (user-token, used by the web binary) and
 //! [`installation::InstallationClient`] (App-JWT → installation token, used by
-//! the Restate Service Worker). [`hmac::verify_signature_256`] is a standalone
-//! helper for the webhook receiver; it does not consume the transport.
+//! the Restate Service Worker). Webhook reception lives in the web crate.
 //!
 //! Every HTTP call funnels through [`transport::HttpTransport`] so impls can be
 //! swapped (production native: [`transport::ReqwestTransport`]; tests:
@@ -12,7 +11,6 @@
 //! the [`transport::HttpTransport`] `Send + Sync + 'static` bound.
 
 pub mod error;
-pub mod hmac;
 pub mod installation;
 pub mod jwt;
 pub mod oauth;

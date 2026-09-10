@@ -5,7 +5,6 @@
 #![cfg(target_arch = "wasm32")]
 
 use crate::error::Error;
-use crate::hmac::verify_signature_256;
 use crate::installation::InstallationClient;
 use crate::jwt::AppJwtSigner;
 use crate::oauth::{AuthorizeUrl, OAuthConfig, UserApiClient};
@@ -27,6 +26,5 @@ pub fn _wasm_link_check(
     _resp: Response,
     _method: Method,
     _err: Error,
-) -> bool {
-    verify_signature_256(b"", b"", "")
+) {
 }
