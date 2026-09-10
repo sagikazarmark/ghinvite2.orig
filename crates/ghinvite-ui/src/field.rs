@@ -18,9 +18,10 @@
 //! markup is byte-identical.
 
 use dioxus::prelude::*;
-use dioxus_field::Binding;
+use dioxus_field::{Binding, FieldContext, FieldMetaValues};
 
-use crate::components::input::{Input, InputColor};
+use crate::components::field::{Field as RegistryField, FieldAppearance, FieldError, FieldLabel};
+use crate::components::input::Input;
 
 /// Which control a [`Field`] renders, together with the constraints that only
 /// make sense for that control. Attributes shared by every kind (`placeholder`,
@@ -56,8 +57,8 @@ pub struct FieldProps {
     pub placeholder: Option<String>,
     /// Help text rendered as `<p id="{id}-help">` under the control.
     pub help: Option<String>,
-    /// Field-level error rendered as `<p id="{id}-error">` under the help text.
-    /// Its presence is what sets `aria-invalid` and the error styling.
+    /// Field-level error under the help text. Native controls render a paragraph;
+    /// registry controls populate an always-mounted live region through metadata.
     pub error: Option<String>,
     /// Fired as the value changes (island only; ignored by SSR).
     pub oninput: Option<EventHandler<FormEvent>>,
@@ -93,13 +94,14 @@ impl ControlHandlers {
 
 /// A labelled form control with optional help text and field-level error.
 ///
-/// Renders one `<div class="form-control">` containing the label, the control,
-/// then help and error paragraphs (each only when present). `aria-invalid` and
-/// `aria-describedby` are derived from which of those paragraphs exist, so the
-/// control markup is written exactly once per kind. Props in, markup out; no
-/// hooks.
+/// Renders the label, control, help and error in that order. Native controls
+/// derive ARIA from their conditional paragraphs. Registry controls delegate to
+/// a separate hook-backed Field context with an always-mounted error region.
 #[component]
 pub fn Field(props: FieldProps) -> Element {
+    if let FieldKind::RegistryText { maxlength } = props.kind {
+        return rsx! { RegistryTextField { field: props, maxlength } };
+    }
     let has_error = props.error.is_some();
     let help_id = format!("{}-help", props.id);
     let error_id = format!("{}-error", props.id);
@@ -110,13 +112,7 @@ pub fn Field(props: FieldProps) -> Element {
     let listeners = listeners(props.oninput, props.onchange, props.onblur);
 
     let control = match &props.kind {
-        FieldKind::RegistryText { maxlength } => rsx! {
-            RegistryTextInput {
-                field: props.clone(),
-                maxlength: *maxlength,
-                described_by,
-            }
-        },
+        FieldKind::RegistryText { .. } => unreachable!(),
         FieldKind::Textarea { rows } => {
             let class = if has_error {
                 "textarea textarea-bordered textarea-error w-full"
@@ -179,27 +175,52 @@ pub fn Field(props: FieldProps) -> Element {
 
 /// Keep registry hooks in their own scope, separate from the native controls.
 #[component]
-fn RegistryTextInput(
-    field: FieldProps,
-    maxlength: Option<u32>,
-    described_by: Option<String>,
-) -> Element {
+fn RegistryTextField(field: FieldProps, maxlength: Option<u32>) -> Element {
     let props = field;
     let value = use_memo(use_reactive(&props.value, |value| value));
+    let help_id = format!("{}-help", props.id);
+    let error_id = format!("{}-error", props.id);
+    let label_id = format!("{}-label", props.id);
+    let described_by = described_by(
+        props.help.as_ref().map(|_| help_id.as_str()),
+        props.error.as_ref().map(|_| error_id.as_str()),
+    );
+    let metadata = FieldMetaValues {
+        id: Some(props.id.into()),
+        name: Some(props.name.into()),
+        required: props.required,
+        errors: props
+            .error
+            .iter()
+            .map(|error| error.as_str().into())
+            .collect(),
+        ..Default::default()
+    };
+    let bound = props.binding.is_some();
+    let context = props
+        .binding
+        .map_or_else(FieldContext::empty, FieldContext::new)
+        .with_meta_values(metadata);
     rsx! {
-        Input {
-            binding: props.binding,
-            value: Some(value.into()),
-            color: if props.error.is_some() { InputColor::Error } else { InputColor::Default },
-            id: props.id,
-            name: props.name,
-            r#type: "text",
-            class: "input-bordered w-full",
-            required: props.required,
-            maxlength: maxlength.map(|limit| limit.to_string()),
-            placeholder: props.placeholder,
-            aria_invalid: if props.error.is_some() { "true" },
-            aria_describedby: described_by,
+        RegistryField { context, appearance: FieldAppearance::None, class: "form-control gap-2",
+            FieldLabel { id: label_id,
+                span { class: "label-text font-medium", "{props.label}" }
+            }
+            Input {
+                // The island reads directly from the binding; only SSR needs
+                // the preserved-value override without a form producer.
+                value: if bound { None } else { Some(value.into()) },
+                r#type: "text",
+                class: "input-bordered w-full",
+                maxlength: maxlength.map(|limit| limit.to_string()),
+                placeholder: props.placeholder,
+                // Later sibling registrations cannot supply first-pass SSR
+                // associations. Keep these explicit until upstream supports it.
+                aria_describedby: described_by,
+                aria_errormessage: props.error.as_ref().map(|_| error_id.clone()),
+            }
+            {help_text(&help_id, props.help.as_deref())}
+            FieldError { id: error_id, class: "text-sm font-medium" }
         }
     }
 }
@@ -301,6 +322,87 @@ pub(crate) fn error_text(id: &str, message: Option<&str>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_text_metadata_is_complete_after_one_rebuild() {
+        for help in [None, Some("Visible only to admins.")] {
+            for error in [None, Some("Description is required.")] {
+                for required in [false, true] {
+                    let mut vdom = VirtualDom::new_with_props(
+                        move || {
+                            rsx! {
+                                Field {
+                                    id: "description",
+                                    name: "admin_description",
+                                    label: "Description",
+                                    kind: FieldKind::RegistryText { maxlength: Some(120) },
+                                    value: "Preserved value",
+                                    required,
+                                    help: help.map(str::to_string),
+                                    error: error.map(str::to_string),
+                                }
+                            }
+                        },
+                        (),
+                    );
+                    // No settling render: later sibling registration must not
+                    // be needed for the server's initial associations.
+                    vdom.rebuild_in_place();
+                    let html = dioxus_ssr::render(&vdom);
+                    let input = html.split_once("<input").unwrap().1;
+                    let input = input.split('>').next().unwrap();
+                    let label = html.split_once("<label").unwrap().1;
+                    let label = label.split('>').next().unwrap();
+                    assert!(input.contains("id=\"description\""), "{html}");
+                    assert!(input.contains("name=\"admin_description\""));
+                    assert!(input.contains("value=\"Preserved value\""));
+                    assert!(input.contains("maxlength=\"120\""));
+                    assert_eq!(input.contains(" required="), required);
+                    assert!(label.contains("id=\"description-label\""));
+                    assert!(label.contains("for=\"description\""));
+                    assert!(html.contains(">Description</span>"));
+                    assert!(input.contains("aria-labelledby=\"description-label\""));
+                    assert!(!input.contains("aria-label="));
+                    assert!(input.contains(&format!("aria-invalid=\"{}\"", error.is_some())));
+                    assert_eq!(input.contains("input-error"), error.is_some());
+                    let expected_description = match (help, error) {
+                        (Some(_), Some(_)) => Some("description-help description-error"),
+                        (Some(_), None) => Some("description-help"),
+                        (None, Some(_)) => Some("description-error"),
+                        (None, None) => None,
+                    };
+                    if let Some(ids) = expected_description {
+                        assert!(input.contains(&format!("aria-describedby=\"{ids}\"")));
+                    } else {
+                        assert!(!input.contains("aria-describedby="));
+                    }
+                    assert_eq!(
+                        input.contains("aria-errormessage=\"description-error\""),
+                        error.is_some()
+                    );
+                    if let Some(help) = help {
+                        assert!(html.contains(&format!("<p id=\"description-help\" class=\"text-sm text-base-content/65\">{help}</p>")));
+                    } else {
+                        assert!(!html.contains("description-help"));
+                    }
+                    let region = html.split_once("id=\"description-error\"").unwrap().1;
+                    let (attributes, content) = region.split_once('>').unwrap();
+                    assert!(attributes.contains("aria-live=\"polite\""));
+                    assert!(attributes.contains("text-error"));
+                    assert!(!attributes.contains("hidden"));
+                    if let Some(error) = error {
+                        assert!(content.starts_with(&format!("<div>{error}</div></div>")));
+                    } else {
+                        assert!(content.starts_with("</div>"));
+                    }
+                    for id in ["description", "description-label", "description-error"] {
+                        assert_eq!(html.matches(&format!(" id=\"{id}\"")).count(), 1);
+                    }
+                    assert_eq!(html.matches("<input").count(), 1);
+                }
+            }
+        }
+    }
 
     fn render<F>(component: F) -> String
     where

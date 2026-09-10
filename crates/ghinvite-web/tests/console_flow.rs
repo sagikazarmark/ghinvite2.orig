@@ -1854,7 +1854,7 @@ async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors(
     assert!(text.contains("aria-describedby=\"max_uses-help max_uses-error\""));
     assert!(text.contains("aria-describedby=\"expires_in_days-help expires_in_days-error\""));
     assert_eq!(text.matches("aria-invalid=\"true\"").count(), 2);
-    assert!(!text.contains("description-error"));
+    assert_description_error_empty(&text);
     assert_preserved_description_input(&text);
     assert!(text.contains("name=\"max_uses\" value=\"abc\""));
     assert!(text.contains("name=\"expires_in_days\" value=\"0\""));
@@ -1983,7 +1983,7 @@ async fn create_link_without_repositories_rerenders_form_with_repository_scope_e
     assert!(text.contains("aria-describedby=\"repo_ids-help repo_ids-error\""));
     // aria-invalid is not permitted on role="group"; no field is invalid here.
     assert_eq!(text.matches("aria-invalid=\"true\"").count(), 0);
-    assert!(!text.contains("description-error"));
+    assert_description_error_empty(&text);
     assert!(!text.contains("Bad Request"));
     assert!(!text.contains("select at least one repository"));
     assert_preserved_description_input(&text);
@@ -2120,8 +2120,18 @@ async fn create_link_tampered_permission_rerenders_form_with_permission_error() 
     assert!(text.contains("Keep this note"));
     assert!(text.contains("value=\"10\" checked"));
     assert!(text.contains("acme/api"));
-    assert!(!text.contains("description-error"));
+    assert_description_error_empty(&text);
     assert!(!text.contains("repo_ids-error"));
+}
+
+fn assert_description_error_empty(html: &str) {
+    let region = html.split_once("id=\"description-error\"").unwrap().1;
+    let (attributes, content) = region.split_once('>').unwrap();
+    assert!(attributes.contains("aria-live=\"polite\""));
+    assert!(!attributes.contains("hidden"));
+    assert!(content.starts_with("</div>"));
+    assert!(html.contains("aria-invalid=\"false\""));
+    assert!(!html.contains("aria-errormessage="));
 }
 
 #[tokio::test]

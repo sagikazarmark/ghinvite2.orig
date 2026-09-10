@@ -75,9 +75,19 @@ duplicate commit from native change before blur, and does not add per-keystroke
 validation. Dioform still owns revalidation and stale-error clearing after errors.
 
 `LinkFormHandlers::description` carries that binding to the original UI `Field`
-wrapper's `RegistryText` variant. Its isolated component derives a controlled
-value memo from props; application labels, IDs, help/error markup, and ARIA remain
-authoritative. Other controls keep their existing native listeners. Registry source
+wrapper's `RegistryText` variant. `RegistryTextField` puts it in registry Field
+context and applies `with_meta_values` for explicit ID, name, required state, and
+visible errors. Bound Input reads that binding directly, with no `value` override;
+only unbound SSR uses a memo for preserved values. Metadata drives error color
+and `aria-invalid`, including `"false"` when valid. FieldLabel and FieldError
+consume the same context; the polite error region stays mounted and is emptied
+on correction.
+
+Stable IDs, native help styling, and explicit `aria-describedby` and
+`aria-errormessage` remain application-owned. Later sibling registration is too
+late for Input's first SSR attributes; native help does not register, and registry
+FieldDescription's forced `label` class is unsuitable for that help text. Other
+controls keep their existing native listeners. Registry source is unchanged;
 pins and replacement boundaries are in the
 [component documentation](../ghinvite-ui/src/components/README.md).
 
@@ -113,9 +123,10 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
-The registry pilot measured approximately 317 KiB gzipped Wasm + JS against a
-243 KiB baseline, below the 600 KiB budget. Sizes vary with toolchain and source;
-the build script reports and enforces the current total.
+The Field-context migration measured approximately 328 KiB gzipped Wasm + JS,
+up from the 317 KiB registry pilot and 243 KiB pre-registry baseline, below the
+600 KiB budget. Sizes vary with toolchain and source; the build script reports
+and enforces the current total.
 
 `[profile.island]` in the root `Cargo.toml` (inherits `release`; `opt-level =
 "z"`, `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`) exists for this

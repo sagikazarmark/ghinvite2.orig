@@ -9,14 +9,31 @@ preview, examples, or CSS is included; the application owns integration and styl
 
 `links::LinkCreateForm` uses the registry Alert for its error summary, Button for
 submission, and Input for the description. The original `ghinvite_ui::field::Field`
-wrapper selects `FieldKind::RegistryText`, whose isolated `RegistryTextInput`
-component keeps hooks separate from native control branches. A prop-derived memo
-supplies the controlled value on both server and client.
+wrapper selects `FieldKind::RegistryText`, whose isolated `RegistryTextField`
+keeps hooks separate from native control branches. It supplies registry Field
+context with explicit ID, name, required state, and errors via `with_meta_values`,
+and renders FieldLabel, Input, native help, and FieldError. Bound Input reads
+directly from the context binding without a `value` override; unbound SSR uses a
+prop-derived memo for preserved values.
 
-The application wrapper still owns labels, existing control/help/error IDs, error
-markup, and ARIA associations. Registry Field parts are not used in production;
-`field/` is installed only as Input's transitive dependency. Checkboxes, textarea,
-select, and number controls retain their native implementation and behavior.
+Metadata supplies Input's ID, name, required state, error color, and
+`aria-invalid` (`"false"` when valid). FieldLabel targets the metadata ID.
+FieldError owns an always-mounted `div` with `aria-live="polite"` and nested
+error `div`s; clearing errors empties it rather than removing the region.
+
+Two upstream limitations keep some wiring application-owned:
+
+- Explicit `aria-describedby` and `aria-errormessage` preserve first-pass SSR
+  associations: help/error siblings render after Input, too late for their
+  registration to supply its initial attributes. Native help does not register
+  with metadata at all. Stable control and part IDs remain application-owned.
+- Help stays a native `p` with the existing prose classes. FieldDescription
+  forces daisyUI's `label` class even with `FieldDescriptionAppearance::None`,
+  which does not preserve the application's help styling.
+
+Metadata reduces duplication but does not remove all application wiring.
+Checkboxes, textarea, select, and number controls retain their native behavior.
+No installed upstream source was edited for this migration.
 
 The [island adapter](../../../ghinvite-island/README.md#registry-input-integration)
 converts dioform's description binding while preserving commit-on-focus-exit

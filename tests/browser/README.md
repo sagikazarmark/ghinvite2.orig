@@ -1,8 +1,9 @@
 # Browser Regression Tests
 
-Playwright tests the registry pilot through the production new invitation link
-page: `LinkCreateFormPage`, the original `Field` wrapper, and the real browser
-island. There is no hand-written substitute UI, mock island, or test-only CSS.
+Playwright tests the registry integration through the production new invitation
+link page: `LinkCreateFormPage`, the application's `Field` wrapper with registry
+Field context, FieldLabel, Input, and FieldError for description, and the real
+browser island. There is no substitute UI, mock island, or test-only CSS.
 The local Node server requires no GitHub login, database, Worker, or Restate.
 
 ## Run
@@ -61,12 +62,19 @@ read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
 ## Coverage
 
 - Successful Wasm mount with one form, no runtime/CSP errors, and real assets.
+- Description validates on focus exit, including an unchanged empty field, not
+  during initial typing. Correct-invalid-correct transitions update metadata's
+  error color and `aria-invalid` (`"false"` when valid), retain unique IDs and
+  label targeting, and update explicit help/error associations.
+- Description's FieldError is an always-mounted polite live-region `div` with
+  nested error `div`s. Correction empties it instead of removing it.
 - Native `required` and `min` constraints block invalid submissions.
 - Whitespace description and missing repository scope pass native constraints
   but are blocked by dioform; correcting them allows a document-navigation POST,
   not fetch/XHR. Tests never bypass constraints with `form.submit()`.
 - Failed values, summary, inline errors, and `aria-describedby`/`aria-invalid`
-  survive mounting. Valid controls are not reset while correcting a failed one.
+  survive mounting, as does description's `aria-errormessage`. Valid controls
+  are not reset while correcting a failed one.
 - JavaScript-disabled and bundle-blocked forms remain usable and submit natively.
 - Label clicks, keyboard Space, repeated repository keys, checked approval and
   unchecked omission, and empty optional numbers keep native behavior.
@@ -76,6 +84,10 @@ read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
 
 Important boundaries:
 
+- These tests cover the application's explicit `aria-describedby` and
+  `aria-errormessage`, not automatic first-pass SSR sibling registration. Input
+  renders before help/error siblings; native help does not register with Field
+  metadata and stays a `p` to avoid FieldDescription's forced `label` styling.
 - Native constraint failures need not show dioform errors: the browser can stop
   before `submit` fires. Tests assert native validity, not validation-popup text.
 - Chromium sanitizes `value="abc"` in a number input to empty. The all-errors
@@ -90,7 +102,7 @@ Important boundaries:
   emits `width=device-width, initial-scale=1`; the fixture does not inject it.
   The responsive test catches a missing viewport meta through navigation and
   control geometry. No claim of physical-device or iOS/WebKit coverage is made.
-- Accessibility checks cover the pilot's names, error wiring, and valid ARIA,
+- Accessibility checks cover the migrated form's names, error wiring, and valid ARIA,
   not a full WCAG/contrast audit. Layout uses geometric assertions rather than
   platform-dependent pixel snapshots. Failure screenshots/traces support review.
 

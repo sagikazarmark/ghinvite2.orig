@@ -74,14 +74,58 @@ test('description validates on focus exit, even unchanged, but not during typing
   await expect(page.locator('#description-error')).toContainText('Description is required.');
   await description.fill('Workshop');
   await page.keyboard.press('Tab');
-  await expect(page.locator('#description-error')).toHaveCount(0);
+  await expect(page.locator('#description-error')).toBeEmpty();
   await open(page);
   await description.fill('Temporary');
   await description.fill('');
   // An untouched field does not show an error while typing, even if emptied.
-  await expect(page.locator('#description-error')).toHaveCount(0);
+  await expect(page.locator('#description-error')).toBeEmpty();
   await page.keyboard.press('Tab');
   await expect(page.locator('#description-error')).toContainText('Description is required.');
+});
+
+test('description metadata and color follow correct-invalid-correct without duplicate associations', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  await open(page);
+  const description = page.getByRole('textbox', { name: 'Description', exact: true });
+  const error = page.locator('#description-error');
+  for (const [value, invalid] of [['Workshop', false], ['   ', true], ['Corrected workshop', false]]) {
+    await description.fill(value);
+    await page.keyboard.press('Tab');
+    await expect(description).toHaveValue(value);
+    await expect(description).toHaveAttribute('id', 'description');
+    await expect(description).toHaveAttribute('name', 'description');
+    await expect(description).toHaveJSProperty('required', true);
+    await expect(description).toHaveAttribute('aria-invalid', String(invalid));
+    await expect(description).toHaveAttribute('aria-labelledby', 'description-label');
+    await expect(description).toHaveAccessibleName('Description');
+    await expect(description).not.toHaveAttribute('aria-label');
+    await expect(description).toHaveAttribute('aria-describedby',
+      invalid ? 'description-help description-error' : 'description-help');
+    await expect(page.locator('#description-label')).toHaveAttribute('for', 'description');
+    await expect(page.locator('p#description-help')).toContainText('Visible only to admins.');
+    await expect(error).toHaveAttribute('aria-live', 'polite');
+    await expect(error).not.toHaveAttribute('hidden');
+    if (invalid) {
+      await expect(description).toHaveAttribute('aria-errormessage', 'description-error');
+      await expect(description).toHaveClass(/\binput-error\b/);
+      await expect(error.locator(':scope > div')).toHaveCount(1);
+      await expect(error).toContainText('Description is required.');
+    } else {
+      await expect(description).not.toHaveAttribute('aria-errormessage');
+      await expect(description).not.toHaveClass(/\binput-error\b/);
+      await expect(error).toBeEmpty();
+    }
+    for (const id of ['description', 'description-label', 'description-help', 'description-error']) {
+      await expect(page.locator(`[id="${id}"]`)).toHaveCount(1);
+    }
+    await expect(page.locator('[name="description"]')).toHaveCount(1);
+  }
+  expect(errors).toEqual([]);
 });
 
 test('native required and minimum constraints block before the submit handler', async ({ page }) => {
@@ -147,7 +191,12 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
       await expect(page.getByRole('checkbox', { name: 'acme/web', exact: true })).toBeChecked();
       await expect(page.getByRole('checkbox', { name: 'acme/docs', exact: true })).toBeChecked();
       await expect(page.locator('#description')).toHaveAttribute('aria-invalid', 'true');
+      await expect(page.getByLabel('Description', { exact: true })).toHaveCount(1);
+      await expect(page.locator('#description-label')).toHaveAttribute('for', 'description');
+      await expect(page.locator('#description')).toHaveAttribute('aria-labelledby', 'description-label');
       await expect(page.locator('#description')).toHaveAttribute('aria-describedby', 'description-help description-error');
+      await expect(page.locator('#description')).toHaveAttribute('aria-errormessage', 'description-error');
+      await expect(page.locator('#description-error')).toHaveAttribute('aria-live', 'polite');
       await expect(page.locator('#description-error')).toContainText('Description is required.');
       await expect(page.locator('#link-form-errors')).toHaveAttribute('role', 'alert');
       await page.locator('#description').fill('Corrected workshop');

@@ -770,6 +770,16 @@ mod tests {
         assert!(!attributes.contains("disabled"));
     }
 
+    fn assert_description_error_empty(html: &str) {
+        let region = html.split_once("id=\"description-error\"").unwrap().1;
+        let (attributes, content) = region.split_once('>').unwrap();
+        assert!(attributes.contains("aria-live=\"polite\""));
+        assert!(!attributes.contains("hidden"));
+        assert!(content.starts_with("</div>"));
+        assert!(html.contains("aria-invalid=\"false\""));
+        assert!(!html.contains("aria-errormessage="));
+    }
+
     // --- island mount points ------------------------------------------------
 
     const APP_SCRIPT: &str = "<script src=\"/static/app.js\"></script>";
@@ -1204,7 +1214,8 @@ mod tests {
         assert!(html.contains("AI coding workshop"));
         assert!(html.contains("aria-describedby=\"description-help\""));
         assert!(html.contains("id=\"description-help\""));
-        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("aria-invalid=\"true\""));
+        assert_description_error_empty(&html);
         assert!(html.contains("aria-describedby=\"internal_note-help\""));
         assert!(html.contains("id=\"internal_note-help\""));
         assert!(html.contains("aria-describedby=\"max_uses-help\""));
@@ -1336,7 +1347,7 @@ mod tests {
         assert!(html.contains("name=\"max_uses\" value=\"abc\""));
         assert!(html.contains("name=\"expires_in_days\" value=\"0\""));
         assert!(html.contains("value=\"AI coding workshop\""));
-        assert!(!html.contains("description-error"));
+        assert_description_error_empty(&html);
         assert!(html.contains("value=\"10\" checked"));
         assert_create_submit_button(&html);
         assert!(!html.contains("disabled"));
@@ -1407,7 +1418,7 @@ mod tests {
         assert!(html.contains("Keep this note"));
         assert!(html.contains("value=\"11\" checked"));
         assert!(!html.contains("value=\"10\" checked"));
-        assert!(!html.contains("description-error"));
+        assert_description_error_empty(&html);
         assert!(!html.contains("repo_ids-error"));
         assert!(!html.contains("input-error"));
         assert_create_submit_button(&html);
@@ -1435,7 +1446,8 @@ mod tests {
         assert!(html.contains("aria-describedby=\"permission-help\""));
         assert!(!html.contains("permission-error"));
         assert!(!html.contains("select-error"));
-        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("aria-invalid=\"true\""));
+        assert_description_error_empty(&html);
         assert!(html.contains("value=\"pull\" selected"));
         assert_eq!(html.matches("<option").count(), 5);
     }
@@ -1475,7 +1487,8 @@ mod tests {
         assert!(html.contains("aria-labelledby=\"repo_ids-label\""));
         assert!(html.contains("aria-describedby=\"repo_ids-help\""));
         assert!(!html.contains("repo_ids-error"));
-        assert!(!html.contains("aria-invalid"));
+        assert!(!html.contains("aria-invalid=\"true\""));
+        assert_description_error_empty(&html);
         assert!(!html.contains("border-error"));
         assert!(!html.contains("value=\"10\" checked"));
         assert!(!html.contains("value=\"11\" checked"));
@@ -1536,7 +1549,7 @@ mod tests {
         // the submitted selection verbatim).
         assert!(!form_markup(&html).contains("999"));
         assert_eq!(html.matches("name=\"repo_ids\"").count(), 2);
-        assert!(!html.contains("description-error"));
+        assert_description_error_empty(&html);
         assert!(!html.contains("input-error"));
         assert_create_submit_button(&html);
         assert!(!html.contains("disabled"));

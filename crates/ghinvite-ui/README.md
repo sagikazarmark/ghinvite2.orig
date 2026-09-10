@@ -4,7 +4,8 @@ Dioxus view components for ghinvite: the three layouts (Home / Console /
 Invitation), every page, the `Field` form primitive (`field`), the `Flash`
 message type the layouts render, and the shared form model for the new
 invitation link form (`link_form`). Views consume props without I/O; the registry
-Input adapter uses a memo to keep its controlled value synchronized with props.
+Input reads its binding from Field context when bound, or a prop-derived memo
+for preserved values in unbound SSR.
 
 This crate exists so the views can be built for the browser
 ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). It depends
@@ -53,8 +54,9 @@ markup from the same inputs:
   `dioxus_field::Binding<String>` for description,
   `field::ControlHandlers { oninput, onchange, onblur }` for native controls, and
   `RepositoryScopeHandlers` for the checkbox group); the server uses the default.
-- `field::Field` - text / textarea / number controls; `RegistryText` uses the
-  registry Input while preserving the application's label/help/error wrapper.
+- `field::Field` - text / textarea / number controls; `RegistryText` delegates to
+  `RegistryTextField`, using registry Field context, FieldLabel, Input, and
+  FieldError while retaining the native help paragraph.
 - `links::PermissionSelect { id, name, value, help, error, onchange, onblur }`
   — the permission-level `<select>` (`PERMISSION_LEVELS`).
 - `links::RepositoryScopeGroup { name, repos, selected, help, error, onchange, onblur }`
@@ -65,9 +67,20 @@ Server-side rendering emits no listener attributes, so wired and unwired
 markup is byte-identical (tested for each component and for the whole
 `LinkCreateForm`).
 
-The production registry pilot is limited to the summary Alert, submit Button,
-and description Input. Registry Field parts are transitive source only; native
-checkboxes, textarea, select, and numbers are unchanged. See
+The production registry integration is limited to the summary Alert, submit
+Button, and description field. `with_meta_values` supplies explicit control ID,
+name, required state, and errors; metadata drives Input's error color and
+`aria-invalid` (`"false"` when valid), without duplicate Input overrides.
+FieldError is an always-mounted polite live-region `div` with nested error
+`div`s; clearing an error empties the region rather than removing it.
+
+The application still owns stable IDs and explicit `aria-describedby` and
+`aria-errormessage`: later sibling registration cannot supply Input's first-pass
+SSR associations, and native help does not register with metadata. The help `p`
+retains its styling because registry FieldDescription forces the unsuitable
+`label` class even with appearance disabled. Metadata reduces duplication; it
+does not eliminate all application wiring. Native checkboxes, textarea, select,
+and numbers are unchanged, as is installed upstream source. See
 [component provenance and update instructions](src/components/README.md) and the
 [island binding adapter](../ghinvite-island/README.md#registry-input-integration).
 

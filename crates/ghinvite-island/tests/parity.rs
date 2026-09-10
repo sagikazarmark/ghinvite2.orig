@@ -164,8 +164,14 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
 
     assert!(island.contains("id=\"link-form-errors\""));
     assert!(island.contains(link_form::SUMMARY_MESSAGE));
-    assert!(island.contains(&format!(
-        "<p id=\"description-error\" class=\"text-sm font-medium text-error\">{}</p>",
+    let region = island.split_once("id=\"description-error\"").unwrap().1;
+    let (attributes, content) = region.split_once('>').unwrap();
+    assert!(attributes.contains("aria-live=\"polite\""));
+    assert!(attributes.contains("text-error"));
+    assert!(attributes.contains("text-sm font-medium"));
+    assert!(!attributes.contains("hidden"));
+    assert!(content.starts_with(&format!(
+        "<div>{}</div></div>",
         link_form::DESCRIPTION_REQUIRED
     )));
     assert!(island.contains(&format!(
@@ -202,6 +208,20 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
         .unwrap();
     assert!(description.contains("name=\"description\""));
     assert!(description.contains("value=\"   \""));
+    assert!(description.contains("required=true"));
+    assert!(description.contains("aria-invalid=\"true\""));
+    assert!(description.contains("input-error"));
+    assert!(description.contains("aria-labelledby=\"description-label\""));
+    assert!(description.contains("aria-describedby=\"description-help description-error\""));
+    assert!(description.contains("aria-errormessage=\"description-error\""));
+    for id in [
+        "description",
+        "description-label",
+        "description-help",
+        "description-error",
+    ] {
+        assert_eq!(island.matches(&format!(" id=\"{id}\"")).count(), 1);
+    }
     assert!(island.contains("name=\"approval_required\" value=\"true\" checked"));
     assert!(island.contains(">Keep this note</textarea>"));
     // Tampered values never reach the markup.
