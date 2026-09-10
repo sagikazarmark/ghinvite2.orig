@@ -66,7 +66,7 @@ pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "New invitation link · {login}",
             account_login: Some(props.account_login.clone()),
-            active_nav: Some("new-link".to_string()),
+            active_nav: Some("links".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6 flex flex-col gap-2",
@@ -492,7 +492,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
             signed_in_login: props.signed_in_login.clone(),
             title: "{description} · {login}",
             account_login: Some(props.account_login.clone()),
-            active_nav: Some("overview".to_string()),
+            active_nav: Some("links".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
                 header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",

@@ -50,7 +50,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
     } else {
         "app-nav-row flex w-full items-center"
     };
-    let new_link_side = if active_nav == "new-link" {
+    let links_side = if active_nav == "links" {
         "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
         "app-nav-row flex w-full items-center"
@@ -85,7 +85,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                 aside { class: "console-sidebar hidden shrink-0 flex-col md:flex",
                     nav { class: "flex-1 space-y-1 p-3 text-sm",
                         a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                        a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New invitation link" }
+                        a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
                         a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
                         a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
                         a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
@@ -103,7 +103,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                     nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
                         div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
                             a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
-                            a { class: "{new_link_side}", href: "/console/accounts/{login}/links/new", aria_current: if active_nav == "new-link" { "page" } else { "false" }, "New invitation link" }
+                            a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
                             a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
                             a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
                             a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
@@ -273,6 +273,67 @@ mod tests {
         assert!(html.contains("Audit log"));
         assert!(html.contains("Pending requests"));
         assert!(!html.contains("rounded-box border border-base-300 bg-base-100 p-3 shadow-sm"));
+    }
+
+    #[test]
+    fn console_navigation_links_to_collection_and_marks_only_current_section() {
+        for (section, destination) in [
+            (Some("links"), Some("/console/accounts/acme/links")),
+            (Some("overview"), Some("/console/accounts/acme")),
+            (Some("requests"), Some("/console/accounts/acme/requests")),
+            (Some("audit"), Some("/console/accounts/acme/audit")),
+            (Some("settings"), Some("/console/accounts/acme/settings")),
+            (None, None),
+        ] {
+            let html = crate::testing::render(move || {
+                rsx! {
+                    ConsoleLayout {
+                        signed_in_login: Some("admin".to_string()),
+                        title: "Console".to_string(),
+                        account_login: Some("acme".to_string()),
+                        active_nav: section.map(str::to_string),
+                        flash: None,
+                        children: rsx! { p { "Content" } },
+                    }
+                }
+            });
+
+            for marker in ["console-sidebar", "mobile-console-nav"] {
+                let nav = html
+                    .split_once(marker)
+                    .unwrap()
+                    .1
+                    .split_once("</nav>")
+                    .unwrap()
+                    .0;
+                assert!(!nav.contains("/links/new"));
+                assert!(!nav.contains("New invitation link"));
+                let anchors: Vec<_> = nav
+                    .split("<a ")
+                    .skip(1)
+                    .map(|anchor| anchor.split_once("</a>").unwrap().0)
+                    .collect();
+                assert!(anchors.iter().any(|anchor| {
+                    anchor.contains("href=\"/console/accounts/acme/links\"")
+                        && anchor.ends_with(">Links")
+                }));
+                assert_eq!(anchors.len(), 5);
+                for anchor in anchors {
+                    let current = destination
+                        .is_some_and(|href| anchor.contains(&format!("href=\"{href}\"")));
+                    assert_eq!(
+                        anchor.contains("aria-current=\"page\""),
+                        current,
+                        "{marker}: {anchor}"
+                    );
+                    assert_eq!(
+                        anchor.contains("app-nav-row-active"),
+                        current,
+                        "{marker}: {anchor}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

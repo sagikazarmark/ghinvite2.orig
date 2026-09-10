@@ -162,6 +162,45 @@ mod tests {
     }
 
     #[test]
+    fn overview_links_to_active_and_all_collections_and_preserves_creation() {
+        for recent_links in [vec![], vec![sample_link()]] {
+            let html = crate::testing::render(move || {
+                rsx! {
+                    OverviewPage {
+                        signed_in_login: Some("admin".to_string()),
+                        flash: None,
+                        account_login: "acme".to_string(),
+                        account_type: AccountType::Organization,
+                        pending_requests: 0,
+                        active_links: 1,
+                        recent_links: recent_links.clone(),
+                        now: Utc::now(),
+                    }
+                }
+            });
+            let summary = html
+                .split("<a ")
+                .skip(1)
+                .find(|anchor| {
+                    anchor
+                        .split_once("</a>")
+                        .unwrap()
+                        .0
+                        .contains("Active invitation links")
+                })
+                .unwrap();
+            assert!(summary.contains("href=\"/console/accounts/acme/links?filter=active\""));
+            let recent = html.split_once("Recent invitation links</h2>").unwrap().1;
+            assert!(
+                recent.contains("href=\"/console/accounts/acme/links?filter=all\">View all</a>")
+            );
+            assert!(
+                html.contains("href=\"/console/accounts/acme/links/new\">New invitation link</a>")
+            );
+        }
+    }
+
+    #[test]
     fn overview_page_uses_glossary_account_type_label() {
         let html = crate::testing::render(|| {
             rsx! {
@@ -318,7 +357,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                             p { class: "text-sm font-medium", "Review queue" }
                             p { class: "mt-1 text-sm text-base-content/65", "{props.pending_requests} pending invitation requests need an account admin decision." }
                         }
-                        a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/links/new",
+                        a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/links?filter=active",
                             p { class: "text-sm font-medium", "Active invitation links" }
                             p { class: "mt-1 text-sm text-base-content/65", "{props.active_links} active invitation links can accept invitation requests." }
                         }
@@ -327,7 +366,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                 section { class: "mac-panel compact-table overflow-hidden",
                     div { class: "flex items-center justify-between border-b border-base-300 px-4 py-3",
                         h2 { class: "text-sm font-semibold", "Recent invitation links" }
-                        a { class: "btn btn-ghost btn-xs h-7 min-h-0", href: "/console/accounts/{login}/links/new", "Create link" }
+                        a { class: "btn btn-ghost btn-xs h-7 min-h-0", href: "/console/accounts/{login}/links?filter=all", "View all" }
                     }
                     {if props.recent_links.is_empty() {
                         rsx! {

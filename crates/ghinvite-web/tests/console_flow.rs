@@ -558,6 +558,7 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
 
     let (status, html) = get_links(&app, &cookie, "?account_id=9002&login=other").await;
     assert_eq!(status, StatusCode::OK);
+    assert_links_navigation_current(&html);
     assert!(html.contains("Workshop 001</a>"));
     assert!(!html.contains("Other account secret"));
     assert!(html.contains("<form method=\"get\" action=\"/console/accounts/acme/links\""));
@@ -568,6 +569,34 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     assert!(html.contains("0 / unlimited"));
     assert!(html.contains("No expiration"));
     assert!(html.contains("href=\"/console/accounts/acme/links/new\""));
+}
+
+#[tokio::test]
+async fn link_detail_selects_links_but_missing_links_have_no_current_section() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+
+    let (status, html) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Workshop 001</h1>"));
+    assert_links_navigation_current(&html);
+
+    for id in [
+        "not-an-id".to_string(),
+        ghinvite_core::InvitationLinkId::new().to_string(),
+    ] {
+        let (status, html) = get_links(&app, &cookie, &format!("/{id}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(html.contains("console-frame"));
+        assert!(!html.contains("aria-current=\"page\""));
+        assert!(!html.contains("app-nav-row-active"));
+    }
 }
 
 #[tokio::test]
@@ -680,6 +709,7 @@ async fn links_collection_distinguishes_empty_account_from_empty_filter() {
     let (status, empty) = get_links(&app, &cookie, "?page=5").await;
     assert_eq!(status, StatusCode::OK);
     assert!(empty.contains("No invitation links yet"));
+    assert_links_navigation_current(&empty);
     assert!(!empty.contains("No invitation links match"));
     assert!(!empty.contains(">Previous</a>"));
 
@@ -688,6 +718,7 @@ async fn links_collection_distinguishes_empty_account_from_empty_filter() {
     storage.insert_invitation_link(&link).await.unwrap();
     let (_, filtered) = get_links(&app, &cookie, "").await;
     assert!(filtered.contains("No invitation links match this filter"));
+    assert_links_navigation_current(&filtered);
     assert!(!filtered.contains("No invitation links yet"));
     assert!(filtered.contains("filter=all&#38;sort=created&#38;direction=desc&#38;page=1"));
     assert!(filtered.contains("href=\"/console/accounts/acme/links/new\""));
@@ -718,6 +749,7 @@ async fn links_collection_load_failure_is_not_an_empty_account() {
         get_links(&app, &cookie, "?filter=all&sort=uses&direction=asc&page=2").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(html.contains("Invitation links could not be loaded"));
+    assert_links_navigation_current(&html);
     assert!(html.contains("Try again"));
     assert!(html.contains("filter=all&#38;sort=uses&#38;direction=asc&#38;page=2"));
     assert!(!html.contains("No invitation links yet"));
@@ -726,6 +758,29 @@ async fn links_collection_load_failure_is_not_an_empty_account() {
     drop(app);
     drop(storage);
     std::fs::remove_file(path).unwrap();
+}
+
+fn assert_links_navigation_current(html: &str) {
+    for marker in ["console-sidebar", "mobile-console-nav"] {
+        let nav = html
+            .split_once(marker)
+            .unwrap()
+            .1
+            .split_once("</nav>")
+            .unwrap()
+            .0;
+        let current: Vec<_> = nav
+            .split("<a ")
+            .skip(1)
+            .map(|anchor| anchor.split_once("</a>").unwrap().0)
+            .filter(|anchor| anchor.contains("aria-current=\"page\""))
+            .collect();
+        assert_eq!(current.len(), 1, "{marker} must have one current section");
+        assert!(current[0].contains("href=\"/console/accounts/acme/links\""));
+        assert!(current[0].contains("app-nav-row-active"));
+        assert!(current[0].ends_with(">Links"));
+        assert!(!nav.contains("/links/new"));
+    }
 }
 
 fn list_link(n: u32) -> ghinvite_core::InvitationLink {
@@ -1127,6 +1182,59 @@ async fn console_audit_page_for_admin_renders_coming_soon_state() {
 }
 
 #[tokio::test]
+async fn console_overview_keeps_five_recent_links_and_opens_filtered_collections() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    for n in 1..=6 {
+        let mut link = list_link(n);
+        if n % 2 == 0 {
+            link.revoked_at = Some(link.created_at);
+        }
+        storage.insert_invitation_link(&link).await.unwrap();
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_eq!(html.matches("Workshop ").count(), 5);
+    assert!(!html.contains("Workshop 001"));
+    assert!(html.find("Workshop 006").unwrap() < html.find("Workshop 002").unwrap());
+    assert!(html.contains("3 active invitation links can accept invitation requests."));
+    assert!(html.contains("href=\"/console/accounts/acme/links?filter=active\""));
+    assert!(html.contains("href=\"/console/accounts/acme/links?filter=all\">View all</a>"));
+    assert!(html.contains("href=\"/console/accounts/acme/links/new\">New invitation link</a>"));
+    assert_eq!(
+        html.matches("href=\"/console/accounts/acme\" aria-current=\"page\"")
+            .count(),
+        2
+    );
+
+    let (status, active) = get_links(&app, &cookie, "?filter=active").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(active.matches("Workshop ").count(), 3);
+    assert!(!active.contains("Workshop 006"));
+    let (status, all) = get_links(&app, &cookie, "?filter=all").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(all.matches("Workshop ").count(), 6);
+    assert!(all.contains("Workshop 001"));
+    assert!(all.contains("Workshop 006"));
+}
+
+#[tokio::test]
 async fn console_overview_carries_csp_and_only_external_script() {
     let (app, cookie) = build_signed_in_admin_app().await;
     let resp = app
@@ -1188,6 +1296,8 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
+
+    assert_links_navigation_current(&text);
 
     // Island root wraps the form.
     assert!(text.contains(
@@ -1325,6 +1435,7 @@ async fn create_link_invalid_description_rerenders_form_with_errors_and_preserve
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("New invitation link"));
+    assert_links_navigation_current(&text);
     assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
     assert!(text.contains("Description is required. Use short, single-line admin-only context for this invitation link."));
     assert!(text.contains("aria-invalid=\"true\""));
