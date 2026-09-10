@@ -385,6 +385,41 @@ impl Storage for D1Storage {
         .await
     }
 
+    async fn update_invitation_link_metadata(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+        description: &str,
+        internal_note: Option<&str>,
+    ) -> Result<()> {
+        let id_str = id.to_string();
+        wasm_send(async {
+            let result = self
+                .db
+                .prepare(
+                    "UPDATE invitation_links SET description = ?1, internal_note = ?2
+                     WHERE account_id = ?3 AND id = ?4",
+                )
+                .bind(&[
+                    JsValue::from_str(description),
+                    internal_note
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    JsValue::from_f64(account_id as f64),
+                    JsValue::from_str(&id_str),
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            if rows_changed(&result)? == 0 {
+                return Err(ghinvite_core::storage::Error::NotFound);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     async fn mark_invitation_link_revoked(
         &self,
         id: InvitationLinkId,
@@ -882,14 +917,20 @@ impl Storage for D1Storage {
             .map(JsValue::from_str)
             .unwrap_or(JsValue::null());
 
+        let mut sql = String::from(
+            "INSERT INTO audit_events
+               (id, account_id, occurred_at, event_type, actor_kind, actor_id,
+                target_kind, target_id, metadata, request_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        );
+        // Only metadata commands supply a journaled, replay-stable event ID.
+        if event.event_type == ghinvite_core::audit::EventType::InvitationLinkMetadataUpdated {
+            sql.push_str(" ON CONFLICT(id) DO NOTHING");
+        }
+
         wasm_send(async {
             self.db
-                .prepare(
-                    "INSERT INTO audit_events
-                       (id, account_id, occurred_at, event_type, actor_kind, actor_id,
-                        target_kind, target_id, metadata, request_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                )
+                .prepare(&sql)
                 .bind(&[
                     JsValue::from_str(&id_str),
                     JsValue::from_f64(account_id as f64),

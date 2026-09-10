@@ -11,6 +11,7 @@ use ghinvite_web::commands::{
     CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
     OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
     RevokeInvitationLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
+    UpdateInvitationLinkMetadata,
 };
 use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 use http_body_util::BodyExt;
@@ -123,10 +124,35 @@ enum RecordedCommand {
 #[derive(Default)]
 struct RecordingCommands {
     calls: Arc<Mutex<Vec<RecordedCommand>>>,
+    edit_storage: Option<Arc<ghinvite_storage_sqlx::SqlxStorage>>,
+    fail_edits: bool,
 }
 
 #[async_trait::async_trait]
 impl GhinviteCommands for RecordingCommands {
+    async fn update_invitation_link_metadata(
+        &self,
+        command: UpdateInvitationLinkMetadata,
+    ) -> ghinvite_web::Result<()> {
+        if self.fail_edits {
+            return Err(ghinvite_web::WebError::Restate(
+                "service unavailable".into(),
+            ));
+        }
+        assert_eq!(command.by_user, 42);
+        self.edit_storage
+            .as_ref()
+            .expect("unexpected metadata update")
+            .update_invitation_link_metadata(
+                command.account_id,
+                command.link_id,
+                &command.description,
+                command.internal_note.as_deref(),
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn create_invitation_link(
         &self,
         command: CreateInvitationLink,
@@ -572,6 +598,265 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
 }
 
 #[tokio::test]
+async fn edit_link_lookup_failure_preserves_submitted_input() {
+    let path = std::env::temp_dir().join(format!(
+        "ghinvite-edit-{}.sqlite",
+        ghinvite_core::InvitationLinkId::new()
+    ));
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query("DROP TABLE invitation_link_repos")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=%20Keep+my+description%20&internal_note=Keep%0Amy+note",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("value=\" Keep my description \""));
+    assert!(html.contains(">Keep\nmy note</textarea>"));
+    assert!(html.contains("Failed to load invitation link details. Please try again."));
+    assert_links_navigation_current(&html);
+    pool.close().await;
+    drop(app);
+    drop(storage);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn edit_link_errors_preserve_input_and_do_not_change_details() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    for description in [
+        "".to_string(),
+        "%20%20".into(),
+        "Workshop%0Acohort".into(),
+        "x".repeat(121),
+    ] {
+        // The command fake panics if invalid input reaches the save boundary.
+        let response = post_edit(
+            &app,
+            &cookie,
+            &link.id.to_string(),
+            &format!("description={description}&internal_note=%20Keep%0Athis%20"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert_links_navigation_current(&html);
+        assert!(html.contains("aria-invalid=\"true\""));
+        assert!(html.contains("description-help description-error"));
+        assert!(html.contains("> Keep\nthis </textarea>"));
+    }
+    let commands = Arc::new(RecordingCommands {
+        fail_edits: true,
+        ..Default::default()
+    });
+    let mut expectations = oauth_expectations();
+    // The session layer does not persist the authorization cache on a 502.
+    expectations.push(Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user/memberships/orgs/acme",
+        serde_json::json!({"role": "admin", "state": "active"}),
+    ));
+    let state = AppState::new(
+        storage.clone(),
+        Arc::new(MockTransport::scripted(expectations)),
+        commands,
+        WebConfig::for_local_dev(),
+    );
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let response = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=%20New+details%20&internal_note=%20Keep%0Athis%20",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert_links_navigation_current(&html);
+    assert!(html.contains("Failed to save invitation link details. Please try again."));
+    assert!(html.contains("value=\" New details \""));
+    assert!(html.contains("> Keep\nthis </textarea>"));
+    assert!(!html.contains("aria-invalid"));
+    let (_, detail) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
+    assert!(detail.contains("Workshop 001</h1>"));
+    assert!(!detail.contains("New details"));
+}
+
+#[tokio::test]
+async fn edit_link_get_and_post_require_account_admin_and_hide_foreign_links() {
+    let app = build_test_app().await;
+    for method in ["GET", "POST"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri("/console/accounts/acme/links/missing/edit")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("description=New"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            response.headers()["location"]
+                .to_str()
+                .unwrap()
+                .starts_with("/login?return_to=")
+        );
+    }
+    for role in ["admin", "member"] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let (app, cookie) = links_app(storage.clone(), role).await;
+        let mut foreign = list_link(1);
+        foreign.account_id = 9002;
+        foreign.installation_id = 78;
+        foreign.description = "Foreign private context".into();
+        storage.insert_invitation_link(&foreign).await.unwrap();
+        let own = list_link(2);
+        storage.insert_invitation_link(&own).await.unwrap();
+        let mut ids = vec![
+            foreign.id.to_string(),
+            "invalid".into(),
+            ghinvite_core::InvitationLinkId::new().to_string(),
+        ];
+        if role == "member" {
+            ids.push(own.id.to_string());
+        }
+        for id in ids {
+            let (status, html) = get_links(&app, &cookie, &format!("/{id}/edit")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert!(!html.contains("Foreign private context"));
+            assert!(!html.contains("aria-current=\"page\""));
+            let response =
+                post_edit(&app, &cookie, &id, "description=Changed&account_id=9002").await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_link_save_normalizes_metadata_and_keeps_guardrails() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let commands = Arc::new(RecordingCommands {
+        edit_storage: Some(storage.clone()),
+        ..Default::default()
+    });
+    let (app, cookie) = links_app_with_commands(storage.clone(), "admin", commands).await;
+    let mut link = list_link(1);
+    link.max_uses = Some(8);
+    link.uses_count = 3;
+    link.revoked_at = Some(link.created_at);
+    link.internal_note = Some("Old private note".into());
+    storage.insert_invitation_link(&link).await.unwrap();
+    for (note, expected) in [("%20New%0Anote%20", Some("New\nnote")), ("%20%20", None)] {
+        let response = post_edit(&app, &cookie, &link.id.to_string(), &format!("description=%20Updated+workshop%20&internal_note={note}&permission=admin&max_uses=999&uses_count=0&revoked_at=&account_id=9002&by_user=999")).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()["location"],
+            format!("/console/accounts/acme/links/{}", link.id)
+        );
+        let (status, detail) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(detail.contains("Updated workshop</h1>"));
+        assert!(detail.contains("Invitation link details updated."));
+        assert!(detail.contains("3 / 8"));
+        assert!(detail.contains("inactive"));
+        assert!(!detail.contains("Old private note"));
+        if let Some(expected) = expected {
+            assert!(detail.contains(expected));
+        } else {
+            assert!(!detail.contains("New\nnote"));
+        }
+    }
+    let (_, list) = get_links(&app, &cookie, "?filter=all").await;
+    assert!(list.contains("Updated workshop</a>"));
+}
+
+async fn post_edit(
+    app: &axum::Router,
+    cookie: &str,
+    id: &str,
+    body: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/console/accounts/acme/links/{id}/edit"))
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn edit_link_form_prefills_metadata_for_inactive_links() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let mut link = list_link(1);
+    link.internal_note = Some("Private note\nSecond line".into());
+    link.revoked_at = Some(link.created_at);
+    storage.insert_invitation_link(&link).await.unwrap();
+    let (status, html) = get_links(&app, &cookie, &format!("/{}/edit", link.id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_links_navigation_current(&html);
+    assert!(html.contains("value=\"Workshop 001\""));
+    assert!(html.contains(">Private note\nSecond line</textarea>"));
+    assert!(html.contains(&format!(
+        "action=\"/console/accounts/acme/links/{}/edit\"",
+        link.id
+    )));
+    assert!(html.contains(&format!(
+        "href=\"/console/accounts/acme/links/{}\">Cancel</a>",
+        link.id
+    )));
+}
+
+#[tokio::test]
 async fn link_detail_selects_links_but_missing_links_have_no_current_section() {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -809,6 +1094,14 @@ async fn links_app(
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     role: &str,
 ) -> (axum::Router, String) {
+    links_app_with_commands(storage, role, Arc::new(RecordingCommands::default())).await
+}
+
+async fn links_app_with_commands(
+    storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
+    role: &str,
+    commands: Arc<dyn GhinviteCommands>,
+) -> (axum::Router, String) {
     for (installation_id, account_id, login) in [(77, 9001, "acme"), (78, 9002, "other")] {
         storage
             .insert_installation(&Account {
@@ -824,15 +1117,18 @@ async fn links_app(
             .unwrap();
     }
     let mut expectations = oauth_sign_in_expectations();
-    expectations.push(Expectation::ok_json(
-        Method::Get,
-        "https://api.github.com/user/memberships/orgs/acme",
-        serde_json::json!({"role": role, "state": "active"}),
-    ));
+    // Rejected membership checks are not saved in the authorization cache.
+    for _ in 0..if role == "admin" { 1 } else { 8 } {
+        expectations.push(Expectation::ok_json(
+            Method::Get,
+            "https://api.github.com/user/memberships/orgs/acme",
+            serde_json::json!({"role": role, "state": "active"}),
+        ));
+    }
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(RecordingCommands::default()),
+        commands,
         WebConfig::for_local_dev(),
     );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await

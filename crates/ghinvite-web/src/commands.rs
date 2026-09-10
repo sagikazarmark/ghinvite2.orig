@@ -13,6 +13,10 @@ pub trait GhinviteCommands: Send + Sync + 'static {
         &self,
         command: CreateInvitationLink,
     ) -> Result<CreateInvitationLinkOutput>;
+    async fn update_invitation_link_metadata(
+        &self,
+        command: UpdateInvitationLinkMetadata,
+    ) -> Result<()>;
     async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()>;
     async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()>;
     async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()>;
@@ -33,6 +37,7 @@ pub trait GhinviteCommands: Send + Sync + 'static {
 
 const INVITATION_LINK_SERVICE: &str = "InvitationLink";
 const CREATE_INVITATION_LINK_METHOD: &str = "create";
+const UPDATE_INVITATION_LINK_METADATA_METHOD: &str = "update_metadata";
 const REVOKE_INVITATION_LINK_METHOD: &str = "revoke";
 const INVITATION_REQUEST_SERVICE: &str = "InvitationRequest";
 const SUBMIT_INVITATION_REQUEST_METHOD: &str = "submit";
@@ -114,6 +119,21 @@ where
                 INVITATION_LINK_SERVICE,
                 &key,
                 CREATE_INVITATION_LINK_METHOD,
+                &command,
+            )
+            .await
+    }
+
+    async fn update_invitation_link_metadata(
+        &self,
+        command: UpdateInvitationLinkMetadata,
+    ) -> Result<()> {
+        let key = invitation_link_command_key(command.account_id);
+        self.restate
+            .call(
+                INVITATION_LINK_SERVICE,
+                &key,
+                UPDATE_INVITATION_LINK_METADATA_METHOD,
                 &command,
             )
             .await
@@ -246,6 +266,15 @@ pub struct CreateInvitationLink {
 pub struct CreateInvitationLinkOutput {
     pub link_id: ghinvite_core::InvitationLinkId,
     pub slug: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateInvitationLinkMetadata {
+    pub account_id: u64,
+    pub link_id: ghinvite_core::InvitationLinkId,
+    pub by_user: u64,
+    pub description: String,
+    pub internal_note: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -912,6 +941,13 @@ mod tests {
             panic!("unexpected create_invitation_link command")
         }
 
+        async fn update_invitation_link_metadata(
+            &self,
+            _command: UpdateInvitationLinkMetadata,
+        ) -> Result<()> {
+            panic!("unexpected update_invitation_link_metadata command")
+        }
+
         async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> Result<()> {
             panic!("unexpected revoke_invitation_link command")
         }
@@ -1451,6 +1487,48 @@ mod tests {
                 "created_at": "2026-05-20T11:00:00Z"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn update_invitation_link_metadata_calls_restate_with_all_fields_and_unit_output() {
+        let (base, calls) = spawn_restate_empty_call_recorder().await;
+        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
+        let link_id = ghinvite_core::InvitationLinkId::new();
+
+        for internal_note in [Some("team onboarding\nupdated context"), None] {
+            let () = commands
+                .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
+                    account_id: 9001,
+                    link_id,
+                    by_user: 42,
+                    description: "Updated workshop".into(),
+                    internal_note: internal_note.map(str::to_owned),
+                })
+                .await
+                .unwrap();
+        }
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        for (call, internal_note) in calls
+            .iter()
+            .zip([Some("team onboarding\nupdated context"), None])
+        {
+            assert_eq!(call.service, "InvitationLink");
+            assert_eq!(call.key, "9001");
+            assert_eq!(call.method, "update_metadata");
+            assert!(!call.send);
+            assert_eq!(
+                call.body,
+                serde_json::json!({
+                    "account_id": 9001,
+                    "link_id": link_id.to_string(),
+                    "by_user": 42,
+                    "description": "Updated workshop",
+                    "internal_note": internal_note,
+                })
+            );
+        }
     }
 
     #[tokio::test]

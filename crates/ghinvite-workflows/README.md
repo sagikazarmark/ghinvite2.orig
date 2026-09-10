@@ -64,6 +64,12 @@ Audit events go through `audit::emit(state, account_id, event_type, actor,
 target, metadata, request_id)`, which constructs an `AuditEvent` and calls
 `Storage::audit`. Every state-change handler emits exactly one audit event.
 
+Metadata updates prepare and journal their changed field names, audit ID, and
+timestamp before applying the write. They construct the event from that snapshot
+and call `Storage::audit` directly so retries reuse the same identity. Storage
+deduplicates this event type by ID; unchanged metadata produces no event. Audit
+metadata includes field names only, never description or internal-note values.
+
 See `docs/superpowers/plans/2026-05-04-ghinvite-restate-handlers.md` for the
 implementation plan, and `docs/superpowers/specs/2026-05-04-ghinvite-v1-design.md`
 §9 for the workflow specifications.

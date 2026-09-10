@@ -20,6 +20,7 @@ pub mod flash;
 pub mod home;
 pub mod invitation;
 pub mod layouts;
+pub mod link_edit;
 pub mod link_form;
 pub mod link_list;
 pub mod links;

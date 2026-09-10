@@ -500,7 +500,10 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                         h1 { class: "text-2xl font-bold", "{description}" }
                         p { class: "text-sm text-base-content/70", "Invitation code: ", span { class: "font-mono", "{slug}" } }
                     }
-                    span { class: "{badge_class}", "{badge_label}" }
+                    div { class: "flex items-center gap-3",
+                        span { class: "{badge_class}", "{badge_label}" }
+                        a { class: "btn btn-outline btn-sm", href: "/console/accounts/{login}/links/{id_str}/edit", "Edit details" }
+                    }
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "border-b border-base-300 px-4 py-3",
@@ -634,6 +637,60 @@ mod tests {
                     repo_full_name: "acme/web".into(),
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn link_detail_offers_edit_details_for_active_expired_exhausted_and_revoked_links() {
+        let now = dt("2026-05-04T12:00:00Z");
+        for state in ["active", "expired", "exhausted", "revoked"] {
+            let mut link = sample_link();
+            match state {
+                "expired" => link.expires_at = Some(now),
+                "exhausted" => link.uses_count = 5,
+                "revoked" => {
+                    link.revoked_at = Some(now);
+                    link.revoked_by = Some(701);
+                }
+                _ => {}
+            }
+            let id = link.id;
+            let html = crate::testing::render(move || {
+                rsx! {
+                    LinkDetailPage {
+                        signed_in_login: Some("admin".to_string()),
+                        flash: None,
+                        account_login: "acme",
+                        link: link.clone(),
+                        now,
+                        invitation_url: "https://ghinvite.test/i/abcdEFGH01234567",
+                    }
+                }
+            });
+
+            assert!(
+                html.contains(&format!(
+                    "href=\"/console/accounts/acme/links/{id}/edit\">Edit details</a>"
+                )),
+                "{state} link must remain editable"
+            );
+            assert_eq!(html.matches(">Edit details</a>").count(), 1);
+            if state == "active" {
+                assert!(html.contains(&format!(
+                    "<form method=\"post\" action=\"/console/accounts/acme/links/{id}/revoke\">"
+                )));
+                assert!(html.contains("href=\"#stop-link-modal\">Stop accepting new requests</a>"));
+                assert!(html.contains(
+                    "<button type=\"submit\" class=\"btn btn-error\">Confirm stop</button>"
+                ));
+            } else {
+                assert!(!html.contains("/revoke"));
+                assert!(
+                    html.contains(
+                        "This invitation link is no longer accepting invitation requests."
+                    )
+                );
+            }
         }
     }
 

@@ -69,6 +69,42 @@ impl SqlxStorage {
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
+    /// Test-only fault injection for exercising durable audit retries against
+    /// real storage. Use with `in_memory()`'s single-connection pool because
+    /// SQLite temporary triggers are connection-local.
+    #[cfg(feature = "test-util")]
+    pub async fn debug_set_audit_failure(&self, fail: bool) -> Result<()> {
+        let sql = if fail {
+            "CREATE TEMP TRIGGER fail_audit BEFORE INSERT ON audit_events
+             BEGIN SELECT RAISE(FAIL, 'injected audit failure'); END"
+        } else {
+            "DROP TRIGGER fail_audit"
+        };
+        sqlx::query(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
+    /// Simulate a committed audit insert whose acknowledgement was lost.
+    /// SQLite's AFTER-trigger RAISE(FAIL) leaves the inserted row intact.
+    /// Like `debug_set_audit_failure`, requires the single-connection test pool.
+    #[cfg(feature = "test-util")]
+    pub async fn debug_set_audit_ack_loss(&self, fail: bool) -> Result<()> {
+        let sql = if fail {
+            "CREATE TEMP TRIGGER lose_audit_ack AFTER INSERT ON audit_events
+             BEGIN SELECT RAISE(FAIL, 'injected audit acknowledgement loss'); END"
+        } else {
+            "DROP TRIGGER lose_audit_ack"
+        };
+        sqlx::query(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
     /// Run the embedded migrations.
     pub async fn run_migrations(&self) -> Result<()> {
         // sqlx::migrate! is a proc-macro that requires a string LITERAL — not a const.
@@ -340,6 +376,30 @@ impl Storage for SqlxStorage {
             .map_err(crate::to_db_err)?;
         }
         tx.commit().await.map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
+    async fn update_invitation_link_metadata(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+        description: &str,
+        internal_note: Option<&str>,
+    ) -> Result<()> {
+        let res = sqlx::query(
+            "UPDATE invitation_links SET description = ?1, internal_note = ?2
+             WHERE account_id = ?3 AND id = ?4",
+        )
+        .bind(description)
+        .bind(internal_note)
+        .bind(u64_to_i64(account_id))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        if res.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
         Ok(())
     }
 
@@ -702,27 +762,33 @@ impl Storage for SqlxStorage {
             Some(serde_json::to_string(&event.metadata).expect("audit metadata serializes"))
         };
 
-        sqlx::query(
+        let mut sql = String::from(
             r#"
             INSERT INTO audit_events
               (id, account_id, occurred_at, event_type, actor_kind, actor_id,
                target_kind, target_id, metadata, request_id)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
-        )
-        .bind(event.id.to_string())
-        .bind(u64_to_i64(event.account_id))
-        .bind(event.occurred_at)
-        .bind(event.event_type.as_str())
-        .bind(event.actor_kind.to_string())
-        .bind(event.actor_id.map(u64_to_i64))
-        .bind(event.target_kind.to_string())
-        .bind(&event.target_id)
-        .bind(metadata_json)
-        .bind(event.request_id.as_deref())
-        .execute(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
+        );
+        // Metadata commands journal their event ID before writing. Ignore only
+        // that primary-key replay, not other constraints or database failures.
+        if event.event_type == ghinvite_core::audit::EventType::InvitationLinkMetadataUpdated {
+            sql.push_str(" ON CONFLICT(id) DO NOTHING");
+        }
+        sqlx::query(&sql)
+            .bind(event.id.to_string())
+            .bind(u64_to_i64(event.account_id))
+            .bind(event.occurred_at)
+            .bind(event.event_type.as_str())
+            .bind(event.actor_kind.to_string())
+            .bind(event.actor_id.map(u64_to_i64))
+            .bind(event.target_kind.to_string())
+            .bind(&event.target_id)
+            .bind(metadata_json)
+            .bind(event.request_id.as_deref())
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
         Ok(())
     }
 }
@@ -1463,6 +1529,35 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], e1);
         assert_eq!(got[1], e2);
+    }
+
+    #[tokio::test]
+    async fn audit_metadata_deduplicates_only_primary_key_and_leaves_other_events_unchanged() {
+        use ghinvite_core::audit::EventType;
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let event = sample_audit(100, EventType::InvitationLinkMetadataUpdated, "link");
+        s.audit(&event).await.unwrap();
+        s.audit(&event).await.unwrap();
+        assert_eq!(s.debug_list_audit(100).await.unwrap(), vec![event.clone()]);
+
+        // A test-only constraint exercises an unrelated unique failure rather
+        // than relying on today's production schema having another unique key.
+        sqlx::query("CREATE UNIQUE INDEX test_audit_request_id ON audit_events(request_id)")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        let conflicting = AuditEvent {
+            id: ghinvite_core::AuditEventId::new(),
+            ..event.clone()
+        };
+        let err = s.audit(&conflicting).await.unwrap_err();
+        assert!(matches!(err, Error::Database(_)));
+        assert_eq!(s.debug_list_audit(100).await.unwrap(), vec![event]);
+
+        let mut other = sample_audit(100, EventType::InvitationLinkCreated, "link");
+        other.request_id = None;
+        s.audit(&other).await.unwrap();
+        assert!(matches!(s.audit(&other).await, Err(Error::Database(_))));
     }
 
     #[tokio::test]

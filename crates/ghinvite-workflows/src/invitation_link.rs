@@ -1,4 +1,4 @@
-//! `InvitationLink` Virtual Object: create, revoke, tick_expiration.
+//! `InvitationLink` Virtual Object: create, update_metadata, revoke, tick_expiration.
 
 use crate::audit::{Actor, Target};
 use crate::state::AppState;
@@ -43,6 +43,25 @@ pub struct RevokeLinkInput {
     pub when: DateTime<Utc>,
 }
 
+/// Account-admin command; metadata is validated and normalized by the server.
+#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
+pub struct UpdateLinkMetadataInput {
+    pub account_id: u64,
+    pub link_id: InvitationLinkId,
+    pub by_user: u64,
+    pub description: String,
+    pub internal_note: Option<String>,
+}
+
+/// Journaled before writing so audit retries retain field names and event identity.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PreparedMetadataUpdate {
+    input: UpdateLinkMetadataInput,
+    changed_fields: Vec<String>,
+    audit_id: ghinvite_core::AuditEventId,
+    occurred_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct TickExpirationInput {
     pub link_id: InvitationLinkId,
@@ -55,6 +74,9 @@ pub trait InvitationLink {
         input: Json<CreateLinkInput>,
     ) -> std::result::Result<Json<CreateLinkOutput>, TerminalError>;
     async fn revoke(input: Json<RevokeLinkInput>) -> std::result::Result<(), TerminalError>;
+    async fn update_metadata(
+        input: Json<UpdateLinkMetadataInput>,
+    ) -> std::result::Result<(), TerminalError>;
     async fn tick_expiration(
         input: Json<TickExpirationInput>,
     ) -> std::result::Result<(), TerminalError>;
@@ -65,6 +87,31 @@ pub struct InvitationLinkImpl {
 }
 
 impl InvitationLink for InvitationLinkImpl {
+    async fn update_metadata(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<UpdateLinkMetadataInput>,
+    ) -> std::result::Result<(), TerminalError> {
+        let Json(input) = input;
+        let request_id = Some(ctx.invocation_id().to_string());
+        let Json(prepared) = ctx
+            .run(|| async {
+                prepare_metadata_update(&self.state, ctx.key(), &input)
+                    .await
+                    .map(Json)
+                    .map_err(crate::error::to_sdk_handler_error)
+            })
+            .name("prepare_metadata_update")
+            .await?;
+        ctx.run(|| async {
+            apply_metadata_update(&self.state, &prepared, request_id.clone())
+                .await
+                .map_err(crate::error::to_sdk_handler_error)
+        })
+        .name("update_metadata")
+        .await
+    }
+
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
@@ -115,6 +162,76 @@ impl InvitationLink for InvitationLinkImpl {
         .name("tick_expiration")
         .await
     }
+}
+
+/// Verify the account scope and snapshot changed field names before any write.
+/// The trusted web caller authorizes `by_user` as a current account admin.
+/// The Restate object must be keyed by `account_id.to_string()`.
+pub async fn prepare_metadata_update(
+    state: &AppState,
+    object_key: &str,
+    input: &UpdateLinkMetadataInput,
+) -> crate::error::Result<PreparedMetadataUpdate> {
+    if object_key != input.account_id.to_string() {
+        return Err(ghinvite_core::storage::Error::NotFound.into());
+    }
+    let link = state
+        .storage
+        .get_invitation_link_by_id(input.link_id)
+        .await?
+        .filter(|link| link.account_id == input.account_id)
+        .ok_or(ghinvite_core::storage::Error::NotFound)?;
+    let mut changed_fields = Vec::new();
+    if link.description != input.description {
+        changed_fields.push("description".into());
+    }
+    if link.internal_note != input.internal_note {
+        changed_fields.push("internal_note".into());
+    }
+    Ok(PreparedMetadataUpdate {
+        input: input.clone(),
+        changed_fields,
+        audit_id: ghinvite_core::AuditEventId::new(),
+        occurred_at: Utc::now(),
+    })
+}
+
+/// Apply a journaled command and audit it. Retry with the SAME prepared snapshot
+/// after transient failure, never recompute changed fields from the updated row.
+pub async fn apply_metadata_update(
+    state: &AppState,
+    prepared: &PreparedMetadataUpdate,
+    request_id: Option<String>,
+) -> crate::error::Result<()> {
+    let input = &prepared.input;
+    state
+        .storage
+        .update_invitation_link_metadata(
+            input.account_id,
+            input.link_id,
+            &input.description,
+            input.internal_note.as_deref(),
+        )
+        .await?;
+    if prepared.changed_fields.is_empty() {
+        return Ok(());
+    }
+    state
+        .storage
+        .audit(&ghinvite_core::audit::AuditEvent {
+            id: prepared.audit_id,
+            occurred_at: prepared.occurred_at,
+            account_id: input.account_id,
+            event_type: EventType::InvitationLinkMetadataUpdated,
+            actor_kind: ghinvite_core::audit::ActorKind::User,
+            actor_id: Some(input.by_user),
+            target_kind: ghinvite_core::audit::TargetKind::InvitationLink,
+            target_id: input.link_id.to_string(),
+            metadata: serde_json::json!({"changed_fields": prepared.changed_fields}),
+            request_id,
+        })
+        .await?;
+    Ok(())
 }
 
 /// Pure logic: generate a slug, write the link + repos rows, emit audit.
@@ -324,6 +441,422 @@ mod tests {
         account_id: u64,
     ) -> Vec<ghinvite_core::audit::AuditEvent> {
         storage.debug_list_audit(account_id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn metadata_update_changes_only_metadata_and_audits_field_names() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let mut expected = state
+            .storage
+            .get_invitation_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: "Corrected private description".into(),
+            internal_note: Some("Corrected private\nnote".into()),
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        apply_metadata_update(&state, &prepared, Some("req-metadata".into()))
+            .await
+            .unwrap();
+        expected.description = input.description;
+        expected.internal_note = input.internal_note;
+        assert_eq!(
+            state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap(),
+            Some(expected)
+        );
+
+        let events = audit_events(&storage, 100).await;
+        assert_eq!(events.len(), 2);
+        let event = &events[1];
+        assert_eq!(event.event_type, EventType::InvitationLinkMetadataUpdated);
+        assert_eq!(
+            serde_json::to_value(event.event_type).unwrap(),
+            "invitation_link.metadata_updated"
+        );
+        assert_eq!(event.account_id, 100);
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::InvitationLink);
+        assert_eq!(event.target_id, out.link_id.to_string());
+        assert_eq!(event.request_id.as_deref(), Some("req-metadata"));
+        assert_eq!(
+            event.metadata,
+            serde_json::json!({"changed_fields": ["description", "internal_note"]})
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_update_replay_after_success_keeps_exactly_one_audit_event() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: "Corrected private description".into(),
+            internal_note: None,
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        let journal = serde_json::to_vec(&prepared).unwrap();
+        apply_metadata_update(&state, &prepared, Some("req-replay".into()))
+            .await
+            .unwrap();
+        let first_events = audit_events(&storage, 100).await;
+        assert_eq!(first_events.len(), 2);
+
+        let replayed = serde_json::from_slice(&journal).unwrap();
+        apply_metadata_update(&state, &replayed, Some("req-replay".into()))
+            .await
+            .unwrap();
+        assert_eq!(audit_events(&storage, 100).await, first_events);
+    }
+
+    #[tokio::test]
+    async fn metadata_update_replays_after_audit_insert_acknowledgement_loss() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: "Corrected private description".into(),
+            internal_note: None,
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        let journal = serde_json::to_vec(&prepared).unwrap();
+        storage.debug_set_audit_ack_loss(true).await.unwrap();
+        let err = apply_metadata_update(&state, &prepared, Some("req-ack-loss".into()))
+            .await
+            .unwrap_err();
+        assert!(!err.is_terminal());
+        let committed_events = audit_events(&storage, 100).await;
+        assert_eq!(
+            committed_events.len(),
+            2,
+            "audit insert committed despite error"
+        );
+        let event = &committed_events[1];
+        assert_eq!(event.event_type, EventType::InvitationLinkMetadataUpdated);
+        assert_eq!(
+            event.metadata,
+            serde_json::json!({"changed_fields": ["description", "internal_note"]})
+        );
+
+        storage.debug_set_audit_ack_loss(false).await.unwrap();
+        let replayed = serde_json::from_slice(&journal).unwrap();
+        apply_metadata_update(&state, &replayed, Some("req-ack-loss".into()))
+            .await
+            .unwrap();
+        assert_eq!(audit_events(&storage, 100).await, committed_events);
+    }
+
+    #[tokio::test]
+    async fn metadata_update_retries_audit_with_journaled_fields_after_write_succeeds() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: sample_input().description,
+            internal_note: None,
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        // Simulate Restate persisting the preparation before the transition runs.
+        let journal = serde_json::to_vec(&prepared).unwrap();
+        state
+            .storage
+            .insert_invitation_request_and_increment_uses(&ghinvite_core::InvitationRequest {
+                id: ghinvite_core::RequestId::new(),
+                invitation_link_id: out.link_id,
+                requester_id: 7,
+                justification: None,
+                state: ghinvite_core::RequestState::Pending,
+                decided_by: None,
+                decided_at: None,
+                decline_reason: None,
+                created_at: dt("2026-05-04T12:30:00Z"),
+            })
+            .await
+            .unwrap();
+        state
+            .storage
+            .mark_invitation_link_revoked(out.link_id, 7, dt("2026-05-04T13:00:00Z"))
+            .await
+            .unwrap();
+        let mut expected = state
+            .storage
+            .get_invitation_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        expected.internal_note = None;
+
+        storage.debug_set_audit_failure(true).await.unwrap();
+        let err = apply_metadata_update(&state, &prepared, Some("req-retry".into()))
+            .await
+            .unwrap_err();
+        assert!(!err.is_terminal(), "audit failure must be retried");
+        assert_eq!(
+            state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap(),
+            Some(expected.clone())
+        );
+        assert_eq!(audit_events(&storage, 100).await.len(), 1);
+
+        storage.debug_set_audit_failure(false).await.unwrap();
+        let replayed: PreparedMetadataUpdate = serde_json::from_slice(&journal).unwrap();
+        apply_metadata_update(&state, &replayed, Some("req-retry".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap(),
+            Some(expected)
+        );
+        let events = audit_events(&storage, 100).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[1].event_type,
+            EventType::InvitationLinkMetadataUpdated
+        );
+        assert_eq!(
+            events[1].metadata,
+            serde_json::json!({"changed_fields": ["internal_note"]})
+        );
+        assert_eq!(events[1].request_id.as_deref(), Some("req-retry"));
+    }
+
+    #[tokio::test]
+    async fn metadata_update_conceals_missing_foreign_links_and_wrong_object_keys() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let before = state
+            .storage
+            .get_invitation_link_by_id(out.link_id)
+            .await
+            .unwrap();
+        for (object_key, account_id, link_id) in [
+            ("100", 100, InvitationLinkId::new()),
+            ("200", 200, out.link_id),
+            ("200", 100, out.link_id),
+        ] {
+            let input = UpdateLinkMetadataInput {
+                account_id,
+                link_id,
+                by_user: 7,
+                description: "Forbidden edit".into(),
+                internal_note: None,
+            };
+            let err = prepare_metadata_update(&state, object_key, &input)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                HandlerError::Storage(ghinvite_core::storage::Error::NotFound)
+            ));
+            assert!(err.is_terminal());
+            assert_eq!(err.to_string(), "not found");
+        }
+        assert_eq!(
+            state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap(),
+            before
+        );
+        assert_eq!(audit_events(&storage, 100).await.len(), 1);
+        assert!(audit_events(&storage, 200).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metadata_update_noop_succeeds_without_audit_and_single_field_edits_are_precise() {
+        let (state, storage) = fixture_state_with_storage().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let mut input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: sample_input().description,
+            internal_note: sample_input().internal_note,
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        apply_metadata_update(&state, &prepared, None)
+            .await
+            .unwrap();
+        assert_eq!(audit_events(&storage, 100).await.len(), 1);
+
+        input.description = "Description only".into();
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        apply_metadata_update(&state, &prepared, None)
+            .await
+            .unwrap();
+        let events = audit_events(&storage, 100).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[1].metadata,
+            serde_json::json!({"changed_fields": ["description"]})
+        );
+
+        input.internal_note = None;
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        apply_metadata_update(&state, &prepared, None)
+            .await
+            .unwrap();
+        input.internal_note = Some("New private\nnote".into());
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        apply_metadata_update(&state, &prepared, None)
+            .await
+            .unwrap();
+        let events = audit_events(&storage, 100).await;
+        assert_eq!(events.len(), 4);
+        for event in &events[2..] {
+            assert_eq!(
+                event.metadata,
+                serde_json::json!({"changed_fields": ["internal_note"]})
+            );
+        }
+        let link = state
+            .storage
+            .get_invitation_link_by_id(out.link_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.description, "Description only");
+        assert_eq!(link.internal_note.as_deref(), Some("New private\nnote"));
+    }
+
+    #[tokio::test]
+    async fn metadata_update_accepts_each_inactive_state_without_reactivation() {
+        for inactive in ["expired", "exhausted", "revoked"] {
+            let (state, storage) = fixture_state_with_storage().await;
+            seed_installation_and_user(&state).await;
+            let mut creation = sample_input();
+            creation.expires_at = if inactive == "expired" {
+                Some(dt("2020-01-01T00:00:00Z"))
+            } else {
+                None
+            };
+            creation.max_uses = if inactive == "exhausted" {
+                Some(0)
+            } else {
+                None
+            };
+            let out = create_logic(&state, &creation, None).await.unwrap();
+            if inactive == "revoked" {
+                state
+                    .storage
+                    .mark_invitation_link_revoked(out.link_id, 7, dt("2026-05-04T13:00:00Z"))
+                    .await
+                    .unwrap();
+            }
+            let mut expected = state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!expected.is_active(Utc::now()), "{inactive}");
+            // Guardrail fields submitted by an untrusted form are not command fields.
+            let input: UpdateLinkMetadataInput = serde_json::from_value(serde_json::json!({
+                "account_id": 100,
+                "link_id": out.link_id,
+                "by_user": 7,
+                "description": "Updated inactive link",
+                "internal_note": null,
+                "permission": "admin",
+                "approval_required": false,
+                "max_uses": 999,
+                "uses_count": 0,
+                "expires_at": null,
+                "revoked_at": null,
+                "repos": [],
+                "slug": "replacement"
+            }))
+            .unwrap();
+            let prepared = prepare_metadata_update(&state, "100", &input)
+                .await
+                .unwrap();
+            apply_metadata_update(&state, &prepared, None)
+                .await
+                .unwrap();
+            expected.description = "Updated inactive link".into();
+            expected.internal_note = None;
+            let actual = state
+                .storage
+                .get_invitation_link_by_id(out.link_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual, expected, "{inactive}");
+            assert!(!actual.is_active(Utc::now()), "{inactive}");
+            assert_eq!(audit_events(&storage, 100).await.len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_update_failed_write_does_not_audit() {
+        let state = fixture_state().await;
+        seed_installation_and_user(&state).await;
+        let out = create_logic(&state, &sample_input(), None).await.unwrap();
+        let input = UpdateLinkMetadataInput {
+            account_id: 100,
+            link_id: out.link_id,
+            by_user: 7,
+            description: "Changed".into(),
+            internal_note: None,
+        };
+        let prepared = prepare_metadata_update(&state, "100", &input)
+            .await
+            .unwrap();
+        let (missing_state, storage) = fixture_state_with_storage().await;
+        let err = apply_metadata_update(&missing_state, &prepared, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            HandlerError::Storage(ghinvite_core::storage::Error::NotFound)
+        ));
+        assert!(audit_events(&storage, 100).await.is_empty());
     }
 
     #[tokio::test]

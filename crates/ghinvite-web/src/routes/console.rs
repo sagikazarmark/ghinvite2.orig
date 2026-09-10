@@ -3,11 +3,15 @@
 use crate::account_admin_reads::{
     find_account_admin_invitation_link, find_account_admin_request, pending_request_queue,
 };
-use crate::commands::{CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink};
+use crate::commands::{
+    CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink,
+    UpdateInvitationLinkMetadata,
+};
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::session;
 use crate::state::AppState;
+use crate::views::link_edit::{self, LinkEditValues};
 use crate::views::link_form::RepositoryChoice;
 use crate::views::render::render;
 use axum::Router;
@@ -34,6 +38,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/console/accounts/{login}/links/{link_id}",
             get(link_detail),
+        )
+        .route(
+            "/console/accounts/{login}/links/{link_id}/edit",
+            get(edit_link_form).post(save_link_details),
         )
         .route(
             "/console/accounts/{login}/links/{link_id}/revoke",
@@ -404,6 +412,134 @@ async fn create_link(
         "/console/accounts/{}/links/{}",
         admin.account.account_login, link_id
     ))
+    .into_response()
+}
+
+async fn edit_link_form(
+    State(state): State<AppState>,
+    admin: RequireConsoleAdminOf,
+    axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    let Ok(id) = id.parse() else {
+        return console_not_found_response(&admin);
+    };
+    let link = match find_account_admin_invitation_link(
+        state.storage.as_ref(),
+        admin.account.account_id,
+        id,
+    )
+    .await
+    {
+        Ok(link) => link,
+        Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
+        Err(error) => return error.into_response(),
+    };
+    edit_link_response(
+        &admin,
+        id,
+        LinkEditValues {
+            description: link.description,
+            internal_note: link.internal_note.unwrap_or_default(),
+        },
+        None,
+        None,
+    )
+}
+
+async fn save_link_details(
+    State(state): State<AppState>,
+    admin: RequireConsoleAdminOf,
+    axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
+    serde_qs::axum::QsForm(values): serde_qs::axum::QsForm<LinkEditValues>,
+) -> axum::response::Response {
+    let Ok(id) = id.parse() else {
+        return console_not_found_response(&admin);
+    };
+    if let Err(error) =
+        find_account_admin_invitation_link(state.storage.as_ref(), admin.account.account_id, id)
+            .await
+    {
+        return match error {
+            crate::error::WebError::NotFound => console_not_found_response(&admin),
+            _ => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                edit_link_response(
+                    &admin,
+                    id,
+                    values,
+                    None,
+                    Some("Failed to load invitation link details. Please try again.".into()),
+                ),
+            )
+                .into_response(),
+        };
+    }
+    let (description, internal_note) = match link_edit::validate(&values) {
+        Ok(metadata) => metadata,
+        Err(error) => return edit_link_response(&admin, id, values, Some(error), None),
+    };
+    if state
+        .commands
+        .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
+            account_id: admin.account.account_id,
+            link_id: id,
+            by_user: admin.session.user_id,
+            description,
+            internal_note,
+        })
+        .await
+        .is_err()
+    {
+        // Ingress errors may include command payloads; do not log private metadata.
+        tracing::warn!("update invitation link metadata command failed");
+        return (
+            axum::http::StatusCode::BAD_GATEWAY,
+            edit_link_response(
+                &admin,
+                id,
+                values,
+                None,
+                Some("Failed to save invitation link details. Please try again.".into()),
+            ),
+        )
+            .into_response();
+    }
+    let _ = session::set_flash(
+        &admin.tower,
+        session::Flash {
+            level: session::FlashLevel::Success,
+            message: "Invitation link details updated.".into(),
+        },
+    )
+    .await;
+    axum::response::Redirect::to(&format!(
+        "/console/accounts/{}/links/{id}",
+        admin.account.account_login
+    ))
+    .into_response()
+}
+
+fn edit_link_response(
+    admin: &RequireConsoleAdminOf,
+    link_id: ghinvite_core::InvitationLinkId,
+    values: LinkEditValues,
+    description_error: Option<String>,
+    form_error: Option<String>,
+) -> axum::response::Response {
+    let signed_in_login = Some(admin.session.login.clone());
+    let account_login = admin.account.account_login.clone();
+    Html(render(move || {
+        rsx! {
+            link_edit::LinkEditPage {
+                signed_in_login: signed_in_login.clone(),
+                account_login: account_login.clone(),
+                link_id,
+                values: values.clone(),
+                description_error: description_error.clone(),
+                form_error: form_error.clone(),
+            }
+        }
+    }))
     .into_response()
 }
 

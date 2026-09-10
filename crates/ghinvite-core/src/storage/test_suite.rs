@@ -99,6 +99,7 @@ where
 {
     scenario_install_uninstall_reinstall(make_storage().await).await;
     scenario_invitation_link_lifecycle(make_storage().await).await;
+    scenario_invitation_link_metadata(make_storage().await).await;
     scenario_request_uses_and_uniqueness(make_storage().await).await;
     scenario_request_decision(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
@@ -156,6 +157,78 @@ async fn scenario_invitation_link_lifecycle<S: Storage>(s: S) {
     let revoked = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(revoked.revoked_by, Some(701));
     assert!(!revoked.is_active(dt("2026-05-04T21:00:00Z")));
+}
+
+async fn scenario_invitation_link_metadata<S: Storage>(s: S) {
+    s.insert_installation(&sample_account(1, 9002, "acme2"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(701, "creator")).await.unwrap();
+    let mut expected = sample_link(9002, 1, 701, 101);
+    expected.permission = Permission::Push;
+    expected.approval_required = true;
+    expected.max_uses = Some(1);
+    expected.expires_at = Some(dt("2026-06-04T12:00:00Z"));
+    expected.internal_note = Some("Original private note".into());
+    s.insert_invitation_link(&expected).await.unwrap();
+
+    s.update_invitation_link_metadata(
+        9002,
+        expected.id,
+        "Corrected description",
+        Some("Private\ncontext"),
+    )
+    .await
+    .unwrap();
+    expected.description = "Corrected description".into();
+    expected.internal_note = Some("Private\ncontext".into());
+    assert_eq!(
+        s.get_invitation_link_by_id(expected.id).await.unwrap(),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        s.list_invitation_links_for_account(9002).await.unwrap(),
+        vec![expected.clone()]
+    );
+
+    for (account_id, id) in [(9999, expected.id), (9002, InvitationLinkId::new())] {
+        assert!(matches!(
+            s.update_invitation_link_metadata(account_id, id, "Forbidden", None)
+                .await,
+            Err(super::Error::NotFound)
+        ));
+    }
+    assert_eq!(
+        s.get_invitation_link_by_id(expected.id).await.unwrap(),
+        Some(expected.clone())
+    );
+
+    // A request and a revocation can land after the editor loaded its metadata.
+    s.insert_invitation_request_and_increment_uses(&sample_request(expected.id, 701))
+        .await
+        .unwrap();
+    expected.uses_count = 1;
+    s.mark_invitation_link_revoked(expected.id, 701, dt("2026-05-04T20:00:00Z"))
+        .await
+        .unwrap();
+    expected.revoked_by = Some(701);
+    expected.revoked_at = Some(dt("2026-05-04T20:00:00Z"));
+
+    // Repeating an edit is successful, including clearing an already-absent note.
+    for _ in 0..2 {
+        s.update_invitation_link_metadata(9002, expected.id, "Inactive link", None)
+            .await
+            .unwrap();
+        expected.description = "Inactive link".into();
+        expected.internal_note = None;
+        let actual = s
+            .get_invitation_link_by_id(expected.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert!(!actual.is_active(dt("2026-07-04T12:00:00Z")));
+    }
 }
 
 async fn scenario_request_uses_and_uniqueness<S: Storage>(s: S) {
@@ -340,6 +413,18 @@ async fn scenario_audit_appends<S: Storage>(s: S) {
         request_id: Some("inv-abc".into()),
     };
     s.audit(&e).await.unwrap();
+    assert!(
+        s.audit(&e).await.is_err(),
+        "existing audit types still reject duplicate IDs"
+    );
+    let metadata = AuditEvent {
+        id: AuditEventId::new(),
+        event_type: EventType::InvitationLinkMetadataUpdated,
+        metadata: serde_json::json!({"changed_fields": ["description"]}),
+        ..e
+    };
+    s.audit(&metadata).await.unwrap();
+    s.audit(&metadata).await.unwrap();
     // (No read on the trait; per-impl tests can verify via their own debug helpers.)
 }
 

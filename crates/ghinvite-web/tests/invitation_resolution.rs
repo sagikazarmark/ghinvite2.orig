@@ -12,6 +12,7 @@ use ghinvite_web::commands::{
     CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
     OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
     RevokeInvitationLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
+    UpdateInvitationLinkMetadata,
 };
 use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
@@ -49,6 +50,13 @@ impl GhinviteCommands for RecordingCommands {
         _command: CreateInvitationLink,
     ) -> ghinvite_web::Result<CreateInvitationLinkOutput> {
         panic!("unexpected create_invitation_link command")
+    }
+
+    async fn update_invitation_link_metadata(
+        &self,
+        _command: UpdateInvitationLinkMetadata,
+    ) -> ghinvite_web::Result<()> {
+        panic!("unexpected update_invitation_link_metadata command")
     }
 
     async fn revoke_invitation_link(

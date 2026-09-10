@@ -227,6 +227,16 @@ mod tests {
             unimplemented!()
         }
 
+        async fn update_invitation_link_metadata(
+            &self,
+            _account_id: u64,
+            _id: InvitationLinkId,
+            _description: &str,
+            _internal_note: Option<&str>,
+        ) -> ghinvite_core::storage::Result<()> {
+            panic!("unexpected update_invitation_link_metadata")
+        }
+
         async fn mark_invitation_link_revoked(
             &self,
             _id: InvitationLinkId,

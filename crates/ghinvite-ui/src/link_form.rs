@@ -365,7 +365,7 @@ pub fn register_validators(
 }
 
 /// Why a typed description is not a usable one, if it is not.
-fn description_problem(raw: &str) -> Option<&'static str> {
+pub(crate) fn description_problem(raw: &str) -> Option<&'static str> {
     const DESCRIPTION_MAX_CHARS: usize = 120;
 
     let trimmed = raw.trim();

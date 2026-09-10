@@ -167,6 +167,21 @@ pub trait Storage: Send + Sync + 'static {
     /// - [`Error::Database`] for any other failure.
     async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()>;
 
+    /// Replace only the description and internal note of an account's link.
+    /// `None` clears the note. Inactive links and unchanged values are accepted;
+    /// all guardrails, identity, usage counters and revocation fields are preserved.
+    /// The caller supplies validated, normalized metadata.
+    ///
+    /// **Errors:** [`Error::NotFound`] for an unknown or foreign-account link;
+    /// [`Error::Database`] otherwise. Safe to retry with the same values.
+    async fn update_invitation_link_metadata(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+        description: &str,
+        internal_note: Option<&str>,
+    ) -> Result<()>;
+
     /// Mark an invitation link as revoked (idempotent guard: only updates rows where
     /// `revoked_at IS NULL`).
     ///
@@ -320,5 +335,8 @@ pub trait Storage: Send + Sync + 'static {
     /// **Idempotency:** safe to retry on transient failure as long as the caller
     /// reuses the same `event.id` (collisions surface as a SQLite unique-violation
     /// inside the [`Error::Database`] branch).
+    /// Metadata-update events are the exception: their journaled ID is an
+    /// idempotency key, so a duplicate primary key succeeds without another row.
+    /// Other constraints and database errors must still surface.
     async fn audit(&self, event: &AuditEvent) -> Result<()>;
 }
