@@ -8,12 +8,9 @@
 //! `--target wasm32-unknown-unknown`.
 #![cfg(target_arch = "wasm32")]
 
+use ghinvite_web::session_store::{Backend, ProtectedStore};
 use std::sync::Arc;
-use tower_sessions::{
-    SessionStore,
-    session::{Id, Record},
-    session_store,
-};
+use tower_sessions::{cookie::time::Duration, session::Id, session_store};
 use worker::{Context, Env, HttpRequest, event};
 
 /// `tower_sessions` requires `Debug + Send + Sync + 'static`. The inner
@@ -56,51 +53,68 @@ impl KvSessionStore {
 }
 
 #[async_trait::async_trait]
-impl SessionStore for KvSessionStore {
-    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
-        self.save(record).await
+impl Backend for KvSessionStore {
+    async fn insert(
+        &self,
+        id: &Id,
+        payload: &[u8],
+        expires_at: i64,
+    ) -> session_store::Result<bool> {
+        // KV has no atomic insert-if-absent. Random 128-bit IDs make concurrent
+        // collisions negligible; refuse known collisions before sealing a new ID.
+        if self.get(id).await?.is_some() {
+            return Ok(false);
+        }
+        self.put(id, payload, expires_at).await?;
+        Ok(true)
     }
 
-    async fn save(&self, record: &Record) -> session_store::Result<()> {
+    async fn put(&self, id: &Id, payload: &[u8], expires_at: i64) -> session_store::Result<()> {
         // Wrap the body in a Send-asserting future so the resulting
         // `Future` returned by `async_trait` (which requires `Send`) is
         // satisfied — the inner `JsFuture` from `worker::kv` is `!Send`.
         ghinvite_web::wasm_compat::wasm_send(async move {
-            let key = format!("session:{}", record.id);
-            let value = serde_json::to_string(record)
-                .map_err(|e| session_store::Error::Encode(e.to_string()))?;
-            let put = self
-                .kv
-                .put(&key, value)
-                .map_err(|e| session_store::Error::Backend(e.to_string()))?;
-            // `Record::expiry_date` is a non-optional `OffsetDateTime`; KV
-            // expects a unix epoch in seconds.
-            let unix = record.expiry_date.unix_timestamp() as u64;
-            put.expiration(unix)
-                .execute()
-                .await
-                .map_err(|e| session_store::Error::Backend(e.to_string()))
+            let key = format!("session:{id}");
+            let put = self.kv.put_bytes(&key, payload).map_err(|_| kv_error())?;
+            // KV requires >=60s retention, even when logical validity is shorter.
+            // ProtectedStore enforces the authenticated deadline independently.
+            let unix = expires_at.max(chrono::Utc::now().timestamp() + 61) as u64;
+            put.expiration(unix).execute().await.map_err(|_| kv_error())
         })
         .await
     }
 
-    async fn load(&self, session_id: &Id) -> session_store::Result<Option<Record>> {
+    async fn get(&self, session_id: &Id) -> session_store::Result<Option<Vec<u8>>> {
         let key = format!("session:{session_id}");
         ghinvite_web::wasm_compat::wasm_send(async move {
-            let raw = self
-                .kv
-                .get(&key)
-                .text()
+            self.kv.get(&key).bytes().await.map_err(|_| kv_error())
+        })
+        .await
+    }
+
+    async fn is_revoked(&self, id: &Id) -> session_store::Result<bool> {
+        ghinvite_web::wasm_compat::wasm_send(async move {
+            self.kv
+                .get(&format!("revoked:{id}"))
+                .bytes()
                 .await
-                .map_err(|e| session_store::Error::Backend(e.to_string()))?;
-            match raw {
-                None => Ok(None),
-                Some(text) => {
-                    let record: Record = serde_json::from_str(&text)
-                        .map_err(|e| session_store::Error::Decode(e.to_string()))?;
-                    Ok(Some(record))
-                }
-            }
+                .map(|value| value.is_some())
+                .map_err(|_| kv_error())
+        })
+        .await
+    }
+
+    async fn revoke(&self, id: &Id, retention: Duration) -> session_store::Result<()> {
+        ghinvite_web::wasm_compat::wasm_send(async move {
+            // A relative TTL starts at the accepted write, so delayed duplicate
+            // writes cannot shorten protection. Never write an "active" marker.
+            self.kv
+                .put(&format!("revoked:{id}"), "revoked")
+                .map_err(|_| kv_error())?
+                .expiration_ttl(retention.whole_seconds() as u64)
+                .execute()
+                .await
+                .map_err(|_| kv_error())
         })
         .await
     }
@@ -108,13 +122,14 @@ impl SessionStore for KvSessionStore {
     async fn delete(&self, session_id: &Id) -> session_store::Result<()> {
         let key = format!("session:{session_id}");
         ghinvite_web::wasm_compat::wasm_send(async move {
-            self.kv
-                .delete(&key)
-                .await
-                .map_err(|e| session_store::Error::Backend(e.to_string()))
+            self.kv.delete(&key).await.map_err(|_| kv_error())
         })
         .await
     }
+}
+
+fn kv_error() -> session_store::Error {
+    session_store::Error::Backend("session KV unavailable".into())
 }
 
 fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
@@ -123,16 +138,8 @@ fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
     let base_url = env.var("GHINVITE_BASE_URL")?.to_string();
 
     let secret_str = env.secret("GHINVITE_SESSION_SECRET")?.to_string();
-    let decoded = hex::decode(&secret_str).map_err(|e| {
-        worker::Error::RustError(format!("GHINVITE_SESSION_SECRET not valid hex: {e}"))
-    })?;
-    if decoded.len() < 32 {
-        return Err(worker::Error::RustError(
-            "GHINVITE_SESSION_SECRET must be at least 32 bytes (64 hex chars)".into(),
-        ));
-    }
-    let mut session_secret = [0u8; 32];
-    session_secret.copy_from_slice(&decoded[..32]);
+    let session_secret =
+        ghinvite_web::config::parse_session_secret(&secret_str).map_err(worker_err)?;
 
     Ok(ghinvite_web::WebConfig {
         base_url: base_url.clone(),
@@ -160,6 +167,21 @@ fn worker_err(e: impl std::fmt::Display) -> worker::Error {
     worker::Error::RustError(e.to_string())
 }
 
+// workerd does not implement performance.mark/measure, used by tracing-wasm's
+// span hooks. Console output with no native timer works on the Worker runtime.
+struct ConsoleWriter;
+
+impl std::io::Write for ConsoleWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        worker::console_log!("{}", String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[event(fetch)]
 async fn fetch(
     req: HttpRequest,
@@ -169,7 +191,11 @@ async fn fetch(
     use tower::ServiceExt;
 
     console_error_panic_hook::set_once();
-    let _ = tracing_wasm::try_set_as_global_default();
+    let _ = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(|| ConsoleWriter)
+        .try_init();
 
     let config = config_from_env(&env)?;
     let db = env.d1("DB")?;
@@ -180,8 +206,8 @@ async fn fetch(
     let restate =
         Arc::new(ghinvite_web::RestateClient::new(&config.restate_ingress).map_err(worker_err)?);
     let commands = Arc::new(ghinvite_web::RestateCommands::new(restate));
+    let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
     let state = ghinvite_web::AppState::new(storage, transport, commands, config);
-    let session_store = KvSessionStore::from_env(&env)?;
     let app = ghinvite_web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`

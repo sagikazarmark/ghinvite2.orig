@@ -1268,7 +1268,7 @@ mod tests {
             Arc::new(commands),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
-                ..crate::WebConfig::for_local_dev()
+                ..crate::WebConfig::for_local_dev_with_secret([7; 32])
             },
         );
         let app = crate::build_app(state, tower_sessions::MemoryStore::default());

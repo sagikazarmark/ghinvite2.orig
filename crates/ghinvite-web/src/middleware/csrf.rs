@@ -42,7 +42,9 @@ where
             .extensions()
             .get::<tower_sessions::Session>()
             .ok_or_else(deny)?;
-        let session = crate::session::load(tower).await.map_err(|_| deny())?;
+        let session = crate::session::load(tower)
+            .await
+            .map_err(|error| crate::WebError::Session(error.to_string()).into_response())?;
         if !session.is_authenticated() {
             let path = request
                 .uri()

@@ -121,7 +121,7 @@ impl Browser {
                 Arc::new(RestateCommands::new(Arc::new(
                     RestateClient::new(ingress.uri()).unwrap(),
                 ))),
-                WebConfig::for_local_dev(),
+                WebConfig::for_local_dev_with_secret([7; 32]),
             ),
             tower_sessions::MemoryStore::default(),
         );

@@ -12,6 +12,7 @@ pub mod middleware;
 pub mod restate_client;
 pub mod routes;
 pub mod session;
+pub mod session_store;
 pub mod state;
 pub mod views;
 pub mod wasm_compat;
@@ -26,8 +27,8 @@ pub use state::AppState;
 use axum::Router;
 
 /// Build the axum app with all routes registered. The session store is
-/// supplied externally so Plan 7 can swap in a D1-backed store; for native
-/// dev pass `tower_sessions_sqlx_store::SqliteStore`.
+/// supplied externally. Native and Worker entry points pass a `ProtectedStore`
+/// over SQLite and KV respectively; tests can inject failure stores.
 ///
 /// `state` carries storage, github transport, command facade, and config.
 pub fn build_app<S>(state: AppState, session_store: S) -> Router

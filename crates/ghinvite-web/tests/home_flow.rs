@@ -80,7 +80,12 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
         Arc::new(MockTransport::scripted(oauth_expectations()));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 

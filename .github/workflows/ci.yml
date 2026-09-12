@@ -68,6 +68,26 @@ jobs:
       - run: cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
 
+  worker-runtime:
+    name: Worker session runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tests/worker/package-lock.json
+      - uses: cargo-bins/cargo-binstall@main
+      # Must match Cargo.lock; tests/worker/build.mjs checks before building.
+      - run: cargo binstall -y wasm-bindgen-cli@0.2.120
+      - run: npm ci --prefix tests/worker
+      - run: npm test --prefix tests/worker
+
   island:
     name: Island bundle
     runs-on: ubuntu-latest

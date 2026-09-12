@@ -59,9 +59,9 @@ impl IntoResponse for WebError {
             }
             WebError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             WebError::OAuth(msg) => (StatusCode::BAD_REQUEST, format!("OAuth error: {msg}")),
-            WebError::Session(msg) => (
+            WebError::Session(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Session error: {msg}"),
+                "Session temporarily unavailable. Please try again later.".into(),
             ),
             WebError::Restate(msg) => (StatusCode::BAD_GATEWAY, format!("Restate error: {msg}")),
             WebError::Storage(_) | WebError::Github(_) | WebError::Internal(_) => {

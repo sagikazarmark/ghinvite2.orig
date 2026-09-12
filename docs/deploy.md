@@ -138,9 +138,13 @@ curl -s -o /dev/null -w "%{http_code}" \
 
 ### 1. Set up `.dev.vars`
 
-Copy `.dev.vars` from the repo root (already provided with safe local defaults). Update with your local GitHub OAuth app credentials if testing OAuth locally.
+Use `.dev.vars` for local Worker secrets. Generate your own session key with
+`openssl rand -hex 32` and set `GHINVITE_SESSION_SECRET` there, along with local
+GitHub OAuth app credentials when testing OAuth. Keep this file out of version control.
 
-GHINVITE_SESSION_SECRET must be a 64-character hex string (32 bytes when decoded).
+`GHINVITE_SESSION_SECRET` must be exactly 64 hexadecimal characters (32 bytes when
+decoded). Native development reads the same format from the environment. Missing,
+invalid, short, and oversized values are rejected; there is no default key.
 
 ### 2. Apply migrations to local D1 simulation
 
@@ -179,11 +183,76 @@ Requires a local Restate server running at `http://localhost:8080` (see `compose
 
 ### Session secret
 
-Rotating `GHINVITE_SESSION_SECRET` invalidates all existing sessions — all users are logged out. No rolling rotation in v1.
+Session records are encrypted with XChaCha20-Poly1305 under the single configured
+application key. The ID cookie is a bearer reference, not an encrypted token
+container. Cloudflare-managed at-rest encryption is additional provider protection.
+
+Replacing `GHINVITE_SESSION_SECRET` rejects old-key sessions **on deployments
+using the new key**. An old-key deployment can still accept old sessions, so
+updating a secret alone is not proof that global invalidation has completed.
+
+Emergency cutover:
+
+1. Put web traffic into maintenance at the ingress, including alternate Worker
+   URLs, so no new session-dependent requests reach old-key deployments.
+2. Stop routing to old versions and allow their in-flight requests to drain.
+   Include requests awaiting GitHub or Restate; previously authorized operations
+   are not retroactively cancelled by session invalidation.
+3. Generate and install a fresh server-only key, then deploy the protected web
+   code with that key. Do not use a gradual old/new-key traffic split.
 
 ```bash
 openssl rand -hex 32 | wrangler secret put GHINVITE_SESSION_SECRET --config wrangler/web.toml
 ```
+
+4. Verify all serving versions use the new key, an old browser cookie cannot
+   reach an authenticated page, and a fresh GitHub login succeeds. Resume traffic.
+   Only now declare global session invalidation complete.
+5. Retain the new key during any code rollback. Never restore a retired key or
+   roll back to code that accepts unprotected session records.
+
+Existing plaintext sessions are rejected on the first protected deployment;
+users must sign in again and pending OAuth flows must restart. Wrong-key,
+unknown-format, malformed, and tampered records grant no authority and are left
+for expiration cleanup. They are not deleted or revoked merely because a reader
+cannot decrypt them: they may belong to an overlapping new-key deployment.
+
+### Session lifetime and individual sign-out
+
+Authenticated sessions have a fixed 30-day maximum from successful sign-in;
+earlier inactivity expiry still applies. Anonymous sessions (including pending
+OAuth) have a fixed 30-minute lifetime. Ordinary requests do not extend either
+maximum. A fresh successful OAuth login starts a new authenticated lifetime.
+
+Sign-out clears the current browser cookie and persists a separate deny-only KV
+marker before reporting success. The marker remains for 31 days (30 days plus a
+one-day clock margin); normally synchronized server/provider clocks within that
+margin are assumed. Ordinary session writes cannot erase markers. A late write
+may recreate ciphertext but, once the marker is visible, cannot restore authority.
+After marker expiration, the authenticated record deadline independently rejects
+old snapshots. Do not delete revocation markers as part of session cleanup.
+
+KV is eventually consistent, including cached negative lookups. Cloudflare
+documents propagation taking **60 seconds or more**, not a guaranteed upper
+bound. A copied cookie can remain usable during propagation. Sign-out does not
+cancel already-authorized operations, a concurrent completing GitHub login,
+other browsers' sessions, GitHub authorization, or repository access.
+
+If revocation persistence fails, the response clears the browser cookie but
+returns 503 with an explicit message that server-side sign-out could not be
+confirmed. Do not infer revocation from cookie removal. If a copied cookie must
+be disabled dependably in an incident, use the global key-cutover procedure.
+Once revocation persists, ciphertext-cleanup failure is logged and sign-out is
+successful under these eventual semantics. KV rate limits or storage outages
+can also fail login/session persistence; these must not report successful login.
+
+Application protection does not revoke a GitHub token already copied elsewhere,
+detect replay of valid same-session ciphertext before expiry/revocation, or defend
+against privileged deletion/rollback of revocation state. Keys stay server-only
+and must never be included in browser assets or logs.
+
+See [ADR 0002](adr/0002-session-protection-and-invalidation.md) and
+[Cloudflare KV consistency](https://developers.cloudflare.com/kv/concepts/how-kv-works/).
 
 ### GitHub private key
 
@@ -195,6 +264,11 @@ base64 new-private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_AP
 ```
 
 ## Rollback
+
+After session-key rotation, redeploy the earlier compatible code with the **current
+key** rather than blindly restoring an old Worker version and its secret bindings.
+The commands below are only appropriate when their target version preserves the
+current session key and record-protection contract.
 
 ```bash
 wrangler versions list --config wrangler/web.toml

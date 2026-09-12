@@ -1,0 +1,40 @@
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build } from 'esbuild';
+
+const root = fileURLToPath(new URL('../../', import.meta.url));
+const here = fileURLToPath(new URL('./', import.meta.url));
+const cli = process.env.WASM_BINDGEN || 'wasm-bindgen';
+const lock = readFileSync(join(root, 'Cargo.lock'), 'utf8');
+const version = lock.match(/name = "wasm-bindgen"\r?\nversion = "([^"]+)"/)?.[1];
+assert.ok(version, 'wasm-bindgen version missing from Cargo.lock');
+const actual = execFileSync(cli, ['--version'], { encoding: 'utf8' }).trim();
+assert.equal(actual, `wasm-bindgen ${version}`, 'Install the wasm-bindgen CLI matching Cargo.lock');
+
+execFileSync('cargo', ['build', '--locked', '-p', 'ghinvite-web-worker', '--target', 'wasm32-unknown-unknown'], {
+  cwd: root, stdio: 'inherit',
+});
+const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], {
+  cwd: root, encoding: 'utf8',
+}));
+const generated = join(here, '.generated');
+rmSync(generated, { recursive: true, force: true });
+mkdirSync(generated);
+execFileSync(cli, [
+  join(metadata.target_directory, 'wasm32-unknown-unknown/debug/ghinvite_web_worker.wasm'),
+  '--target', 'web', '--no-typescript', '--out-dir', generated, '--out-name', 'index',
+], { stdio: 'inherit' });
+// The web target's initSync accepts workerd's precompiled WebAssembly.Module.
+// esbuild follows generated JS snippets, so their hashed paths aren't hard-coded.
+await build({
+  absWorkingDir: here,
+  entryPoints: ['shim.mjs'],
+  outfile: 'worker.mjs',
+  bundle: true,
+  format: 'esm',
+  external: ['./.generated/index_bg.wasm', 'cloudflare:workers', 'cloudflare:sockets'],
+});
+console.log(`Built actual web Worker with wasm-bindgen ${version}`);

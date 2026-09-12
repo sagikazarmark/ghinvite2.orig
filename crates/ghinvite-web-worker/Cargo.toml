@@ -15,6 +15,7 @@ crate-type = ["cdylib"]
 # wasm32. On native (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 # Mirror `crates/ghinvite-web/Cargo.toml`: axum without the `tokio` feature so we don't
 # pull in mio/tokio-net on wasm32.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
@@ -29,5 +30,4 @@ ghinvite-web.workspace = true
 # conversions used to return an axum response.
 worker = { version = "0.8", features = ["d1", "axum", "http"] }
 console_error_panic_hook = "0.1.7"
-hex = "0.4"
-tracing-wasm = "0.2"
+tracing-subscriber.workspace = true

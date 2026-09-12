@@ -170,7 +170,7 @@ async fn identity_app(account: &Account, expectations: Vec<Expectation>) -> (axu
         storage,
         Arc::new(MockTransport::scripted(expectations)),
         Arc::new(RecordingCommands::default()),
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
 }
@@ -373,7 +373,7 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
         storage.clone(),
         Arc::new(MockTransport::scripted(expectations)),
         Arc::new(RecordingCommands::default()),
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
@@ -494,7 +494,7 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
                 ),
             ])),
             Arc::new(RecordingCommands::default()),
-            WebConfig::for_local_dev(),
+            WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let app = build_app(state, store);
         let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
@@ -526,7 +526,7 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
                 edit_storage: Some(storage.clone()),
                 ..Default::default()
             }),
-            WebConfig::for_local_dev(),
+            WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
         storage.insert_invitation_link(&link).await.unwrap();
@@ -683,7 +683,12 @@ async fn build_test_app() -> axum::Router {
         Arc::new(MockTransport::scripted(vec![]));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }
@@ -712,7 +717,12 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
         Arc::new(MockTransport::scripted(oauth_expectations()));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 
@@ -774,7 +784,12 @@ async fn build_signed_in_admin_app_with_recording_commands(
         Arc::new(MockTransport::scripted(expectations));
     let commands = Arc::new(RecordingCommands::default());
     let calls = commands.calls.clone();
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 
@@ -935,7 +950,12 @@ async fn build_signed_in_admin_app_with_console_installations(
         Arc::new(MockTransport::scripted(expectations));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 
@@ -964,7 +984,12 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
         Arc::new(MockTransport::scripted(expectations));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 
@@ -987,7 +1012,12 @@ async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
         Arc::new(MockTransport::scripted(expectations));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     let app = build_app(state, session_store);
 
@@ -1144,7 +1174,7 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
         storage.clone(),
         Arc::new(MockTransport::scripted(expectations)),
         commands,
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let response = post_edit(
@@ -1588,7 +1618,7 @@ async fn links_app_with_commands(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
         commands,
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
 }
@@ -2393,7 +2423,7 @@ async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accou
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
         Arc::new(RecordingCommands::default()),
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     assert_eq!(

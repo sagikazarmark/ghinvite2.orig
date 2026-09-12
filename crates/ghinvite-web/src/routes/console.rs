@@ -78,7 +78,10 @@ async fn console_index(
     State(state): State<AppState>,
     tower: tower_sessions::Session,
 ) -> impl IntoResponse {
-    let mut session = session::load(&tower).await.unwrap_or_default();
+    let mut session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     if !session.is_authenticated() {
         return login_redirect("/console").into_response();
     }
@@ -165,7 +168,10 @@ fn login_redirect(return_to: &str) -> axum::response::Redirect {
 }
 
 async fn console_unknown(uri: Uri, tower: tower_sessions::Session) -> axum::response::Response {
-    let session = session::load(&tower).await.unwrap_or_default();
+    let session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     if !session.is_authenticated() {
         let return_to = uri
             .path_and_query()

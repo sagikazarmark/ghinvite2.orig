@@ -283,7 +283,12 @@ async fn build_test_app_with_requests(
     let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
     let commands = Arc::new(RecordingCommands::default());
     let calls = commands.calls.clone();
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     let session_store = tower_sessions::MemoryStore::default();
     (build_app(state, session_store), calls)
 }

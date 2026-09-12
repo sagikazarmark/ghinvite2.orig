@@ -57,7 +57,10 @@ async fn invitation_page(
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
+    let session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     if !session.is_authenticated() {
         return redirect_to_login(&canonical_invitation_path(&slug));
     }
@@ -94,7 +97,10 @@ async fn invitation_page(
 }
 
 async fn unknown_nested(tower: TowerSession, uri: Uri) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
+    let session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     if !session.is_authenticated() {
         let return_to = uri
             .path_and_query()
@@ -111,7 +117,10 @@ async fn submit_request(
     axum::extract::Path(slug): axum::extract::Path<String>,
     crate::middleware::csrf::CsrfForm(form): crate::middleware::csrf::CsrfForm<SubmitForm>,
 ) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
+    let session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     if !session.is_authenticated() {
         return redirect_to_login(&canonical_invitation_path(&slug));
     }

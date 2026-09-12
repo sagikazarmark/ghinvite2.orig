@@ -10,8 +10,8 @@ use tower_sessions::Session as TowerSession;
 pub struct Session {
     pub user_id: u64,
     pub login: String,
-    /// User access token from GitHub OAuth. Stored encrypted at rest by
-    /// tower-sessions's cookie-encryption layer (see [`crate::config::WebConfig::session_secret`]).
+    /// User access token from GitHub OAuth. Production entry points use
+    /// [`crate::session_store::ProtectedStore`] to encrypt complete stored records.
     pub access_token: String,
     /// CSRF token for the OAuth state round-trip. Set on `/login`, verified on
     /// `/oauth/callback`.
@@ -63,6 +63,18 @@ pub fn validate_return_to(raw: &str) -> Option<String> {
 
 const SESSION_KEY: &str = "ghinvite";
 
+pub(crate) fn from_record(
+    record: &tower_sessions::session::Record,
+) -> Result<Session, serde_json::Error> {
+    record
+        .data
+        .get(SESSION_KEY)
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 /// Read the session from a tower-sessions handle. Returns the default empty
 /// session if none is set.
 pub async fn load(tower: &TowerSession) -> Result<Session, tower_sessions::session::Error> {
@@ -91,12 +103,8 @@ pub async fn save(
     tower: &TowerSession,
     session: &Session,
 ) -> Result<(), tower_sessions::session::Error> {
-    tower.insert(SESSION_KEY, session).await
-}
-
-/// Clear the session entirely.
-pub async fn clear(tower: &TowerSession) {
-    tower.flush().await.ok();
+    tower.insert(SESSION_KEY, session).await?;
+    crate::session_store::apply_lifetime(tower).await
 }
 
 /// One-shot status message shown to the user after a redirect. Defined in
@@ -111,7 +119,8 @@ pub async fn set_flash(
     tower: &TowerSession,
     flash: Flash,
 ) -> Result<(), tower_sessions::session::Error> {
-    tower.insert(FLASH_KEY, flash).await
+    tower.insert(FLASH_KEY, flash).await?;
+    crate::session_store::apply_lifetime(tower).await
 }
 
 /// Read + clear the flash. Returns `None` if no flash is present.

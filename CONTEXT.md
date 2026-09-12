@@ -11,6 +11,15 @@ A GitHub account owned by an individual person, as distinct from a GitHub organi
 ### GitHub User
 An individual GitHub identity that can sign in, create invitation links, request access, or decide invitation requests.
 
+### Ghinvite Session
+A browser's continuity with ghinvite across requests, which may include a signed-in GitHub user's identity. It is distinct from the user's GitHub authorization and repository access.
+
+### Sign Out
+Ending the current browser's signed-in ghinvite session. Other browsers' sessions, GitHub authorization, and repository access are unaffected.
+
+### Global Session Invalidation
+Ending all existing ghinvite sessions so users must sign in again. It does not revoke GitHub authorization or repository access.
+
 ### Requester
 A GitHub user who has submitted an invitation request.
 

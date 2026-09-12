@@ -14,7 +14,10 @@ pub async fn public(method: Method, uri: Uri, tower: tower_sessions::Session) ->
         return plain_not_found();
     }
 
-    let session = crate::session::load(&tower).await.unwrap_or_default();
+    let session = match crate::session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return WebError::Session(error.to_string()).into_response(),
+    };
     let signed_in_login = if session.is_authenticated() {
         Some(session.login.clone())
     } else {

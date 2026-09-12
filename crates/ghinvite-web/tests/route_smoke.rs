@@ -48,7 +48,7 @@ async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Rout
     let commands = Arc::new(RestateCommands::new(restate));
     let config = WebConfig {
         webhook_secret: webhook_secret.to_vec(),
-        ..WebConfig::for_local_dev()
+        ..WebConfig::for_local_dev_with_secret([7; 32])
     };
     let state = AppState::new(storage, transport, commands, config);
     let session_store = tower_sessions::MemoryStore::default();
@@ -649,7 +649,7 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
     let commands = Arc::new(RestateCommands::new(restate));
     let config = WebConfig {
         island_assets_dir,
-        ..WebConfig::for_local_dev()
+        ..WebConfig::for_local_dev_with_secret([7; 32])
     };
     let state = AppState::new(storage, transport, commands, config);
     let session_store = tower_sessions::MemoryStore::default();
@@ -770,7 +770,7 @@ async fn island_assets_route_is_absent_without_a_directory() {
 
 #[tokio::test]
 async fn local_dev_config_defaults_island_assets_to_dist_public_assets() {
-    let cfg = WebConfig::for_local_dev();
+    let cfg = WebConfig::for_local_dev_with_secret([7; 32]);
     assert_eq!(
         cfg.island_assets_dir.as_deref(),
         Some(std::path::Path::new("dist/public/assets"))

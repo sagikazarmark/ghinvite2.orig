@@ -117,7 +117,7 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
 }
 
 /// User-token API client. Constructed per signed-in session (the access token
-/// is encrypted at rest in the session cookie; the web binary decrypts it
+/// is encrypted at rest in the server-side session record; the web binary decrypts it
 /// before instantiating this client per request).
 #[derive(Clone)]
 pub struct UserApiClient {

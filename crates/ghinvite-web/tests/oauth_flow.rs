@@ -19,7 +19,14 @@ use tower_sessions::{
 };
 
 async fn build_app_with_mock(mock: MockTransport) -> axum::Router {
-    build_app_with_store(mock, tower_sessions::MemoryStore::default()).await
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let backend = ghinvite_web::session_store::SqliteBackend::new(pool);
+    backend.migrate().await.unwrap();
+    build_app_with_store(
+        mock,
+        ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
+    )
+    .await
 }
 
 async fn build_app_with_store<S: SessionStore + Clone + 'static>(
@@ -46,7 +53,12 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
         .unwrap();
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
     let commands = Arc::new(RestateCommands::new(restate));
-    let state = AppState::new(storage, transport, commands, WebConfig::for_local_dev());
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
     build_app(state, session_store)
 }
 
@@ -142,6 +154,266 @@ async fn signin_happy_path() {
     )
     .await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destructive_overlap() {
+    use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let backend = SqliteBackend::new(pool.clone());
+    backend.migrate().await.unwrap();
+    let old_app = build_app_with_store(
+        MockTransport::scripted(signin_expectations()),
+        ProtectedStore::new(backend.clone(), [7; 32]),
+    )
+    .await;
+    let (anonymous, state) = begin_login(&old_app, "/login").await;
+    let response = get(
+        &old_app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &anonymous,
+    )
+    .await;
+    let old_cookie = session_cookie(&response);
+    assert_eq!(
+        get(&old_app, "/console/accounts/octocat", &old_cookie)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let new_app = build_app_with_store(
+        MockTransport::scripted(signin_expectations()),
+        ProtectedStore::new(backend, [8; 32]),
+    )
+    .await;
+    assert_eq!(
+        get(&new_app, "/console/accounts/octocat", &old_cookie)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let (anonymous, state) = begin_login(&new_app, "/login").await;
+    let response = get(
+        &new_app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &anonymous,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    // Successful OAuth must replace the anonymous 30-minute cookie deadline.
+    let parsed =
+        tower_sessions::cookie::Cookie::parse(response.headers()["set-cookie"].to_str().unwrap())
+            .unwrap();
+    assert!(parsed.max_age().unwrap().whole_seconds() > 29 * 24 * 60 * 60);
+    let new_cookie = session_cookie(&response);
+    assert_eq!(
+        get(&new_app, "/console/accounts/octocat", &new_cookie)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get(&old_app, "/console/accounts/octocat", &new_cookie)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        get(&new_app, "/console/accounts/octocat", &new_cookie)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // Demonstrates why the runbook requires draining old-key deployments.
+    assert_eq!(
+        get(&old_app, "/console/accounts/octocat", &old_cookie)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let records: Vec<Vec<u8>> = sqlx::query_scalar("SELECT payload FROM protected_sessions")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .iter()
+            .all(|raw| !raw.windows(5).any(|part| part == b"u_xxx"))
+    );
+}
+
+#[tokio::test]
+async fn failed_logout_clears_cookie_but_reports_unconfirmed_server_signout() {
+    for operation in [StoreOperation::Delete, StoreOperation::Load] {
+        let store = FailingStore::default();
+        let app = build_app_with_store(
+            MockTransport::scripted(signin_expectations()),
+            store.clone(),
+        )
+        .await;
+        let (anonymous, state) = begin_login(&app, "/login").await;
+        let response = get(
+            &app,
+            &format!("/oauth/callback?code=test&state={state}"),
+            &anonymous,
+        )
+        .await;
+        let cookie = session_cookie(&response);
+        let token = common::csrf_token(&app, &cookie).await;
+        store.failure.store(operation as u8, Ordering::SeqCst);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("csrf_token={token}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
+        assert!(!response.headers().contains_key("location"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("server sign-out could not be confirmed"));
+        assert!(!text.contains("injected session failure"));
+        store.failure.store(0, Ordering::SeqCst);
+        // No incidental empty-record save is allowed to masquerade as revocation.
+        assert_eq!(
+            get(&app, "/console/accounts/octocat", &cookie)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn unchanged_console_reads_do_not_write_or_refresh_the_session() {
+    let store = FailingStore::default();
+    let app = build_app_with_store(
+        MockTransport::scripted(signin_expectations()),
+        store.clone(),
+    )
+    .await;
+    let (anonymous, state) = begin_login(&app, "/login").await;
+    let response = get(
+        &app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &anonymous,
+    )
+    .await;
+    let cookie = session_cookie(&response);
+    store
+        .failure
+        .store(StoreOperation::Save as u8, Ordering::SeqCst);
+    for _ in 0..3 {
+        let response = get(&app, "/console/accounts/octocat", &cookie).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(!response.headers().contains_key("set-cookie"));
+    }
+}
+
+#[tokio::test]
+async fn aged_authenticated_deadlines_survive_requests_but_fresh_signin_renews_them() {
+    use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let backend = SqliteBackend::new(pool);
+    backend.migrate().await.unwrap();
+    let store = ProtectedStore::new(backend, [7; 32]);
+    let app = build_app_with_store(
+        MockTransport::scripted(signin_expectations().into_iter().cycle().take(4).collect()),
+        store.clone(),
+    )
+    .await;
+    let (anonymous, state) = begin_login(&app, "/login").await;
+    let response = get(
+        &app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &anonymous,
+    )
+    .await;
+    let cookie = session_cookie(&response);
+    let id: Id = cookie.strip_prefix("id=").unwrap().parse().unwrap();
+    let mut record = store.load(&id).await.unwrap().unwrap();
+    // Seed an authentic 29-day-old record through the trusted store interface.
+    let issued = chrono::Utc::now().timestamp() - 29 * 86400;
+    let deadline = issued + 30 * 86400;
+    record.data.insert(
+        "ghinvite_lifetime".into(),
+        serde_json::json!({
+            "issued_at": issued, "deadline": deadline, "authenticated": true
+        }),
+    );
+    store.save(&record).await.unwrap();
+    assert_eq!(
+        get(&app, "/console/accounts/octocat", &cookie)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let login = get(&app, "/login", &cookie).await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let unchanged = store.load(&id).await.unwrap().unwrap();
+    assert_eq!(unchanged.expiry_date.unix_timestamp(), deadline);
+    assert_eq!(unchanged.data["ghinvite_lifetime"]["deadline"], deadline);
+    let location = url::Url::parse(login.headers()["location"].to_str().unwrap()).unwrap();
+    let state = location
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let response = get(
+        &app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &cookie,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let new_cookie = session_cookie(&response);
+    let new_id: Id = new_cookie.strip_prefix("id=").unwrap().parse().unwrap();
+    assert_ne!(id, new_id);
+    let renewed = store.load(&new_id).await.unwrap().unwrap();
+    assert!(renewed.expiry_date.unix_timestamp() > chrono::Utc::now().timestamp() + 29 * 86400);
+    assert!(store.load(&id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn unavailable_session_storage_is_a_generic_error_not_anonymous_success() {
+    let store = FailingStore::default();
+    let app = build_app_with_store(MockTransport::scripted(vec![]), store.clone()).await;
+    let (cookie, _) = begin_login(&app, "/login").await;
+    store
+        .failure
+        .store(StoreOperation::Load as u8, Ordering::SeqCst);
+    for path in [
+        "/",
+        "/login",
+        "/console",
+        "/i/AAAAAAAAAAAAAAAA",
+        "/missing-page",
+    ] {
+        let response = get(&app, path, &cookie).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{path}"
+        );
+        assert!(!response.headers().contains_key("location"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&body).contains("injected session failure"));
+    }
 }
 
 async fn get(app: &axum::Router, path: &str, cookie: &str) -> axum::response::Response {
@@ -442,7 +714,7 @@ async fn legacy_session_error_page_logout_token_does_not_depend_on_persistence()
         Arc::new(RestateCommands::new(Arc::new(
             RestateClient::new("http://127.0.0.1:1").unwrap(),
         ))),
-        WebConfig::for_local_dev(),
+        WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let page_app = ghinvite_web::routes::home::router()
         .with_state(state)
@@ -529,6 +801,7 @@ enum StoreOperation {
     Save = 1,
     Delete = 2,
     Create = 3,
+    Load = 4,
 }
 
 impl FailingStore {
@@ -556,6 +829,7 @@ impl SessionStore for FailingStore {
     }
 
     async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
+        self.check(StoreOperation::Load)?;
         self.inner.load(id).await
     }
 
@@ -615,8 +889,9 @@ async fn sqlite_rotation_preserves_only_valid_return_destinations() {
         ("//evil.example/console", "/"),
     ] {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let store = tower_sessions_sqlx_store::SqliteStore::new(pool);
-        store.migrate().await.unwrap();
+        let backend = ghinvite_web::session_store::SqliteBackend::new(pool);
+        backend.migrate().await.unwrap();
+        let store = ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]);
         let app = build_app_with_store(MockTransport::scripted(signin_expectations()), store).await;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("return_to", return_to)

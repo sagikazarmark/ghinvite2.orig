@@ -117,6 +117,14 @@ curl --fail-with-body --max-time 20 -X POST http://localhost:9070/deployments \
 
 **Terminal 3 — web**
 
+Generate a local session secret once in this shell (or keep it in your local
+secret manager). Both native and Worker deployments require exactly 64 hex
+characters; there is no built-in development key.
+
+```bash
+export GHINVITE_SESSION_SECRET="$(openssl rand -hex 32)"
+```
+
 ```bash
 GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
 GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
@@ -125,7 +133,7 @@ GHINVITE_DATABASE_PATH=./dev.sqlite \
 cargo run -p ghinvite-web
 ```
 
-App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. All other env vars have safe defaults.
+App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
 
 ### Option B — Wrangler dev (production-equivalent)
 

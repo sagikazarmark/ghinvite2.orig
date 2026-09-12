@@ -1,0 +1,16 @@
+{
+  "name": "ghinvite-worker-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "npm run build && node smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.3",
+    "miniflare": "4.20260302.0"
+  }
+}

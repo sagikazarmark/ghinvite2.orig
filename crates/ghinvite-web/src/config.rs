@@ -5,12 +5,12 @@ use std::path::PathBuf;
 
 /// Configuration parsed at server boot. Production sources fields from
 /// Workers secrets (Plan 7); local dev uses [`WebConfig::for_local_dev`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct WebConfig {
     /// Base URL of THIS web binary (e.g. `https://ghinvite.example`). Used to
     /// build OAuth redirect URIs and absolute URLs in the home page.
     pub base_url: String,
-    /// 32-byte symmetric key for tower-sessions cookie encryption.
+    /// 32-byte symmetric key for application-level session record encryption.
     /// Production rotates this via Workers secrets.
     pub session_secret: [u8; 32],
     /// Restate ingress URL (e.g. `http://127.0.0.1:8080` for local dev).
@@ -36,18 +36,18 @@ pub struct WebConfig {
 }
 
 impl WebConfig {
-    /// Build a config suitable for `cargo run -p web` local dev. Reads from
-    /// environment variables; falls back to safe defaults that won't actually
-    /// authenticate against real GitHub.
-    pub fn for_local_dev() -> Self {
-        let secret = match std::env::var("GHINVITE_SESSION_SECRET") {
-            Ok(s) if s.len() >= 32 => {
-                let mut b = [0u8; 32];
-                b.copy_from_slice(&s.as_bytes()[..32]);
-                b
-            }
-            _ => *b"insecure-local-dev-session-key!!", // 32 bytes
-        };
+    /// Build native local configuration from environment variables. The session
+    /// key is mandatory; other fields have local defaults that do not authenticate
+    /// against real GitHub without explicit OAuth credentials.
+    pub fn for_local_dev() -> Result<Self, SessionKeyError> {
+        let secret = std::env::var("GHINVITE_SESSION_SECRET").map_err(|_| SessionKeyError)?;
+        Ok(Self::for_local_dev_with_secret(parse_session_secret(
+            &secret,
+        )?))
+    }
+
+    /// Local defaults with an explicitly supplied key (also used by tests).
+    pub fn for_local_dev_with_secret(secret: [u8; 32]) -> Self {
         Self {
             base_url: std::env::var("GHINVITE_BASE_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:8787".into()),
@@ -82,16 +82,49 @@ impl WebConfig {
     }
 }
 
+impl std::fmt::Debug for WebConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebConfig")
+            .field("base_url", &self.base_url)
+            .field("session_secret", &"[REDACTED]")
+            .field("cookie_secure", &self.cookie_secure)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("GHINVITE_SESSION_SECRET must be exactly 64 hexadecimal characters (32 bytes)")]
+pub struct SessionKeyError;
+
+/// Shared native/Worker parser; errors never include supplied key material.
+pub fn parse_session_secret(value: &str) -> Result<[u8; 32], SessionKeyError> {
+    if value.len() != 64 {
+        return Err(SessionKeyError);
+    }
+    let mut key = [0; 32];
+    hex::decode_to_slice(value, &mut key).map_err(|_| SessionKeyError)?;
+    Ok(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn local_dev_default_does_not_panic() {
-        // SAFETY: tests should not depend on the env, but for_local_dev reads
-        // it; we rely on the unwrap_or fallbacks. Cleaner would be to inject
-        // env, but acceptable for this smoke.
-        let cfg = WebConfig::for_local_dev();
+    fn explicit_local_key_and_strict_shared_parsing() {
+        let key = "ab".repeat(32);
+        assert_eq!(parse_session_secret(&key).unwrap(), [0xab; 32]);
+        for value in [
+            "".to_owned(),
+            "a".repeat(63),
+            "a".repeat(65),
+            "gg".repeat(32),
+        ] {
+            assert!(parse_session_secret(&value).is_err());
+        }
+        let cfg = WebConfig::for_local_dev_with_secret([0xab; 32]);
+        assert!(!format!("{cfg:?}").contains(&key));
+        assert!(format!("{cfg:?}").contains("[REDACTED]"));
         assert!(cfg.base_url.starts_with("http"));
         assert_eq!(cfg.session_secret.len(), 32);
         assert!(cfg.oauth.redirect_uri.ends_with("/oauth/callback"));

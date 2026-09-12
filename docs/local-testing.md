@@ -52,14 +52,15 @@ organization authority and use the new access token:
 
 ```bash
 cargo test -p ghinvite-web --test oauth_flow
+cargo test -p ghinvite-web --test session_protection
 cargo test -p ghinvite-web --test console_flow oauth_signin_discards
 cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
 ```
 
-Successful OAuth uses tower-sessions' `cycle_id()` to delete the prior session
+Successful OAuth uses tower-sessions' `cycle_id()` to revoke the prior session
 ID, replaces session data with fresh credentials and empty authorization caches,
 and lets the session middleware persist the new record and send its cookie.
-Deletion or persistence failure returns HTTP 500 instead of a login redirect.
+Revocation or persistence failure returns HTTP 500 instead of a login redirect.
 Validated OAuth state is persisted as consumed before contacting GitHub, so a
 failed exchange or user lookup cannot replay it on a consistent store.
 
@@ -68,8 +69,19 @@ sessions (D1 stores domain data). KV is eventually consistent: deletions and
 state updates may remain stale in other locations, and a new ID may not yet be
 visible everywhere. Correct rotation calls therefore do **not** guarantee
 instantaneous worldwide logout or globally atomic OAuth-state consumption.
-These HTTP tests use MemoryStore and SQLite, and the Worker build checks target
-compatibility; they do not simulate KV propagation.
+The main OAuth paths use encrypted SQLite; targeted tests inject MemoryStore
+failures. Protection tests inspect raw ciphertext, tampering, wrong keys,
+cross-session substitution, expiry, and a late write after revocation. Rotation
+tests share a backend between old/new-key apps and prove old-cookie rejection
+and fresh login success. The Worker build checks target compatibility; these
+tests do not measure distributed KV propagation. See the
+[session runbook](deploy.md#session-secret) for cutover and sign-out guarantees.
+
+The [Worker runtime smoke](../tests/worker/README.md) runs the actual Wasm in
+workerd with local KV and dummy configuration. It verifies encrypted persistence,
+later-request state loading, and logout cookie clearing on KV-read failure,
+including the JavaScript clock and console logging paths that compilation alone
+cannot exercise. It runs in CI and blocks all outbound network requests.
 
 ### Browser mutation CSRF protection
 
@@ -82,10 +94,9 @@ replaces the SSR form, and replaced with identity at every successful OAuth
 sign-in. Dynamic responses use `Cache-Control: private, no-store`. Tokens stay
 out of URLs and command payloads; rejected parser bodies are not logged/echoed.
 
-For pre-CSRF sessions, a domain-separated SHA-256 digest of the existing random
-session ID supplies stable authority without revealing the bearer ID or relying
-on an upgrade write. Concurrent requests and 5xx pages derive the same value.
-The next OAuth sign-in replaces it with a newly generated token.
+The session helper retains deterministic CSRF fallback coverage for injected
+test stores, but production protected storage rejects legacy unencrypted
+sessions outright. Users must restart sign-in after the protection upgrade.
 
 Protected POST inventory:
 

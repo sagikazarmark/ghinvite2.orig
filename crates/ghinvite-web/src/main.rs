@@ -1,16 +1,16 @@
 //! Native binary: runs the axum app on a local hyper server.
 //! Plan 7 wraps `ghinvite_web::build_app()` in a Workers `#[event(fetch)]` instead.
 
+use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
 use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower_sessions_sqlx_store::SqliteStore;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let config = WebConfig::for_local_dev();
+    let config = WebConfig::for_local_dev()?;
 
     let storage: Arc<dyn ghinvite_core::storage::Storage> = match std::env::var(
         "GHINVITE_DATABASE_PATH",
@@ -41,10 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let commands = Arc::new(RestateCommands::new(restate));
 
     // Session store: a local sqlite database.
-    let session_pool =
-        tower_sessions_sqlx_store::sqlx::SqlitePool::connect("sqlite::memory:").await?;
-    let session_store = SqliteStore::new(session_pool);
-    session_store.migrate().await?;
+    let session_pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    let backend = SqliteBackend::new(session_pool);
+    backend.migrate().await?;
+    let session_store = ProtectedStore::new(backend, config.session_secret);
 
     let state = AppState::new(storage, transport, commands, config);
     let app = build_app(state, session_store);

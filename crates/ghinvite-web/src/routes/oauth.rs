@@ -54,11 +54,48 @@ async fn login(
 }
 
 async fn logout(
+    State(state): State<AppState>,
     tower: TowerSession,
-    _form: crate::middleware::csrf::CsrfForm<crate::middleware::csrf::EmptyForm>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
-    session::clear(&tower).await;
-    Redirect::to("/")
+    use axum::extract::FromRequest;
+    // A storage outage prevents CSRF verification. Clear only the browser's
+    // cookie in that case; no server-side mutation bypasses CSRF verification.
+    if session::load(&tower).await.is_err() {
+        return unconfirmed_signout(state.config.cookie_secure);
+    }
+    if let Err(response) =
+        crate::middleware::csrf::CsrfForm::<crate::middleware::csrf::EmptyForm>::from_request(
+            request, &state,
+        )
+        .await
+    {
+        return response;
+    }
+    match tower.flush().await {
+        Ok(()) => Redirect::to("/").into_response(),
+        Err(_) => unconfirmed_signout(state.config.cookie_secure),
+    }
+}
+
+fn unconfirmed_signout(secure: bool) -> axum::response::Response {
+    // flush clears local data before revoking. On failure its ID remains;
+    // a 5xx suppresses Tower's otherwise implicit save of that empty record.
+    let mut response = (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "Browser session cleared; server sign-out could not be confirmed. Please try again later.",
+    )
+        .into_response();
+    let cookie = if secure {
+        "id=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax; Secure"
+    } else {
+        "id=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+    };
+    response
+        .headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+    tracing::warn!("session revocation could not be confirmed");
+    response
 }
 
 async fn install(State(state): State<AppState>) -> impl IntoResponse {
@@ -158,6 +195,9 @@ async fn oauth_callback(
     // user. Only the validated return destination survives the old session.
     let destination = session.return_to.take().unwrap_or_else(|| "/".to_string());
     tower.clear().await;
+    crate::session_store::establish_authenticated_lifetime(&tower)
+        .await
+        .map_err(|e| WebError::Session(e.to_string()))?;
     let session = session::Session {
         user_id: gh_user.id,
         login: gh_user.login,

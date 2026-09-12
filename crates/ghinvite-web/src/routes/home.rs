@@ -15,7 +15,10 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn home(tower: TowerSession) -> impl IntoResponse {
-    let session = session::load(&tower).await.unwrap_or_default();
+    let session = match session::load(&tower).await {
+        Ok(session) => session,
+        Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
+    };
     let signed_in_login = if session.is_authenticated() {
         Some(session.login.clone())
     } else {
