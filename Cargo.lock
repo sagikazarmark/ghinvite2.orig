@@ -919,9 +919,9 @@ dependencies = [
 
 [[package]]
 name = "dioform"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c50baf8dfae42db0d6443d948ac233b368cf04f6c297c677b8a83a5277a99e0"
+checksum = "d735a478b9ccfabec711190b630c66a14f3a55b4eb6de9319173c5bc76eece27"
 dependencies = [
  "dioform-core",
  "dioform-derive",
@@ -936,15 +936,15 @@ dependencies = [
 
 [[package]]
 name = "dioform-core"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d3c21a77f12cad9f63cf6b9f05caecb8c8f9d1724ba68665796176acda6f1b0"
+checksum = "3f1bee458bb825a94656b7eb8f50d1c859395aabbca1fac108400c68653cb23e"
 
 [[package]]
 name = "dioform-derive"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "932c47e7d7893ed5f4484c6af1c7ba80d3230675771b280e61eeb4497187f49a"
+checksum = "c2dbf82b979bb8535c9862fe8f8e90b59420866f58318c4e964fc9340395aa74"
 dependencies = [
  "proc-macro2",
  "quote",

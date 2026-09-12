@@ -34,6 +34,7 @@ Run one project, repeat for flakes, or inspect a failure:
 ```bash
 npm test --prefix tests/browser -- --project=desktop-light
 npm test --prefix tests/browser -- --project=desktop-light --grep 'numeric max_uses' --workers=2
+npm test --prefix tests/browser -- --project=desktop-light --grep 'browser rejection' --workers=2
 npm test --prefix tests/browser -- --grep 'numeric' --workers=2
 npm test --prefix tests/browser -- --project=mobile-light --project=mobile-dark
 npm test --prefix tests/browser -- --repeat-each=3 --workers=2
@@ -63,6 +64,14 @@ if accidentally deployed.
   error and summary, a valid description, and repository 10 selected.
 - `/expires_in_days-invalid`: `--numeric-only-invalid --expiration`, the same
   numeric-only failure for expiration instead of max use.
+- `/rejection-mixed`: `--browser-rejection`, a client-reproducible whitespace
+  description error alongside a synthetic server-only permission error and
+  form-level summary message. Permission `push` is valid to the client.
+- `/rejection-max_uses` and `/rejection-expires_in_days`: `--browser-rejection
+  --parse-blocked` (plus `--expiration` for the latter), the mixed rejection
+  with raw `abc` and its parse error on the named numeric field.
+- `/rejection-form`: `--browser-rejection --form-only`, valid values with only
+  a synthetic form-level rejection, for an unchanged native POST retry.
 - `/assets/*`: real JS/Wasm staged by `scripts/build-island.sh`, with Wasm MIME.
 - `/static/styles.css` and `/static/app.js`: production CSS and theme script.
 - `POST /console/accounts/acme/links`: JSON echo of ordered form entries,
@@ -72,6 +81,14 @@ if accidentally deployed.
 HTML is the fixture's unmodified production renderer output. The HTTP CSP is
 read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
 `bypassCSP` option is used.
+
+The `Transport fixture:` messages are deliberately fabricated response payloads
+to exercise dioform 0.7 `BrowserRejection` transport. They do not represent a
+duplicate-description feature or any additional domain validation. The fixture
+injects only values/errors into the production renderer; lifecycle behavior
+comes from the real compiled island bundle. When another session owns the
+production migration/build, wait for its staged bundle before running these
+tests; rebuilding SSR at server startup does not rebuild Wasm.
 
 ## Coverage
 
@@ -115,6 +132,19 @@ read from `ghinvite-web/src/middleware/csp.rs`; no relaxed test policy or
 - Failed values, summary, inline errors, and `aria-describedby`/`aria-invalid`
   survive mounting, as do description's and permission's `aria-errormessage`.
   Valid controls are not reset while correcting a failed one.
+- Mixed client/server-only rejection messages and numeric raw parse failures
+  retain the same messages and error associations in mounted, no-JS, and
+  blocked-bundle modes. Summary entries and inline messages are not duplicated.
+- Parse-blocked progressive preflight retains restored field and form errors
+  across repeated submit attempts. Correcting either numeric field clears its
+  error; the next submit retires server-only rejection messages and validates
+  the untouched whitespace description on the client before permitting POST.
+- Editing a related field clears its restored error immediately, before blur;
+  other field errors and the form-level rejection remain. Unrelated rerenders
+  neither replay the original rejection nor restore invalid numeric text.
+- A server-only form rejection permits an unchanged, native-valid retry as a
+  document-navigation POST in all three modes. Field edits alone retain that
+  form-level message until fresh preflight retires it.
 - JavaScript-disabled and bundle-blocked forms remain usable and submit natively.
 - Label clicks, keyboard Space, repeated repository keys, checked approval and
   unchecked omission, and empty optional numbers keep native behavior.

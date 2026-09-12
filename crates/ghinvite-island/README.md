@@ -4,7 +4,7 @@ The browser island for the new invitation link form
 ([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)): a
 `dioxus-web` root that mounts on the server-rendered form container and
 re-renders **the same `LinkCreateForm` component** the server rendered, with a
-[dioform](https://github.com/sagikazarmark/dioform) form behind it. Field
+[dioform](https://github.com/sagikazarmark/dioform) 0.7 form behind it. Field
 errors appear on commit (leaving a field), the repository-scope error clears
 as soon as a repository is checked, and `progressive_submit()` cancels the
 native POST only while a known blocker exists — otherwise the browser POSTs to
@@ -21,7 +21,7 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 | --- | --- |
 | `src/lib.rs` | `LinkFormIsland(props: LinkFormIslandProps)` — the reactive form. Compiles natively (for tests) and for the browser. |
 | `src/main.rs` | The wasm32 entrypoint: reads the props blob, empties `#link-form-island`, sets `data-island="mounted"` on it, launches Dioxus there. An empty `main` on native. |
-| `tests/parity.rs` | Renders `LinkCreateForm` (server) and `LinkFormIsland` (island) with `dioxus_ssr` for the same props and asserts the HTML is **identical**, byte for byte. |
+| `tests/parity.rs` | Renders `LinkCreateForm` (server) and `LinkFormIsland` (island) with `dioxus_ssr` for the covered props and asserts the HTML is **identical**, byte for byte. |
 | `examples/ssr_fixture.rs` | Prints the server-rendered page as a full HTML document, for local smoke tests (see below). |
 
 ## How the island works
@@ -44,25 +44,42 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    `LinkCreateForm` with a `LinkFormValues` read back from the bindings and a
    `LinkFormHandlers` bundle of the bindings' listeners. Field ids stay the
    shared components' (`description`, `permission`, `repo_ids`, …).
-4. **Seeding server errors** (once, on mount): if `values.errors` is
-   non-empty, `form.begin_submission()`. The shared validators run first; if
-   they reject the preserved values (`Blocked`) the submit attempt has made
-   the same errors the server produced visible. If they pass (`Started`), the
-   server knew something the browser cannot — the messages are attached as
-   `SubmitError::field(path, msg)` on their slots and summary-only lines as
-   `SubmitError::form(msg)`, then `finish_submission_with_errors`. Either way
-   the error clears when the admin edits the field.
+4. **Restoring a rejected browser POST**: when `values.errors` is non-empty,
+   the config uses `FormConfig::browser_rejection((), …)` before
+   `use_form_config`. It supplies a `BrowserRejection` with
+   `SubmitError::field(path, msg)` for each field slot and
+   `SubmitError::form(msg)` for extra summary lines. Restoration runs once per
+   form instance: the supplied typed values become the draft and baseline,
+   and errors are immediately visible as a prior rejected attempt, without
+   marking fields touched or starting a fake submission. Rerenders do not
+   replay it. Client-reproducible errors and server-only field/form messages
+   now coexist; client validation no longer causes server diagnostics to be lost.
 5. **Raw numeric text that does not parse** (`max_uses: "abc"`,
-   `expires_in_days: "0"`) is re-applied to the parsed binding with
-   `on_input(raw)` after seeding, so the input shows the text and the same
-   parse error the server reported, and submission stays blocked until it is
-   fixed. Chromium sanitises non-numeric text out of a `type="number"` input,
-   so there the field shows empty with the error; the server stays the
-   authority.
+   `expires_in_days: "0"`) is attached to that rejection with `raw_field`.
+   The parsed bindings consume the restored input when they mount, preserving
+   the raw text and parse error without simulating `on_input` or marking the
+   field touched. This restoration is configured only for failed responses
+   with non-empty errors. Chromium sanitises non-numeric text out of a
+   `type="number"` input, so there the field shows empty with the error;
+   the binding still holds the parse blocker.
 6. Errors are folded back into `LinkFormErrors` with the same `attach` the
    server uses (parse errors first, then visible validation errors; summary
    line added on the first attach; form-level messages appended), so the
-   first frame matches the server's HTML exactly.
+   first frame matches the server's HTML for the covered response values.
+7. **Correction and retry**: editing a related field clears its restored
+   field error; unrelated field errors and form-level messages remain. A fresh
+   core preflight retires the prior rejection and validates the current values,
+   allowing an unchanged retry when only server-side errors were present and
+   client/native validation passes. A mounted numeric parse blocker returns
+   `ParseBlocked` before core preflight, retaining the rejection. After the
+   parse blocker is corrected, the next submit can reach fresh core preflight.
+
+Valid noncanonical numeric text (for example, `"007"` or `" 7 "`) still goes
+through the typed model and `format_count`, yielding `"7"` on mount. This is
+existing behavior: the migration restores invalid raw input from rejected
+responses, not arbitrary numeric spelling. First-frame byte parity is not
+promised for valid noncanonical numeric text or invalid numeric props with no
+response errors. The server remains the validation authority.
 
 ## Registry Input Integration
 
@@ -107,7 +124,7 @@ validator runs.
 
 Unbound SSR preserves raw numeric text through the value memo; bound browser
 Inputs read the parsed binding directly, with no value override. Chromium can
-sanitize seeded `abc` to an empty number display, but the binding retains the
+sanitize restored `abc` to an empty number display, but the binding retains the
 invalid text and blocks progressive submission. Unchanged blur and unrelated
 edits do not repair it or convert it to `None`; an actual numeric-field edit is
 needed to correct or explicitly clear it.
@@ -137,9 +154,9 @@ correction. First-frame parity tests cover every supported permission and
 unsupported/empty display fallbacks, including explicit selected-option markup.
 
 Stable IDs, native help styling, and explicit `aria-describedby` and
-`aria-errormessage` remain application-owned. Later sibling registration is too
-late for Input's or NativeSelect's first SSR attributes; native help does not
-register, and registry FieldDescription's forced `label` class is unsuitable for
+`aria-errormessage` remain application-owned with dioform 0.7. Later sibling
+registration is too late for Input's or NativeSelect's first SSR attributes;
+native help does not register, and registry FieldDescription's forced `label` class is unsuitable for
 that help text. Only the new-link numeric fields migrated; legacy native number
 controls elsewhere, textarea, and checkboxes retain their rendering and listeners.
 Registry source and installation are unchanged, with no new dependencies. Pins and
@@ -178,7 +195,7 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
-The numeric Input migration measured approximately 338 KiB gzipped Wasm + JS,
+The dioform 0.7 rejection-restoration migration measured approximately 342 KiB gzipped Wasm + JS,
 compared with 337 KiB for NativeSelect, 328 KiB for the description Field-context
 migration, and the 243 KiB pre-registry baseline, below the
 600 KiB budget. Sizes vary with toolchain and source; the build script reports

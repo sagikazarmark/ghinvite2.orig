@@ -7,6 +7,11 @@ const submit = (page) => page.getByRole('button', { name: 'Create invitation lin
 const approval = (page) => page.getByRole('checkbox', { name: /Require account admin approval/ });
 const permissions = ['pull', 'triage', 'push', 'maintain', 'admin'];
 const permissionError = 'Choose a supported permission level: pull, triage, push, maintain, or admin.';
+const summaryMessage = 'Fix the highlighted fields before creating this invitation link.';
+const descriptionError = 'Description is required. Use short, single-line admin-only context for this invitation link.';
+// Synthetic transport messages: no production validator emits these.
+const serverPermissionError = 'Transport fixture: server-only permission rejection.';
+const serverFormError = 'Transport fixture: server-only form rejection.';
 const numericFields = [
   {
     id: 'max_uses', label: 'Max use', initial: '', valid: '4294967295',
@@ -58,7 +63,7 @@ async function expectNumeric(page, field, value, message = null) {
   await expect(page.locator(`[name="${id}"]`)).toHaveCount(1);
 }
 
-async function expectPermission(page, value, invalid) {
+async function expectPermission(page, value, invalid, message = permissionError) {
   const control = page.getByRole('combobox', { name: 'Permission level', exact: true });
   await expect(control).toHaveValue(value);
   await expect(control).toHaveAttribute('id', 'permission');
@@ -81,7 +86,7 @@ async function expectPermission(page, value, invalid) {
     await expect(control).toHaveClass(/\bselect-error\b/);
     await expect(control).toHaveAttribute('aria-errormessage', 'permission-error');
     await expect(error.locator(':scope > div')).toHaveCount(1);
-    await expect(error).toHaveText(permissionError);
+    await expect(error).toHaveText(message);
   } else {
     await expect(control).not.toHaveClass(/\bselect-error\b/);
     await expect(control).not.toHaveAttribute('aria-errormessage');
@@ -125,6 +130,99 @@ async function post(page) {
   expect(response.status()).toBe(200);
   await expect(page).toHaveURL(new RegExp(`${action}$`));
   return new URLSearchParams((await response.json()).entries);
+}
+
+async function expectRestoredRejection(page, field = null) {
+  await expect(page.locator('#description')).toHaveValue('   ');
+  await expect(page.locator('#description')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#description')).toHaveAttribute('aria-describedby', 'description-help description-error');
+  await expect(page.locator('#description')).toHaveAttribute('aria-errormessage', 'description-error');
+  await expect(page.locator('#description-error > div')).toHaveText([descriptionError]);
+  await expectPermission(page, 'push', true, serverPermissionError);
+  await expect(page.locator('#link-form-errors')).toHaveAttribute('role', 'alert');
+  await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+  await expect(page.locator('#internal_note')).toHaveValue('Preserved transport note');
+  await expect(page.getByRole('checkbox', { name: 'acme/api', exact: true })).toBeChecked();
+  for (const numeric of numericFields) {
+    await expectNumeric(page, numeric, numeric === field ? '' : numeric.id === 'max_uses' ? '7' : '45',
+      numeric === field ? numeric.invalid : null);
+  }
+}
+
+test('browser rejection clears only related field errors on edit and never reapplies on rerender', async ({ page }) => {
+  await open(page, '/rejection-mixed');
+  await expectRestoredRejection(page);
+  // An unrelated write rerenders the island without replaying restoration.
+  await page.locator('#internal_note').fill('First unrelated edit');
+  await expect(page.locator('#description-error')).toHaveText(descriptionError);
+  await expectPermission(page, 'push', true, serverPermissionError);
+  await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+
+  await page.locator('#description').fill('Corrected transport workshop');
+  // Restored errors retire on input, before on-commit client validation.
+  await expect(page.locator('#description-error')).toBeEmpty();
+  await expect(page.locator('#description')).toHaveAttribute('aria-invalid', 'false');
+  await expect(page.locator('#description')).not.toHaveAttribute('aria-errormessage');
+  await expectPermission(page, 'push', true, serverPermissionError);
+  await page.locator('#permission').selectOption('triage');
+  await expectPermission(page, 'triage', false);
+  // Field edits do not retire a form-level rejection.
+  await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+  await page.locator('#internal_note').fill('Second unrelated edit');
+  await approval(page).check();
+  await expect(page.locator('#description-error')).toBeEmpty();
+  await expectPermission(page, 'triage', false);
+  await expect(page.locator('#description')).toHaveValue('Corrected transport workshop');
+  await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+  const data = await post(page);
+  expect(data.get('description')).toBe('Corrected transport workshop');
+  expect(data.get('permission')).toBe('triage');
+  expect(data.get('internal_note')).toBe('Second unrelated edit');
+});
+
+for (const field of numericFields) {
+  test(`browser rejection ${field.id} parse-blocked preflight retains errors; a fresh submit retires them and validates the client`, async ({ page }) => {
+    const path = `/rejection-${field.id}`;
+    await open(page, path);
+    await expectRestoredRejection(page, field);
+    const posts = [];
+    page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+    // Sanitized abc is optional/empty in the DOM, and whitespace satisfies
+    // required: a click reaches progressive_submit, not native invalid UI.
+    expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await submit(page).click();
+      await expectRestoredRejection(page, field);
+      await expect(page).toHaveURL(path);
+      expect(posts).toEqual([]);
+    }
+    await page.locator(`#${field.id}`).fill('9');
+    await page.keyboard.press('Tab');
+    await expectNumeric(page, field, '9');
+    await expectPermission(page, 'push', true, serverPermissionError);
+    await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+    await submit(page).click();
+    // No parse blocker remains: retire the old response and run the client
+    // rules. The untouched whitespace description is still a real blocker.
+    await expect(page.locator('#description-error > div')).toHaveText([descriptionError]);
+    await expectPermission(page, 'push', false);
+    await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage]);
+    await expect(page).toHaveURL(path);
+    expect(posts).toEqual([]);
+    await page.locator('#internal_note').fill('Rerender after fresh preflight');
+    await approval(page).check();
+    await expectNumeric(page, field, '9');
+    await expectPermission(page, 'push', false);
+    await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage]);
+    await page.locator('#description').fill('Corrected transport workshop');
+    await page.keyboard.press('Tab');
+    await expect(page.locator('#description-error')).toBeEmpty();
+    await expect(page.locator('#link-form-errors')).toHaveCount(0);
+    const data = await post(page);
+    expect(data.get(field.id)).toBe('9');
+    expect(data.get('permission')).toBe('push');
+    expect(posts).toHaveLength(1);
+  });
 }
 
 test('mounts the real bundle under CSP without runtime errors or missing assets', async ({ page }) => {
@@ -425,6 +523,30 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
     if (mode === 'no-js') test.use({ javaScriptEnabled: false });
     test.beforeEach(async ({ page }) => {
       if (mode === 'blocked-bundle') await page.route('**/assets/**', (route) => route.abort('blockedbyclient'));
+    });
+
+    for (const field of [null, ...numericFields]) {
+      test(`browser rejection ${field?.id ?? 'mixed'} preserves SSR messages and metadata`, async ({ page }) => {
+        await open(page, `/rejection-${field?.id ?? 'mixed'}`, mode === 'mounted');
+        await expectRestoredRejection(page, field);
+        const props = JSON.parse(await page.locator('#link-form-props').textContent());
+        expect(props.values.errors.permission).toBe(serverPermissionError);
+        expect(props.values.errors.summary).toEqual([summaryMessage, serverFormError]);
+        if (field) expect(props.values[field.id]).toBe('abc');
+      });
+    }
+
+    test('browser rejection form-only response permits an unchanged native POST retry', async ({ page }) => {
+      await open(page, '/rejection-form', mode === 'mounted');
+      await expect(page.locator('#link-form-errors li')).toHaveText([summaryMessage, serverFormError]);
+      await expect(page.locator('#description-error')).toBeEmpty();
+      await expectPermission(page, 'push', false);
+      expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+      const data = await post(page);
+      expect(Object.fromEntries(data)).toEqual({
+        description: 'Transport workshop', internal_note: 'Preserved transport note',
+        permission: 'push', max_uses: '7', expires_in_days: '45', repo_ids: '10',
+      });
     });
 
     for (const field of numericFields) {

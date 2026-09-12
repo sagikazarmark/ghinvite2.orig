@@ -44,6 +44,17 @@ and the same parsers to `use_number_with`. `LinkCreateForm` renders its
 cannot drift. The `dioform` facade and `dioxus-web` are deliberately **not**
 dependencies of this crate.
 
+The workspace uses dioform 0.7. On a failed POST with non-empty
+`LinkFormValues.errors`, the island configures `FormConfig::browser_rejection`
+to restore the supplied typed values as draft and baseline and show errors from
+the prior rejected attempt without marking fields touched. Server-only field
+and form messages survive alongside client-reproducible errors. Parsed numeric
+bindings consume restored invalid raw input when they mount; no simulated input
+or submission is needed. A fresh core preflight retires the rejection and can
+allow an unchanged retry of server-only errors. `ParseBlocked` stops before
+that preflight and retains the rejection until a later submit can reach it.
+See the [island lifecycle](../ghinvite-island/README.md#how-the-island-works).
+
 ## The new invitation link form and its island (`links`)
 
 `links::LinkCreateFormPage` is the Console page. Inside it, the form is one
@@ -71,8 +82,9 @@ markup from the same inputs:
 
 The server supplies preserved values without browser bindings or listeners.
 Server-side rendering emits no listener attributes, so wired and unwired
-markup is byte-identical (tested for each component and for the whole
-`LinkCreateForm`).
+markup is byte-identical for the covered values (tested for each component and
+for the whole `LinkCreateForm`). The numeric restoration boundary below also
+applies to the island's first-frame parity.
 
 The production registry integration covers the summary Alert, submit Button,
 description, max-use, and expiration Inputs, and permission NativeSelect.
@@ -93,9 +105,14 @@ and expiration timestamp overflow is still checked by the shared server/browser
 validator. Errors still arrive through `LinkFormValues` props, folded with parse
 errors before visible validator errors, then passed into the same metadata.
 Unbound SSR uses the preserved raw-value memo; bound browser Inputs read directly
-from their bindings, including invalid raw text. Chromium sanitizes `abc` out of
-the native number display, but the binding retains it and its parse error until
+from their bindings, including invalid raw text restored from a failed response
+with non-empty errors. Chromium sanitizes `abc` out of the native number display,
+but the binding retains it and its parse error until
 edited; unchanged blur or unrelated edits do not silently turn it into `None`.
+Invalid numeric props without response errors do not configure restoration.
+Valid noncanonical text such as `"007"` or `" 7 "` still formats from the typed
+model as `"7"` on mount; preserving that spelling or byte-identical markup for
+it is not a guarantee of this migration.
 
 Permission has exactly five options, with explicit `NativeSelectOption::form_value`
 strings: `pull`, `triage`, `push`, `maintain`, and `admin`. Native POSTs submit
@@ -110,9 +127,10 @@ controlled memo: NativeSelect writes the DOM value property, so passing an
 unmatched raw value would blank the control. Real NativeSelect input writes
 through the binding; unchanged focus exit does not copy the fallback into it.
 
-The application still owns stable IDs and explicit `aria-describedby` and
-`aria-errormessage`: later sibling registration cannot supply the controls'
-first-pass SSR associations, and native help does not register with metadata. The help `p`
+With dioform 0.7, the application still owns stable IDs and explicit
+`aria-describedby` and `aria-errormessage`: later sibling registration cannot
+supply the controls' first-pass SSR associations, and native help does not
+register with metadata. The help `p`
 retains its styling because registry FieldDescription forces the unsuitable
 `label` class even with appearance disabled. Metadata reduces duplication; it
 does not eliminate all application wiring. Only the new-link numeric fields
@@ -147,7 +165,7 @@ plain form keeps working.
 - `ghinvite-island` (the browser island, `dioxus-web` + the `dioform` facade)
   depends on this crate directly and renders `links::LinkCreateForm` with a
   `links::LinkFormHandlers` bundle of listeners; its parity test asserts the
-  island's first frame equals the server's HTML.
+  island's first frame equals the server's HTML for the covered response values.
 
 ## Checks
 

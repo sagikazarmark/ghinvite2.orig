@@ -4,11 +4,11 @@
 //! `LinkFormIsland` is the reactive form (dioform bindings + progressive
 //! submit) and `ghinvite_ui::links::LinkCreateForm` is the server's plain
 //! component. Both are rendered here with `dioxus_ssr` (the `dioform` facade
-//! works natively; hooks run, the seeding hook included) and the strings are
-//! compared byte for byte — no normalisation. That pins down not only the
-//! layout, which the island shares by calling the same component, but the
+//! works natively; hooks run, including configured rejection restoration).
+//! The strings are compared byte for byte — no normalisation. That pins down
+//! not only the layout, shared by calling the same component, but the
 //! island's *state mapping*: the initial model built from the props, the
-//! server errors seeded through dioform's submission lifecycle, the raw
+//! server errors restored from the prior browser rejection, the raw
 //! numeric text that does not parse, and how visible errors fold back into
 //! `LinkFormErrors` (summary line, one message per field).
 //!
@@ -299,7 +299,7 @@ fn failed_submission_without_available_repositories_renders_identically() {
 #[test]
 fn server_only_errors_render_identically() {
     // Errors the browser cannot reproduce (no client rule rejects these
-    // values): the island must seed them through the submission lifecycle
+    // values): the island must restore them from the rejected response
     // rather than rely on its own validators, and a summary-only message
     // must land in the alert.
     let values = LinkFormValues {
@@ -320,6 +320,128 @@ fn server_only_errors_render_identically() {
         },
     };
     assert_parity(values, acme_repos());
+}
+
+#[test]
+fn client_validation_failures_do_not_drop_server_only_diagnostics_on_first_render() {
+    // The old begin_submission-based seeding stopped at client validation,
+    // dropping server-only diagnostics whenever any client rule also failed.
+    let permission_error = "This installation cannot grant admin access.";
+    let max_uses_error = "This account allows at most five uses per link.";
+    let summary = [
+        link_form::SUMMARY_MESSAGE,
+        "This installation is suspended.",
+        "Contact an account administrator before retrying.",
+    ];
+    let values = LinkFormValues {
+        description: "   ".into(),
+        permission: "admin".into(),
+        approval_required: true,
+        max_uses: "7".into(),
+        expires_in_days: "45".into(),
+        internal_note: "Preserve the rejected request".into(),
+        selected_repo_ids: vec![999],
+        errors: LinkFormErrors {
+            summary: summary.map(str::to_string).to_vec(),
+            description: Some(link_form::DESCRIPTION_REQUIRED.into()),
+            permission: Some(permission_error.into()),
+            max_uses: Some(max_uses_error.into()),
+            expires_in_days: None,
+            repo_scope: Some(link_form::REPO_SCOPE_REQUIRED.into()),
+        },
+    };
+
+    let (server, island) = render_both(values, acme_repos());
+    assert_eq!(
+        island, server,
+        "mixed rejection must match on the first frame"
+    );
+    for message in summary.into_iter().chain([
+        link_form::DESCRIPTION_REQUIRED,
+        permission_error,
+        max_uses_error,
+        link_form::REPO_SCOPE_REQUIRED,
+    ]) {
+        assert_eq!(island.matches(message).count(), 1, "message: {message}");
+    }
+    assert_numeric_input(&island, "max_uses", "7", Some(max_uses_error));
+    assert_numeric_input(&island, "expires_in_days", "45", None);
+}
+
+#[test]
+fn raw_parse_failures_coexist_with_server_only_diagnostics_on_first_render() {
+    let description_error = "A link with this description already exists.";
+    let form_error = "This installation is suspended.";
+    // Cover either parsed binding alone and both together. Raw values must
+    // survive binding registration without discarding the restored errors.
+    // Invalid raw values with empty errors are not a supported response:
+    // production only configures restoration when errors are present, and
+    // the server always attaches parse errors for these rejected inputs.
+    for (max_uses, expires_in_days, max_error, expires_error) in [
+        ("abc", "45", Some(link_form::MAX_USES_NOT_POSITIVE), None),
+        (
+            "7",
+            "4294967296",
+            None,
+            Some(link_form::EXPIRES_IN_DAYS_TOO_FAR),
+        ),
+        (
+            "00",
+            "-1",
+            Some(link_form::MAX_USES_NOT_POSITIVE),
+            Some(link_form::EXPIRES_IN_DAYS_NOT_POSITIVE),
+        ),
+    ] {
+        let values = LinkFormValues {
+            description: "Workshop".into(),
+            max_uses: max_uses.into(),
+            expires_in_days: expires_in_days.into(),
+            selected_repo_ids: vec![10],
+            errors: LinkFormErrors {
+                summary: vec![link_form::SUMMARY_MESSAGE.into(), form_error.into()],
+                description: Some(description_error.into()),
+                max_uses: max_error.map(str::to_string),
+                expires_in_days: expires_error.map(str::to_string),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+
+        let (server, island) = render_both(values, acme_repos());
+        assert_eq!(
+            island, server,
+            "raw rejection: max_uses={max_uses:?}, expires_in_days={expires_in_days:?}"
+        );
+        assert_numeric_input(&island, "max_uses", max_uses, max_error);
+        assert_numeric_input(&island, "expires_in_days", expires_in_days, expires_error);
+        for message in [link_form::SUMMARY_MESSAGE, description_error, form_error]
+            .into_iter()
+            .chain(max_error)
+            .chain(expires_error)
+        {
+            assert_eq!(island.matches(message).count(), 1, "message: {message}");
+        }
+    }
+}
+
+#[test]
+fn form_level_rejection_without_field_errors_renders_identically() {
+    let message = "This installation is suspended; no links can be created right now.";
+    let values = LinkFormValues {
+        description: "Workshop".into(),
+        selected_repo_ids: vec![10],
+        errors: LinkFormErrors {
+            summary: vec![link_form::SUMMARY_MESSAGE.into(), message.into()],
+            ..LinkFormErrors::default()
+        },
+        ..LinkFormValues::default()
+    };
+
+    let (server, island) = render_both(values, acme_repos());
+    assert_eq!(island, server);
+    assert_eq!(island.matches(link_form::SUMMARY_MESSAGE).count(), 1);
+    assert_eq!(island.matches(message).count(), 1);
+    assert!(!island.contains("aria-invalid=\"true\""));
 }
 
 #[test]

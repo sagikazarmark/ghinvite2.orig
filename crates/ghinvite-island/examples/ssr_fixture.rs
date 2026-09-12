@@ -26,7 +26,13 @@ use ghinvite_ui::links::LinkCreateFormPage;
 
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let form = if args.iter().any(|arg| arg == "--permission-only-invalid") {
+    let form = if args.iter().any(|arg| arg == "--browser-rejection") {
+        transport_rejection(
+            args.iter().any(|arg| arg == "--parse-blocked"),
+            args.iter().any(|arg| arg == "--expiration"),
+            args.iter().any(|arg| arg == "--form-only"),
+        )
+    } else if args.iter().any(|arg| arg == "--permission-only-invalid") {
         LinkFormValues {
             description: "Permission workshop".into(),
             permission: if args.iter().any(|arg| arg == "--empty-permission") {
@@ -90,6 +96,45 @@ fn main() {
     );
     vdom.rebuild_in_place();
     println!("{}", dioxus_ssr::render(&vdom));
+}
+
+/// Synthetic response payloads exercise rejection transport, not domain rules.
+/// The browser can reproduce the description/parse errors, but neither of the
+/// fixture-only messages below is emitted by a production validator.
+fn transport_rejection(parse_blocked: bool, expiration: bool, form_only: bool) -> LinkFormValues {
+    let mut form = LinkFormValues {
+        description: "Transport workshop".into(),
+        permission: "push".into(),
+        max_uses: "7".into(),
+        expires_in_days: "45".into(),
+        internal_note: "Preserved transport note".into(),
+        selected_repo_ids: vec![10],
+        errors: LinkFormErrors {
+            summary: vec![
+                SUMMARY_MESSAGE.into(),
+                "Transport fixture: server-only form rejection.".into(),
+            ],
+            ..LinkFormErrors::default()
+        },
+        ..LinkFormValues::default()
+    };
+    if !form_only {
+        form.description = "   ".into();
+        form.errors.description = Some(ghinvite_ui::link_form::DESCRIPTION_REQUIRED.into());
+        form.errors.permission =
+            Some("Transport fixture: server-only permission rejection.".into());
+    }
+    if parse_blocked {
+        if expiration {
+            form.expires_in_days = "abc".into();
+            form.errors.expires_in_days =
+                Some(ghinvite_ui::link_form::EXPIRES_IN_DAYS_NOT_POSITIVE.into());
+        } else {
+            form.max_uses = "abc".into();
+            form.errors.max_uses = Some(ghinvite_ui::link_form::MAX_USES_NOT_POSITIVE.into());
+        }
+    }
+    form
 }
 
 /// A rejected description alongside otherwise valid values, to check that
