@@ -2030,6 +2030,7 @@ dependencies = [
  "serde_qs 1.1.1",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "thiserror 1.0.69",
  "tokio",
  "tower",
@@ -2039,6 +2040,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wiremock",
 ]
 
 [[package]]

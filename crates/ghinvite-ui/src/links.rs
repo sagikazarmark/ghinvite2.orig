@@ -56,6 +56,9 @@ pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
     let action = format!("/console/accounts/{login}/links");
     let island_props = LinkFormIslandProps {
+        csrf_token: try_consume_context::<crate::csrf::CsrfToken>()
+            .unwrap_or_default()
+            .0,
         action: action.clone(),
         values: props.form.clone(),
         repos: props.repos.clone(),
@@ -160,6 +163,7 @@ pub fn LinkCreateForm(
 
     rsx! {
         form { method: "post", action: "{action}", class: "max-w-3xl space-y-5", ..form_listeners,
+            crate::csrf::CsrfField {}
             {if form.errors.summary.is_empty() {
                 rsx! {}
             } else {
@@ -599,6 +603,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                                 div { class: "modal-action",
                                     a { class: "btn btn-ghost", href: "#", "Cancel" }
                                     form { method: "post", action: "/console/accounts/{login}/links/{id_str}/revoke",
+                                        crate::csrf::CsrfField {}
                                         button { r#type: "submit", class: "btn btn-error", "Confirm stop" }
                                     }
                                 }
@@ -753,8 +758,11 @@ mod tests {
     /// The `<form>…</form>` slice of a rendered page: what the admin sees and
     /// submits, as opposed to the props blob that follows it.
     fn form_markup(page: &str) -> &str {
-        let start = page.find("<form").expect("page renders a form");
-        let end = page.find("</form>").expect("page closes the form") + "</form>".len();
+        let start = page
+            .find("<form method=\"post\" action=\"/console/accounts/acme/links\"")
+            .expect("page renders a create form");
+        let end =
+            start + page[start..].find("</form>").expect("page closes the form") + "</form>".len();
         &page[start..end]
     }
 
@@ -912,6 +920,7 @@ mod tests {
         assert_eq!(
             props,
             LinkFormIslandProps {
+                csrf_token: None,
                 action: "/console/accounts/acme/links".to_string(),
                 values: form,
                 repos: acme_repos(),
@@ -1000,7 +1009,7 @@ mod tests {
                 page.contains(&standalone),
                 "page does not embed the standalone form verbatim"
             );
-            assert_eq!(page.matches("<form").count(), 1);
+            assert_eq!(form_markup(&page).matches("<form").count(), 1);
         }
     }
 

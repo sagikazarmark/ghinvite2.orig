@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,8 @@ if (!assets.has('/assets/ghinvite-island.js')) {
 }
 
 const pages = new Map();
+// Fixture authority travels through the real SSR context, props, and form.
+const csrfToken = randomBytes(32).toString('base64url');
 for (const [path, args] of [
   ['/', []], ['/failed', ['--with-errors']], ['/preserved', ['--preserved-values']],
   ['/permission-invalid', ['--permission-only-invalid']],
@@ -43,7 +46,8 @@ for (const [path, args] of [
 ]) {
   pages.set(path, execFileSync('cargo', [
     'run', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture', '--', ...args,
-  ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }));
+  ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
+    env: { ...process.env, GHINVITE_FIXTURE_CSRF: csrfToken } }));
 }
 
 createServer(async (request, response) => {
@@ -60,6 +64,10 @@ createServer(async (request, response) => {
         response.writeHead(413).end();
         return;
       }
+    }
+    if (new URLSearchParams(body).getAll('csrf_token').join() !== csrfToken) {
+      response.writeHead(403).end('Invalid CSRF token');
+      return;
     }
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ entries: [...new URLSearchParams(body)] }));

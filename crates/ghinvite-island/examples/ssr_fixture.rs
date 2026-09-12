@@ -94,6 +94,9 @@ fn main() {
         },
         (),
     );
+    vdom.provide_root_context(ghinvite_ui::csrf::CsrfToken(
+        std::env::var("GHINVITE_FIXTURE_CSRF").ok(),
+    ));
     vdom.rebuild_in_place();
     println!("{}", dioxus_ssr::render(&vdom));
 }

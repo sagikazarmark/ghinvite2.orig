@@ -1,5 +1,5 @@
 use crate::error::WebError;
-use crate::views::render::render;
+use crate::views::render::render_with_csrf as render;
 use axum::body::Body;
 use axum::http::{Method, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Response};
@@ -30,7 +30,7 @@ pub async fn public(method: Method, uri: Uri, tower: tower_sessions::Session) ->
             .into_response();
     }
 
-    let html = render(move || {
+    let html = render(session.csrf_token.clone(), move || {
         rsx! {
             crate::views::not_found::PublicNotFoundPage {
                 signed_in_login: signed_in_login.clone(),

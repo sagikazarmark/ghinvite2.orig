@@ -208,9 +208,11 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                             rsx! {
                                                 div { class: "flex gap-2 lg:flex-col lg:items-stretch",
                                                     form { method: "post", action: "/console/accounts/{login}/requests/{rid}/approve",
+                                                        crate::csrf::CsrfField {}
                                                         button { r#type: "submit", class: "btn btn-success btn-sm h-8 min-h-0", "Approve request" }
                                                     }
                                                     form { method: "post", action: "/console/accounts/{login}/requests/{rid}/decline",
+                                                        crate::csrf::CsrfField {}
                                                         button { r#type: "submit", class: "btn btn-error btn-sm h-8 min-h-0", "Decline request" }
                                                     }
                                                 }

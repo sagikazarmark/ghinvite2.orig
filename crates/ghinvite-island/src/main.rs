@@ -95,6 +95,7 @@ mod browser {
         let props = use_context::<LinkFormIslandProps>();
         rsx! {
             LinkFormIsland {
+                csrf_token: props.csrf_token,
                 action: props.action,
                 values: props.values,
                 repos: props.repos,

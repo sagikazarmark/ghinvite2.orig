@@ -9,11 +9,12 @@ use crate::commands::{
 };
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::middleware::auth::RequireConsoleAdminOf;
+use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::session;
 use crate::state::AppState;
 use crate::views::link_edit::{self, LinkEditValues};
 use crate::views::link_form::RepositoryChoice;
-use crate::views::render::render;
+use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
 use axum::http::{Method, Uri};
@@ -87,7 +88,7 @@ async fn console_index(
         Err(error) => {
             tracing::warn!(error = ?error, "failed to load console accounts");
             let signed_in_login = Some(session.login.clone());
-            let html = render(move || {
+            let html = render(session.csrf_token.clone(), move || {
                 rsx! {
                     crate::views::console::ConsoleIndexPage {
                         signed_in_login: signed_in_login.clone(),
@@ -112,7 +113,7 @@ async fn console_index(
         crate::views::console::ConsoleIndexState::AccountPicker { accounts }
     };
     let signed_in_login = Some(session.login.clone());
-    let html = render(move || {
+    let html = render(session.csrf_token.clone(), move || {
         rsx! {
             crate::views::console::ConsoleIndexPage {
                 signed_in_login: signed_in_login.clone(),
@@ -179,7 +180,7 @@ async fn console_unknown(uri: Uri, tower: tower_sessions::Session) -> axum::resp
 fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::not_found::ConsoleNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
@@ -219,7 +220,7 @@ async fn overview(
     let account_login = admin.account.account_login.clone();
     let account_type = admin.account.account_type;
 
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::console::OverviewPage {
                 signed_in_login: signed_in_login.clone(),
@@ -261,7 +262,7 @@ async fn links_list(
     };
     let now = Utc::now();
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::link_list::LinkListPage {
                 signed_in_login: Some(admin.session.login.clone()),
@@ -303,7 +304,7 @@ fn link_form_response(
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
 
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::links::LinkCreateFormPage {
                 signed_in_login: signed_in_login.clone(),
@@ -351,7 +352,7 @@ async fn load_installation_repos_for_form(
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<CreateLinkSubmission>,
+    CsrfForm(form): CsrfForm<CreateLinkSubmission>,
 ) -> impl IntoResponse {
     let now = Utc::now();
 
@@ -385,21 +386,17 @@ async fn create_link(
         .await
     {
         Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = ?e, "create invitation link command failed");
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Error,
-                    message: "Failed to create invitation link. Please try again.".into(),
-                },
+        Err(_) => {
+            tracing::warn!("create invitation link command failed");
+            let mut errors = crate::views::links::LinkFormErrors::default();
+            errors
+                .summary
+                .push("Failed to create invitation link. Please try again.".into());
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                link_form_response(&admin, None, repos, form.into_view_values(errors), now),
             )
-            .await;
-            return axum::response::Redirect::to(&format!(
-                "/console/accounts/{}/links/new",
-                admin.account.account_login
-            ))
-            .into_response();
+                .into_response();
         }
     };
     let link_id = output.link_id.to_string();
@@ -454,7 +451,7 @@ async fn save_link_details(
     State(state): State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
-    serde_qs::axum::QsForm(values): serde_qs::axum::QsForm<LinkEditValues>,
+    CsrfForm(values): CsrfForm<LinkEditValues>,
 ) -> axum::response::Response {
     let Ok(id) = id.parse() else {
         return console_not_found_response(&admin);
@@ -532,7 +529,7 @@ fn edit_link_response(
 ) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
-    Html(render(move || {
+    Html(render(admin.session.csrf_token.clone(), move || {
         rsx! {
             link_edit::LinkEditPage {
                 signed_in_login: signed_in_login.clone(),
@@ -576,7 +573,7 @@ async fn link_detail(
     let now = Utc::now();
     let invitation_url = format!("{}/i/{}", state.config.base_url, link.slug.as_str());
 
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::links::LinkDetailPage {
                 signed_in_login: signed_in_login.clone(),
@@ -595,6 +592,7 @@ async fn revoke_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
+    _form: CsrfForm<EmptyForm>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
@@ -680,7 +678,7 @@ async fn requests_queue(
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
 
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::requests::RequestsQueuePage {
                 signed_in_login: signed_in_login.clone(),
@@ -697,6 +695,7 @@ async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    _form: CsrfForm<EmptyForm>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
@@ -758,6 +757,7 @@ async fn decline_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    _form: CsrfForm<EmptyForm>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
@@ -822,7 +822,7 @@ async fn settings_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
     let signed_in_login = Some(admin.session.login.clone());
     let account = admin.account.clone();
 
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::settings::SettingsPage {
                 signed_in_login: signed_in_login.clone(),

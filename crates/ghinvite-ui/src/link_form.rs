@@ -136,6 +136,8 @@ pub const LINK_FORM_ISLAND_MODULE_SRC: &str = "/assets/ghinvite-island.js";
 /// serialised is exactly what the browser component receives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Props)]
 pub struct LinkFormIslandProps {
+    #[props(default)]
+    pub csrf_token: Option<String>,
     /// `action` of the form; the route that handles the POST.
     pub action: String,
     pub values: LinkFormValues,
@@ -939,6 +941,7 @@ mod tests {
 
     fn island_props(description: &str) -> LinkFormIslandProps {
         LinkFormIslandProps {
+            csrf_token: None,
             action: "/console/accounts/acme/links".to_string(),
             values: LinkFormValues {
                 description: description.to_string(),

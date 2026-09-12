@@ -10,7 +10,15 @@ pub fn render<F>(component: F) -> String
 where
     F: 'static + Clone + Fn() -> Element + Send,
 {
+    render_with_csrf(None, component)
+}
+
+pub fn render_with_csrf<F>(token: Option<String>, component: F) -> String
+where
+    F: 'static + Clone + Fn() -> Element + Send,
+{
     let mut vdom = VirtualDom::new_with_props(component, ());
+    vdom.provide_root_context(ghinvite_ui::csrf::CsrfToken(token));
     vdom.rebuild_in_place();
     dioxus_ssr::render(&vdom)
 }

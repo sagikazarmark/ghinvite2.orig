@@ -22,7 +22,7 @@ struct LoginQuery {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/login", get(login))
-        .route("/logout", get(logout))
+        .route("/logout", axum::routing::post(logout))
         .route("/install", get(install))
         .route("/oauth/callback", get(oauth_callback))
 }
@@ -53,7 +53,10 @@ async fn login(
     Ok(Redirect::to(&authorize.url))
 }
 
-async fn logout(tower: TowerSession) -> impl IntoResponse {
+async fn logout(
+    tower: TowerSession,
+    _form: crate::middleware::csrf::CsrfForm<crate::middleware::csrf::EmptyForm>,
+) -> impl IntoResponse {
     session::clear(&tower).await;
     Redirect::to("/")
 }
@@ -159,6 +162,7 @@ async fn oauth_callback(
         user_id: gh_user.id,
         login: gh_user.login,
         access_token: token.access_token,
+        csrf_token: Some(crate::middleware::csrf::generate_token()),
         ..Default::default()
     };
     session::save(&tower, &session)

@@ -20,6 +20,60 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+mod common;
+
+#[tokio::test]
+async fn request_submission_requires_the_rendered_session_token() {
+    let (app, calls) = build_test_app(
+        active_link(ACTIVE_SLUG),
+        None,
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+    let token = common::csrf_token(&app, &cookie).await;
+    for body in [
+        "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+        "csrf_token=wrong".into(),
+        format!("csrf_token={token}&csrf_token={token}"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .header("cookie", &cookie)
+                    .header("origin", "https://evil.ghinvite.test")
+                    .header("sec-fetch-site", "same-site")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert!(calls.lock().unwrap().is_empty());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={token}&justification=Native+request"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
 const ACTIVE_SLUG: &str = "abcdEFGH01234567";
 const UNKNOWN_SLUG: &str = "ZZZZZZZZZZZZZZZZ";
 const CREATOR_ID: u64 = 701;
@@ -928,6 +982,7 @@ async fn submit_creates_request_and_redirects_to_canonical_page() {
     )
     .await;
     let cookie = sign_in(app.clone()).await;
+    let token = common::csrf_token(&app, &cookie).await;
 
     let resp = app
         .oneshot(
@@ -936,9 +991,9 @@ async fn submit_creates_request_and_redirects_to_canonical_page() {
                 .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=ship-it",
-                ))
+                .body(Body::from(format!(
+                    "csrf_token={token}&request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=ship-it"
+                )))
                 .unwrap(),
         )
         .await
@@ -968,6 +1023,7 @@ async fn submit_with_existing_pending_request_redirects_without_command() {
     )
     .await;
     let cookie = sign_in(app.clone()).await;
+    let token = common::csrf_token(&app, &cookie).await;
 
     let resp = app
         .oneshot(
@@ -976,9 +1032,9 @@ async fn submit_with_existing_pending_request_redirects_without_command() {
                 .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=again",
-                ))
+                .body(Body::from(format!(
+                    "csrf_token={token}&request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=again"
+                )))
                 .unwrap(),
         )
         .await
@@ -1007,6 +1063,7 @@ async fn submit_with_existing_declined_request_sends_command() {
     )
     .await;
     let cookie = sign_in(app.clone()).await;
+    let token = common::csrf_token(&app, &cookie).await;
 
     let resp = app
         .oneshot(
@@ -1015,9 +1072,9 @@ async fn submit_with_existing_declined_request_sends_command() {
                 .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=retry",
-                ))
+                .body(Body::from(format!(
+                    "csrf_token={token}&request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=retry"
+                )))
                 .unwrap(),
         )
         .await
@@ -1052,6 +1109,7 @@ async fn submit_with_existing_approved_request_redirects_without_command() {
     )
     .await;
     let cookie = sign_in(app.clone()).await;
+    let token = common::csrf_token(&app, &cookie).await;
 
     let resp = app
         .oneshot(
@@ -1060,9 +1118,9 @@ async fn submit_with_existing_approved_request_redirects_without_command() {
                 .uri(format!("/i/{ACTIVE_SLUG}"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=again",
-                ))
+                .body(Body::from(format!(
+                    "csrf_token={token}&request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=again"
+                )))
                 .unwrap(),
         )
         .await

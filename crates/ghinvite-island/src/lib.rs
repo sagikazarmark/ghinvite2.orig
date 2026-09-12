@@ -57,6 +57,7 @@ use ghinvite_ui::links::{LinkCreateForm, LinkFormHandlers, RepositoryScopeHandle
 /// listeners are the bindings' handlers. See the crate docs for the lifecycle.
 #[component]
 pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
+    use_context_provider(|| ghinvite_ui::csrf::CsrfToken(props.csrf_token.clone()));
     let fields = CreateLinkForm::fields();
 
     // The form: the model built from the preserved values, the shared
@@ -285,6 +286,7 @@ mod tests {
         check: impl Fn(&FormHandle<CreateLinkForm>, [(String, Option<String>); 2]) + Clone + 'static,
     ) {
         let props = LinkFormIslandProps {
+            csrf_token: None,
             action: "/console/accounts/acme/links".into(),
             values,
             repos: vec![RepositoryChoice {

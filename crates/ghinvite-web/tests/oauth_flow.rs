@@ -196,6 +196,299 @@ fn signin_expectations() -> Vec<Expectation> {
 }
 
 #[tokio::test]
+async fn logout_requires_a_session_bound_native_form_token() {
+    let app = build_app_with_mock(MockTransport::scripted(signin_expectations())).await;
+    let (cookie, state) = begin_login(&app, "/login").await;
+    let signed_in = get(
+        &app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &cookie,
+    )
+    .await;
+    let cookie = session_cookie(&signed_in);
+
+    // Even a same-site sibling can send the victim's Lax cookie on a POST.
+    for body in ["", "csrf_token=incorrect"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header("cookie", &cookie)
+                    .header("origin", "https://evil.ghinvite.test")
+                    .header("sec-fetch-site", "same-site")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            get(&app, "/console/accounts/octocat", &cookie)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        get(&app, "/logout", &cookie).await.status(),
+        StatusCode::METHOD_NOT_ALLOWED
+    );
+
+    let home = get(&app, "/", &cookie).await;
+    assert_eq!(home.headers()["cache-control"], "private, no-store");
+    let html = String::from_utf8(
+        home.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("action=\"/logout\""));
+    let token = html
+        .split("name=\"csrf_token\" value=\"")
+        .nth(1)
+        .expect("native CSRF field")
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(token.len() >= 32);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/");
+    assert_eq!(
+        get(&app, "/console/accounts/octocat", &cookie)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test]
+async fn browser_tokens_are_stable_session_separated_and_replaced_on_signin() {
+    let app = build_app_with_mock(MockTransport::scripted(
+        signin_expectations().into_iter().cycle().take(6).collect(),
+    ))
+    .await;
+    let mut cookies = Vec::new();
+    for _ in 0..2 {
+        let (cookie, state) = begin_login(&app, "/login").await;
+        let response = get(
+            &app,
+            &format!("/oauth/callback?code=test&state={state}"),
+            &cookie,
+        )
+        .await;
+        cookies.push(session_cookie(&response));
+    }
+    let first = common::csrf_token(&app, &cookies[0]).await;
+    assert_eq!(first, common::csrf_token(&app, &cookies[0]).await);
+    assert_ne!(first, common::csrf_token(&app, &cookies[1]).await);
+    let login = get(&app, "/login", &cookies[0]).await;
+    let location = url::Url::parse(login.headers()["location"].to_str().unwrap()).unwrap();
+    let state = location
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .unwrap()
+        .1
+        .into_owned();
+    let response = get(
+        &app,
+        &format!("/oauth/callback?code=test&state={state}"),
+        &cookies[0],
+    )
+    .await;
+    let rotated = session_cookie(&response);
+    assert_ne!(first, common::csrf_token(&app, &rotated).await);
+    for cookie in [&cookies[1], &rotated] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!("csrf_token={first}")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            get(&app, "/console/accounts/octocat", cookie)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+}
+
+mod common;
+
+#[derive(Clone, Debug)]
+struct ConcurrentLoadStore {
+    inner: tower_sessions::MemoryStore,
+    first_loads: Arc<tokio::sync::Barrier>,
+    loads: Arc<AtomicU8>,
+}
+
+#[async_trait::async_trait]
+impl SessionStore for ConcurrentLoadStore {
+    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
+        self.inner.create(record).await
+    }
+    async fn save(&self, record: &Record) -> session_store::Result<()> {
+        self.inner.save(record).await
+    }
+    async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
+        let record = self.inner.load(id).await?;
+        if self.loads.fetch_add(1, Ordering::SeqCst) < 2 {
+            self.first_loads.wait().await;
+        }
+        Ok(record)
+    }
+    async fn delete(&self, id: &Id) -> session_store::Result<()> {
+        self.inner.delete(id).await
+    }
+}
+
+#[tokio::test]
+async fn legacy_session_concurrent_forms_keep_the_same_usable_token() {
+    let inner = tower_sessions::MemoryStore::default();
+    let session = tower_sessions::Session::new(None, Arc::new(inner.clone()), None);
+    session
+        .insert(
+            "ghinvite",
+            serde_json::json!({
+                "user_id":42, "login":"octocat", "access_token":"u_xxx", "admin_checks":{}
+            }),
+        )
+        .await
+        .unwrap();
+    session.save().await.unwrap();
+    let cookie = format!("id={}", session.id().unwrap());
+    let store = ConcurrentLoadStore {
+        inner,
+        first_loads: Arc::new(tokio::sync::Barrier::new(2)),
+        loads: Arc::new(AtomicU8::new(0)),
+    };
+    let app = build_app_with_store(MockTransport::scripted(vec![]), store).await;
+    let (first, second) = tokio::join!(
+        common::csrf_token(&app, &cookie),
+        common::csrf_token(&app, &cookie)
+    );
+    assert_eq!(
+        first, second,
+        "concurrently opened legacy-session forms share authority"
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={first}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
+async fn legacy_session_error_page_logout_token_does_not_depend_on_persistence() {
+    // Persisted legacy authority is test input; all observations use HTTP.
+    let store = tower_sessions::MemoryStore::default();
+    let session = tower_sessions::Session::new(None, Arc::new(store.clone()), None);
+    session
+        .insert(
+            "ghinvite",
+            serde_json::json!({
+                "user_id":42, "login":"octocat", "access_token":"u_xxx", "admin_checks":{}
+            }),
+        )
+        .await
+        .unwrap();
+    session.save().await.unwrap();
+    let cookie = format!("id={}", session.id().unwrap());
+    // Render a production page, then simulate its upstream read failing. The
+    // layer is inside SessionManagerLayer, which skips persistence on 5xx.
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(vec![])),
+        Arc::new(RestateCommands::new(Arc::new(
+            RestateClient::new("http://127.0.0.1:1").unwrap(),
+        ))),
+        WebConfig::for_local_dev(),
+    );
+    let page_app = ghinvite_web::routes::home::router()
+        .with_state(state)
+        .layer(axum::middleware::map_response(
+            |mut response: axum::response::Response| async move {
+                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                response
+            },
+        ))
+        .layer(tower_sessions::SessionManagerLayer::new(store.clone()).with_secure(false));
+    let response = get(&page_app, "/", &cookie).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let token = html
+        .split("name=\"csrf_token\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    let app = build_app_with_store(MockTransport::scripted(vec![]), store).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/logout")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={token}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+}
+
+#[tokio::test]
 async fn github_failure_consumes_state_without_authenticating_or_rotating() {
     for fail_user_lookup in [false, true] {
         let expectations = if fail_user_lookup {

@@ -3,7 +3,7 @@ use crate::{
     middleware::auth::RequireConsoleAdminOf,
     state::AppState,
     views::audit::{AuditLogPage, AuditRow},
-    views::render::render,
+    views::render::render_with_csrf as render,
 };
 use axum::{
     extract::State,
@@ -199,7 +199,7 @@ pub(super) async fn page(
     };
     let latest_href = query.href(&base, AuditPosition::Latest);
     let retry_href = query.href(&base, query.position);
-    let html = render(move || {
+    let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             AuditLogPage {
                 signed_in_login: Some(admin.session.login.clone()), account_login: admin.account.account_login.clone(),

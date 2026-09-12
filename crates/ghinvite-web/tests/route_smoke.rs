@@ -132,7 +132,7 @@ async fn setup_route_requires_installation_id() {
 }
 
 #[tokio::test]
-async fn logout_clears_session_and_redirects_home() {
+async fn logout_get_is_not_a_mutation() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -143,9 +143,7 @@ async fn logout_clears_session_and_redirects_home() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location, "/");
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@
 use crate::session;
 use crate::state::AppState;
 use crate::views::home::HomePage;
-use crate::views::render::render;
+use crate::views::render::render_with_csrf;
 use axum::Router;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
@@ -22,6 +22,9 @@ async fn home(tower: TowerSession) -> impl IntoResponse {
         None
     };
 
-    let html = render(move || rsx! { HomePage { signed_in_login: signed_in_login.clone() } });
+    let html = render_with_csrf(
+        session.csrf_token,
+        move || rsx! { HomePage { signed_in_login: signed_in_login.clone() } },
+    );
     Html(html).into_response()
 }

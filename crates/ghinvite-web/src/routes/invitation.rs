@@ -6,7 +6,7 @@ use crate::invitation_link_resolution::{
 };
 use crate::session;
 use crate::state::AppState;
-use crate::views::render::render;
+use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
 use axum::http::Uri;
@@ -31,8 +31,9 @@ pub fn router() -> Router<AppState> {
         .route("/i/{slug}/{*rest}", any(unknown_nested))
 }
 
-fn invitation_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
-    let html = render(move || {
+fn invitation_not_found_response(session: &session::Session) -> axum::response::Response {
+    let signed_in_login = Some(session.login.clone());
+    let html = render(session.csrf_token.clone(), move || {
         rsx! {
             crate::views::not_found::InvitationNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
@@ -65,18 +66,18 @@ async fn invitation_page(
     let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
     {
         Ok(context) => context,
-        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
+        Err(_) => return invitation_not_found_response(&session),
     };
     let selection = select_requester_request_state(&context.requests, session.user_id);
     if !context.link.is_active(now) && selection.current_status.is_none() {
-        return invitation_not_found_response(Some(session.login.clone()));
+        return invitation_not_found_response(&session);
     }
 
     let slug = context.slug.as_str().to_string();
     let request_id = ghinvite_core::RequestId::new().to_string();
     let flash = session::take_flash(&tower).await.unwrap_or(None);
     let signed_in_login = session.login.clone();
-    let html = render(move || {
+    let html = render(session.csrf_token.clone(), move || {
         rsx! {
             crate::views::invitation::RequestPage {
                 slug: slug.clone(),
@@ -101,15 +102,14 @@ async fn unknown_nested(tower: TowerSession, uri: Uri) -> impl IntoResponse {
             .unwrap_or("/");
         return redirect_to_login(return_to);
     }
-    invitation_not_found_response(Some(session.login.clone()))
+    invitation_not_found_response(&session)
 }
 
 async fn submit_request(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
-    // Use serde_qs::axum::QsForm, NOT axum::extract::Form - this workspace uses serde_qs.
-    serde_qs::axum::QsForm(form): serde_qs::axum::QsForm<SubmitForm>,
+    crate::middleware::csrf::CsrfForm(form): crate::middleware::csrf::CsrfForm<SubmitForm>,
 ) -> impl IntoResponse {
     let session = session::load(&tower).await.unwrap_or_default();
     if !session.is_authenticated() {
@@ -120,11 +120,11 @@ async fn submit_request(
     let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
     {
         Ok(context) => context,
-        Err(_) => return invitation_not_found_response(Some(session.login.clone())),
+        Err(_) => return invitation_not_found_response(&session),
     };
     let selection = select_requester_request_state(&context.requests, session.user_id);
     if !context.link.is_active(now) && selection.current_status.is_none() {
-        return invitation_not_found_response(Some(session.login.clone()));
+        return invitation_not_found_response(&session);
     }
 
     let slug = context.slug.as_str().to_string();
@@ -146,7 +146,7 @@ async fn submit_request(
     let request_id = ghinvite_core::RequestId::from_str(&form.request_id)
         .unwrap_or_else(|_| ghinvite_core::RequestId::new());
 
-    if let Err(e) = state
+    if state
         .commands
         .submit_invitation_request(SubmitInvitationRequest::new(
             request_id,
@@ -156,17 +156,28 @@ async fn submit_request(
             now,
         ))
         .await
+        .is_err()
     {
-        tracing::warn!(error = ?e, "submit invitation request command failed");
-        let _ = session::set_flash(
-            &tower,
-            session::Flash {
-                level: session::FlashLevel::Error,
-                message: "Failed to submit request. Please try again.".into(),
-            },
-        )
-        .await;
-        return Redirect::to(&canonical_invitation_path(&slug)).into_response();
+        tracing::warn!("submit invitation request command failed");
+        let flash = Some(session::Flash {
+            level: session::FlashLevel::Error,
+            message: "Failed to submit request. Please try again.".into(),
+        });
+        let html = render(session.csrf_token.clone(), move || {
+            rsx! {
+                crate::views::invitation::RequestPage {
+                    slug: slug.clone(),
+                    link: context.link.clone(),
+                    signed_in_login: session.login.clone(),
+                    flash: flash.clone(),
+                    request_id: request_id.to_string(),
+                    justification: form.justification.clone().unwrap_or_default(),
+                    current_status: selection.current_status,
+                    retry_notice: selection.retry_notice,
+                }
+            }
+        });
+        return (axum::http::StatusCode::BAD_GATEWAY, Html(html)).into_response();
     }
 
     Redirect::to(&canonical_invitation_path(&slug)).into_response()

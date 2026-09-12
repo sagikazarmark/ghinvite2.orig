@@ -108,6 +108,14 @@ example the console route maps the GitHub `GhRepo` payload into
 `views::link_form::RepositoryChoice` once, where repositories are loaded, and
 both validation and the form page work on that type.
 
+Browser mutation authority is a request-local exception to page props:
+`render_with_csrf` installs a `ghinvite_ui::csrf::CsrfToken` root context so
+shared navigation and nested forms use the same token without passing it through
+every layout. Every authenticated HTML route must use that renderer. The island
+serializes the context value in its props and reinstalls it on mount. HTTP form
+inventory tests verify nonempty authority in every rendered POST form, including
+logout and error pages; standalone view fixtures may render without a session.
+
 ### Form validation
 
 `forms::create_link` is a thin adapter over the shared model: it parses the

@@ -44,3 +44,4 @@ pub(crate) mod testing {
         dioxus_ssr::render(&vdom)
     }
 }
+pub mod csrf;

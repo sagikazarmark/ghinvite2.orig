@@ -19,6 +19,45 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
+mod common;
+
+#[tokio::test]
+async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
+    let (app, cookie, calls) =
+        build_signed_in_admin_app_with_recording_commands(oauth_expectations()).await;
+    for path in [
+        "/console/accounts/acme/links",
+        "/console/accounts/acme/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/edit",
+        "/console/accounts/acme/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/revoke",
+        "/console/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve",
+        "/console/accounts/acme/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/decline",
+    ] {
+        for body in ["", "csrf_token=incorrect"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("cookie", &cookie)
+                        .header("origin", "https://evil.ghinvite.test")
+                        .header("sec-fetch-site", "same-site")
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            assert_eq!(
+                response_html(response).await,
+                "Invalid CSRF token. Reload the page and try again."
+            );
+        }
+    }
+    assert!(calls.lock().unwrap().is_empty());
+}
+
 fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
     resp.headers()
         .get("set-cookie")
@@ -492,6 +531,7 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
         storage.insert_invitation_link(&link).await.unwrap();
         let path = format!("/console/accounts/{stored_login}/links/{}/edit", link.id);
+        let token = common::csrf_token(&app, &cookie).await;
         let response = app
             .clone()
             .oneshot(
@@ -500,7 +540,9 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
                     .uri(&path)
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from("description=Updated+by+owner"))
+                    .body(Body::from(format!(
+                        "csrf_token={token}&description=Updated+by+owner"
+                    )))
                     .unwrap(),
             )
             .await
@@ -1231,6 +1273,7 @@ async fn post_edit(
     id: &str,
     body: &str,
 ) -> axum::response::Response {
+    let token = common::csrf_token(app, cookie).await;
     app.clone()
         .oneshot(
             Request::builder()
@@ -1238,7 +1281,7 @@ async fn post_edit(
                 .uri(format!("/console/accounts/acme/links/{id}/edit"))
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body.to_string()))
+                .body(Body::from(format!("csrf_token={token}&{body}")))
                 .unwrap(),
         )
         .await
@@ -2481,7 +2524,7 @@ async fn audit_history_urls_filter_seek_normalize_and_remain_read_only() {
     assert_eq!(audit_get(&app, &cookie, &older_uri).await.1, second);
     let form = second
         .split("<form")
-        .nth(1)
+        .find(|form| form.starts_with(" method=\"get\""))
         .unwrap()
         .split("</form>")
         .next()
@@ -2669,6 +2712,8 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E&permission=owner&max_uses=7&expires_in_days=45&repo_ids=999&repo_ids=10";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let resp = app
         .oneshot(
             Request::builder()
@@ -2724,6 +2769,8 @@ async fn create_link_invalid_description_rerenders_form_with_errors_and_preserve
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=%20%20%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let resp = app
         .oneshot(
             Request::builder()
@@ -2764,6 +2811,8 @@ async fn create_link_valid_submission_invokes_command_and_redirects() {
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let before = Utc::now();
     let resp = app
         .oneshot(
@@ -2820,7 +2869,13 @@ fn assert_expires_days_from(
 }
 
 fn assert_preserved_description_input(html: &str) {
-    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
+    let form = html
+        .split("id=\"link-form-island\"")
+        .nth(1)
+        .unwrap()
+        .split("</form>")
+        .next()
+        .unwrap();
     let mut inputs = form
         .split("<input ")
         .skip(1)
@@ -2832,7 +2887,13 @@ fn assert_preserved_description_input(html: &str) {
 }
 
 fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) {
-    let form = &html[html.find("<form").unwrap()..html.find("</form>").unwrap()];
+    let form = html
+        .split("id=\"link-form-island\"")
+        .nth(1)
+        .unwrap()
+        .split("</form>")
+        .next()
+        .unwrap();
     let mut inputs = form
         .split("<input ")
         .skip(1)
@@ -2883,6 +2944,8 @@ async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors(
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=AI+coding+workshop&permission=push&max_uses=abc&expires_in_days=0&internal_note=Keep+this+note&repo_ids=10";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let resp = app
         .oneshot(
             Request::builder()
@@ -2938,6 +3001,8 @@ async fn create_link_valid_numeric_guardrails_reach_command() {
         build_signed_in_admin_app_with_recording_commands(expectations).await;
 
     let body = "description=AI+coding+workshop&permission=pull&max_uses=+3+&expires_in_days=+10+&repo_ids=11";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let before = Utc::now();
     let resp = app
         .oneshot(
@@ -2976,6 +3041,8 @@ async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration()
 
     let body =
         "description=AI+coding+workshop&permission=pull&max_uses=&expires_in_days=&repo_ids=10";
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{body}");
     let resp = app
         .oneshot(
             Request::builder()
@@ -3007,13 +3074,14 @@ const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least
 /// exposes `acme/api` (10) and `acme/web` (11), returning the response and the
 /// recorded command calls.
 async fn post_create_link(
-    body: impl Into<Body>,
+    body: impl AsRef<str>,
 ) -> (axum::response::Response, Arc<Mutex<Vec<RecordedCommand>>>) {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
     let (app, cookie, calls) =
         build_signed_in_admin_app_with_recording_commands(expectations).await;
-
+    let token = common::csrf_token(&app, &cookie).await;
+    let body = format!("csrf_token={token}&{}", body.as_ref());
     let resp = app
         .oneshot(
             Request::builder()
@@ -3021,7 +3089,7 @@ async fn post_create_link(
                 .uri("/console/accounts/acme/links")
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(body.into())
+                .body(Body::from(body))
                 .unwrap(),
         )
         .await
@@ -3243,7 +3311,13 @@ async fn create_link_tampered_permission_rerenders_form_with_permission_error() 
     // The tampered value is not echoed into the form (the island props blob
     // after it carries the submitted values verbatim, JSON-escaped); the
     // select offers only supported levels.
-    let form_markup = &text[text.find("<form").unwrap()..text.find("</form>").unwrap()];
+    let form_markup = text
+        .split("id=\"link-form-island\"")
+        .nth(1)
+        .unwrap()
+        .split("</form>")
+        .next()
+        .unwrap();
     assert!(!form_markup.contains("owner"));
     assert_eq!(text.matches("<option").count(), 5);
     // Every other submitted value and selection survives the re-render.
@@ -3368,13 +3442,15 @@ async fn console_unknown_post_route_stays_plain_404() {
 #[tokio::test]
 async fn console_post_missing_resource_stays_plain_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
+    let token = common::csrf_token(&app, &cookie).await;
     let resp = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/console/accounts/acme/links/not-a-link-id/revoke")
                 .header("cookie", cookie)
-                .body(Body::empty())
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={token}")))
                 .unwrap(),
         )
         .await

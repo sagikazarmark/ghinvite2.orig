@@ -71,6 +71,51 @@ instantaneous worldwide logout or globally atomic OAuth-state consumption.
 These HTTP tests use MemoryStore and SQLite, and the Worker build checks target
 compatibility; they do not simulate KV propagation.
 
+### Browser mutation CSRF protection
+
+Authenticated native forms use a server-generated, 256-bit synchronizer token
+stored in the session. `CsrfForm` verifies the URL-encoded `csrf_token` field
+before dispatch; missing, invalid, duplicate, or another-session tokens return
+the same 403 response. Console authentication/account concealment runs first.
+Tokens are reusable across open forms, carried in the island props when it
+replaces the SSR form, and replaced with identity at every successful OAuth
+sign-in. Dynamic responses use `Cache-Control: private, no-store`. Tokens stay
+out of URLs and command payloads; rejected parser bodies are not logged/echoed.
+
+For pre-CSRF sessions, a domain-separated SHA-256 digest of the existing random
+session ID supplies stable authority without revealing the bearer ID or relying
+on an upgrade write. Concurrent requests and 5xx pages derive the same value.
+The next OAuth sign-in replaces it with a newly generated token.
+
+Protected POST inventory:
+
+- `/console/accounts/{login}/links` — create
+- `/console/accounts/{login}/links/{link_id}/edit` — edit metadata
+- `/console/accounts/{login}/links/{link_id}/revoke` — revoke
+- `/console/accounts/{login}/requests/{request_id}/approve` and `/decline`
+- `/i/{slug}` — submit request (the request ID is only an idempotency key)
+- `/logout` — sign out; GET returns 405
+
+GitHub redirect and webhook contracts are independent of form tokens:
+
+- `GET /oauth/callback` requires the session's one-use OAuth state before code
+  exchange and session rotation. An installation ID on this callback does not
+  onboard an installation.
+- `GET /setup/github` requires authentication and resolves the supplied
+  installation ID against GitHub's user-visible installations, then fetches
+  repository selection through that user's API before dispatch. It is the
+  verified GitHub setup/update return, not a general browser mutation endpoint.
+  `/install` only redirects to GitHub; neither route gains a POST alternative.
+- `POST /webhooks/github` uses its existing HMAC/header/payload verification.
+
+Run `cargo test -p ghinvite-web --test csrf_flow` for rendered form inventory,
+same-site sibling-origin forgery, cross-session rejection, command isolation,
+accepted native actions, and validation/service retry preservation. Session
+rotation/logout cases are in `oauth_flow`; setup and webhook tests retain their
+independent authentication contracts. The browser suite verifies real fields
+and submission with the island mounted, JavaScript disabled, and the bundle
+blocked (see `tests/browser/README.md`).
+
 ### Restate approval and delivery acceptance gate
 
 From the repository root, run the same command used by CI:

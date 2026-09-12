@@ -78,8 +78,9 @@ pub async fn check_admin(
     Ok(is_admin)
 }
 
-fn generic_not_found_response(signed_in_login: Option<String>) -> axum::response::Response {
-    let html = crate::views::render::render(move || {
+fn generic_not_found_response(session: &Session) -> axum::response::Response {
+    let signed_in_login = Some(session.login.clone());
+    let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
         rsx! {
             crate::views::not_found::PublicNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
@@ -157,7 +158,7 @@ where
 
         let account = match state.storage.get_active_installation_by_login(&login).await {
             Ok(Some(account)) => account,
-            Ok(None) => return Err(generic_not_found_response(Some(session.login.clone()))),
+            Ok(None) => return Err(generic_not_found_response(&session)),
             Err(error) => return Err(WebError::Storage(error).into_response()),
         };
 
@@ -166,7 +167,7 @@ where
             Err(error) => return Err(error.into_response()),
         };
         if !is_admin {
-            return Err(generic_not_found_response(Some(session.login.clone())));
+            return Err(generic_not_found_response(&session));
         }
 
         crate::session::save(&tower, &session)

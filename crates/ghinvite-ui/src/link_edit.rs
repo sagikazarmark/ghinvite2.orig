@@ -74,6 +74,7 @@ pub fn LinkEditPage(props: LinkEditPageProps) -> Element {
                     }
                 }
                 form { method: "post", action: "{detail_href}/edit", class: "max-w-3xl space-y-5",
+                    crate::csrf::CsrfField {}
                     if props.description_error.is_some() || props.form_error.is_some() {
                         div { id: "link-edit-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
                             div {
@@ -305,7 +306,13 @@ mod tests {
         assert!(html.contains(&format!(
             "<form method=\"post\" action=\"/console/accounts/acme/links/{link_id}/edit\""
         )));
-        assert_eq!(html.matches("<form").count(), 1);
+        assert_eq!(
+            html.matches(&format!(
+                "action=\"/console/accounts/acme/links/{link_id}/edit\""
+            ))
+            .count(),
+            1
+        );
         assert!(html.contains("for=\"description\""));
         assert!(html.contains("<input id=\"description\" type=\"text\" name=\"description\" value=\"AI coding workshop\""));
         assert!(html.contains("required=true"));

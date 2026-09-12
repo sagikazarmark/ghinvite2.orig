@@ -61,7 +61,10 @@ pub fn Nav(props: NavProps) -> Element {
                     Some(login) => rsx! {
                         a { class: "btn btn-primary btn-sm h-8 min-h-0 px-3", href: "/console", "Console" }
                         span { class: "hidden max-w-32 truncate px-1 text-xs text-base-content/60 sm:inline-flex", "@{login}" }
-                        a { class: "btn btn-ghost btn-sm h-8 min-h-0 px-2", href: "/logout", "Sign out" }
+                        form { method: "post", action: "/logout",
+                            crate::csrf::CsrfField {}
+                            button { r#type: "submit", class: "btn btn-ghost btn-sm h-8 min-h-0 px-2", "Sign out" }
+                        }
                     },
                     None => rsx! {
                         a { class: "btn btn-primary btn-sm h-8 min-h-0 px-3", href: "/login", "Sign in" }

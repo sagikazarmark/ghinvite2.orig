@@ -29,6 +29,8 @@ pub struct RequestPageProps {
     pub signed_in_login: String,
     pub flash: Option<crate::flash::Flash>,
     pub request_id: String,
+    #[props(default)]
+    pub justification: String,
     pub current_status: Option<RequestState>,
     pub retry_notice: Option<RequestState>,
 }
@@ -132,7 +134,10 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                         "Signed in as "
                         strong { "@{login}" }
                         ". Not you? "
-                        a { href: "/logout", class: "link", "Sign out and sign in again." }
+                        form { method: "post", action: "/logout",
+                            crate::csrf::CsrfField {}
+                            button { r#type: "submit", class: "link", "Sign out and sign in again." }
+                        }
                     }
                 }
                 div { class: "space-y-3",
@@ -145,6 +150,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                     method: "post",
                     action: "{action}",
                     class: "space-y-4",
+                    crate::csrf::CsrfField {}
                     input {
                         r#type: "hidden",
                         name: "request_id",
@@ -158,6 +164,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                             class: "textarea textarea-bordered min-h-28 w-full",
                             placeholder: "Share useful context for the account admins.",
                             rows: "4",
+                            "{props.justification}"
                         }
                         p { class: "text-sm text-base-content/70", "Optional, visible to account admins." }
                     }
@@ -256,7 +263,7 @@ mod tests {
         assert!(html.contains("Permission: Write (push)"));
         assert!(html.contains("Signed in as"));
         assert!(html.contains("Not you?"));
-        assert!(html.contains("href=\"/logout\""));
+        assert!(html.contains("action=\"/logout\""));
         assert!(html.contains("name=\"request_id\""));
         assert!(html.contains("action=\"/i/abcdEFGH01234567\""));
         assert!(html.contains("Submit request"));

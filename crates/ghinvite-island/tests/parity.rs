@@ -532,6 +532,7 @@ fn island_props_from_the_page_blob_round_trip_into_the_component() {
     // `LinkFormIslandProps`; make sure a blob produced by the page code
     // renders to the same markup as the typed props.
     let props = LinkFormIslandProps {
+        csrf_token: None,
         action: ACTION.to_string(),
         values: failed_submission(),
         repos: acme_repos(),

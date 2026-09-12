@@ -16,6 +16,9 @@ pub struct Session {
     /// CSRF token for the OAuth state round-trip. Set on `/login`, verified on
     /// `/oauth/callback`.
     pub oauth_csrf: Option<String>,
+    /// Browser mutation authority, replaced with identity on authentication.
+    #[serde(default)]
+    pub csrf_token: Option<String>,
     /// Organization authority keyed by `"{user_id}:{account_id}"` (numeric
     /// GitHub IDs), with a 60-second TTL. Legacy login-keyed entries deserialize
     /// but are never used by authorization. Clear this map on session reset.
@@ -63,7 +66,24 @@ const SESSION_KEY: &str = "ghinvite";
 /// Read the session from a tower-sessions handle. Returns the default empty
 /// session if none is set.
 pub async fn load(tower: &TowerSession) -> Result<Session, tower_sessions::session::Error> {
-    Ok(tower.get(SESSION_KEY).await?.unwrap_or_default())
+    let mut session: Session = tower.get(SESSION_KEY).await?.unwrap_or_default();
+    // Legacy records have no stored token. Derive their authority from the
+    // existing unpredictable session ID without exposing that bearer ID. This
+    // is deterministic across concurrent requests and needs no write (including
+    // on 5xx responses, which tower-sessions does not persist). Successful OAuth
+    // always replaces it with a fresh random token and rotates the session ID.
+    if session.is_authenticated() && session.csrf_token.is_none() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        if let Some(id) = tower.id() {
+            let mut hash = Sha256::new();
+            hash.update(b"ghinvite:legacy-browser-csrf:v1:");
+            hash.update(id.to_string().as_bytes());
+            session.csrf_token =
+                Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finalize()));
+        }
+    }
+    Ok(session)
 }
 
 /// Persist the session.
@@ -123,6 +143,7 @@ mod tests {
             login: "octocat".into(),
             access_token: "u_xxx".into(),
             oauth_csrf: None,
+            csrf_token: None,
             admin_checks: HashMap::new(),
             return_to: None,
         };

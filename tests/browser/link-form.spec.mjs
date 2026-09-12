@@ -117,9 +117,13 @@ async function open(page, path = '/', mounted = true) {
   await expect(submit(page)).toBeVisible();
   await expect(form(page)).toHaveAttribute('method', 'post');
   await expect(form(page)).toHaveAttribute('action', action);
+  const props = JSON.parse(await page.locator('#link-form-props').textContent());
+  expect(props.csrf_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  await expect(form(page).locator('input[name="csrf_token"]')).toHaveValue(props.csrf_token);
 }
 
 async function post(page) {
+  const csrfToken = await form(page).locator('input[name="csrf_token"]').inputValue();
   const responsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === action && response.request().method() === 'POST');
   await submit(page).click();
@@ -129,7 +133,10 @@ async function post(page) {
   expect(response.request().headers()['content-type']).toContain('application/x-www-form-urlencoded');
   expect(response.status()).toBe(200);
   await expect(page).toHaveURL(new RegExp(`${action}$`));
-  return new URLSearchParams((await response.json()).entries);
+  const entries = new URLSearchParams((await response.json()).entries);
+  expect(entries.getAll('csrf_token')).toEqual([csrfToken]);
+  entries.delete('csrf_token'); // Remaining assertions describe domain form values.
+  return entries;
 }
 
 async function expectRestoredRejection(page, field = null) {
@@ -691,7 +698,7 @@ test('responsive themed form keeps controls reachable and accessibility wiring i
     expect.soft(await page.locator(selector).evaluate((element) => element.scrollWidth - element.clientWidth),
       `${selector} must not overflow horizontally`).toBeLessThanOrEqual(1);
   }
-  for (const control of await form(page).locator('input, textarea, select, button[type="submit"]').all()) {
+  for (const control of await form(page).locator('input:not([type="hidden"]), textarea, select, button[type="submit"]').all()) {
     await control.scrollIntoViewIfNeeded();
     await expect(control).toBeInViewport();
     await expect(control).toHaveAccessibleName(/\S/);

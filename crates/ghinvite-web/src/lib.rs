@@ -60,6 +60,18 @@ where
     router
         .fallback(routes::not_found::public)
         .layer(middleware::csp::layer())
+        // Every rendered page can contain logout authority, including errors.
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            |response: &axum::http::Response<axum::body::Body>| {
+                response
+                    .headers()
+                    .get(axum::http::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .is_some_and(|value| value.starts_with("text/html"))
+                    .then(|| axum::http::HeaderValue::from_static("private, no-store"))
+            },
+        ))
         .layer(session_layer)
         .with_state(state)
 }
