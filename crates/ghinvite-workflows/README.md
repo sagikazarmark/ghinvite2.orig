@@ -5,14 +5,13 @@ change in the system: `Installation`, `InvitationLink`, `InvitationRequest`
 (workflow), `GithubInvitation`, `Reconcile`. Built on the upstream
 `restate-sdk = "0.10"` Rust SDK.
 
-This crate is **library-only in Plan 3**: handler logic + unit tests, with
-`SqlxStorage::in_memory` and `crates/ghinvite-github`'s `MockTransport` driving every
-test. Plan 7 wraps this library in a Workers `#[event(fetch)]` entry point
-backed by `D1Storage`, plus the `wrangler.toml` and Workers secrets.
+The library contains handler logic shared by the native binary and the
+`ghinvite-workflows-worker` entry point. Native tests use `SqlxStorage`; the
+Worker uses `D1Storage`.
 
 ## Local dev (current)
 
-The crate ships no binary in Plan 3. Run unit tests:
+Run unit tests without infrastructure:
 
 ```bash
 cargo test -p ghinvite-workflows
@@ -26,11 +25,14 @@ Each handler module has tests in the same file:
 - `crates/ghinvite-workflows/src/invitation_request.rs::tests`
 - `crates/ghinvite-workflows/src/reconcile.rs::tests`
 
-The `InvitationRequest` workflow's awakeable + timer race is **not** unit-
-tested in Plan 3 — that requires the Restate runtime. Plan 8 covers it via
-integration tests against the local Restate server.
+The durable timer path requires the real Restate runtime. From the repository
+root, run `bash scripts/test-restate.sh` to register the current endpoint and
+verify request expiration and persisted audit outcomes. This feature-gated
+test is excluded from normal workspace tests; when enabled it fails if the
+runtime is absent. See [local testing](../../docs/local-testing.md) for the
+host/container topology, prerequisites, deadlines, and cleanup.
 
-## Local dev (after Plan 7)
+## Local runtime
 
 Restate's platform server runs in `compose.yaml` at the repo root:
 
@@ -43,8 +45,8 @@ This binds:
 - `127.0.0.1:9070` — admin (where deployments are registered).
 - `127.0.0.1:9071` — internal.
 
-Plan 7 will wire the Workers entry point. Until then, the crate is library-
-only and registers nothing with the Restate platform.
+See the root [README](../../README.md#running-locally-full-stack) for starting
+the native endpoint and registering it with Restate.
 
 ## Architecture notes
 

@@ -124,24 +124,11 @@ jobs:
 
   integration:
     name: Restate integration tests
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-    services:
-      restate:
-        image: docker.restate.dev/restatedev/restate:latest
-        ports:
-          - 8080:8080
-          - 9070:9070
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
-      - name: Wait for Restate
-        run: until curl -sf http://localhost:9070/health; do sleep 2; done
-      - name: Start github-stub
-        run: |
-          cargo build -p ghinvite-github --example stub
-          ./target/debug/examples/stub --port 3001 &
-          until curl -sf http://localhost:3001/calls; do sleep 1; done
-      - name: Run integration tests
-        run: cargo test -p ghinvite-workflows --features integration -- --ignored
+      - name: Run real Restate smoke
+        run: bash scripts/test-restate.sh

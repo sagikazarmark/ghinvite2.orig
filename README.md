@@ -56,6 +56,10 @@ No services required:
 cargo test --workspace
 ```
 
+This excludes the real Restate smoke and the opt-in D1/browser tests. Run the
+Restate smoke with `bash scripts/test-restate.sh`; see
+[`docs/local-testing.md`](docs/local-testing.md) for prerequisites and coverage.
+
 ## Running locally (full stack)
 
 Two options: native Rust binaries (faster iteration) or Wrangler dev (closer to production).
@@ -92,6 +96,7 @@ Wait for: `Restate is ready`
 GHINVITE_GITHUB_APP_ID=<your-app-id> \
 GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE=path/to/private-key.pem \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
+GHINVITE_LISTEN_ADDR=0.0.0.0:9080 \
 cargo run -p ghinvite-workflows
 ```
 
@@ -100,18 +105,15 @@ On first run (or after `rm dev.sqlite`), migrations are applied automatically. Y
 After it starts, register it with Restate once:
 
 ```bash
-# macOS / Docker Desktop — restate-svc is on the host, Restate is in Docker:
-curl -X POST http://localhost:9070/restate/v1/deployments \
+# Restate is in Docker; compose.yaml maps this host alias on Linux/Desktop.
+curl --fail-with-body --max-time 20 -X POST http://localhost:9070/deployments \
   -H 'Content-Type: application/json' \
   -d '{"uri": "http://host.docker.internal:9080"}'
-
-# Linux — use the Docker bridge IP instead (host.docker.internal is not automatic):
-# curl -X POST http://localhost:9070/restate/v1/deployments \
-#   -H 'Content-Type: application/json' \
-#   -d '{"uri": "http://172.17.0.1:9080"}'
 ```
 
-> **Note:** `ghinvite-workflows` binds to `127.0.0.1:9080` by default, so the URI you give to Restate must resolve to the host from *inside* the Restate container — not just from your shell. Use `GHINVITE_LISTEN_ADDR=0.0.0.0:9080 cargo run -p ghinvite-workflows` if `host.docker.internal` is unavailable on your platform.
+> **Note:** The explicit listen address above lets the container reach the host
+> endpoint. The binary's default `127.0.0.1:9080` is host-loopback only. The host
+> firewall must allow the Docker bridge to reach port 9080.
 
 **Terminal 3 — web**
 
@@ -195,4 +197,4 @@ GitHub Actions runs on every push and PR to `main`:
 - **Lint** — `cargo fmt --check` + `cargo clippy`
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
-- **Integration** (main branch only) — Restate-in-Docker + the github stub example + `cargo test --features integration`
+- **Integration** — `bash scripts/test-restate.sh`: digest-pinned Restate in a disposable Docker container, current native endpoint, and persisted expiration/audit assertions
