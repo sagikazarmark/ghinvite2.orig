@@ -123,12 +123,14 @@ jobs:
           if-no-files-found: error
 
   integration:
-    name: Restate integration tests
+    name: Restate approval and delivery gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
-      - name: Run real Restate smoke
+      # The runner owns the disposable runtime; the test owns loopback GitHub
+      # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
+      - name: Verify approval, fanout, retry, and duplicate operations
         run: bash scripts/test-restate.sh

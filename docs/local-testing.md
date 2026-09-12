@@ -6,7 +6,7 @@
 cargo test --workspace
 ```
 
-This excludes the feature-gated real Restate smoke, the opt-in ignored D1 suite,
+This excludes the feature-gated real Restate acceptance gate, the opt-in ignored D1 suite,
 and browser tests. A passing workspace suite does **not** verify Restate runtime
 compatibility or container networking.
 
@@ -71,7 +71,7 @@ instantaneous worldwide logout or globally atomic OAuth-state consumption.
 These HTTP tests use MemoryStore and SQLite, and the Worker build checks target
 compatibility; they do not simulate KV propagation.
 
-### Restate integration tests
+### Restate approval and delivery acceptance gate
 
 From the repository root, run the same command used by CI:
 
@@ -82,7 +82,9 @@ bash scripts/test-restate.sh
 Prerequisites:
 
 - Rust **1.92.0**, selected by `rust-toolchain.toml`, with Cargo dependencies
-  available (`--locked` uses the checked-in lockfile).
+  available (`--locked` uses the checked-in lockfile). The runner prints the
+  actual compiler version: non-rustup environments such as Nix may override the
+  toolchain file; use 1.92.0 to reproduce the CI compiler exactly.
 - Bash, GNU coreutils `timeout` (on macOS, `brew install coreutils` provides
   `gtimeout`), and Docker Compose v2+.
 - A running **local** Docker Engine 20.10+ on Linux, or Docker Desktop on
@@ -91,13 +93,14 @@ Prerequisites:
   inside another container are not supported by this host/bridge topology.
 - The container must be able to reach an ephemeral TCP port on the host. Host
   firewalls must allow traffic from the Docker bridge to that test listener.
-  No GitHub App credentials, GitHub stub process, Wrangler, or dev stack is needed.
+  No GitHub App credentials, separately started GitHub stub, Wrangler, or dev stack is needed.
 
 `compose.yaml` pins Restate **1.7.9** by image digest; the dev stack and smoke
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
 script. To upgrade Restate, update the shared image pin and rerun this command.
 
-The script compiles the single integration-test file, creates a uniquely named
+The script runs the GitHub stub HTTP contract tests, compiles the single
+integration-test file, creates a uniquely named
 Compose project, and publishes admin/ingress on randomly allocated **loopback**
 ports. The Rust test serves the current workflow endpoint on `0.0.0.0:0`.
 Restate reaches it using `host.docker.internal`, explicitly mapped by Compose
@@ -106,24 +109,78 @@ subnet or fixed IP is assumed. The readiness probe uses cleartext HTTP/2 and the
 SDK discovery media type. Successful deployment registration verifies the
 container-to-host discovery path before any invocation is sent.
 
-The bounded scenario onboards an installation, creates a described invitation
-link with one repository, then submits an approval-required invitation request
-with a two-second decision window. It waits for the workflow's **expired** result
-and reads through the public `Storage` trait to assert the installation, link
-description/scope/use count, terminal request/decision timestamp, and four audit
-events. GitHub transport rejects calls; invitation request expiration does not
-send GitHub invitations.
-This exercises native SDK + real Restate + SQLite, not Workers/D1 or GitHub delivery.
+The test starts its own GitHub HTTP stub on `127.0.0.1:0`, using the same router
+as the standalone example. The production `InstallationClient` and
+`ReqwestTransport` exchange a synthetic App JWT for a fake installation token
+and send real HTTP requests to that stub. Both servers are Tokio tasks owned by
+the test runtime, so success, assertion failure, or process termination closes
+their sockets. No credentials are injected into this gate.
 
-Readiness has a 30-second deadline per service; HTTP calls have a 20-second
-deadline (3-second connect), and the scenario has a 120-second overall deadline.
-The shell bounds compilation (600s), container startup/pull (180s), test execution
+The bounded scenarios verify:
+
+- Request expiration after a two-second decision window, including the stored
+  link description/scope/use count and four audit records, with **zero** GitHub calls.
+- Auto-approval and manual approval through the web application's public
+  `RestateCommands` → `RestateClient` → real ingress/handlers. Manual approval
+  resolves the actual durable decision promise; pending requests dispatch no
+  GitHub work. Each link has **four repositories**, with `201` (sent with an ID),
+  `204` (already collaborator), `422` (failed), and one `502` followed by `201`.
+  The final retry is performed by Restate, not a retry loop in the test/client.
+- Persisted request approval separately from per-repository delivery success,
+  stored upstream invitation IDs matched against GitHub list responses, requester,
+  repository and permission on outbound calls, exact attempt counts, and safe
+  account-scoped audit metadata. Reads use the public `Storage` API.
+- Re-submitting the **same request ID and payload after completed success**
+  leaves one request, one link use, the same invitation IDs/audit count, and no
+  additional outbound GitHub calls. A transparent loopback HTTP observer forwards
+  real command bytes/responses and captures Restate's send receipts: both sends
+  must return the same invocation ID, whose workflow output is completed. It
+  never synthesizes an ingress response. This covers stable-operation replay, not
+  arbitrary browser resubmissions that generate a new request ID.
+
+The gate starts below the web router; focused HTTP authorization/session tests
+remain in `console_flow`, `route_smoke`, and `oauth_flow`. The browser POST echo
+fixture is not used as evidence of the web-to-Restate wire contract.
+
+**Boundaries:** local stub responses are not evidence of live GitHub webhook
+availability or delivery. Native SQLx runtime tests are **not D1 adapter
+conformance**. Full browser OAuth, automatic lifecycle scheduling, and deep
+partial-commit/crash-recovery fault injection are outside this gate (Batch 3
+covers the latter). The transient scenario fails before upstream success; it
+does not claim exactly-once delivery across a GitHub-success/database-failure gap.
+
+#### Standalone GitHub stub
+
+```bash
+cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
+```
+
+This loopback-only fixture provides token minting, collaborator PUT/GET/DELETE,
+and pending-invitation GET/DELETE. Successful PUTs return JSON with an invitation
+ID, invitee, repository, permissions, and creation timestamp; pending invitations
+do not count as accepted collaborators. It models the consumed API subset, not
+all GitHub validation, authorization, pagination, or pending-invitation updates.
+
+`POST /outcomes` accepts `{"owner":"test-org","repo":"api","user":"requester",
+"outcome":"transient_once"}`. Outcomes are `already_collaborator` (204),
+`terminal_failure` (422), or `transient_once` (one 502, then normal 201).
+`GET /calls` returns `{"count":N,"requests":[...]}` with method, path, permission,
+and status only, never headers/JWTs/tokens. `DELETE /reset` clears all fixture
+state. Configuration and ledger requests are excluded from the API call count.
+
+Readiness has a 30-second deadline per service; harness HTTP calls have a 20-second
+deadline (3-second connect), the real web client has its production 15-second
+timeout, request polling is bounded at 15s and fanout/retry polling at 30s, and
+all scenarios share a 120-second overall deadline.
+The shell bounds each compilation/contract-test step (600s), container startup/pull (180s), test execution
 (150s), and cleanup (30s), escalating to a kill after a further 5s if a child
-ignores termination; CI also has a 20-minute job deadline. Registration
+ignores termination; CI also has a 30-minute job deadline. Registration
 and invocation failures stop immediately, reporting the phase and HTTP status
 without printing response bodies, headers, or configured URLs. On failure the
 script prints container status and at most 60 log lines from its own disposable
-runtime, which has only synthetic fixtures and no injected secrets.
+runtime, which has only synthetic fixtures and no injected secrets. Actions
+retains these diagnostics in the job logs. The failure output includes the
+failed assertion/phase and the runtime retry status/target when available.
 
 Every run has fresh SQLite and Restate state and unique object/workflow keys.
 An exit trap removes the container, volumes, and network on success, failure,

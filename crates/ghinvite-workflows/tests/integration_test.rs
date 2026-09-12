@@ -1,18 +1,25 @@
-//! Real Restate smoke: run `bash scripts/test-restate.sh` from the repository root.
+//! Real Restate acceptance gate: run `bash scripts/test-restate.sh` from the repository root.
 //! The integration feature opts in; missing infrastructure is a failure, never a skip.
 
 #![cfg(feature = "integration")]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
 use ghinvite_core::storage::{AuditPosition, Storage};
-use ghinvite_core::{RequestId, RequestState};
+use ghinvite_core::{
+    GithubInvitation, InvitationLinkRepo, InvitationState, Permission, RequestId, RequestState,
+};
 use ghinvite_github::InstallationClient;
 use ghinvite_github::jwt::AppJwtSigner;
-use ghinvite_github::mocks::MockTransport;
+use ghinvite_github::transport::ReqwestTransport;
 use ghinvite_storage_sqlx::SqlxStorage;
+use ghinvite_web::commands::{
+    CreateInvitationLink, DecideInvitationRequest, GhinviteCommands, RestateCommands,
+    SubmitInvitationRequest,
+};
+use ghinvite_web::restate_client::RestateClient;
 use ghinvite_workflows::invitation_link::CreateLinkOutput;
 use reqwest::{Client, Response};
 use restate_sdk::http_server::HttpServer;
@@ -21,6 +28,50 @@ use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep, timeout};
 
 const TEST_KEY_PEM: &str = include_str!("../../ghinvite-github/src/jwt_test_key.pem");
+
+// A transparent HTTP observer: forward the real command bytes to real ingress
+// and relay its response unchanged. Capture only send receipts, never credentials.
+// This lets the test correlate duplicate commands without changing the production
+// fire-and-forget command API or substituting an echo/mock response.
+#[derive(Clone)]
+struct IngressObserver {
+    client: Client,
+    ingress: String,
+    receipts: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+async fn forward_ingress(
+    axum::extract::State(observer): axum::extract::State<IngressObserver>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    let path = request.uri().path().to_owned();
+    let method = request.method().clone();
+    let body = axum::body::to_bytes(request.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let response = observer
+        .client
+        .request(method, format!("{}{path}", observer.ingress))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.bytes().await.unwrap();
+    if path.ends_with("/send") && status.is_success() {
+        observer
+            .receipts
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&body).expect("real Restate send receipt"));
+    }
+    let mut response = axum::response::Response::new(axum::body::Body::from(body));
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
 
 fn runtime_var(name: &str) -> String {
     std::env::var(name)
@@ -64,10 +115,10 @@ async fn ready(client: &Client, url: &str, phase: &str) {
 }
 
 #[tokio::test]
-async fn real_restate_persists_request_expiration() {
+async fn real_restate_approval_delivery_and_expiration() {
     timeout(Duration::from_secs(120), scenario())
         .await
-        .expect("Restate smoke exceeded its 120s scenario deadline");
+        .expect("Restate acceptance gate exceeded its 120s scenario deadline");
 }
 
 async fn scenario() {
@@ -97,12 +148,17 @@ async fn scenario() {
             .await
             .unwrap();
     }
-    // Expiration must not contact GitHub. An empty script rejects any API call.
-    let transport = Arc::new(MockTransport::scripted(vec![]));
+    let stub_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let stub_base = format!("http://{}", stub_listener.local_addr().unwrap());
+    let stub_server = tokio::spawn(async move {
+        axum::serve(stub_listener, ghinvite_github::stub::router())
+            .await
+            .unwrap();
+    });
+    let transport = Arc::new(ReqwestTransport::with_client(client.clone()));
     let signer = AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap();
-    let github_client =
-        Arc::new(InstallationClient::new(transport, signer).with_base("https://api.github.test"));
-    let state = ghinvite_workflows::AppState::new(storage.clone(), github_client);
+    let github_client = Arc::new(InstallationClient::new(transport, signer).with_base(&stub_base));
+    let state = ghinvite_workflows::AppState::new(storage.clone(), github_client.clone());
     let endpoint = ghinvite_workflows::build_endpoint(state, None).unwrap();
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -266,5 +322,485 @@ async fn scenario() {
             .as_ref()
             .is_some_and(|id| !id.is_empty())
     );
+    assert_eq!(
+        stub_calls(&client, &stub_base).await,
+        json!({"count": 0, "requests": []}),
+        "expiration must not contact GitHub"
+    );
+    let observer = IngressObserver {
+        client: client.clone(),
+        ingress,
+        receipts: Arc::default(),
+    };
+    let observer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let restate = Arc::new(
+        RestateClient::new(format!(
+            "http://{}",
+            observer_listener.local_addr().unwrap()
+        ))
+        .unwrap(),
+    );
+    let observer_app = axum::Router::new()
+        .fallback(forward_ingress)
+        .with_state(observer.clone());
+    let observer_server = tokio::spawn(async move {
+        axum::serve(observer_listener, observer_app).await.unwrap();
+    });
+    let commands = RestateCommands::new(restate);
+    approval_fanout(
+        &storage,
+        &commands,
+        &client,
+        &stub_base,
+        &github_client,
+        &observer,
+        false,
+    )
+    .await;
+    approval_fanout(
+        &storage,
+        &commands,
+        &client,
+        &stub_base,
+        &github_client,
+        &observer,
+        true,
+    )
+    .await;
     server.abort();
+    stub_server.abort();
+    observer_server.abort();
+}
+
+async fn stub_calls(client: &Client, base: &str) -> serde_json::Value {
+    success(
+        "GitHub stub call ledger",
+        client.get(format!("{base}/calls")),
+    )
+    .await
+    .json()
+    .await
+    .unwrap()
+}
+
+async fn wait_for_request(storage: &Arc<dyn Storage>, id: RequestId, expected: RequestState) {
+    timeout(Duration::from_secs(15), async {
+        loop {
+            if storage
+                .get_invitation_request(id)
+                .await
+                .unwrap()
+                .is_some_and(|r| r.state == expected)
+            {
+                return;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("request did not reach {expected:?} within 15s"));
+}
+
+// Read through the account audit/public Storage API, including terminal invitations
+// that the pending-invitation query intentionally excludes. No SQL/debug helpers.
+async fn delivered_invitations(
+    storage: &Arc<dyn Storage>,
+    request_id: RequestId,
+) -> Vec<GithubInvitation> {
+    let audit = storage
+        .list_audit_events(42, None, AuditPosition::Latest)
+        .await
+        .unwrap();
+    let mut rows = Vec::new();
+    for event in audit
+        .events
+        .iter()
+        .filter(|e| e.target_kind == TargetKind::GithubInvitation)
+    {
+        let row = storage
+            .get_github_invitation(event.target_id.parse().unwrap())
+            .await
+            .unwrap()
+            .expect("audited invitation persisted");
+        if row.invitation_request_id == request_id
+            && !rows.iter().any(|r: &GithubInvitation| r.id == row.id)
+        {
+            rows.push(row);
+        }
+    }
+    rows.sort_by_key(|r| r.repo_id);
+    rows
+}
+
+async fn approval_fanout(
+    storage: &Arc<dyn Storage>,
+    commands: &RestateCommands,
+    http: &Client,
+    stub: &str,
+    github: &InstallationClient,
+    observer: &IngressObserver,
+    manual: bool,
+) {
+    // Literal expectations for each repository; keep the wire and persisted
+    // outcomes together rather than encoding meaning in repository positions.
+    struct ExpectedDelivery {
+        name: &'static str,
+        repo_id: u64,
+        configured_outcome: Option<&'static str>,
+        state: InvitationState,
+        statuses: &'static [u16],
+        event: EventType,
+        actor: ActorKind,
+        detail: Option<(&'static str, &'static str)>,
+    }
+    let cases = [
+        ExpectedDelivery {
+            name: "sent",
+            repo_id: 20,
+            configured_outcome: None,
+            state: InvitationState::Sent,
+            statuses: &[201],
+            event: EventType::InvitationSent,
+            actor: ActorKind::System,
+            detail: None,
+        },
+        ExpectedDelivery {
+            name: "member",
+            repo_id: 21,
+            configured_outcome: Some("already_collaborator"),
+            state: InvitationState::Accepted,
+            statuses: &[204],
+            event: EventType::InvitationAccepted,
+            actor: ActorKind::Github,
+            detail: Some(("reason", "already_collaborator")),
+        },
+        ExpectedDelivery {
+            name: "denied",
+            repo_id: 22,
+            configured_outcome: Some("terminal_failure"),
+            state: InvitationState::Failed,
+            statuses: &[422],
+            event: EventType::InvitationSendFailed,
+            actor: ActorKind::System,
+            detail: Some((
+                "error",
+                "github returned status 422: {\"message\":\"Controlled stub failure\"}",
+            )),
+        },
+        ExpectedDelivery {
+            name: "retry",
+            repo_id: 23,
+            configured_outcome: Some("transient_once"),
+            state: InvitationState::Sent,
+            statuses: &[502, 201],
+            event: EventType::InvitationSent,
+            actor: ActorKind::System,
+            detail: None,
+        },
+    ];
+    let now = chrono::Utc::now();
+    let prefix = if manual { "manual" } else { "auto" };
+    let repos = cases
+        .each_ref()
+        .map(|case| format!("{prefix}-{}", case.name));
+    for (case, repo) in cases.iter().zip(&repos) {
+        let Some(outcome) = case.configured_outcome else {
+            continue;
+        };
+        success(
+            "Configure GitHub outcome",
+            http.post(format!("{stub}/outcomes")).json(&json!({
+                "owner":"test-org", "repo":repo, "user":"requester", "outcome":outcome
+            })),
+        )
+        .await;
+    }
+    let link = commands
+        .create_invitation_link(CreateInvitationLink {
+            installation_id: 1,
+            account_id: 42,
+            created_by: 7,
+            created_at: now,
+            expires_at: Some(now + chrono::Duration::minutes(5)),
+            max_uses: Some(2),
+            permission: Permission::Push,
+            approval_required: manual,
+            description: format!("{prefix} acceptance gate"),
+            internal_note: Some("private-note-canary".into()),
+            repos: cases
+                .iter()
+                .zip(&repos)
+                .map(|(case, name)| InvitationLinkRepo {
+                    repo_id: case.repo_id,
+                    repo_full_name: format!("test-org/{name}"),
+                })
+                .collect(),
+        })
+        .await
+        .expect("web create-link command over real Restate");
+    let id = RequestId::new();
+    let submit = SubmitInvitationRequest::new(
+        id,
+        link.link_id,
+        8,
+        Some("private-justification-canary".into()),
+        now,
+    );
+    commands
+        .submit_invitation_request(submit.clone())
+        .await
+        .expect("web submit command over real Restate");
+    let first_receipt = observer.receipts.lock().unwrap().last().unwrap().clone();
+    assert!(
+        first_receipt["invocationId"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    if manual {
+        wait_for_request(storage, id, RequestState::Pending).await;
+        assert!(delivered_invitations(storage, id).await.is_empty());
+        let calls = stub_calls(http, stub).await;
+        assert!(
+            !calls["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|call| call["path"].as_str().unwrap().contains("/manual-")),
+            "pending request must not dispatch GitHub work"
+        );
+        commands
+            .decide_invitation_request(DecideInvitationRequest::approve(id, 7, now))
+            .await
+            .expect("web approval resolves real durable promise");
+    }
+    wait_for_request(storage, id, RequestState::Approved).await;
+    let rows = timeout(Duration::from_secs(30), async {
+        loop {
+            let rows = delivered_invitations(storage, id).await;
+            if rows.len() == 4 {
+                break rows;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("four audited repository outcomes within 30s, including runtime retry");
+    for ((case, repo), row) in cases.iter().zip(&repos).zip(&rows) {
+        assert_eq!(row.repo_id, case.repo_id);
+        assert_eq!(row.state, case.state);
+        assert_eq!(row.invitation_request_id, id);
+        if case.state == InvitationState::Sent {
+            let pending = github.list_invitations(1, "test-org", repo).await.unwrap();
+            assert_eq!(pending.len(), 1);
+            assert_eq!(row.github_invitation_id, Some(pending[0].id));
+            assert_eq!(pending[0].invitee.login, "requester");
+            assert_eq!(pending[0].permissions, "write");
+            assert_eq!(row.error_message, None);
+        } else {
+            assert_eq!(row.github_invitation_id, None);
+            assert_eq!(
+                row.error_message.as_deref(),
+                case.detail
+                    .filter(|(key, _)| *key == "error")
+                    .map(|(_, value)| value)
+            );
+        }
+    }
+    let request = storage.get_invitation_request(id).await.unwrap().unwrap();
+    assert_eq!(
+        request.state,
+        RequestState::Approved,
+        "approval is distinct from delivery: one repo failed"
+    );
+    assert_eq!(request.requester_id, 8);
+    assert_eq!(request.invitation_link_id, link.link_id);
+    assert_eq!(request.decided_by, if manual { Some(7) } else { None });
+    assert_eq!(request.decided_at, Some(now));
+
+    let calls = stub_calls(http, stub).await;
+    assert_eq!(
+        calls["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "PUT")
+            .count(),
+        if manual { 10 } else { 5 },
+        "no extra fanout to unexpected repositories or requesters"
+    );
+    for (case, repo) in cases.iter().zip(&repos) {
+        let path = format!("/repos/test-org/{repo}/collaborators/requester");
+        let puts: Vec<_> = calls["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "PUT" && c["path"] == path)
+            .collect();
+        assert_eq!(
+            puts.len(),
+            case.statuses.len(),
+            "exact outbound attempts for {repo}"
+        );
+        for (call, status) in puts.iter().zip(case.statuses) {
+            assert_eq!(call["permission"], "push");
+            assert_eq!(call["status"], *status);
+        }
+    }
+    let audit = storage
+        .list_audit_events(42, None, AuditPosition::Latest)
+        .await
+        .unwrap();
+    let request_events: Vec<_> = audit
+        .events
+        .iter()
+        .filter(|e| e.target_id == id.to_string())
+        .collect();
+    assert_eq!(request_events.len(), 2);
+    let created = request_events
+        .iter()
+        .find(|e| e.event_type == EventType::RequestCreated)
+        .unwrap();
+    assert_eq!(created.target_kind, TargetKind::InvitationRequest);
+    assert_eq!(created.actor_kind, ActorKind::User);
+    assert_eq!(created.actor_id, Some(8));
+    assert_eq!(
+        created.metadata,
+        json!({"invitation_link_id":link.link_id.to_string(), "auto_approve":!manual})
+    );
+    let approved = request_events
+        .iter()
+        .find(|e| e.event_type == EventType::RequestApproved)
+        .unwrap();
+    assert_eq!(
+        approved.actor_kind,
+        if manual {
+            ActorKind::User
+        } else {
+            ActorKind::System
+        }
+    );
+    assert_eq!(approved.actor_id, if manual { Some(7) } else { None });
+    assert_eq!(approved.target_kind, TargetKind::InvitationRequest);
+    assert_eq!(
+        approved.metadata,
+        if manual {
+            json!({})
+        } else {
+            json!({"reason":"auto_approve"})
+        }
+    );
+    for ((case, repo), row) in cases.iter().zip(&repos).zip(&rows) {
+        let events: Vec<_> = audit
+            .events
+            .iter()
+            .filter(|e| e.target_id == row.id.to_string())
+            .collect();
+        assert_eq!(
+            events.len(),
+            1,
+            "one audit per logical delivery, including retry"
+        );
+        let event = events[0];
+        assert_eq!(event.event_type, case.event);
+        assert_eq!(event.actor_kind, case.actor);
+        assert_eq!(event.actor_id, None);
+        let mut metadata =
+            json!({"repo_full_name":format!("test-org/{repo}"), "recipient":"requester"});
+        if let Some((key, value)) = case.detail {
+            metadata[key] = json!(value);
+        } else {
+            metadata["github_invitation_id"] = json!(row.github_invitation_id.unwrap());
+        }
+        assert_eq!(
+            event.metadata, metadata,
+            "audit contains only expected integration metadata"
+        );
+    }
+    for event in &audit.events {
+        assert_eq!(event.account_id, 42);
+        assert!(event.request_id.as_ref().is_some_and(|id| !id.is_empty()));
+        let metadata = event.metadata.to_string();
+        for forbidden in [
+            "private-note-canary",
+            "private-justification-canary",
+            "test-token",
+            "Bearer",
+            "PRIVATE KEY",
+        ] {
+            assert!(
+                !metadata.contains(forbidden),
+                "audit must not expose {forbidden}"
+            );
+        }
+    }
+    // Complete the workflow before submitting the exact stable operation again.
+    // Workflow output is approval, not the asynchronous per-repo delivery result.
+    let output_url = format!(
+        "{}/restate/workflow/InvitationRequest/{id}/output",
+        runtime_var("RESTATE_INGRESS_URL")
+    );
+    let output = success("Completed workflow output", http.get(&output_url)).await;
+    assert_eq!(
+        output.json::<RequestState>().await.unwrap(),
+        RequestState::Approved
+    );
+    commands.submit_invitation_request(submit).await.unwrap();
+    let duplicate_receipt = observer.receipts.lock().unwrap().last().unwrap().clone();
+    assert_eq!(
+        duplicate_receipt["invocationId"], first_receipt["invocationId"],
+        "real ingress must deduplicate the stable command to the completed invocation"
+    );
+    // The receipt establishes identity; output establishes completion for that
+    // same workflow. A duplicate routed to any new invocation fails above.
+    let response = success(
+        "Completed workflow output after duplicate",
+        http.get(&output_url),
+    )
+    .await;
+    assert_eq!(
+        response.json::<RequestState>().await.unwrap(),
+        RequestState::Approved
+    );
+    assert_eq!(
+        stub_calls(http, stub).await,
+        calls,
+        "duplicate stable operation must not dispatch more GitHub work"
+    );
+    assert_eq!(
+        storage
+            .get_invitation_link_by_id(link.link_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .uses_count,
+        1
+    );
+    assert_eq!(
+        storage
+            .list_requests_for_link(link.link_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        delivered_invitations(storage, id)
+            .await
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        rows.iter().map(|r| r.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        storage
+            .list_audit_events(42, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events
+            .len(),
+        audit.events.len()
+    );
+    eprintln!(
+        "{prefix} approval: four persisted repository outcomes, bounded retry, stable-operation deduplication verified"
+    );
 }

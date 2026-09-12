@@ -22,6 +22,9 @@ mod util;
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mocks;
 
+#[cfg(feature = "test-stub")]
+pub mod stub;
+
 #[cfg(target_arch = "wasm32")]
 pub mod wasm_smoke;
 

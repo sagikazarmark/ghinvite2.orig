@@ -3,19 +3,21 @@ set -euo pipefail
 
 # Run from the repository root. GNU timeout is `gtimeout` on macOS (coreutils).
 deadline=$(command -v timeout || command -v gtimeout) || {
-  printf '%s\n' 'Restate smoke FAILED: GNU timeout (coreutils) is required.' >&2
+  printf '%s\n' 'Restate acceptance FAILED: GNU timeout (coreutils) is required.' >&2
   exit 1
 }
 # Escalate if a child ignores TERM, so every shell deadline is a hard bound.
 bounded() { "$deadline" --kill-after=5s "$@"; }
 command -v docker >/dev/null || {
-  printf '%s\n' 'Restate smoke FAILED: Docker is required; no runtime verification performed.' >&2
+  printf '%s\n' 'Restate acceptance FAILED: Docker is required; no runtime verification performed.' >&2
   exit 1
 }
 bounded 15s docker info >/dev/null
 bounded 15s docker compose version
 
 # Compile before starting infrastructure; respect rust-toolchain.toml and Cargo.lock.
+rustc --version
+bounded 600s cargo test --locked -p ghinvite-github --features test-stub --lib stub::tests
 bounded 600s cargo test --locked -p ghinvite-workflows --features integration --test integration_test --no-run
 
 project="ghinvite-smoke-$(date +%s)-$$-$RANDOM"
@@ -24,7 +26,7 @@ cleanup() {
   status=$?
   trap - EXIT
   if (( status != 0 )); then
-    printf '%s\n' 'Restate smoke FAILED. Bounded diagnostics from this disposable runtime:' >&2
+    printf '%s\n' 'Restate acceptance FAILED. Bounded diagnostics from this disposable runtime:' >&2
     bounded 10s "${compose[@]}" ps -a >&2 || true
     bounded 10s "${compose[@]}" logs --no-color --tail 60 restate-smoke >&2 || true
   fi

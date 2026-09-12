@@ -10,7 +10,7 @@ name = "ghinvite-workflows"
 path = "src/main.rs"
 
 [features]
-integration = []
+integration = ["dep:ghinvite-web", "dep:axum", "ghinvite-github/test-stub"]
 
 [dependencies]
 async-trait.workspace = true
@@ -32,6 +32,8 @@ tracing.workspace = true
 # the `worker` runtime instead. `http_server` pulls tokio's `net`/mio, which
 # does not compile on wasm32 — keep it native-only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+axum = { workspace = true, optional = true }
+ghinvite-web = { workspace = true, optional = true }
 ghinvite-storage-sqlx.workspace = true
 restate-sdk = { workspace = true, features = ["http_server"] }
 tokio.workspace = true

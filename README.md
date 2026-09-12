@@ -56,8 +56,8 @@ No services required:
 cargo test --workspace
 ```
 
-This excludes the real Restate smoke and the opt-in D1/browser tests. Run the
-Restate smoke with `bash scripts/test-restate.sh`; see
+This excludes the real Restate acceptance gate and the opt-in D1/browser tests. Run the
+Restate gate with `bash scripts/test-restate.sh`; see
 [`docs/local-testing.md`](docs/local-testing.md) for prerequisites and coverage.
 
 ## Running locally (full stack)
@@ -197,4 +197,4 @@ GitHub Actions runs on every push and PR to `main`:
 - **Lint** — `cargo fmt --check` + `cargo clippy`
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
-- **Integration** — `bash scripts/test-restate.sh`: digest-pinned Restate in a disposable Docker container, current native endpoint, and persisted expiration/audit assertions
+- **Restate approval and delivery gate** — `bash scripts/test-restate.sh`: digest-pinned disposable Restate, real web commands and GitHub HTTP client, local GitHub stub, auto/manual approval with four-repository mixed outcomes, bounded retry, completed-operation deduplication, and persisted expiration/audit assertions

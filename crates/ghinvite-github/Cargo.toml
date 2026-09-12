@@ -10,12 +10,14 @@ publish.workspace = true
 # (notably `ghinvite-workflows`) can write hermetic tests against the GitHub
 # clients without spinning up an HTTP server.
 test-mock = []
+test-stub = ["dep:axum"]
 # `wiremock-tests` enables an optional integration test that runs the
 # installation client against a real local HTTP server. Off by default so
 # `cargo test --workspace` stays hermetic and fast.
 wiremock-tests = ["dep:wiremock"]
 
 [dependencies]
+axum = { workspace = true, optional = true }
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
@@ -38,7 +40,6 @@ jsonwebtoken = { workspace = true, features = ["rust_crypto", "use_pem"] }   # u
 tokio.workspace = true
 wiremock.workspace = true
 # examples/stub.rs only:
-axum = { version = "0.8", features = ["macros"] }
 clap = { version = "4", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -58,6 +59,7 @@ getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 # examples/stub.rs — standalone fake-GitHub server used by the ghinvite-workflows
-# integration tests and local dev (`cargo run -p ghinvite-github --example stub`).
+# integration tests and local dev (enable `--features test-stub`).
 [[example]]
 name = "stub"
+required-features = ["test-stub"]
