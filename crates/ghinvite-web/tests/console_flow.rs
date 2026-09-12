@@ -59,7 +59,7 @@ fn oauth_expectations() -> Vec<Expectation> {
         Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
-            serde_json::json!({"role": "admin", "state": "active"}),
+            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
         ),
     ]
 }
@@ -106,6 +106,416 @@ fn oauth_sign_in_expectations() -> Vec<Expectation> {
             serde_json::json!({"id": 42, "login": "octocat"}),
         ),
     ]
+}
+
+fn identity_account(account_id: u64, login: &str, account_type: AccountType) -> Account {
+    Account {
+        installation_id: 77,
+        account_id,
+        account_login: login.into(),
+        account_type,
+        installed_at: Utc::now(),
+        uninstalled_at: None,
+        selected_repos: SelectedRepos::All,
+    }
+}
+
+async fn identity_app(account: &Account, expectations: Vec<Expectation>) -> (axum::Router, String) {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    storage.insert_installation(account).await.unwrap();
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(expectations)),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev(),
+    );
+    sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
+}
+
+async fn identity_request(
+    app: &axum::Router,
+    cookie: &str,
+    method: &str,
+    path: &str,
+) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn personal_account_reused_login_cannot_authorize_direct_reads_or_mutations() {
+    let account = identity_account(999, "octocat", AccountType::User);
+    let (app, cookie) = identity_app(&account, oauth_sign_in_expectations()).await;
+    for (method, path) in [
+        ("GET", "/console/accounts/octocat"),
+        ("GET", "/console/accounts/octocat/links"),
+        ("POST", "/console/accounts/octocat/links"),
+        ("GET", "/console/accounts/octocat/audit"),
+    ] {
+        let response = identity_request(&app, &cookie, method, path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+        let html = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!html.contains("console-sidebar"));
+    }
+}
+
+fn visible_account(account: &Account) -> Expectation {
+    let account_type = match account.account_type {
+        AccountType::User => "User",
+        AccountType::Organization => "Organization",
+    };
+    Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user/installations?per_page=100",
+        serde_json::json!({
+            "total_count": 1,
+            "installations": [{
+                "id": account.installation_id,
+                "account": {"id": account.account_id, "login": account.account_login, "type": account_type},
+                "repository_selection": "all",
+                "target_type": account_type,
+                "target_id": account.account_id
+            }]
+        }),
+    )
+}
+
+#[tokio::test]
+async fn personal_console_discovery_requires_identity_even_after_rename_or_name_reuse() {
+    for (id, stored_login, authorized) in [
+        (42, "octocat", true),
+        (42, "old-octocat", true),
+        (999, "octocat", false),
+    ] {
+        let account = identity_account(id, stored_login, AccountType::User);
+        let mut expectations = oauth_sign_in_expectations();
+        expectations.push(visible_account(&account));
+        let (app, cookie) = identity_app(&account, expectations).await;
+        let response = identity_request(&app, &cookie, "GET", "/console").await;
+        if authorized {
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(
+                response.headers()["location"],
+                format!("/console/accounts/{stored_login}")
+            );
+            let direct = identity_request(
+                &app,
+                &cookie,
+                "GET",
+                &format!("/console/accounts/{stored_login}"),
+            )
+            .await;
+            assert_eq!(direct.status(), StatusCode::OK);
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            let html = String::from_utf8(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .unwrap();
+            assert!(!html.contains("href=\"/console/accounts/octocat\""));
+        }
+    }
+}
+
+fn org_membership(login: &str, organization_id: u64, organization_login: &str) -> Expectation {
+    Expectation::ok_json(
+        Method::Get,
+        format!("https://api.github.com/user/memberships/orgs/{login}"),
+        serde_json::json!({
+            "role": "admin", "state": "active",
+            "organization": {"id": organization_id, "login": organization_login}
+        }),
+    )
+}
+
+#[tokio::test]
+async fn organization_name_reuse_cannot_authorize_discovery_reads_or_mutations() {
+    let account = identity_account(9001, "acme", AccountType::Organization);
+    let mut expectations = oauth_sign_in_expectations();
+    expectations.push(org_membership("acme", 9999, "acme"));
+    expectations.push(org_membership("acme", 9999, "acme"));
+    expectations.push(visible_account(&account));
+    expectations.push(org_membership("acme", 9999, "acme"));
+    let (app, cookie) = identity_app(&account, expectations).await;
+    for (method, path) in [
+        ("GET", "/console/accounts/acme"),
+        ("POST", "/console/accounts/acme/links"),
+    ] {
+        let response = identity_request(&app, &cookie, method, path).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
+    }
+    let response = identity_request(&app, &cookie, "GET", "/console").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("href=\"/console/accounts/acme\""));
+}
+
+#[tokio::test]
+async fn organization_authority_does_not_follow_a_different_oauth_user() {
+    let account = identity_account(9001, "acme", AccountType::Organization);
+    let mut expectations = oauth_sign_in_expectations();
+    expectations.push(org_membership("acme", 9001, "acme"));
+    let mut second_login = oauth_sign_in_expectations();
+    second_login[1] = Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user",
+        serde_json::json!({"id": 43, "login": "another-user"}),
+    );
+    expectations.extend(second_login);
+    expectations.push(Expectation::status(
+        Method::Get,
+        "https://api.github.com/user/memberships/orgs/acme",
+        404,
+    ));
+    let (app, cookie) = identity_app(&account, expectations).await;
+    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = session_cookie(&response, Some(cookie));
+    let (app, cookie) = sign_in_with_cookie(app, Some(cookie)).await;
+    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let mut account = identity_account(9001, "acme", AccountType::Organization);
+    storage.insert_installation(&account).await.unwrap();
+    let mut expectations = oauth_sign_in_expectations();
+    expectations.push(org_membership("acme", 9001, "acme"));
+    expectations.push(org_membership("acme", 9001, "renamed-acme"));
+    let state = AppState::new(
+        storage.clone(),
+        Arc::new(MockTransport::scripted(expectations)),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev(),
+    );
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = session_cookie(&response, Some(cookie));
+
+    storage
+        .mark_installation_uninstalled(77, Utc::now())
+        .await
+        .unwrap();
+    account.installation_id = 78;
+    account.account_id = 9002;
+    storage.insert_installation(&account).await.unwrap();
+    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn organization_rename_keeps_identity_authority_and_cache_across_console_routes() {
+    let account = identity_account(9001, "acme", AccountType::Organization);
+    let mut expectations = oauth_sign_in_expectations();
+    expectations.push(visible_account(&account));
+    expectations.push(org_membership("acme", 9001, "renamed-acme"));
+    let (app, cookie) = identity_app(&account, expectations).await;
+    let response = identity_request(&app, &cookie, "GET", "/console").await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let cookie = session_cookie(&response, Some(cookie));
+    for path in [
+        "/console/accounts/acme",
+        "/console/accounts/acme/links",
+        "/console/accounts/acme/audit",
+    ] {
+        let response = identity_request(&app, &cookie, "GET", path).await;
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
+    for (membership, denied_status) in [
+        (
+            serde_json::json!({"role": "admin", "state": "active"}),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": "9001"}}),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        (
+            serde_json::json!({"role": "admin", "state": "pending", "organization": {"id": 9001}}),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            serde_json::json!({"role": "member", "state": "active", "organization": {"id": 9001}}),
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let account = identity_account(9001, "acme", AccountType::Organization);
+        let mut expectations = oauth_sign_in_expectations();
+        expectations.push(Expectation::ok_json(
+            Method::Get,
+            "https://api.github.com/user/memberships/orgs/acme",
+            membership,
+        ));
+        expectations.push(org_membership("acme", 9001, "acme"));
+        let (app, cookie) = identity_app(&account, expectations).await;
+        let response =
+            identity_request(&app, &cookie, "POST", "/console/accounts/acme/links").await;
+        assert_eq!(response.status(), denied_status);
+        let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
+#[tokio::test]
+async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never_grant_access() {
+    for (cache_key, checked_at) in [
+        ("acme", Utc::now()),
+        ("42:9001", Utc::now() - Duration::seconds(61)),
+        ("42:9001", Utc::now() + Duration::minutes(5)),
+    ] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        storage
+            .insert_installation(&identity_account(9001, "acme", AccountType::Organization))
+            .await
+            .unwrap();
+        let store = tower_sessions::MemoryStore::default();
+        // Seed an old persisted session; exercise all verification via HTTP.
+        let session = tower_sessions::Session::new(None, Arc::new(store.clone()), None);
+        session
+            .insert(
+                "ghinvite",
+                serde_json::json!({
+                    "user_id": 42, "login": "octocat", "access_token": "u_xxx", "oauth_csrf": null,
+                    "admin_checks": {cache_key: {"is_admin": true, "checked_at": checked_at}}
+                }),
+            )
+            .await
+            .unwrap();
+        session.save().await.unwrap();
+        let cookie = format!("id={}", session.id().unwrap());
+        let state = AppState::new(
+            storage,
+            Arc::new(MockTransport::scripted(vec![
+                Expectation::status(
+                    Method::Get,
+                    "https://api.github.com/user/memberships/orgs/acme",
+                    503,
+                ),
+                Expectation::status(
+                    Method::Get,
+                    "https://api.github.com/user/memberships/orgs/acme",
+                    404,
+                ),
+            ])),
+            Arc::new(RecordingCommands::default()),
+            WebConfig::for_local_dev(),
+        );
+        let app = build_app(state, store);
+        let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response =
+            identity_request(&app, &cookie, "POST", "/console/accounts/acme/links").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}
+
+#[tokio::test]
+async fn personal_owner_can_edit_links_by_identity_after_rename() {
+    for stored_login in ["octocat", "old-octocat"] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        storage
+            .insert_installation(&identity_account(42, stored_login, AccountType::User))
+            .await
+            .unwrap();
+        let mut link = list_link(1);
+        link.account_id = 42;
+        let state = AppState::new(
+            storage.clone(),
+            Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+            Arc::new(RecordingCommands {
+                edit_storage: Some(storage.clone()),
+                ..Default::default()
+            }),
+            WebConfig::for_local_dev(),
+        );
+        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        storage.insert_invitation_link(&link).await.unwrap();
+        let path = format!("/console/accounts/{stored_login}/links/{}/edit", link.id);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&path)
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from("description=Updated+by+owner"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let response = identity_request(&app, &cookie, "GET", &path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(html.contains("Updated by owner"));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -378,18 +788,21 @@ fn installation_repos_expectation() -> Expectation {
 }
 
 async fn sign_in(app: axum::Router) -> (axum::Router, String) {
+    sign_in_with_cookie(app, None).await
+}
+
+async fn sign_in_with_cookie(app: axum::Router, cookie: Option<String>) -> (axum::Router, String) {
+    let mut request = Request::builder().uri("/login");
+    if let Some(cookie) = &cookie {
+        request = request.header("cookie", cookie);
+    }
     let resp1 = app
         .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
+    let cookie1 = session_cookie(&resp1, cookie);
     let location = resp1.headers().get("location").unwrap().to_str().unwrap();
     let state = state_from_location(location);
 
@@ -422,7 +835,11 @@ async fn build_signed_in_admin_app_with_console_installations(
         storage
             .insert_installation(&Account {
                 installation_id: 77 + index as u64,
-                account_id: 9001 + index as u64,
+                account_id: if *login == "octocat" {
+                    42
+                } else {
+                    9001 + index as u64
+                },
                 account_login: (*login).into(),
                 account_type: if *login == "octocat" {
                     AccountType::User
@@ -447,12 +864,17 @@ async fn build_signed_in_admin_app_with_console_installations(
             } else {
                 "Organization"
             };
+            let account_id = if *login == "octocat" {
+                42
+            } else {
+                9001 + index as u64
+            };
             serde_json::json!({
                 "id": 77 + index as u64,
-                "account": {"id": 9001 + index as u64, "login": login, "type": target_type},
+                "account": {"id": account_id, "login": login, "type": target_type},
                 "repository_selection": "all",
                 "target_type": target_type,
-                "target_id": 9001 + index as u64
+                "target_id": account_id
             })
         })
         .collect();
@@ -464,11 +886,15 @@ async fn build_signed_in_admin_app_with_console_installations(
             "installations": installations
         }),
     ));
-    for login in logins.iter().filter(|login| **login != "octocat") {
+    for (index, login) in logins
+        .iter()
+        .enumerate()
+        .filter(|(_, login)| **login != "octocat")
+    {
         expectations.push(Expectation::ok_json(
             Method::Get,
             format!("https://api.github.com/user/memberships/orgs/{login}"),
-            serde_json::json!({"role": "admin", "state": "active"}),
+            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001 + index as u64}}),
         ));
     }
 
@@ -680,7 +1106,7 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/memberships/orgs/acme",
-        serde_json::json!({"role": "admin", "state": "active"}),
+        serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
     ));
     let state = AppState::new(
         storage.clone(),
@@ -1122,7 +1548,7 @@ async fn links_app_with_commands(
         expectations.push(Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
-            serde_json::json!({"role": role, "state": "active"}),
+            serde_json::json!({"role": role, "state": "active", "organization": {"id": 9001}}),
         ));
     }
     let state = AppState::new(

@@ -51,7 +51,7 @@ fn oauth_expectations() -> Vec<Expectation> {
         Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
-            serde_json::json!({"role": "admin", "state": "active"}),
+            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
         ),
     ]
 }

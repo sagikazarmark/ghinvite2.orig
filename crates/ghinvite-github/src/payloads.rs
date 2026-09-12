@@ -19,12 +19,18 @@ pub struct GhUser {
     pub account_type: Option<String>,
 }
 
-/// `GET /user/memberships/orgs/{login}` response. We only care about the
-/// `role` and `state` fields for admin re-check.
+/// `GET /user/memberships/orgs/{login}` response. Authority must be bound to
+/// the returned organization's immutable ID, not the requested login.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GhMembership {
     pub role: String,  // "admin" | "member"
     pub state: String, // "active" | "pending"
+    pub organization: GhOrganization,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GhOrganization {
+    pub id: u64,
 }
 
 /// `GET /repos/{owner}/{repo}` (a small slice; we use it for display + access
@@ -110,7 +116,7 @@ mod tests {
 
     #[test]
     fn membership_decodes() {
-        let raw = br#"{"role":"admin","state":"active"}"#;
+        let raw = br#"{"role":"admin","state":"active","organization":{"id":9001}}"#;
         let m: GhMembership = serde_json::from_slice(raw).unwrap();
         assert_eq!(m.role, "admin");
     }

@@ -36,30 +36,40 @@ impl<S: Send + Sync> FromRequestParts<S> for RequireSession {
     }
 }
 
-/// Re-check whether the signed-in user is an admin of `account_login`.
-/// Hits GitHub's `/user/memberships/orgs/{login}` once per 60s per login,
-/// caching the result in the session.
+/// Check the signed-in user's authority over an installed account.
+/// Personal ownership is bound to the authenticated GitHub user ID.
+/// Organization membership checks are cached in the session for 60 seconds.
 ///
 /// Returns `Ok(true)` if admin, `Ok(false)` if not, `Err` on transport
 /// failure.
 pub async fn check_admin(
     state: &AppState,
     session: &mut Session,
-    account_login: &str,
+    account: &ghinvite_core::Account,
 ) -> Result<bool, WebError> {
-    if let Some(cached) = session.admin_checks.get(account_login)
-        && Utc::now() - cached.checked_at < Duration::seconds(ADMIN_CACHE_TTL_SECS)
+    if account.account_type == ghinvite_core::AccountType::User {
+        return Ok(session.user_id == account.account_id);
+    }
+    // A GitHub login cannot contain ':', so legacy login-keyed entries cannot
+    // collide with an identity-bound key and are never trusted.
+    let cache_key = format!("{}:{}", session.user_id, account.account_id);
+    let now = Utc::now();
+    if let Some(cached) = session.admin_checks.get(&cache_key)
+        && cached.checked_at <= now
+        && now - cached.checked_at < Duration::seconds(ADMIN_CACHE_TTL_SECS)
     {
         return Ok(cached.is_admin);
     }
     let user_api = UserApiClient::new(state.github_transport.clone(), session.access_token.clone());
-    let is_admin = match user_api.get_org_membership(account_login).await {
-        Ok(m) => m.role == "admin" && m.state == "active",
+    let is_admin = match user_api.get_org_membership(&account.account_login).await {
+        Ok(m) => {
+            m.organization.id == account.account_id && m.role == "admin" && m.state == "active"
+        }
         Err(ghinvite_github::Error::Status { status: 404, .. }) => false,
         Err(e) => return Err(WebError::Github(e)),
     };
     session.admin_checks.insert(
-        account_login.to_string(),
+        cache_key,
         AdminCheck {
             is_admin,
             checked_at: Utc::now(),
@@ -151,16 +161,9 @@ where
             Err(error) => return Err(WebError::Storage(error).into_response()),
         };
 
-        // Personal-account installations: `get_org_membership` returns 404 for
-        // personal accounts, which maps to `is_admin = false` — locking the owner
-        // out. Short-circuit: match session login against account login directly.
-        let is_admin = if account.account_type == ghinvite_core::AccountType::User {
-            session.login == account.account_login
-        } else {
-            match check_admin(&state, &mut session, &login).await {
-                Ok(is_admin) => is_admin,
-                Err(error) => return Err(error.into_response()),
-            }
+        let is_admin = match check_admin(&state, &mut session, &account).await {
+            Ok(is_admin) => is_admin,
+            Err(error) => return Err(error.into_response()),
         };
         if !is_admin {
             return Err(generic_not_found_response(Some(session.login.clone())));

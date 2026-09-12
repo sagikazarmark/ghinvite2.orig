@@ -445,7 +445,7 @@ mod user_api_tests {
         let mock = MockTransport::scripted(vec![Expectation::ok_json(
             Method::Get,
             "https://api.github.test/user/memberships/orgs/acme%20corp",
-            serde_json::json!({"role": "admin", "state": "active"}),
+            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
         )]);
         let m = client_with(mock)
             .get_org_membership("acme corp")

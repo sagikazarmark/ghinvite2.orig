@@ -16,9 +16,9 @@ pub struct Session {
     /// CSRF token for the OAuth state round-trip. Set on `/login`, verified on
     /// `/oauth/callback`.
     pub oauth_csrf: Option<String>,
-    /// Last admin-check timestamp per `account_login`. Used by the auth
-    /// middleware to throttle GitHub `/user/memberships/orgs/{login}` calls
-    /// (60-second cache per spec §10.3).
+    /// Organization authority keyed by `"{user_id}:{account_id}"` (numeric
+    /// GitHub IDs), with a 60-second TTL. Legacy login-keyed entries deserialize
+    /// but are never used by authorization. Clear this map on session reset.
     pub admin_checks: HashMap<String, AdminCheck>,
     /// Stored by `GET /login?return_to=<path>` and consumed by the OAuth callback
     /// to bounce the user back after sign-in. Only known relative paths are
@@ -133,7 +133,7 @@ mod tests {
     fn admin_check_round_trips_via_serde() {
         let mut s = Session::default();
         s.admin_checks.insert(
-            "acme".into(),
+            "42:9001".into(),
             AdminCheck {
                 is_admin: true,
                 checked_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
@@ -142,7 +142,7 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         let parsed: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.admin_checks.len(), 1);
-        assert!(parsed.admin_checks.get("acme").unwrap().is_admin);
+        assert!(parsed.admin_checks.get("42:9001").unwrap().is_admin);
     }
 
     #[test]

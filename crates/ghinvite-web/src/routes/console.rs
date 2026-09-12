@@ -143,11 +143,7 @@ async fn load_console_accounts(
             continue;
         };
 
-        let is_admin = if account.account_type == ghinvite_core::AccountType::User {
-            session.login == account.account_login
-        } else {
-            crate::middleware::auth::check_admin(state, session, &account.account_login).await?
-        };
+        let is_admin = crate::middleware::auth::check_admin(state, session, &account).await?;
 
         if is_admin {
             accounts.push(crate::views::console::ConsoleAccountChoice {
