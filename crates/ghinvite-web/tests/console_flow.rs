@@ -156,6 +156,19 @@ async fn identity_request(
         .unwrap()
 }
 
+async fn response_html(response: axum::response::Response) -> String {
+    String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn personal_account_reused_login_cannot_authorize_direct_reads_or_mutations() {
     let account = identity_account(999, "octocat", AccountType::User);
@@ -168,16 +181,7 @@ async fn personal_account_reused_login_cannot_authorize_direct_reads_or_mutation
     ] {
         let response = identity_request(&app, &cookie, method, path).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {path}");
-        let html = String::from_utf8(
-            response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        let html = response_html(response).await;
         assert!(!html.contains("console-sidebar"));
     }
 }
@@ -231,16 +235,7 @@ async fn personal_console_discovery_requires_identity_even_after_rename_or_name_
             assert_eq!(direct.status(), StatusCode::OK);
         } else {
             assert_eq!(response.status(), StatusCode::OK);
-            let html = String::from_utf8(
-                response
-                    .into_body()
-                    .collect()
-                    .await
-                    .unwrap()
-                    .to_bytes()
-                    .to_vec(),
-            )
-            .unwrap();
+            let html = response_html(response).await;
             assert!(!html.contains("href=\"/console/accounts/octocat\""));
         }
     }
@@ -275,16 +270,7 @@ async fn organization_name_reuse_cannot_authorize_discovery_reads_or_mutations()
     }
     let response = identity_request(&app, &cookie, "GET", "/console").await;
     assert_eq!(response.status(), StatusCode::OK);
-    let html = String::from_utf8(
-        response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec(),
-    )
-    .unwrap();
+    let html = response_html(response).await;
     assert!(!html.contains("href=\"/console/accounts/acme\""));
 }
 
@@ -504,16 +490,7 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         let response = identity_request(&app, &cookie, "GET", &path).await;
         assert_eq!(response.status(), StatusCode::OK);
-        let html = String::from_utf8(
-            response
-                .into_body()
-                .collect()
-                .await
-                .unwrap()
-                .to_bytes()
-                .to_vec(),
-        )
-        .unwrap();
+        let html = response_html(response).await;
         assert!(html.contains("Updated by owner"));
     }
 }
@@ -831,50 +808,46 @@ async fn build_signed_in_admin_app_with_console_installations(
             .await
             .unwrap(),
     );
-    for (index, login) in logins.iter().enumerate() {
-        storage
-            .insert_installation(&Account {
-                installation_id: 77 + index as u64,
-                account_id: if *login == "octocat" {
-                    42
-                } else {
-                    9001 + index as u64
-                },
-                account_login: (*login).into(),
-                account_type: if *login == "octocat" {
-                    AccountType::User
-                } else {
-                    AccountType::Organization
-                },
-                installed_at: Utc::now(),
-                uninstalled_at: None,
-                selected_repos: SelectedRepos::All,
-            })
-            .await
-            .unwrap();
+    let accounts: Vec<_> = logins
+        .iter()
+        .enumerate()
+        .map(|(index, login)| Account {
+            installation_id: 77 + index as u64,
+            account_id: if *login == "octocat" {
+                42
+            } else {
+                9001 + index as u64
+            },
+            account_login: (*login).into(),
+            account_type: if *login == "octocat" {
+                AccountType::User
+            } else {
+                AccountType::Organization
+            },
+            installed_at: Utc::now(),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        })
+        .collect();
+    for account in &accounts {
+        storage.insert_installation(account).await.unwrap();
     }
 
     let mut expectations = oauth_sign_in_expectations();
-    let installations: Vec<_> = logins
+    let installations: Vec<_> = accounts
         .iter()
-        .enumerate()
-        .map(|(index, login)| {
-            let target_type = if *login == "octocat" {
+        .map(|account| {
+            let target_type = if account.account_type == AccountType::User {
                 "User"
             } else {
                 "Organization"
             };
-            let account_id = if *login == "octocat" {
-                42
-            } else {
-                9001 + index as u64
-            };
             serde_json::json!({
-                "id": 77 + index as u64,
-                "account": {"id": account_id, "login": login, "type": target_type},
+                "id": account.installation_id,
+                "account": {"id": account.account_id, "login": account.account_login, "type": target_type},
                 "repository_selection": "all",
                 "target_type": target_type,
-                "target_id": account_id
+                "target_id": account.account_id
             })
         })
         .collect();
@@ -886,15 +859,14 @@ async fn build_signed_in_admin_app_with_console_installations(
             "installations": installations
         }),
     ));
-    for (index, login) in logins
+    for account in accounts
         .iter()
-        .enumerate()
-        .filter(|(_, login)| **login != "octocat")
+        .filter(|account| account.account_type == AccountType::Organization)
     {
-        expectations.push(Expectation::ok_json(
-            Method::Get,
-            format!("https://api.github.com/user/memberships/orgs/{login}"),
-            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001 + index as u64}}),
+        expectations.push(org_membership(
+            &account.account_login,
+            account.account_id,
+            &account.account_login,
         ));
     }
 
