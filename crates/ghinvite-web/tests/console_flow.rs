@@ -275,29 +275,47 @@ async fn organization_name_reuse_cannot_authorize_discovery_reads_or_mutations()
 }
 
 #[tokio::test]
-async fn organization_authority_does_not_follow_a_different_oauth_user() {
-    let account = identity_account(9001, "acme", AccountType::Organization);
-    let mut expectations = oauth_sign_in_expectations();
-    expectations.push(org_membership("acme", 9001, "acme"));
-    let mut second_login = oauth_sign_in_expectations();
-    second_login[1] = Expectation::ok_json(
-        Method::Get,
-        "https://api.github.com/user",
-        serde_json::json!({"id": 43, "login": "another-user"}),
-    );
-    expectations.extend(second_login);
-    expectations.push(Expectation::status(
-        Method::Get,
-        "https://api.github.com/user/memberships/orgs/acme",
-        404,
-    ));
-    let (app, cookie) = identity_app(&account, expectations).await;
-    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let cookie = session_cookie(&response, Some(cookie));
-    let (app, cookie) = sign_in_with_cookie(app, Some(cookie)).await;
-    let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+async fn oauth_signin_discards_organization_authority_for_same_or_different_user() {
+    for (user_id, login) in [(42, "octocat"), (43, "another-user")] {
+        let account = identity_account(9001, "acme", AccountType::Organization);
+        let mut expectations = oauth_sign_in_expectations();
+        expectations.push(org_membership("acme", 9001, "acme"));
+        let mut second_login = oauth_sign_in_expectations();
+        second_login[0] = Expectation::ok_json(
+            Method::Post,
+            "https://github.com/login/oauth/access_token",
+            serde_json::json!({"access_token": "u_second", "token_type": "bearer", "scope": "read:user read:org"}),
+        );
+        second_login[1] = Expectation::ok_json(
+            Method::Get,
+            "https://api.github.com/user",
+            serde_json::json!({"id": user_id, "login": login}),
+        );
+        expectations.extend(second_login);
+        expectations.push(
+            Expectation::status(
+                Method::Get,
+                "https://api.github.com/user/memberships/orgs/acme",
+                404,
+            )
+            .require_header("authorization", "Bearer u_second"),
+        );
+        let (app, cookie) = identity_app(&account, expectations).await;
+        let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = session_cookie(&response, Some(cookie));
+        let old_cookie = cookie.clone();
+        let (app, cookie) = sign_in_with_cookie(app, Some(cookie)).await;
+        assert_ne!(old_cookie, cookie);
+        let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = identity_request(&app, &old_cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()["location"],
+            "/login?return_to=%2Fconsole%2Faccounts%2Facme"
+        );
+    }
 }
 
 #[tokio::test]

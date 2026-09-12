@@ -120,6 +120,15 @@ async fn oauth_callback(
     }
     // Consume the CSRF token so it can't be replayed.
     session.oauth_csrf = None;
+    session::save(&tower, &session)
+        .await
+        .map_err(|e| WebError::Session(e.to_string()))?;
+    // Persist before calling GitHub: the session middleware does not save on
+    // server errors, including a failed token exchange or user lookup.
+    tower
+        .save()
+        .await
+        .map_err(|e| WebError::Session(e.to_string()))?;
 
     // Exchange the code for a user access token.
     let token = exchange_code(state.github_transport.as_ref(), &state.config.oauth, &code).await?;
@@ -137,11 +146,21 @@ async fn oauth_callback(
     };
     state.storage.upsert_user(&user_row).await?;
 
-    // Populate the session.
-    session.user_id = gh_user.id;
-    session.login = gh_user.login.clone();
-    session.access_token = token.access_token;
+    tower
+        .cycle_id()
+        .await
+        .map_err(|e| WebError::Session(e.to_string()))?;
+
+    // Start with fresh identity-bound state, even when signing in as the same
+    // user. Only the validated return destination survives the old session.
     let destination = session.return_to.take().unwrap_or_else(|| "/".to_string());
+    tower.clear().await;
+    let session = session::Session {
+        user_id: gh_user.id,
+        login: gh_user.login,
+        access_token: token.access_token,
+        ..Default::default()
+    };
     session::save(&tower, &session)
         .await
         .map_err(|e| WebError::Session(e.to_string()))?;
@@ -153,5 +172,7 @@ async fn oauth_callback(
         );
     }
 
+    // SessionManagerLayer persists the new record and emits its cookie before
+    // sending this redirect. A store failure replaces the redirect with a 500.
     Ok(Redirect::to(&destination))
 }

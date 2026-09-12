@@ -43,6 +43,34 @@ cargo test -p ghinvite-web --test route_smoke webhook
 cargo test -p ghinvite-web --lib commands::tests
 ```
 
+### OAuth sessions
+
+HTTP regression tests exercise OAuth state validation, ID rotation, old-cookie
+invalidation, return destinations, and session-store failures. Console tests
+verify that both same-user sign-in and switching GitHub users discard cached
+organization authority and use the new access token:
+
+```bash
+cargo test -p ghinvite-web --test oauth_flow
+cargo test -p ghinvite-web --test console_flow oauth_signin_discards
+cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
+```
+
+Successful OAuth uses tower-sessions' `cycle_id()` to delete the prior session
+ID, replaces session data with fresh credentials and empty authorization caches,
+and lets the session middleware persist the new record and send its cookie.
+Deletion or persistence failure returns HTTP 500 instead of a login redirect.
+Validated OAuth state is persisted as consumed before contacting GitHub, so a
+failed exchange or user lookup cannot replay it on a consistent store.
+
+Native development uses SQLite; production Workers use **Workers KV** for
+sessions (D1 stores domain data). KV is eventually consistent: deletions and
+state updates may remain stale in other locations, and a new ID may not yet be
+visible everywhere. Correct rotation calls therefore do **not** guarantee
+instantaneous worldwide logout or globally atomic OAuth-state consumption.
+These HTTP tests use MemoryStore and SQLite, and the Worker build checks target
+compatibility; they do not simulate KV propagation.
+
 ### Restate integration tests
 
 From the repository root, run the same command used by CI:
