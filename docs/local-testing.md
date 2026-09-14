@@ -249,6 +249,29 @@ direct Cargo execution requires `RESTATE_ADMIN_URL`, `RESTATE_INGRESS_URL`, and
 `RESTATE_ENDPOINT_HOST` from an isolated runtime. Prefer the script, which owns
 those values and runtime cleanup.
 
+### Admission protocol proof (#48)
+
+```bash
+bash scripts/test-restate.sh admission_protocol_proof
+```
+
+This optional throwaway experiment reuses the disposable runtime runner and
+registers test-only handlers from
+`crates/ghinvite-workflows/tests/admission_protocol_proof.rs`. It verifies a
+complete journaled decision followed by a coherent state write and durable
+projection/workflow sends. The endpoint uses request-response mode on native.
+It aborts SDK execution tasks at four recovery checkpoints, rejects real SQLite
+projection writes with a trigger while admission/revocation proceed, then tests
+commit acknowledgement loss and duplicate/out-of-order projection convergence.
+It also checks final-use concurrency, replay/payload conflicts, and expiration
+before versus after a durable decision.
+
+The miniature SQL schema and handlers are protocol evidence, not production
+admission implementation or D1/Worker conformance. See
+[ADR 0003](adr/0003-restate-authoritative-admission.md) for results and remaining
+verification. The default runner still executes the existing production workflow
+acceptance gate; the proof is explicitly selected by the argument above.
+
 ### D1 storage smoke tests (requires wrangler)
 
 Install `wrangler` separately (`npm i -g wrangler`).

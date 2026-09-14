@@ -4,6 +4,8 @@
 **Date:** 2026-05-04
 **Scope:** v1 specification, with explicit v1.1 and v2+ deferral lists
 
+> **Historical admission contract:** The admission/workflow rules and link-expiry decision-deadline cap in this design (§8, §9, and Q8) are superseded by [ADR 0003: Restate-authoritative admission with asynchronous database projections](../../adr/0003-restate-authoritative-admission.md). The original text remains below as historical context. ADR 0003 distinguishes accepted decisions from the draft protocol and pending verification.
+
 ---
 
 ## 1. Product summary

@@ -1,5 +1,7 @@
 # ghinvite — Plan 3: Restate Handlers Implementation Plan
 
+> **Historical admission plan:** The request-keyed admission/storage design and link-expiry decision-deadline cap below are superseded by [ADR 0003: Restate-authoritative admission with asynchronous database projections](../../adr/0003-restate-authoritative-admission.md). Preserve this plan as historical context; use the ADR and #48 for current admission design and its outstanding verification.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the `crates/restate-svc` library — five Restate services (`Installation`, `InvitationLink`, `InvitationRequest`, `GithubInvitation`, `Reconcile`) that own every durable state change in ghinvite. Each method is idempotent under Restate's exactly-once-effects guarantee, emits the audit events spec §15.1 mandates, and is unit-tested on native against `SqlxStorage::in_memory` + `MockTransport` from Plans 1 and 2.

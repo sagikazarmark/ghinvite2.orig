@@ -37,6 +37,8 @@ An invitation link's max use is the maximum number of invitation requests that m
 
 Use `max use` and `uses` in domain and UI language. A use means a created invitation request, not a page view, click, approval, or sent GitHub invitation.
 
+A declined, expired, or cancelled invitation request still counts as a use; its outcome does not refund the use.
+
 Invitation-link guardrails are the max use, expiration, permission level, repository scope, and approval policy. Guardrails are fixed when the invitation link is created. To use different guardrails, an account admin creates a new invitation link.
 
 Invitation link expiration or revocation stops new invitation requests from being created through that invitation link. It does not change existing invitation requests or GitHub invitations.
@@ -80,7 +82,7 @@ An account-scoped history of access workflow events that account admins use to u
 Admin UI may use `Audit` as a compact label when the Console context makes the meaning clear.
 
 ### Invitation Request
-A requester's request for access through an invitation link. It may be auto-approved or wait for an account admin decision. A requester may have at most one pending invitation request for a given invitation link at a time. Admin UI may use `Requests` as a compact label when the Console context makes the meaning clear.
+A requester's request for access through an invitation link. It may be auto-approved or wait for an account admin decision. A requester may have at most one pending or approved invitation request for a given invitation link at a time. Admin UI may use `Requests` as a compact label when the Console context makes the meaning clear.
 
 A requester may create a new invitation request through the same invitation link after a previous invitation request is declined, expired, or cancelled. A requester may not create a new invitation request through the same invitation link after a previous invitation request is pending or approved.
 
@@ -89,6 +91,14 @@ An auto-approved invitation request is approved by invitation-link policy withou
 An expired invitation request is one whose account-admin decision deadline passed before approval or decline. This is distinct from invitation link expiration and GitHub invitation expiration.
 
 In the Console, `Requests` usually means the queue of pending invitation requests awaiting account-admin decision, not a complete invitation request archive.
+
+### Invitation Request Admission
+The authoritative acceptance or rejection of an attempt to create an invitation request, based on eligibility at admission time rather than submission time. Accepted admission creates one invitation request and consumes one use; replaying the same attempt preserves its outcome even after invitation link expiration or revocation.
+
+Admission is distinct from approval: an admitted invitation request may still await an account admin decision.
+
+### Invitation Request Decision Deadline
+The time by which a pending invitation request must be approved or declined, established at admission using the pending-request lifetime. This deadline is independent of invitation link expiration and is not shortened by invitation link revocation.
 
 ### Approval Policy
 The invitation-link setting that determines whether invitation requests are auto-approved or wait for an account-admin decision.
