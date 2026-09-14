@@ -19,6 +19,7 @@ pub mod invitation_link;
 pub mod invitation_request;
 pub mod projection_v1;
 pub mod reconcile;
+pub mod request_lifecycle_v1;
 pub mod state;
 
 #[cfg(test)]

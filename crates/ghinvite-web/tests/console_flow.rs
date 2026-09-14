@@ -22,6 +22,80 @@ use tower::ServiceExt;
 mod common;
 
 #[tokio::test]
+async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
+    use ghinvite_core::request_lifecycle::*;
+    use ghinvite_core::storage::projection::RequestSnapshot;
+    struct Lifecycle(Arc<Mutex<Vec<DecideRequest>>>);
+    #[async_trait::async_trait]
+    impl ghinvite_web::lifecycle::RequestLifecycle for Lifecycle {
+        async fn decide(&self, command: DecideRequest) -> ghinvite_web::Result<DecisionReceipt> {
+            self.0.lock().unwrap().push(command.clone());
+            Ok(DecisionReceipt { outcome: DecisionOutcome::Incompatible,
+                request: serde_json::from_value(serde_json::json!({"request_id": command.request_id,
+                    "link_id": command.link_id, "account_id": 42, "requester_id": 99,
+                    "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
+                    "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2})).unwrap() })
+        }
+        async fn status(&self, _: RequestStatus) -> ghinvite_web::Result<RequestSnapshot> {
+            panic!("unexpected status")
+        }
+    }
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    storage
+        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .await
+        .unwrap();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_request_lifecycle(Arc::new(Lifecycle(calls.clone())));
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let request = ghinvite_core::RequestId::new();
+    let link = ghinvite_core::InvitationLinkId::new();
+    let operation = ghinvite_core::RequestId::new();
+    // Missing projection is not evidence that the acknowledged request is absent.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/console/accounts/octocat/requests/{request}/approve"
+                ))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&link_id={link}&operation_id={operation}&user_id=666"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let html = response_html(response).await;
+    assert!(html.contains("expired"));
+    assert!(!html.contains("Request approved"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].admin.user_id, 42);
+    assert_eq!(calls[0].admin.account_id, 42);
+    assert_eq!(calls[0].link_id, link);
+    assert_eq!(
+        String::from(calls[0].operation_id.clone()),
+        operation.to_string()
+    );
+}
+
+#[tokio::test]
 async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
     let (app, cookie, calls) =
         build_signed_in_admin_app_with_recording_commands(oauth_expectations()).await;

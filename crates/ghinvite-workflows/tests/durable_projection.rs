@@ -45,12 +45,27 @@ impl ProjectionStorage for LostAcknowledgement {
 // #55 owns lifecycle execution; only its startup contract is needed here.
 struct RequestSink;
 impl admission_v1::InvitationRequestV1 for RequestSink {
+    async fn notify(
+        &self,
+        _: restate_sdk::context::SharedWorkflowContext<'_>,
+        _: restate_sdk::serde::Json<admission_v1::TerminalSignal>,
+    ) -> Result<(), restate_sdk::errors::TerminalError> {
+        Ok(())
+    }
     async fn run(
         &self,
         _: restate_sdk::context::WorkflowContext<'_>,
         _: restate_sdk::serde::Json<admission_v1::WorkflowEnvelope>,
-    ) -> Result<(), restate_sdk::errors::TerminalError> {
-        Ok(())
+    ) -> Result<
+        restate_sdk::serde::Json<ghinvite_workflows::request_lifecycle_v1::WorkflowResult>,
+        restate_sdk::errors::TerminalError,
+    > {
+        Ok(restate_sdk::serde::Json(
+            ghinvite_workflows::request_lifecycle_v1::WorkflowResult {
+                state: ghinvite_core::RequestState::Pending,
+                dispatch: None,
+            },
+        ))
     }
 }
 
@@ -129,6 +144,10 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         let revoked = command("revoke", json!({"link_id": link_id,
             "admin": {"account_id": 100, "user_id": 7}})).await;
         assert!(revoked["revoked_at"].is_string());
+        let decision = command("decide", json!({"version": 1, "link_id": link_id,
+            "request_id": accepted["result"]["request_id"], "operation_id": ghinvite_core::RequestId::new(),
+            "admin": {"account_id": 100, "user_id": 7}, "action": {"kind": "decline", "reason": "Admin-only context"}})).await;
+        assert_eq!(decision["outcome"], "applied");
         loop {
             let response = client.post(format!("{admin}/query")).header("accept", "application/json")
                 .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjectionV1'"}))
@@ -157,10 +176,14 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             let link = storage.get_invitation_link_by_id(link_id).await.unwrap();
             let requests = storage.list_requests_for_link(link_id).await.unwrap();
             let events = storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap();
-            if link.as_ref().is_some_and(|l| l.revoked_at.is_some()) && requests.len() == 1 && events.events.len() == 4
-                && acknowledgements.committed_attempts.load(Ordering::SeqCst) >= 4 {
+            if link.as_ref().is_some_and(|l| l.revoked_at.is_some()) && requests.len() == 1 && events.events.len() == 5
+                && acknowledgements.committed_attempts.load(Ordering::SeqCst) >= 5 {
                 assert_eq!(link.unwrap().uses_count, 1);
                 assert_eq!(requests[0].id.to_string(), accepted["result"]["request_id"]);
+                assert_eq!(requests[0].state, ghinvite_core::RequestState::Declined);
+                assert_eq!(requests[0].decided_by, Some(7));
+                assert_eq!(requests[0].decline_reason.as_deref(), Some("Admin-only context"));
+                assert_eq!(serde_json::to_value(requests[0].decided_at).unwrap(), decision["request"]["decision"]["effective_at"]);
                 let projected = storage.get_projected_request(requests[0].id).await.unwrap().unwrap();
                 assert_eq!(serde_json::to_value(projected.decision_deadline).unwrap(), accepted["result"]["decision_deadline"]);
                 break;

@@ -54,6 +54,8 @@ pub struct RequestSnapshot {
     pub admitted_at: DateTime<Utc>,
     pub decision_deadline: Option<DateTime<Utc>>,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::request_lifecycle::TerminalDecision>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

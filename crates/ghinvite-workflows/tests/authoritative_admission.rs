@@ -30,10 +30,12 @@ struct Runtime {
     faults: Arc<admission_v1::Faults>,
     transport: Arc<Transport>,
     offline: Arc<AtomicBool>,
+    workflow_faults: Arc<ghinvite_workflows::request_lifecycle_v1::WorkflowFaults>,
 }
 
 #[derive(Default)]
 struct Transport {
+    pause_workflows: AtomicBool,
     tasks: Mutex<Vec<tokio::task::AbortHandle>>,
     max_body: AtomicUsize,
 }
@@ -43,6 +45,14 @@ async fn serve(
     request: Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
+    if parts.uri.path().ends_with("/InvitationRequestV1/run")
+        && transport.pause_workflows.load(Ordering::SeqCst)
+    {
+        return axum::response::Response::builder()
+            .status(503)
+            .body(Body::empty())
+            .unwrap();
+    }
     let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
     if parts.uri.path().contains("/InvitationLinkV1/") {
         transport.max_body.fetch_max(bytes.len(), Ordering::SeqCst);
@@ -99,14 +109,26 @@ impl InvitationProjectionV1 for Consumer {
 }
 
 impl InvitationRequestV1 for Consumer {
+    async fn notify(
+        &self,
+        _: restate_sdk::context::SharedWorkflowContext<'_>,
+        _: Json<admission_v1::TerminalSignal>,
+    ) -> Result<(), TerminalError> {
+        Ok(())
+    }
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
         Json(envelope): Json<WorkflowEnvelope>,
-    ) -> Result<(), TerminalError> {
+    ) -> Result<Json<ghinvite_workflows::request_lifecycle_v1::WorkflowResult>, TerminalError> {
         ctx.run(|| async {
             self.0.lock().unwrap().workflows.push(envelope.clone());
-            Ok::<_, HandlerError>(())
+            Ok::<_, HandlerError>(Json(
+                ghinvite_workflows::request_lifecycle_v1::WorkflowResult {
+                    state: envelope.request.state,
+                    dispatch: None,
+                },
+            ))
         })
         .name("receive_workflow")
         .await
@@ -121,6 +143,10 @@ impl Drop for Runtime {
 
 impl Runtime {
     async fn start() -> Self {
+        Self::start_with_workflow(false).await
+    }
+
+    async fn start_with_workflow(real_workflow: bool) -> Self {
         let env = |key| {
             std::env::var(key).expect(
                 "real Restate required: bash scripts/test-restate.sh authoritative_admission",
@@ -152,19 +178,26 @@ impl Runtime {
         let received = Arc::new(Mutex::new(Received::default()));
         let faults = Arc::new(admission_v1::Faults::default());
         let offline = Arc::new(AtomicBool::new(true));
-        let endpoint = admission_v1::bind_with_faults(Endpoint::builder(), faults.clone())
-            .bind(InvitationProjectionV1::serve(Consumer(
-                received.clone(),
-                offline.clone(),
-            )))
-            .bind_with_options(
+        let workflow_faults =
+            Arc::new(ghinvite_workflows::request_lifecycle_v1::WorkflowFaults::default());
+        let builder = admission_v1::bind_with_faults(Endpoint::builder(), faults.clone()).bind(
+            InvitationProjectionV1::serve(Consumer(received.clone(), offline.clone())),
+        );
+        let builder = if real_workflow {
+            ghinvite_workflows::request_lifecycle_v1::bind_with_faults(
+                builder,
+                workflow_faults.clone(),
+            )
+        } else {
+            builder.bind_with_options(
                 InvitationRequestV1::serve(Consumer(received.clone(), offline.clone())),
                 ServiceOptions::new().handler(
                     "run",
                     HandlerOptions::new().workflow_retention(Duration::from_secs(2)),
                 ),
             )
-            .build();
+        };
+        let endpoint = builder.build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let transport = Arc::new(Transport::default());
@@ -194,6 +227,7 @@ impl Runtime {
             faults,
             transport,
             offline,
+            workflow_faults,
         }
     }
 
@@ -224,6 +258,313 @@ impl Runtime {
         assert!(status.is_success(), "introspection: {status} {text}");
         let value: Value = serde_json::from_str(&text).unwrap();
         value["rows"].as_array().expect(&text).clone()
+    }
+}
+
+async fn authoritative_workflow_contract() {
+    timeout(Duration::from_secs(60), async {
+        let runtime = Runtime::start_with_workflow(true).await;
+        runtime.offline.store(false, Ordering::SeqCst);
+        runtime.workflow_faults.early_wakes.store(1, Ordering::SeqCst);
+        let now = chrono::Utc::now();
+        runtime.faults.set_clock(Some(
+            now - chrono::Duration::days(7) + chrono::Duration::seconds(2),
+        ));
+        let input = creation();
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let attempt = json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 91});
+        let receipt = runtime.ok(id, "admit", &attempt).await;
+        runtime.faults.set_clock(None);
+        let request_id = receipt["result"]["request_id"].as_str().unwrap();
+        timeout(Duration::from_secs(1), async {
+            while runtime.workflow_faults.early_wakes.load(Ordering::SeqCst) != 0 { sleep(Duration::from_millis(10)).await; }
+        }).await.expect("early durable wake scheduled");
+        let early = runtime.ok(id, "request_status", &json!({"link_id": id, "request_id": request_id, "requester_id": 91})).await;
+        assert_eq!(early["state"], "pending");
+        let response = runtime
+            .client
+            .get(format!(
+                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                runtime.ingress
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
+        let result: Value = response.json().await.unwrap();
+        assert_eq!(result["state"], "expired");
+        assert_eq!(result["dispatch"], Value::Null);
+        assert!(chrono::Utc::now() >= now + chrono::Duration::seconds(2));
+        runtime
+            .transport
+            .pause_workflows
+            .store(true, Ordering::SeqCst);
+        let input = creation();
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let attempt = json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 92});
+        let receipt = runtime.ok(id, "admit", &attempt).await;
+        let request_id = receipt["result"]["request_id"].as_str().unwrap();
+        runtime.workflow_faults.interrupt_notification.store(true, Ordering::SeqCst);
+        let decision = runtime
+            .ok(
+                id,
+                "decide",
+                &json!({"version": 1, "link_id": id,
+            "request_id": request_id, "operation_id": ghinvite_core::RequestId::new(),
+            "admin": input["admin"], "action": {"kind": "approve"}}),
+            )
+            .await;
+        let signal = json!({"link_id": id, "request_id": request_id, "revision": 2,
+            "decision_id": decision["request"]["decision"]["decision_id"]});
+        let notify = runtime
+            .client
+            .post(format!(
+                "{}/InvitationRequestV1/{request_id}/notify",
+                runtime.ingress
+            ))
+            .json(&signal)
+            .send();
+        tokio::pin!(notify);
+        tokio::select! {
+            result = &mut notify => { assert!(result.unwrap().status().is_success()); },
+            _ = async { timeout(Duration::from_secs(10), async {
+                while runtime.workflow_faults.notification_attempts.load(Ordering::SeqCst) < 2 { sleep(Duration::from_millis(20)).await; }
+            }).await.expect("notification replay"); } => {}
+        }
+        timeout(Duration::from_secs(10), async {
+            while runtime.workflow_faults.notification_attempts.load(Ordering::SeqCst) < 2 { sleep(Duration::from_millis(20)).await; }
+        }).await.expect("notification interrupted after resolve");
+        runtime.workflow_faults.interrupt_notification.store(false, Ordering::SeqCst);
+        for task in runtime.transport.tasks.lock().unwrap().drain(..) { if !task.is_finished() { task.abort(); } }
+        let notified = runtime.client.post(format!("{}/InvitationRequestV1/{request_id}/notify", runtime.ingress)).json(&signal).send().await.unwrap();
+        assert!(notified.status().is_success());
+        runtime
+            .transport
+            .pause_workflows
+            .store(false, Ordering::SeqCst);
+        let result: Value = runtime
+            .client
+            .get(format!(
+                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                runtime.ingress
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["state"], "approved");
+        assert_eq!(
+            result["dispatch"]["dispatch_id"],
+            format!("v1/dispatch/{request_id}")
+        );
+        assert_eq!(
+            result["dispatch"]["input"]["repos"][0]["repo_full_name"],
+            "acme/api"
+        );
+        assert_eq!(runtime.ok(id, "admit", &attempt).await, receipt);
+        timeout(Duration::from_secs(15), async { loop {
+            if runtime.invocations(request_id).await.is_empty() { break; }
+            sleep(Duration::from_millis(100)).await;
+        }}).await.expect("completed workflow cleanup");
+        assert_eq!(runtime.ok(id, "admit", &attempt).await, receipt);
+        assert!(runtime.invocations(request_id).await.is_empty(), "receipt replay restarted workflow");
+        let retained = runtime.ok(id, "prepare_dispatch", &json!({"link_id": id, "request_id": request_id, "requester_id": 92})).await;
+        assert_eq!(retained, result["dispatch"], "workflow cleanup removed handoff");
+        let mut input = creation();
+        input["approval_required"] = json!(false);
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let receipt = runtime
+            .ok(
+                id,
+                "admit",
+                &json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 93}),
+            )
+            .await;
+        let request_id = receipt["result"]["request_id"].as_str().unwrap();
+        let result: Value = runtime
+            .client
+            .get(format!(
+                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                runtime.ingress
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["state"], "approved");
+        assert_eq!(
+            result["dispatch"]["input"]["request"]["decision_deadline"],
+            Value::Null
+        );
+        let handoff = runtime
+            .ok(
+                id,
+                "prepare_dispatch",
+                &json!({"link_id": id, "request_id": request_id, "requester_id": 93}),
+            )
+            .await;
+        assert_eq!(handoff, result["dispatch"]);
+        assert_eq!(
+            runtime
+                .ok(
+                    id,
+                    "prepare_dispatch",
+                    &json!({"link_id": id, "request_id": request_id, "requester_id": 93})
+                )
+                .await,
+            handoff
+        );
+        interrupted_timer_setup(&runtime).await;
+        waiting_notification_and_timer_races(&runtime).await;
+    })
+    .await
+    .expect("workflow timer completion");
+}
+
+async fn interrupted_timer_setup(runtime: &Runtime) {
+    let deadline = chrono::Utc::now() + chrono::Duration::seconds(3);
+    runtime
+        .faults
+        .set_clock(Some(deadline - chrono::Duration::days(7)));
+    runtime
+        .workflow_faults
+        .interrupt_timer
+        .store(true, Ordering::SeqCst);
+    let input = creation();
+    let id = input["link_id"].as_str().unwrap();
+    runtime.ok(id, "create", &input).await;
+    let receipt = runtime
+        .ok(
+            id,
+            "admit",
+            &json!({"version": 1, "link_id": id,
+        "operation_id": ghinvite_core::RequestId::new(), "requester_id": 94}),
+        )
+        .await;
+    timeout(Duration::from_secs(2), async {
+        while runtime
+            .workflow_faults
+            .timer_attempts
+            .load(Ordering::SeqCst)
+            < 2
+        {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("sleep setup boundary reached");
+    runtime.faults.set_clock(None);
+    while chrono::Utc::now() < deadline {
+        sleep(Duration::from_millis(20)).await;
+    }
+    runtime
+        .workflow_faults
+        .interrupt_timer
+        .store(false, Ordering::SeqCst);
+    for task in runtime.transport.tasks.lock().unwrap().drain(..) {
+        if !task.is_finished() {
+            task.abort();
+        }
+    }
+    let request_id = receipt["result"]["request_id"].as_str().unwrap();
+    let response = timeout(
+        Duration::from_secs(2),
+        runtime
+            .client
+            .get(format!(
+                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                runtime.ingress
+            ))
+            .send(),
+    )
+    .await
+    .expect("recovery must not restart the original relative wait")
+    .unwrap();
+    assert_eq!(response.json::<Value>().await.unwrap()["state"], "expired");
+}
+
+async fn waiting_notification_and_timer_races(runtime: &Runtime) {
+    for late in [false, true] {
+        let deadline = chrono::Utc::now() + chrono::Duration::seconds(2);
+        runtime
+            .faults
+            .set_clock(Some(deadline - chrono::Duration::days(7)));
+        let waits = runtime.workflow_faults.waits.load(Ordering::SeqCst);
+        let input = creation();
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let receipt = runtime
+            .ok(
+                id,
+                "admit",
+                &json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 95}),
+            )
+            .await;
+        runtime.faults.set_clock(None);
+        timeout(Duration::from_secs(1), async {
+            while runtime.workflow_faults.waits.load(Ordering::SeqCst) == waits {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("production workflow entered wait");
+        if late {
+            while chrono::Utc::now() < deadline {
+                sleep(Duration::from_millis(5)).await;
+            }
+        }
+        let request_id = receipt["result"]["request_id"].as_str().unwrap();
+        let decision = runtime
+            .ok(
+                id,
+                "decide",
+                &json!({"version": 1, "link_id": id,
+            "request_id": request_id, "operation_id": ghinvite_core::RequestId::new(),
+            "admin": input["admin"], "action": {"kind": "approve"}}),
+            )
+            .await;
+        let result = timeout(
+            Duration::from_secs(1),
+            runtime
+                .client
+                .get(format!(
+                    "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                    runtime.ingress
+                ))
+                .send(),
+        )
+        .await
+        .expect("waiting workflow did not consume terminal signal")
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+        assert_eq!(result["state"], if late { "expired" } else { "approved" });
+        assert_eq!(
+            decision["outcome"],
+            if late { "incompatible" } else { "applied" }
+        );
+        if !late {
+            assert!(
+                chrono::Utc::now() < deadline,
+                "notification only completed on timeout"
+            );
+        }
     }
 }
 
@@ -400,6 +741,10 @@ async fn authoritative_admission_contract() {
             }
         }
         admission_edges(&runtime).await;
+        lifecycle_boundaries(&runtime).await;
+        overdue_status_and_timer_race(&runtime).await;
+        overdue_readmission(&runtime).await;
+        lifecycle_recovery(&runtime).await;
         interruption_recovery(&runtime).await;
         queued_expiry(&runtime).await;
         imported_terminal_requests(&runtime).await;
@@ -407,6 +752,348 @@ async fn authoritative_admission_contract() {
     })
     .await
     .expect("authoritative admission acceptance exceeded 120 seconds");
+    authoritative_workflow_contract().await;
+}
+
+async fn lifecycle_boundaries(runtime: &Runtime) {
+    let now = chrono::Utc::now();
+    for (offset, action, expected) in [
+        (-1, "approve", "approved"),
+        (-1, "decline", "declined"),
+        (0, "approve", "expired"),
+        (1, "decline", "expired"),
+    ] {
+        runtime.faults.set_clock(Some(now));
+        let mut input = creation();
+        input["max_uses"] = json!(3);
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let attempt = json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 81});
+        let admitted = runtime.ok(id, "admit", &attempt).await;
+        let deadline = now + chrono::Duration::days(7);
+        runtime
+            .faults
+            .set_clock(Some(deadline + chrono::Duration::milliseconds(offset)));
+        let decision = json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(),
+            "request_id": admitted["result"]["request_id"], "admin": input["admin"],
+            "action": {"kind": action}});
+        let result = runtime.ok(id, "decide", &decision).await;
+        assert_eq!(result["request"]["state"], expected);
+        assert_eq!(
+            result["outcome"],
+            if expected == "expired" {
+                "incompatible"
+            } else {
+                "applied"
+            }
+        );
+        runtime
+            .faults
+            .set_clock(Some(deadline + chrono::Duration::days(1)));
+        assert_eq!(runtime.ok(id, "decide", &decision).await, result);
+        for field in ["admin", "request_id", "version"] {
+            let mut foreign = decision.clone();
+            foreign[field] = match field {
+                "admin" => json!({"account_id": 200, "user_id": 7}),
+                "request_id" => json!(ghinvite_core::RequestId::new()),
+                _ => json!(2),
+            };
+            assert_eq!(
+                runtime.command(id, "decide", &foreign).await.status(),
+                if field == "admin" { 404 } else { 409 }
+            );
+        }
+        let mut changed = decision.clone();
+        changed["action"] =
+            json!({"kind": if action == "approve" { "decline" } else { "approve" }});
+        assert_eq!(runtime.command(id, "decide", &changed).await.status(), 409);
+        changed["operation_id"] = json!(ghinvite_core::RequestId::new());
+        assert_eq!(
+            runtime.ok(id, "decide", &changed).await["outcome"],
+            "incompatible"
+        );
+        let mut matching = decision.clone();
+        matching["operation_id"] = json!(ghinvite_core::RequestId::new());
+        assert_eq!(
+            runtime.ok(id, "decide", &matching).await["outcome"],
+            if expected == "expired" {
+                "incompatible"
+            } else {
+                "already_completed"
+            }
+        );
+        let query = json!({"link_id": id, "request_id": admitted["result"]["request_id"], "requester_id": 81});
+        assert_eq!(
+            runtime.ok(id, "request_status", &query).await["state"],
+            expected
+        );
+        assert_eq!(runtime.ok(id, "admit", &attempt).await, admitted);
+        let mut fresh = attempt.clone();
+        fresh["operation_id"] = json!(ghinvite_core::RequestId::new());
+        assert_eq!(
+            runtime.ok(id, "admit", &fresh).await["result"]["kind"],
+            if expected == "approved" {
+                "rejected"
+            } else {
+                "accepted"
+            }
+        );
+    }
+    runtime.faults.set_clock(None);
+}
+
+async fn overdue_status_and_timer_race(runtime: &Runtime) {
+    for status_first in [false, true] {
+        let now = chrono::Utc::now();
+        runtime.faults.set_clock(Some(now));
+        let input = creation();
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let receipt = runtime
+            .ok(
+                id,
+                "admit",
+                &json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 85}),
+            )
+            .await;
+        let query = json!({"link_id": id, "request_id": receipt["result"]["request_id"], "requester_id": 85});
+        runtime
+            .faults
+            .set_clock(Some(now + chrono::Duration::days(7)));
+        let command = json!({"version": 1, "link_id": id, "request_id": receipt["result"]["request_id"],
+            "operation_id": ghinvite_core::RequestId::new(), "admin": input["admin"], "action": {"kind": "approve"}});
+        let (status, decision) = if status_first {
+            tokio::join!(
+                runtime.ok(id, "request_status", &query),
+                runtime.ok(id, "decide", &command)
+            )
+        } else {
+            let (decision, status) = tokio::join!(
+                runtime.ok(id, "decide", &command),
+                runtime.ok(id, "request_status", &query)
+            );
+            (status, decision)
+        };
+        assert_eq!(status["state"], "expired");
+        assert_eq!(decision["outcome"], "incompatible");
+        assert_eq!(
+            status["decision"]["effective_at"],
+            receipt["result"]["decision_deadline"]
+        );
+    }
+    runtime.faults.set_clock(None);
+}
+
+async fn lifecycle_recovery(runtime: &Runtime) {
+    for (handler, stages) in [
+        (
+            "decide",
+            vec![
+                "lifecycle-before-decision",
+                "lifecycle-after-decision",
+                "lifecycle-after-request",
+                "lifecycle-after-blocker",
+                "lifecycle-after-projection-send",
+                "lifecycle-after-notification-send",
+                "lifecycle-after-outcome",
+            ],
+        ),
+        (
+            "admit",
+            vec![
+                "after-decision",
+                "after-old-request",
+                "after-old-blocker",
+                "after-request",
+                "after-outcome",
+                "after-projection-send",
+                "after-old-notification-send",
+                "after-workflow-send",
+            ],
+        ),
+    ] {
+        for stage in stages {
+            let now = chrono::Utc::now();
+            runtime.faults.set_clock(Some(now));
+            let mut input = creation();
+            input["max_uses"] = json!(3);
+            let id = input["link_id"].as_str().unwrap();
+            runtime.ok(id, "create", &input).await;
+            let attempt = json!({"version": 1, "link_id": id,
+                "operation_id": ghinvite_core::RequestId::new(), "requester_id": 83});
+            let original = runtime.ok(id, "admit", &attempt).await;
+            let deadline = now + chrono::Duration::days(7);
+            runtime.faults.set_clock(Some(
+                deadline + chrono::Duration::milliseconds(if handler == "decide" { -1 } else { 0 }),
+            ));
+            let command = if handler == "decide" {
+                json!({"version": 1, "link_id": id, "request_id": original["result"]["request_id"],
+                    "operation_id": ghinvite_core::RequestId::new(), "admin": input["admin"], "action": {"kind": "approve"}})
+            } else {
+                json!({"operation_id": ghinvite_core::RequestId::new(), "version": 1, "link_id": id, "requester_id": 83})
+            };
+            runtime.faults.arm(stage);
+            let call = runtime.ok(id, handler, &command);
+            tokio::pin!(call);
+            tokio::select! {
+                _ = &mut call => panic!("completed before {stage}"),
+                _ = async { timeout(Duration::from_secs(10), async {
+                    while runtime.faults.attempts() < 2 { sleep(Duration::from_millis(20)).await; }
+                }).await.expect("checkpoint readiness"); } => {}
+            }
+            let query = json!({"link_id": id, "request_id": original["result"]["request_id"], "requester_id": 83});
+            let read = runtime.ok(id, "request_status", &query);
+            tokio::pin!(read);
+            assert!(
+                timeout(Duration::from_millis(50), &mut read).await.is_err(),
+                "partial read at {stage}"
+            );
+            runtime
+                .faults
+                .set_clock(Some(deadline + chrono::Duration::seconds(1)));
+            runtime.faults.release();
+            for task in runtime.transport.tasks.lock().unwrap().drain(..) {
+                if !task.is_finished() {
+                    task.abort();
+                }
+            }
+            let result = call.await;
+            let expected = if handler == "decide" && stage != "lifecycle-before-decision" {
+                "approved"
+            } else {
+                "expired"
+            };
+            assert_eq!(read.await["state"], expected, "{stage}");
+            assert_eq!(runtime.ok(id, handler, &command).await, result, "{stage}");
+            assert_eq!(runtime.ok(id, "admit", &attempt).await, original);
+            let new_attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 83});
+            if handler == "admit" || expected == "approved" {
+                assert_eq!(
+                    runtime.ok(id, "admit", &new_attempt).await["result"]["reason"],
+                    "existing_request",
+                    "{stage}"
+                );
+            }
+            timeout(Duration::from_secs(10), async {
+                loop {
+                    let envelopes = runtime.received.lock().unwrap().projections.clone();
+                    let events: Vec<_> = envelopes
+                        .iter()
+                        .filter(|e| e.link.link_id.to_string() == id)
+                        .flat_map(|e| &e.events)
+                        .filter(|e| e.kind.as_str() == format!("request.{expected}"))
+                        .collect();
+                    if !events.is_empty() {
+                        assert_eq!(events.len(), 1, "{stage}");
+                        break;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("terminal audit not dispatched");
+            assert_eq!(
+                runtime
+                    .ok(
+                        id,
+                        "link_status",
+                        &json!({"link_id": id, "admin": input["admin"]})
+                    )
+                    .await["uses"],
+                if handler == "admit" { 2 } else { 1 }
+            );
+        }
+    }
+    runtime.faults.set_clock(None);
+}
+
+async fn overdue_readmission(runtime: &Runtime) {
+    for rejection in [None, Some("exhausted"), Some("revoked"), Some("expired")] {
+        let now = chrono::Utc::now();
+        runtime.faults.set_clock(Some(now));
+        let mut input = creation();
+        input["max_uses"] = json!(if rejection == Some("exhausted") { 1 } else { 3 });
+        if rejection == Some("expired") {
+            input["expires_at"] = json!(now + chrono::Duration::days(1));
+        }
+        let id = input["link_id"].as_str().unwrap();
+        runtime.ok(id, "create", &input).await;
+        let attempt = json!({"version": 1, "link_id": id,
+            "operation_id": ghinvite_core::RequestId::new(), "requester_id": 82});
+        let admitted = runtime.ok(id, "admit", &attempt).await;
+        if rejection == Some("revoked") {
+            runtime
+                .ok(
+                    id,
+                    "revoke",
+                    &json!({"link_id": id, "admin": input["admin"]}),
+                )
+                .await;
+        }
+        runtime
+            .faults
+            .set_clock(Some(now + chrono::Duration::days(8)));
+        let before = runtime.received.lock().unwrap().projections.len();
+        assert_eq!(runtime.ok(id, "admit", &attempt).await, admitted);
+        let mut fresh = attempt.clone();
+        fresh["operation_id"] = json!(ghinvite_core::RequestId::new());
+        let result = runtime.ok(id, "admit", &fresh).await;
+        assert_eq!(
+            result["result"]["reason"],
+            rejection.map_or(Value::Null, |s| json!(s))
+        );
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let envelopes = runtime.received.lock().unwrap().projections.clone();
+                if let Some(envelope) = envelopes.iter().find(|e| {
+                    e.link.link_id.to_string() == id
+                        && e.events
+                            .iter()
+                            .any(|e| e.kind.as_str() == "request.expired")
+                }) {
+                    assert_eq!(
+                        envelope.requests.len(),
+                        if rejection.is_none() { 2 } else { 1 }
+                    );
+                    assert_eq!(envelope.link.uses, if rejection.is_none() { 2 } else { 1 });
+                    let expired = envelope
+                        .requests
+                        .iter()
+                        .find(|r| r.state == ghinvite_core::RequestState::Expired)
+                        .unwrap();
+                    assert_eq!(
+                        expired.request_id.to_string(),
+                        admitted["result"]["request_id"]
+                    );
+                    assert_eq!(
+                        expired.decision.as_ref().unwrap().effective_at,
+                        now + chrono::Duration::days(7)
+                    );
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fresh admission must project overdue expiry, even on rejection");
+        let old = json!({"link_id": id, "request_id": admitted["result"]["request_id"], "requester_id": 82});
+        assert_eq!(
+            runtime.ok(id, "request_status", &old).await["state"],
+            "expired"
+        );
+        if rejection.is_none() {
+            fresh["operation_id"] = json!(ghinvite_core::RequestId::new());
+            assert_eq!(
+                runtime.ok(id, "admit", &fresh).await["result"]["reason"],
+                "existing_request"
+            );
+        }
+        assert!(runtime.received.lock().unwrap().projections.len() > before);
+    }
+    runtime.faults.set_clock(None);
 }
 
 async fn queued_expiry(runtime: &Runtime) {

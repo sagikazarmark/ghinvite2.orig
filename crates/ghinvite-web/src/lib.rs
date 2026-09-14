@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub(crate) mod forms;
 pub(crate) mod invitation_link_resolution;
+pub mod lifecycle;
 pub mod middleware;
 pub mod restate_client;
 pub mod routes;

@@ -56,6 +56,7 @@ async fn invitation_page(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Path(slug): axum::extract::Path<String>,
+    axum::extract::Query(query): axum::extract::Query<StatusQuery>,
 ) -> impl IntoResponse {
     let session = match session::load(&tower).await {
         Ok(session) => session,
@@ -71,7 +72,33 @@ async fn invitation_page(
         Ok(context) => context,
         Err(_) => return invitation_not_found_response(&session),
     };
-    let selection = select_requester_request_state(&context.requests, session.user_id);
+    let mut selection = select_requester_request_state(&context.requests, session.user_id);
+    if let Some(lifecycle) = &state.request_lifecycle {
+        let request_id = query.request_id.or_else(|| {
+            context
+                .requests
+                .iter()
+                .find(|r| r.requester_id == session.user_id)
+                .map(|r| r.id)
+        });
+        if let Some(request_id) = request_id {
+            let request = match lifecycle
+                .status(ghinvite_core::request_lifecycle::RequestStatus {
+                    link_id: context.link.id,
+                    request_id,
+                    requester_id: session.user_id,
+                })
+                .await
+            {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            // Render only lifecycle state; justification/reason and admin facts
+            // from the private command response never become requester copy.
+            selection.current_status = Some(request.state);
+            selection.retry_notice = None;
+        }
+    }
     if !context.link.is_active(now) && selection.current_status.is_none() {
         return invitation_not_found_response(&session);
     }
@@ -94,6 +121,11 @@ async fn invitation_page(
         }
     });
     Html(html).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct StatusQuery {
+    request_id: Option<ghinvite_core::RequestId>,
 }
 
 async fn unknown_nested(tower: TowerSession, uri: Uri) -> impl IntoResponse {

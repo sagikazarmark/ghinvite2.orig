@@ -68,6 +68,10 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
                 .as_ref()
                 .is_some_and(|s| s.len() > 16_384)
             || (request.state == RequestState::Pending && request.decision_deadline.is_none())
+            || request.decision.as_ref().is_some_and(|d| {
+                d.decided_by.is_some_and(|id| !valid_id(id))
+                    || d.decline_reason.as_ref().is_some_and(|s| s.len() > 16_384)
+            })
         {
             return Err(invalid());
         }
@@ -162,6 +166,7 @@ pub const STATEMENTS: &[&str] = &[
         SELECT json_extract(?1,'$.link.creation.admin.user_id') AS id
         UNION SELECT json_extract(?1,'$.link.revoked_by')
         UNION SELECT json_extract(value,'$.requester_id') FROM json_each(?1,'$.requests')
+        UNION SELECT json_extract(value,'$.decision.decided_by') FROM json_each(?1,'$.requests')
         UNION SELECT json_extract(value,'$.actor_id') FROM json_each(?1,'$.events')
       ) WHERE id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM users WHERE user_id = id)),
       NOT EXISTS(SELECT 1 FROM installations WHERE installation_id = json_extract(?1,'$.link.creation.installation_id')
@@ -195,6 +200,9 @@ pub const STATEMENTS: &[&str] = &[
       r.created_at IS NOT json_extract(j.value,'$.admitted_at') OR
       r.decision_deadline IS NOT json_extract(j.value,'$.decision_deadline') OR
       r.state IS NOT json_extract(r.projection_content,'$.state') OR
+      r.decided_by IS NOT json_extract(r.projection_content,'$.decision.decided_by') OR
+      r.decided_at IS NOT json_extract(r.projection_content,'$.decision.effective_at') OR
+      r.decline_reason IS NOT json_extract(r.projection_content,'$.decision.decline_reason') OR
       (r.projection_revision = json_extract(j.value,'$.revision') AND r.projection_content IS NOT json_extract(j.value,'$.content')))
     AND NOT EXISTS(SELECT 1 FROM audit_events a JOIN json_each(?1,'$.events') j
       ON a.id = json_extract(j.value,'$.id') OR a.projection_event_id = json_extract(j.value,'$.event_id')
@@ -231,13 +239,16 @@ pub const STATEMENTS: &[&str] = &[
     FROM json_each(?1,'$.link.creation.repos') WHERE true
     ON CONFLICT(invitation_link_id, repo_id) DO NOTHING"#,
     r#"INSERT INTO invitation_requests(id, invitation_link_id, requester_id, justification, state, created_at,
-      decision_deadline, projection_revision, projection_content, projection_identity)
+      decision_deadline, projection_revision, projection_content, projection_identity, decided_by, decided_at, decline_reason)
     SELECT json_extract(value,'$.request_id'), json_extract(value,'$.link_id'), json_extract(value,'$.requester_id'),
       json_extract(value,'$.justification'), json_extract(value,'$.state'), json_extract(value,'$.admitted_at'),
       json_extract(value,'$.decision_deadline'), json_extract(value,'$.revision'),
-      json_extract(value,'$.content'), json_extract(value,'$.identity') FROM json_each(?1,'$.requests') WHERE true
+      json_extract(value,'$.content'), json_extract(value,'$.identity'),
+      json_extract(value,'$.decision.decided_by'), json_extract(value,'$.decision.effective_at'),
+      json_extract(value,'$.decision.decline_reason') FROM json_each(?1,'$.requests') WHERE true
     ON CONFLICT(id) DO UPDATE SET state=excluded.state, projection_revision=excluded.projection_revision,
-      projection_content=excluded.projection_content
+      projection_content=excluded.projection_content, decided_by=excluded.decided_by,
+      decided_at=excluded.decided_at, decline_reason=excluded.decline_reason
     WHERE excluded.projection_revision > invitation_requests.projection_revision"#,
     r#"INSERT INTO audit_events(id, account_id, occurred_at, event_type, actor_kind, actor_id,
       target_kind, target_id, metadata, projection_event_id, projection_content, evaluated_at)

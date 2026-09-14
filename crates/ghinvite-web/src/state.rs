@@ -13,6 +13,7 @@ pub struct AppState {
     pub github_transport: Arc<dyn HttpTransport>,
     pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
+    pub request_lifecycle: Option<Arc<dyn crate::lifecycle::RequestLifecycle>>,
 }
 
 impl AppState {
@@ -27,6 +28,17 @@ impl AppState {
             github_transport,
             commands,
             config,
+            request_lifecycle: None,
         }
+    }
+
+    /// For an isolated deployment whose requests are owned by InvitationLinkV1.
+    /// Rollout/migration decides when this is enabled; no per-row fallback.
+    pub fn with_request_lifecycle(
+        mut self,
+        lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
+    ) -> Self {
+        self.request_lifecycle = Some(lifecycle);
+        self
     }
 }

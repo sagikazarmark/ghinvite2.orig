@@ -256,6 +256,15 @@ async fn build_test_app_with_requests(
     requests: Vec<InvitationRequest>,
     mock: MockTransport,
 ) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
+    build_lifecycle_app(link, requests, mock, None).await
+}
+
+async fn build_lifecycle_app(
+    link: InvitationLink,
+    requests: Vec<InvitationRequest>,
+    mock: MockTransport,
+    lifecycle: Option<Arc<dyn ghinvite_web::lifecycle::RequestLifecycle>>,
+) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
@@ -283,14 +292,74 @@ async fn build_test_app_with_requests(
     let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
     let commands = Arc::new(RecordingCommands::default());
     let calls = commands.calls.clone();
-    let state = AppState::new(
+    let mut state = AppState::new(
         storage,
         transport,
         commands,
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
+    state.request_lifecycle = lifecycle;
     let session_store = tower_sessions::MemoryStore::default();
     (build_app(state, session_store), calls)
+}
+
+#[tokio::test]
+async fn isolated_status_reads_authority_without_projected_request_and_hides_reason() {
+    use ghinvite_core::request_lifecycle::*;
+    use ghinvite_core::storage::projection::RequestSnapshot;
+    struct Lifecycle(RequestId, Arc<Mutex<Vec<RequestStatus>>>);
+    #[async_trait::async_trait]
+    impl ghinvite_web::lifecycle::RequestLifecycle for Lifecycle {
+        async fn decide(&self, _: DecideRequest) -> ghinvite_web::Result<DecisionReceipt> {
+            panic!("unexpected decision")
+        }
+        async fn status(&self, query: RequestStatus) -> ghinvite_web::Result<RequestSnapshot> {
+            self.1.lock().unwrap().push(query.clone());
+            if query.request_id != self.0 {
+                return Err(ghinvite_web::WebError::NotFound);
+            }
+            Ok(
+                serde_json::from_value(serde_json::json!({"request_id": query.request_id,
+                "link_id": query.link_id, "account_id": 9001, "requester_id": query.requester_id,
+                "justification": null, "state": "declined", "admitted_at": "2026-01-01T00:00:00Z",
+                "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2,
+                "decision": {"decision_id": "decision", "decided_by": 7,
+                    "effective_at": "2026-01-02T00:00:00Z", "evaluated_at": "2026-01-02T00:00:00Z",
+                    "decline_reason": "Private admin context"}}))
+                .unwrap(),
+            )
+        }
+    }
+    let link = active_link("LifecycleStatus1");
+    let id = RequestId::new();
+    let calls = Arc::new(Mutex::new(vec![]));
+    let (app, _) = build_lifecycle_app(
+        link.clone(),
+        vec![],
+        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+        Some(Arc::new(Lifecycle(id, calls.clone()))),
+    )
+    .await;
+    let cookie = sign_in(app.clone()).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{}?request_id={id}", link.slug.as_str()))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(html.contains("declined"));
+    assert!(!html.contains("Private admin context"));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].requester_id, REQUESTER_ID);
+    assert_eq!(calls[0].request_id, id);
 }
 
 fn request_with_state_at(

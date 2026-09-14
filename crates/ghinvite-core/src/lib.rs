@@ -11,6 +11,7 @@ pub mod invitation_link;
 pub mod invitation_request;
 pub mod permission;
 pub mod repository_identity;
+pub mod request_lifecycle;
 pub mod slug;
 pub mod storage;
 pub mod user;

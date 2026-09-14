@@ -701,7 +701,7 @@ async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
-    _form: CsrfForm<EmptyForm>,
+    CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
@@ -709,6 +709,17 @@ async fn approve_request(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
+
+    if let Some(lifecycle) = &state.request_lifecycle {
+        return authoritative_decision(
+            lifecycle.as_ref(),
+            &admin,
+            request_id,
+            form,
+            ghinvite_core::request_lifecycle::DecisionAction::Approve,
+        )
+        .await;
+    }
 
     let _account_request = match find_account_admin_request(
         state.storage.as_ref(),
@@ -763,7 +774,7 @@ async fn decline_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
-    _form: CsrfForm<EmptyForm>,
+    CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
     use std::str::FromStr;
 
@@ -771,6 +782,17 @@ async fn decline_request(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
+
+    if let Some(lifecycle) = &state.request_lifecycle {
+        return authoritative_decision(
+            lifecycle.as_ref(),
+            &admin,
+            request_id,
+            form,
+            ghinvite_core::request_lifecycle::DecisionAction::Decline { reason: None },
+        )
+        .await;
+    }
 
     let _account_request = match find_account_admin_request(
         state.storage.as_ref(),
@@ -821,6 +843,77 @@ async fn decline_request(
         admin.account.account_login
     ))
     .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct LifecycleForm {
+    link_id: Option<ghinvite_core::InvitationLinkId>,
+    operation_id: Option<ghinvite_core::request_lifecycle::LifecycleOperationId>,
+}
+
+async fn authoritative_decision(
+    lifecycle: &dyn crate::lifecycle::RequestLifecycle,
+    admin: &RequireConsoleAdminOf,
+    request_id: ghinvite_core::RequestId,
+    form: LifecycleForm,
+    action: ghinvite_core::request_lifecycle::DecisionAction,
+) -> axum::response::Response {
+    use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome};
+    let (Some(link_id), Some(operation_id)) = (form.link_id, form.operation_id) else {
+        return crate::WebError::BadRequest(
+            "Missing lifecycle command identity. Reload the queue.".into(),
+        )
+        .into_response();
+    };
+    let command = DecideRequest {
+        version: 1,
+        link_id,
+        request_id,
+        operation_id,
+        admin: ghinvite_core::storage::projection::AccountAdmin {
+            account_id: admin.account.account_id,
+            user_id: admin.session.user_id,
+        },
+        action,
+    };
+    match lifecycle.decide(command).await {
+        Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => (
+            axum::http::StatusCode::CONFLICT,
+            format!(
+                "Request is {}. The requested decision was not applied.",
+                receipt.request.state
+            ),
+        )
+            .into_response(),
+        Ok(receipt) => {
+            let _ = session::set_flash(
+                &admin.tower,
+                session::Flash {
+                    level: session::FlashLevel::Success,
+                    message: format!(
+                        "Request {}{}.",
+                        if receipt.outcome == DecisionOutcome::AlreadyCompleted {
+                            "already "
+                        } else {
+                            ""
+                        },
+                        receipt.request.state
+                    ),
+                },
+            )
+            .await;
+            axum::response::Redirect::to(&format!(
+                "/console/accounts/{}/requests",
+                admin.account.account_login
+            ))
+            .into_response()
+        }
+        Err(_) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            "Decision outcome could not be confirmed. Retry the same submitted form.",
+        )
+            .into_response(),
+    }
 }
 
 async fn settings_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {

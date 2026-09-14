@@ -143,6 +143,8 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                         div { class: "request-decision-list mac-panel compact-table overflow-hidden",
                             {props.rows.iter().map(|r| {
                                 let rid = r.request_id.clone();
+                                let approve_operation = ghinvite_core::RequestId::new().to_string();
+                                let decline_operation = ghinvite_core::RequestId::new().to_string();
                                 let just = r.justification.clone();
                                 let link_id = r.link_id.clone();
                                 let link_slug = r.link_slug.clone();
@@ -209,10 +211,14 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 div { class: "flex gap-2 lg:flex-col lg:items-stretch",
                                                     form { method: "post", action: "/console/accounts/{login}/requests/{rid}/approve",
                                                         crate::csrf::CsrfField {}
+                                                        input { r#type: "hidden", name: "link_id", value: "{link_id}" }
+                                                        input { r#type: "hidden", name: "operation_id", value: "{approve_operation}" }
                                                         button { r#type: "submit", class: "btn btn-success btn-sm h-8 min-h-0", "Approve request" }
                                                     }
                                                     form { method: "post", action: "/console/accounts/{login}/requests/{rid}/decline",
                                                         crate::csrf::CsrfField {}
+                                                        input { r#type: "hidden", name: "link_id", value: "{link_id}" }
+                                                        input { r#type: "hidden", name: "operation_id", value: "{decline_operation}" }
                                                         button { r#type: "submit", class: "btn btn-error btn-sm h-8 min-h-0", "Decline request" }
                                                     }
                                                 }

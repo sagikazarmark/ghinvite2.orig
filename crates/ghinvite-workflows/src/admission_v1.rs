@@ -22,6 +22,10 @@ use restate_sdk::serde::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use ghinvite_core::request_lifecycle::{
+    DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, RequestStatus,
+    TerminalDecision, TerminalSignal,
+};
 pub use ghinvite_core::storage::projection::{
     AccountAdmin, AuditIntent, CreateLink, LinkSnapshot, ProjectionEnvelope, RequestSnapshot,
 };
@@ -35,11 +39,7 @@ pub struct AdmissionOperationId(RequestId);
 impl TryFrom<String> for AdmissionOperationId {
     type Error = &'static str;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let id: RequestId = value.parse().map_err(|_| "invalid operation ID")?;
-        if value.len() != 26 || value.to_ascii_uppercase() != id.to_string() {
-            return Err("invalid operation ID");
-        }
-        Ok(Self(id))
+        ghinvite_core::request_lifecycle::parse_operation_id(&value).map(Self)
     }
 }
 
@@ -100,12 +100,17 @@ pub struct AdminLinkCommand {
     pub admin: AccountAdmin,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RequestStatus {
-    pub link_id: InvitationLinkId,
-    pub request_id: RequestId,
-    pub requester_id: u64,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LifecycleRecord {
+    input: DecideRequest,
+    receipt: DecisionReceipt,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LifecycleDecision {
+    request: RequestSnapshot,
+    projection: Option<ProjectionEnvelope>,
+    clear_blocker: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -115,6 +120,7 @@ struct AdmissionDecision {
     request: Option<RequestSnapshot>,
     projection: Option<ProjectionEnvelope>,
     workflow: Option<WorkflowEnvelope>,
+    expired: Option<RequestSnapshot>,
 }
 
 /// Immutable startup input, sufficient before any projected request row exists.
@@ -129,6 +135,19 @@ pub struct WorkflowEnvelope {
     pub approval_required: bool,
 }
 
+impl WorkflowEnvelope {
+    fn from_authority(link: &LinkSnapshot, request: RequestSnapshot) -> Self {
+        Self {
+            version: 1,
+            request,
+            installation_id: link.creation.installation_id,
+            repos: link.creation.repos.clone(),
+            permission: link.creation.permission,
+            approval_required: link.creation.approval_required,
+        }
+    }
+}
+
 /// Internal durable projection consumer; bind via `projection_v1::bind`.
 #[restate_sdk::service]
 pub trait InvitationProjectionV1 {
@@ -137,7 +156,11 @@ pub trait InvitationProjectionV1 {
 
 #[restate_sdk::workflow]
 pub trait InvitationRequestV1 {
-    async fn run(input: Json<WorkflowEnvelope>) -> Result<(), TerminalError>;
+    async fn run(
+        input: Json<WorkflowEnvelope>,
+    ) -> Result<Json<crate::request_lifecycle_v1::WorkflowResult>, TerminalError>;
+    #[shared]
+    async fn notify(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
 }
 
 fn audit(
@@ -197,6 +220,10 @@ pub trait InvitationLinkV1 {
     async fn request_status(
         input: Json<RequestStatus>,
     ) -> Result<Json<RequestSnapshot>, TerminalError>;
+    async fn decide(input: Json<DecideRequest>) -> Result<Json<DecisionReceipt>, TerminalError>;
+    async fn prepare_dispatch(
+        input: Json<RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
 }
 
 #[derive(Default)]
@@ -233,6 +260,64 @@ impl Faults {
 }
 
 impl InvitationLinkV1Impl {
+    async fn transition(
+        &self,
+        ctx: &ObjectContext<'_>,
+        request: RequestSnapshot,
+        command: Option<&DecideRequest>,
+    ) -> Result<RequestSnapshot, TerminalError> {
+        if request.state != RequestState::Pending {
+            return Ok(request);
+        }
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let blocker_key = format!("v1/blocker/{}", request.requester_id);
+        let blocker = ctx.get::<Json<RequestId>>(&blocker_key).await?.map(|v| v.0);
+        self.checkpoint(ctx, "lifecycle-before-decision").await?;
+        let Json(decision) = ctx
+            .run(|| async {
+                let mut request = request.clone();
+                let now = self.now();
+                let event = transition_request(&mut request, command, now)?;
+                let projection = event.map(|event| {
+                    let mut envelope = projection(&link, vec![request.clone()], vec![event]);
+                    envelope.transition_id = request.decision.as_ref().unwrap().decision_id.clone();
+                    envelope
+                });
+                let clear_blocker = projection.is_some()
+                    && request.state != RequestState::Approved
+                    && blocker == Some(request.request_id);
+                Ok::<_, HandlerError>(Json(LifecycleDecision {
+                    request,
+                    projection,
+                    clear_blocker,
+                }))
+            })
+            .name("decide_lifecycle_v1")
+            .await?;
+        self.checkpoint(ctx, "lifecycle-after-decision").await?;
+        if let Some(envelope) = decision.projection {
+            ctx.set(
+                &format!("v1/request/{}", decision.request.request_id),
+                Json(decision.request.clone()),
+            );
+            self.checkpoint(ctx, "lifecycle-after-request").await?;
+            if decision.clear_blocker {
+                ctx.clear(&blocker_key);
+            }
+            self.checkpoint(ctx, "lifecycle-after-blocker").await?;
+            send_projection(ctx, envelope).await?;
+            self.checkpoint(ctx, "lifecycle-after-projection-send")
+                .await?;
+            send_terminal(ctx, &decision.request).await?;
+            self.checkpoint(ctx, "lifecycle-after-notification-send")
+                .await?;
+        }
+        Ok(decision.request)
+    }
+
     fn now(&self) -> DateTime<Utc> {
         #[cfg(feature = "integration")]
         if let Some(faults) = &self.faults
@@ -276,6 +361,82 @@ impl InvitationLinkV1Impl {
         let _ = (ctx, stage);
         Ok(())
     }
+}
+
+/// All callers use the same evaluation-time arbitration, inside their complete
+/// journaled decision. Expiration is effective at the snapshotted deadline.
+fn transition_request(
+    request: &mut RequestSnapshot,
+    command: Option<&DecideRequest>,
+    now: DateTime<Utc>,
+) -> Result<Option<AuditIntent>, TerminalError> {
+    if request.state != RequestState::Pending {
+        return Ok(None);
+    }
+    let deadline = request
+        .decision_deadline
+        .ok_or_else(|| TerminalError::new_with_code(500, "pending deadline missing"))?;
+    let (state, kind, actor, effective_at, reason) = if now >= deadline {
+        (
+            RequestState::Expired,
+            EventType::RequestExpired,
+            None,
+            deadline,
+            None,
+        )
+    } else if let Some(command) = command {
+        match &command.action {
+            DecisionAction::Approve => (
+                RequestState::Approved,
+                EventType::RequestApproved,
+                Some(command.admin.user_id),
+                now,
+                None,
+            ),
+            DecisionAction::Decline { reason } => (
+                RequestState::Declined,
+                EventType::RequestDeclined,
+                Some(command.admin.user_id),
+                now,
+                reason.clone(),
+            ),
+        }
+    } else {
+        return Ok(None);
+    };
+    let mut event = audit(kind, request.request_id, actor, effective_at);
+    event.evaluated_at = now;
+    request.state = state;
+    request.revision += 1;
+    request.decision = Some(TerminalDecision {
+        decision_id: event.event_id.clone(),
+        decided_by: actor,
+        effective_at,
+        evaluated_at: now,
+        decline_reason: reason,
+    });
+    Ok(Some(event))
+}
+
+async fn send_terminal(
+    ctx: &ObjectContext<'_>,
+    request: &RequestSnapshot,
+) -> Result<(), TerminalError> {
+    let decision = request
+        .decision
+        .as_ref()
+        .ok_or_else(|| TerminalError::new_with_code(500, "terminal decision missing"))?;
+    ctx.workflow_client::<InvitationRequestV1Client>(request.request_id.to_string())
+        .notify(Json(TerminalSignal {
+            link_id: request.link_id,
+            request_id: request.request_id,
+            decision_id: decision.decision_id.clone(),
+            revision: request.revision,
+        }))
+        .send()
+        .invocation_id()
+        .await?;
+    Ok(())
 }
 
 #[cfg(feature = "integration")]
@@ -359,6 +520,40 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
 }
 
 impl InvitationLinkV1 for InvitationLinkV1Impl {
+    async fn prepare_dispatch(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
+        validate_key(&ctx, input.link_id)?;
+        let Json(request) = ctx
+            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
+            .await?
+            .ok_or_else(missing)?;
+        if input.requester_id == 0 || request.requester_id != input.requester_id {
+            return Err(missing());
+        }
+        if request.state != RequestState::Approved {
+            return Err(conflict());
+        }
+        let key = format!("v1/dispatch/{}", input.request_id);
+        if let Some(dispatch) = ctx.get(&key).await? {
+            return Ok(dispatch);
+        }
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let dispatch = crate::request_lifecycle_v1::ApprovedDispatch {
+            dispatch_id: key.clone(),
+            input: WorkflowEnvelope::from_authority(&link, request),
+        };
+        // Retained independently of workflow cleanup. #56 extends this checkpoint
+        // with per-repository receiving receipts; this does not claim delivery.
+        ctx.set(&key, Json(dispatch.clone()));
+        Ok(Json(dispatch))
+    }
+
     async fn admit(
         &self,
         ctx: ObjectContext<'_>,
@@ -413,6 +608,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .run(|| async {
                 let now = self.now();
                 let mut link = link.clone();
+                let mut blocking_request = blocking_request.clone();
+                let expiry_event = if let Some(request) = &mut blocking_request {
+                    transition_request(request, None, now)?
+                } else {
+                    None
+                };
+                let expired = expiry_event.as_ref().and(blocking_request.clone());
                 let reason = if link.revoked_at.is_some() {
                     Some(Rejection::Revoked)
                 } else if link.creation.expires_at.is_some_and(|at| now >= at) {
@@ -460,6 +662,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                         admitted_at: now,
                         decision_deadline,
                         revision: 1,
+                        decision: (state == RequestState::Approved).then(|| TerminalDecision {
+                            decision_id: format!("v1/request.approved/{request_id}"),
+                            decided_by: None,
+                            effective_at: now,
+                            evaluated_at: now,
+                            decline_reason: None,
+                        }),
                     };
                     (
                         AdmissionResult::Accepted {
@@ -470,13 +679,16 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                         Some(request),
                     )
                 };
-                let projection = request.as_ref().map(|request| {
-                    let mut events = vec![audit(
+                let mut events: Vec<_> = expiry_event.into_iter().collect();
+                let mut touched: Vec<_> = expired.iter().cloned().collect();
+                if let Some(request) = &request {
+                    touched.push(request.clone());
+                    events.push(audit(
                         EventType::RequestCreated,
                         request.request_id,
                         Some(input.requester_id),
                         now,
-                    )];
+                    ));
                     if request.state == RequestState::Approved {
                         events.push(audit(
                             EventType::RequestApproved,
@@ -497,21 +709,25 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                             now,
                         ));
                     }
-                    projection(&link, vec![request.clone()], events)
-                });
-                let workflow = request.as_ref().map(|request| WorkflowEnvelope {
-                    version: 1,
-                    request: request.clone(),
-                    installation_id: link.creation.installation_id,
-                    repos: link.creation.repos.clone(),
-                    permission: link.creation.permission,
-                    approval_required: link.creation.approval_required,
-                });
+                }
+                let projection = if touched.is_empty() {
+                    None
+                } else {
+                    // Rejection plus expiry also gets a unique link revision.
+                    if request.is_none() {
+                        link.revision += 1;
+                    }
+                    Some(projection(&link, touched, events))
+                };
+                let workflow = request
+                    .as_ref()
+                    .map(|request| WorkflowEnvelope::from_authority(&link, request.clone()));
                 Ok::<_, HandlerError>(Json(AdmissionDecision {
                     link,
                     request,
                     projection,
                     workflow,
+                    expired,
                     operation: OperationRecord {
                         input: input.clone(),
                         receipt: AdmissionReceipt {
@@ -524,9 +740,20 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .name("decide_admission_v1")
             .await?;
         self.checkpoint(&ctx, "after-decision").await?;
-        if let Some(request) = &decision.request {
+        if decision.projection.is_some() {
             ctx.set("v1/link", Json(decision.link.clone()));
             self.checkpoint(&ctx, "after-link").await?;
+        }
+        if let Some(expired) = &decision.expired {
+            ctx.set(
+                &format!("v1/request/{}", expired.request_id),
+                Json(expired.clone()),
+            );
+            self.checkpoint(&ctx, "after-old-request").await?;
+            ctx.clear(&blocker_key);
+            self.checkpoint(&ctx, "after-old-blocker").await?;
+        }
+        if let Some(request) = &decision.request {
             ctx.set(
                 &format!("v1/request/{}", request.request_id),
                 Json(request.clone()),
@@ -541,6 +768,10 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             send_projection(&ctx, envelope).await?;
         }
         self.checkpoint(&ctx, "after-projection-send").await?;
+        if let Some(expired) = &decision.expired {
+            send_terminal(&ctx, expired).await?;
+            self.checkpoint(&ctx, "after-old-notification-send").await?;
+        }
         if let Some(envelope) = decision.workflow {
             ctx.workflow_client::<InvitationRequestV1Client>(
                 envelope.request.request_id.to_string(),
@@ -581,7 +812,81 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         if input.requester_id == 0 || request.requester_id != input.requester_id {
             return Err(missing());
         }
+        let mut request = self.transition(&ctx, request, None).await?;
+        if let Some(decision) = &mut request.decision {
+            decision.decline_reason = None;
+        }
         Ok(Json(request))
+    }
+
+    async fn decide(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(mut input): Json<DecideRequest>,
+    ) -> Result<Json<DecisionReceipt>, TerminalError> {
+        validate_key(&ctx, input.link_id)?;
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        validate_admin(&input.admin, link.creation.account_id)?;
+        if let DecisionAction::Decline { reason } = &mut input.action {
+            *reason = reason
+                .take()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
+                return Err(invalid());
+            }
+        }
+        let key = format!(
+            "v1/lifecycle-op/{}",
+            String::from(input.operation_id.clone())
+        );
+        if let Some(Json(old)) = ctx.get::<Json<LifecycleRecord>>(&key).await? {
+            if old.input != input {
+                return Err(conflict());
+            }
+            return Ok(Json(old.receipt));
+        }
+        if input.version != 1 {
+            return Err(invalid());
+        }
+        let Json(request) = ctx
+            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
+            .await?
+            .ok_or_else(missing)?;
+        let was_pending = request.state == RequestState::Pending;
+        let request = self.transition(&ctx, request, Some(&input)).await?;
+        let matching = match &input.action {
+            DecisionAction::Approve => request.state == RequestState::Approved,
+            DecisionAction::Decline { reason } => {
+                request.state == RequestState::Declined
+                    && request
+                        .decision
+                        .as_ref()
+                        .is_some_and(|d| &d.decline_reason == reason)
+            }
+        };
+        let receipt = DecisionReceipt {
+            request,
+            outcome: if !matching {
+                DecisionOutcome::Incompatible
+            } else if was_pending {
+                DecisionOutcome::Applied
+            } else {
+                DecisionOutcome::AlreadyCompleted
+            },
+        };
+        ctx.set(
+            &key,
+            Json(LifecycleRecord {
+                input,
+                receipt: receipt.clone(),
+            }),
+        );
+        self.checkpoint(&ctx, "lifecycle-after-outcome").await?;
+        Ok(Json(receipt))
     }
 
     async fn revoke(
