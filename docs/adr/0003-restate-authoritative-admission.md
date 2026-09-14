@@ -318,6 +318,63 @@ This adds one small durable delivery module per request. Direct promise evidence
 
 If request withdrawal is wanted now, decide explicitly whether the requester, an account admin, or both may cancel a pending request. Then define audit actor/reason visibility and command replay. The recommended state rule is pending-only cancellation before its deadline, expiry at/after the deadline, no use refund, and no cascade to an approved request/GitHub invitation. Administrative Restate cancellation/kill remains operational recovery and is not a domain cancellation command.
 
+## Approved dispatch recovery and migration contract
+
+The maintainer [confirmed this contract](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5668073287), including stable dispatch plans and create outcomes, controlled write maintenance, preservation of established historical deadlines, and existing identity-parent prerequisites. This is not a completed migration or verified external-effect protocol; concrete recovery mechanics and the migration rehearsal remain implementation work.
+
+### Retained dispatch plans and receiving-side receipts
+
+Distinguish **approved**, **durably submitted**, and **GitHub create result confirmed**. None implies the next. In particular, a `Sent` GitHub invitation awaits its recipient, but its create operation is complete.
+
+Before first fan-out, a short exclusive link command creates or returns a retained dispatch plan for the approved request: approval identity, immutable repository scope/permission/requester identity, and one stable GitHub invitation ID per repository. Generate IDs once in the complete journaled plan decision and retain them beyond workflow cleanup. A different plan for the same approval conflicts. Preserve existing invitation IDs on import. Store per-repository entries separately if needed; bound repository scope at link creation rather than growing the hot link header with dispatch history.
+
+The workflow obtains that same plan on replay/redrive and durably sends each create command to its stable invitation object ID. Record `submitted` only after the durable send identity is confirmed. If acknowledgement of submission is lost, resending the same command must be safe at the receiving object. A submitted checkpoint is not a successful GitHub response, and a missing workflow journal is not permission to allocate new invitation IDs.
+
+Suggested retained per-repository checkpoints: `planned`, `submitted` (with original invocation identity when available), and `create_resolved` (with outcome identity). The workflow can finish when fan-out is durably arranged and recorded; delivery continues independently. Explicit repair checks receiving-side outcomes before resending retained commands. Admission replay only returns its receipt and never initiates redrive.
+
+The existing [`GithubInvitation::create_logic`](../../crates/ghinvite-workflows/src/github_invitation.rs) skips a repeated create only when the stored invitation state is terminal. `Sent` is not terminal in [`InvitationState`](../../crates/ghinvite-core/src/github_invitation.rs), so a replay can repeat the collaborator PUT despite a prior successful create. Fix this before considering post-retention redrive safe.
+
+**Retain a create-operation receipt separately from invitation lifecycle**, keyed by stable invitation ID and bound to immutable input. Results include created pending invitation with upstream ID, already collaborator, and definitive failure. Once recorded, replay returns that result without another PUT regardless of later sent/accepted/declined/expired/cancelled state. A future deliberate resend is a new domain operation, not recovery of the original create. Link dispatch checkpoints do not replace the receiving receipt.
+
+GitHub success before receipt persistence is still ambiguous: Restate cannot atomically commit GitHub and its journal. Retain attempt intent/identity; reconcile collaborator access and pending invitations for the immutable requester before retrying an uncertain create. Absence in a list is not by itself proof that an earlier call never succeeded or that its result was not subsequently acted on. Specify handling of unresolved ambiguity rather than claiming exactly-once HTTP effects. Test acknowledgement loss, recipient action, and API errors. Requester login is mutable addressing data; define lookup/validation against immutable GitHub identity instead of treating a stale login as identity.
+
+Initially the GitHub adapter may retain database-backed create receipts, provided missing projected request/link prerequisites are retryable dependencies rather than terminal not-found. Database outage may delay delivery, but never moves external calls or projection waits into the authoritative link handler. Choosing Restate state for GitHub create receipts is a separate explicit implementation decision. Neither receiving-side receipt implementation nor GitHub ambiguity reconciliation has been proven by the admission experiments.
+
+### Controlled writer cutover
+
+Use write maintenance rather than simultaneous old/new authoritative writers:
+
+1. **Inventory.** Collect link/request counts and uses, pending/approved conflicts, pending deadlines, per-repository invitation IDs/results, queued/running Restate invocations, and pinned deployments. Record an immutable versioned migration manifest with source identities/checksums and per-link progress. Endpoint replacement cannot arbitrarily change old journal semantics.
+2. **Quiesce.** Stop new old-path admission/link/admin-decision commands and automatic request transitions. Let short commands finish. Pending workflows can wait days and cannot simply drain during a short window: inventory and pause/suspend them under a validated procedure, accounting for queued timers/decisions. A pause does not fence already-issued SQL/GitHub requests. Establish that all old writers are quiescent before import; late commands must route compatibly or fail as obsolete rather than resume independent database-authoritative mutation.
+3. **Checkpoint.** Capture coordinated Restate/database backups or exports and outstanding invocation metadata after quiescence. Record uncertain external effects. A database backup alone cannot recover new authoritative Restate outcomes.
+4. **Import once.** Initialize each link with existing IDs, guardrails, metadata, revocation, uses, request states/blockers, and known dispatch IDs/results. Import requires the expected migration identity, rejects conflicting initialized state, and resumes partial work from the manifest. Mark a link ready only after all its state keys are imported; do not overwrite live state from a stale SQL snapshot.
+5. **Transfer lifecycle work.** Preserve request identity and terminal results. Start versioned replacement lifecycles only for pending work or unfinished approved dispatch after old execution is fenced. Retain dispatch plans and receiving outcomes; never blindly fan out again. Retire old invocations only after their obligations and uncertain effects are accounted for. Operational kill is not domain cancellation. Validate exact management commands/routing in a disposable rehearsal before deployment.
+6. **Verify and open.** Check counts, eligibility, deadlines, revisions, dispatch identity and representative replay. Route all relevant commands to canonical link keys. Deploy authoritative immediate reads with cutover; database readers must tolerate projection lag.
+
+### Historical data treatment
+
+- **Uses mismatch:** all created requests count, including declined/expired/cancelled. Report and reconcile discrepancies from evidence; do not reduce counters, fabricate requests, or expand max use automatically. An already-over-limit link cannot admit more.
+- **Multiple blocking requests:** preserve records and flag ambiguous eligibility. Do not pick a pending row while ignoring approved history or delete rows to satisfy a new index. Keep unresolved links closed to new admission pending reconciliation; define any exceptional historical blocker representation in the migration ticket.
+- **Historical deadlines:** preserve each already-established pending deadline, including the old link-expiry cap, while applying the new independent lifetime to new admissions. Recover journaled deadlines if absent from SQL. Missing/unreliable deadlines need an explicit mapping decision; never give every migrated pending request a fresh seven days. Known terminal states are preserved.
+- **Legacy operation identity:** old request IDs can identify accepted attempts, but exact original input and rejected outcomes may not have been retained. Define a versioned legacy replay compatibility path based on available evidence. Do not fabricate payload equality or promise replay of previously unrecorded rejections. Strict new operation semantics begin at a versioned cutover.
+- **GitHub delivery:** preserve existing per-repository IDs. `Sent` with an upstream ID is create-success evidence. `Sending`, incomplete fan-out, or missing records require Restate/GitHub reconciliation before redrive, not fresh IDs and unconditional PUTs.
+
+### Projection prerequisites
+
+Retain the current installation/user parent model initially rather than inserting incomplete stubs into tables whose readers require full profile/account fields. Normal identity rows come from their existing owners. A missing parent becomes retryable projection dependency/repair, not fabricated authority or compensation of admission.
+
+The envelope carries a complete authoritative link snapshot and its touched request snapshots. Apply link/repository records before requests within the transaction/batch even if an earlier link-created envelope is delayed; honor independent revisions and never overwrite newer parent/account metadata from admission-time data. On database restore, recover installation/user prerequisites from their owners or a compatible backup before admission projection replay. Dependency recovery must not wait cyclically on the same projector.
+
+If an identity cannot be recovered, leave projection observably pending for repair. Admission/revocation continue from Restate. Identity retention/deletion must respect these references. Portable statements, equal-version conflict checks, and actual D1 validation remain implementation work.
+
+### Rollback and destructive recovery
+
+Before new-authority writes, a failed cutover can restore its coordinated checkpoint and resume old writers through the verified procedure. **After any new Restate-authoritative admission/transition, rolling back to database-authoritative writers is unsafe**: projection may omit uses/outcomes. Prefer a compatible forward fix or maintenance with explicit reverse reconciliation. Missing SQL rows after restore never establish fresh admission eligibility.
+
+For killed/purged invocations or independent Restate restore, close affected commands until partial keys, sends, receipts, and external effects are reconciled. Ordinary replay proofs assume the original journal survives. Restore projections from retained authoritative snapshots and event history where available; current snapshots cannot reconstruct every historical audit event. A recoverable event source/database backup is required independently of completed-workflow journal retention.
+
+Required rehearsal: legacy pending/approved/terminal records, `Sent` and ambiguous `Sending` delivery, queued old revoke/decision, interrupted import, identical/conflicting manifest replay, delayed parent projection, and attempted rollback after a new admission. Assert no restored eligibility, lost history, or repeated confirmed create and explicit handling of uncertainty. No migration, runtime pause/purge, or external reconciliation was performed in this session.
+
 ## Remaining implementation decisions
 
 **Sequencing update (2026-09-14):** The maintainer [deferred actual Worker/D1 verification](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5667489260) for now. Continue contract and lifecycle design using the recorded native evidence. Worker clock/endpoint and D1 adapter verification remain explicit follow-ups; native request-response/SQLx success does not satisfy them. This deferral does not establish production readiness or by itself close #48.
