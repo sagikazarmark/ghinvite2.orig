@@ -4,7 +4,7 @@ use crate::admission_v1::{
 };
 use ghinvite_core::RequestState;
 use restate_sdk::context::{
-    ContextClient, ContextPromises, ContextSideEffects, ContextTimers, InvocationHandle, RunFuture,
+    ContextClient, ContextPromises, ContextSideEffects, ContextTimers, RunFuture,
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::endpoint::Builder;
@@ -154,8 +154,9 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                             )
                             .create(Json(command.clone()))
                             .send()
+                            .await?
                             .invocation_id()
-                            .await?;
+                            .to_owned();
                         #[cfg(feature = "integration")]
                         if let Some(faults) = &self.faults {
                             ctx.run(|| async {

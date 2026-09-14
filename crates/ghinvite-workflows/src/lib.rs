@@ -9,18 +9,27 @@
 //! without a Restate runtime; full workflow integration tests against the local
 //! `restate-server` (compose.yaml) are deferred to Plan 8.
 
+// SDK 0.12 retains the trait-based service API. Preserve these deployed contracts
+// during the clock compatibility upgrade; migrating macro style is separate work.
+#[allow(deprecated)]
 pub mod admission_v1;
 pub mod audit;
+#[allow(deprecated)]
 pub mod delivery_v1;
 pub mod error;
+#[allow(deprecated)]
 pub mod github_invitation;
+#[allow(deprecated)]
 pub mod installation;
 pub mod invitation_context;
+#[allow(deprecated)]
 pub mod invitation_link;
+#[allow(deprecated)]
 pub mod invitation_request;
 pub mod migration_v1;
 mod obsolete_writers;
 pub mod projection_v1;
+#[allow(deprecated)]
 pub mod reconcile;
 pub mod request_lifecycle_v1;
 pub mod state;

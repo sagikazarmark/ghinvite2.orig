@@ -6,6 +6,11 @@ blocked on #59: actual clock/endpoint execution, D1 batch/fence conformance,
 identity verification, routing, capacity, backup/restore, and deployment isolation
 must be exercised there. Native binaries retain `legacy` as their default mode.
 
+The [#59 Worker/D1 gate](worker-admission-gate.md) now rehearses the adopted
+checkpoint/import path against actual local bindings. Its remote deployment and
+live D1 checkpoint/adoption limitations remain rollout blockers. Both Workers
+accept `GHINVITE_ADMISSION_MODE=authoritative`; web also accepts `maintenance`.
+
 ## Safety boundary
 
 Only trusted operators can reach migration handlers. Private ingress and the

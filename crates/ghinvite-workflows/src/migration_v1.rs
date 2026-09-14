@@ -80,7 +80,6 @@ pub async fn verify(
 }
 
 pub async fn handoff(ctx: &ObjectContext<'_>, input: HandoffImport) -> Result<(), TerminalError> {
-    use restate_sdk::context::InvocationHandle;
     ensure_open(ctx).await?;
     let Json(source) = ctx
         .get::<Json<BeginImport>>("migration/v1/source")
@@ -111,7 +110,6 @@ pub async fn handoff(ctx: &ObjectContext<'_>, input: HandoffImport) -> Result<()
             record.request,
         )))
         .send()
-        .invocation_id()
         .await?;
     }
     ctx.set(&key, true);

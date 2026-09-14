@@ -13,8 +13,8 @@ use ghinvite_core::{
     Slug,
 };
 use restate_sdk::context::{
-    ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, InvocationHandle,
-    ObjectContext, RunFuture,
+    ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
+    RunFuture,
 };
 use restate_sdk::endpoint::{Builder, ServiceOptions};
 use restate_sdk::errors::{HandlerError, TerminalError};
@@ -144,7 +144,6 @@ async fn send_projection(
     ctx.service_client::<InvitationProjectionV1Client>()
         .apply_transition(Json(envelope))
         .send()
-        .invocation_id()
         .await?;
     Ok(())
 }
@@ -446,7 +445,6 @@ async fn send_terminal(
             revision: request.revision,
         }))
         .send()
-        .invocation_id()
         .await?;
     Ok(())
 }
@@ -1284,7 +1282,6 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             )
             .run(Json(envelope))
             .send()
-            .invocation_id()
             .await?;
         }
         self.checkpoint(&ctx, "after-workflow-send").await?;

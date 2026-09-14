@@ -15,6 +15,9 @@ use restate_sdk::endpoint::{HandleOptions, ProtocolMode};
 use std::sync::Arc;
 use worker::{Body, Context, Env, HttpRequest, event};
 
+#[cfg(feature = "runtime-tests")]
+mod fixture;
+
 /// Map non-`worker::Error` failures into `worker::Error` for the fetch entry
 /// point.
 fn worker_err(e: impl std::fmt::Display) -> worker::Error {
@@ -55,16 +58,22 @@ fn github_client_from_env(env: &Env) -> worker::Result<ghinvite_github::Installa
 #[event(fetch)]
 async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http::Response<Body>> {
     console_error_panic_hook::set_once();
-    // `tracing_wasm::set_as_global_default` panics on repeat calls within the
-    // same wasm instance — Workers can reuse instances across invocations.
-    let _ = tracing_wasm::try_set_as_global_default();
+    let _ = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(|| ConsoleWriter)
+        .try_init();
+
+    #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/") {
+        return fixture::fetch(req, &env).await;
+    }
 
     let db = env.d1("DB")?;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> =
-        Arc::new(ghinvite_storage_d1::D1Storage::new(db));
+    let storage = Arc::new(ghinvite_storage_d1::D1Storage::new(db));
     let github_client = Arc::new(github_client_from_env(&env)?);
 
-    let state = ghinvite_workflows::AppState::new(storage, github_client);
+    let state = ghinvite_workflows::AppState::new(storage.clone(), github_client);
     // RESTATE_IDENTITY_KEY is required in production — it is the public key
     // Restate Cloud uses to sign inbound requests. Without it the endpoint
     // accepts any caller. Set via:
@@ -79,8 +88,18 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
              This is only safe for local dev."
         );
     }
-    let endpoint =
-        ghinvite_workflows::build_endpoint(state, identity_key.as_deref()).map_err(worker_err)?;
+    let mode = env
+        .var("GHINVITE_ADMISSION_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "legacy".into());
+    let endpoint = match mode.as_str() {
+        "legacy" => ghinvite_workflows::build_endpoint(state, identity_key.as_deref()),
+        "authoritative" => {
+            ghinvite_workflows::build_cutover_endpoint(state, storage, identity_key.as_deref())
+        }
+        _ => return Err(worker_err("invalid GHINVITE_ADMISSION_MODE")),
+    }
+    .map_err(worker_err)?;
 
     // Cloudflare Workers does not support true bidirectional streaming — it
     // buffers the entire request body before passing it to the worker. We
@@ -96,4 +115,16 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
     let (parts, body) = response.into_parts();
     let body = Body::from_stream(body.into_data_stream())?;
     Ok(http::Response::from_parts(parts, body))
+}
+
+// workerd has no performance.mark/measure for tracing-wasm's span hooks.
+struct ConsoleWriter;
+impl std::io::Write for ConsoleWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        worker::console_log!("{}", String::from_utf8_lossy(bytes));
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

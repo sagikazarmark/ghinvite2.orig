@@ -41,7 +41,7 @@ parking_lot = "0.12"
 rand = { version = "0.8", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "charset"] }
-restate-sdk = { version = "0.10", default-features = false, features = ["hyper", "schemars", "rust_crypto"] }
+restate-sdk = { version = "0.12", default-features = false, features = ["hyper", "schemars", "rust_crypto"] }
 rsa = { version = "0.9", default-features = false, features = ["pem", "sha2"] }
 schemars = { version = "1.2", features = ["chrono04"] }
 serde = { version = "1", features = ["derive"] }
@@ -83,3 +83,7 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Wasm clocks and input draining: https://github.com/restatedev/sdk-rust/pull/128
+[patch.crates-io]
+restate-sdk = { git = "https://github.com/sagikazarmark/restate-sdk-rust", rev = "e882e9e04f9ad9942b4fe7f3788999a521dfa336" }

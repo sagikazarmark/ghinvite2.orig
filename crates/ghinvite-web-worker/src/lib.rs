@@ -205,9 +205,19 @@ async fn fetch(
         Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);
     let restate =
         Arc::new(ghinvite_web::RestateClient::new(&config.restate_ingress).map_err(worker_err)?);
-    let commands = Arc::new(ghinvite_web::RestateCommands::new(restate));
+    let commands = Arc::new(ghinvite_web::RestateCommands::new(restate.clone()));
     let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
     let state = ghinvite_web::AppState::new(storage, transport, commands, config);
+    let mode = env
+        .var("GHINVITE_ADMISSION_MODE")
+        .map(|v| v.to_string())
+        .unwrap_or_else(|_| "legacy".into());
+    let state = match mode.as_str() {
+        "legacy" => state,
+        "maintenance" => state.with_write_maintenance(),
+        "authoritative" => state.with_admission(restate),
+        _ => return Err(worker_err("invalid GHINVITE_ADMISSION_MODE")),
+    };
     let app = ghinvite_web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`

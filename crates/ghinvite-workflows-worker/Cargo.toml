@@ -9,9 +9,13 @@ publish.workspace = true
 path = "src/lib.rs"
 crate-type = ["cdylib"]
 
+[features]
+# Disposable binding conformance harness only; never enable in deployed builds.
+runtime-tests = []
+
 # This crate is the Cloudflare Workers entry point for the Restate service
 # binary. The whole crate exists only on wasm32 — `worker`,
-# `console_error_panic_hook`, `tracing-wasm`, and the wasm32-only D1 backing
+# `console_error_panic_hook`, console tracing, and the wasm32-only D1 backing
 # in `ghinvite-storage-d1` are gated to wasm32. On native
 # (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -25,4 +29,6 @@ worker = { version = "0.8", features = ["d1", "http"] }
 console_error_panic_hook = "0.1.7"
 http = "1"
 http-body-util = "0.1"
-tracing-wasm = "0.2"
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+bytes = "1"

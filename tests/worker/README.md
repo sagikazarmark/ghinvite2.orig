@@ -1,5 +1,10 @@
 # Worker Runtime Smoke Test
 
+For authoritative admission, recovery, D1 projection and cutover execution, run
+`npm run test:admission --prefix tests/worker` from the root. See the
+[separate gate/results](../../docs/worker-admission-gate.md), including its explicit
+blocked production rollout verdict. The session smoke below remains independent.
+
 Runs the actual `ghinvite-web-worker` Wasm in Miniflare/workerd with local KV and
 D1 bindings. This catches runtime failures that a successful Wasm build misses,
 including unsupported clocks and tracing APIs. There are no clock, crypto,

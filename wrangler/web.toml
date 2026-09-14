@@ -46,6 +46,7 @@ id = "REPLACE_WITH_WRANGLER_KV_CREATE_OUTPUT"
 
 # Non-secret config vars
 [vars]
+GHINVITE_ADMISSION_MODE = "legacy" # maintenance / authoritative after cutover gates
 GHINVITE_BASE_URL           = "https://ghinvite.workers.dev"
 GHINVITE_RESTATE_INGRESS    = "https://ACCOUNT_ID.restate.cloud"
 GHINVITE_GITHUB_INSTALL_URL = "https://github.com/apps/YOUR_APP_NAME/installations/new"

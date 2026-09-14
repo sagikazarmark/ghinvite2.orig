@@ -1,7 +1,7 @@
 //! Throwaway deadline proof. Fixed requester, compact link record, split requests.
 //! Controlled time is test infrastructure, never command-supplied production time.
 use super::*;
-use restate_sdk::context::{ContextTimers, InvocationHandle};
+use restate_sdk::context::ContextTimers;
 use std::sync::atomic::AtomicI64;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -220,7 +220,6 @@ impl DeadlineProof for Handler {
                 events: change.events.clone(),
             }))
             .send()
-            .invocation_id()
             .await?;
         ctx.run(|| self.faults.checkpoint("deadline-after-send"))
             .name("deadline-after-send")

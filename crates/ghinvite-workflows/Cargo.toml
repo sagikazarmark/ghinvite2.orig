@@ -45,7 +45,7 @@ ghinvite-core = { workspace = true, features = ["test-suite"] }
 ghinvite-storage-sqlx = { workspace = true, features = ["test-util"] }
 rand_chacha.workspace = true
 reqwest.workspace = true
-restate-sdk = { version = "0.10", features = ["http_server", "hyper", "schemars", "rust_crypto"] }
+restate-sdk = { workspace = true, features = ["http_server"] }
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true

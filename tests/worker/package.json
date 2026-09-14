@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "node build.mjs",
-    "test": "npm run build && node smoke.mjs"
+    "test": "npm run build && node smoke.mjs",
+    "test:admission": "node build.mjs && node build.mjs workflows && cargo build --locked -p ghinvite-github --features test-stub --example stub && node admission.mjs"
   },
   "engines": {
     "node": ">=20"

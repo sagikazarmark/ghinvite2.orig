@@ -1,3 +1,5 @@
 node_modules/
 .generated/
 worker.mjs
+.generated-workflows/
+workflows-worker.mjs

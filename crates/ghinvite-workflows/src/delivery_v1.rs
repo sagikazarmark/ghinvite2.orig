@@ -8,7 +8,7 @@ use ghinvite_core::{
 use restate_sdk::{
     context::{
         Context, ContextClient, ContextReadState, ContextSideEffects, ContextWriteState,
-        InvocationHandle, ObjectContext, RunFuture, SharedObjectContext,
+        ObjectContext, RunFuture, SharedObjectContext,
     },
     endpoint::Builder,
     errors::{HandlerError, TerminalError},
@@ -112,8 +112,9 @@ impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
             let invocation_id = receiver
                 .create(Json(command.clone()))
                 .send()
+                .await?
                 .invocation_id()
-                .await?;
+                .to_owned();
             link.record_submitted(Json(crate::request_lifecycle_v1::SubmittedCommand {
                 command: command.clone(),
                 invocation_id,
@@ -200,7 +201,6 @@ impl GithubCreateV1 for GithubCreateV1Impl {
         ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
             .create(Json(command))
             .send()
-            .invocation_id()
             .await?;
         Ok(())
     }
@@ -318,7 +318,6 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
                 .recheck(Json(command))
                 .send_after(std::time::Duration::from_secs(3600))
-                .invocation_id()
                 .await?;
         }
         Ok(Json(receipt))

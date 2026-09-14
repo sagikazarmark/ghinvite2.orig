@@ -298,6 +298,10 @@ acceptance gate; the proof is explicitly selected by the argument above.
 
 ### D1 storage smoke tests (requires wrangler)
 
+The [Worker admission gate](worker-admission-gate.md) exercises the **actual Rust
+D1 binding path** via workerd and real Restate. Run
+`npm run test:admission --prefix tests/worker`. The SQL-only suite below is separate.
+
 Install `wrangler` separately (`npm i -g wrangler`).
 
 First, apply migrations to local D1:

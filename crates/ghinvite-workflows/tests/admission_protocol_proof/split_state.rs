@@ -144,7 +144,6 @@ impl AdmissionSplitProof for Handler {
         // Bounded projection message: current link snapshot + only this request,
         // never the accumulated operation/request history.
         let outcomes = BTreeMap::from([(input.operation.clone(), decision.outcome.clone())]);
-        use restate_sdk::context::InvocationHandle;
         ctx.service_client::<AdmissionProofProjectionClient>()
             .apply(Json(Projection {
                 link: ctx.key().into(),
@@ -161,7 +160,6 @@ impl AdmissionSplitProof for Handler {
                 },
             }))
             .send()
-            .invocation_id()
             .await?;
         if decision.outcome.result == "accepted" {
             ctx.workflow_client::<AdmissionProofRequestClient>(format!(
@@ -171,7 +169,6 @@ impl AdmissionSplitProof for Handler {
             ))
             .run(Json(decision.outcome.clone()))
             .send()
-            .invocation_id()
             .await?;
         }
         Ok(Json(decision.outcome))

@@ -224,8 +224,7 @@ impl AdmissionProofLink for LinkHandler {
             }))
             .send();
         // This awaits the durable send identity, not projector completion.
-        use restate_sdk::context::InvocationHandle;
-        handle.invocation_id().await?;
+        handle.await?;
         ctx.run(|| self.0.checkpoint("after-projection-send"))
             .name("after-projection-send")
             .retry_policy(retry_policy())
@@ -238,7 +237,6 @@ impl AdmissionProofLink for LinkHandler {
             ))
             .run(Json(outcome.clone()))
             .send()
-            .invocation_id()
             .await?;
         }
         ctx.run(|| self.0.checkpoint("after-workflow-send"))
@@ -256,7 +254,6 @@ impl AdmissionProofLink for LinkHandler {
         state.revoked = true;
         state.revision += 1;
         ctx.set("state", Json(state.clone()));
-        use restate_sdk::context::InvocationHandle;
         ctx.service_client::<AdmissionProofProjectionClient>()
             .apply(Json(Projection {
                 link: ctx.key().into(),
@@ -264,7 +261,6 @@ impl AdmissionProofLink for LinkHandler {
                 events: vec!["revoked".into()],
             }))
             .send()
-            .invocation_id()
             .await?;
         Ok(())
     }
