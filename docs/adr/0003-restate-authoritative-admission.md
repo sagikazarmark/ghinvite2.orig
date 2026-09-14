@@ -154,6 +154,57 @@ A normal new admission performs direct reads of operation, link, and requester b
 
 This is bounded **per-command access and payload**, subject to input/repository-scope limits, not bounded total storage. One operation record per retained attempt and one request record per admitted request still accumulate. Preserve outcomes without automatic deletion until retention/replay semantics are approved. Approved blockers remain while they confer repeat suppression. Capacity measurement, key/value limits, and retention remain production work; do not use an unbounded serialized map as a shortcut.
 
+### Proposed deadline arbitration and overdue-request contract
+
+Independent request deadlines are approved. The duration, deadline-edge ordering, and overdue materialization rules below are concrete recommendations for confirmation; committing this ADR does not by itself approve them.
+
+**Initial lifetime: seven days for newly admitted manual-approval requests**, expressed as an application-wide policy value rather than a per-link editable guardrail. Snapshot `decision_deadline = admitted_at + pending_lifetime` in each accepted pending request. Existing requests keep their recorded deadline when the policy changes. Test fixtures may use short lifetimes. Do not infer this deadline from current link expiration or a workflow's start/restart time. Migration must explicitly assign deadlines to historical pending requests rather than silently recomputing them on read.
+
+**An admin decision is timely only if the link object's complete journaled transition decision evaluates it at `decision_time < decision_deadline`.** At equality or later, a still-pending request expires; approval/decline does not win. Use the same complete-decision clock pattern as admission: sample current time with the transition computation, journal its complete result, then apply the touched state and arrange downstream work. Once a timely approval/decline is durable, replay completes it even if execution resumes after the deadline. Client click time, HTTP receipt time, a caller-supplied `decided_at`, and the order a workflow promise happens to resolve cannot backdate the authoritative decision.
+
+This deliberately accepts processing-time semantics: a command submitted before the deadline but queued until afterward can be too late. Honoring submission/ingress time instead would require an authoritative receipt-time protocol and different ordering rules; it must be a separate product choice, not accidental use of a payload timestamp.
+
+#### One request transition authority
+
+- Approve/decline commands must obtain the link object's authoritative transition result before reporting success. The workflow's durable promise is a coordination mechanism, not proof of approval.
+- Prefer a short link command for the decision, followed by a durable one-way notification to the request workflow. A forwarding workflow handler may call the link object, but the link handler must never wait for that workflow's completion or callback. This prevents a circular wait and keeps SQL projection out of the critical path.
+- A timer, admin command, or new admission may discover that a pending request is overdue. They all use the same transition logic and stable request-expiration event identity. Exactly one logical pending-to-expired transition releases its blocker; late notifications are harmless.
+- A terminal request is never overwritten by a late decision or timer. Return its authoritative current state, distinguishing an already-completed matching decision from an incompatible action. Precise lifecycle operation identity/payload-conflict semantics remain part of the lifecycle command interface; admission-operation receipts alone do not solve decision replay.
+- GitHub dispatch is authorized only by the recorded approved request transition. Auto-approval should be recorded as approved during admission, with no pending deadline or timer; this is the proposed representation, not a change already made to production handlers.
+
+#### Late timers and fresh admission
+
+For a **new** valid admission operation, directly read the request named by the requester's blocker. If it is pending and the complete decision's sampled time is at/after its deadline, include its expiration and conditional blocker release in the same bounded decision as evaluation of the new admission. Do not scan other requesters or wait for a scheduled timer.
+
+Expiration does not refund the old use. Evaluate new admission against the current link state and remaining uses after recognizing that release. A revoked, expired, or exhausted link still rejects the new request, but the discovered overdue request is expired and its event/projection is durably arranged. Thus a decision may expire the old request and reject the new attempt; its complete journaled result must contain both effects. It may touch one old request and one new request, still bounded independently of history.
+
+**Recorded admission replay remains first.** Replaying an existing accepted or rejected operation returns its original outcome without opportunistically creating a new request or re-running its admission eligibility. It is not the overdue-cleanup trigger; a fresh operation, timer, or lifecycle/status command performs that work.
+
+For an immediate authoritative status query, recommend using the same short exclusive expiration check before returning a still-pending request. This keeps the displayed actionable state consistent with the deadline. Such a handler can materialize expiry and durably arrange notifications/projection; it is not a shared read-only handler. Database-backed lists may temporarily show an overdue pending row, but commands always enforce the deadline. Whether to adopt this status-query behavior needs confirmation alongside the existing exclusive-read interface.
+
+#### Timer scheduling and timestamps
+
+Persist the absolute deadline and carry it in the request workflow's immutable input. On initial startup or after an early wake-up, compute remaining wait from current time, not submission time; if due, immediately ask the link object to expire. After any wake-up, recheck through the authoritative transition. An early timer does not expire the request, and a delayed timer does not authorize late approval. The pinned Rust SDK exposes relative `sleep`; its suspension/replay timing still needs a focused timer test before claiming an exact wake-up time. No exact scheduler-latency guarantee is part of the contract.
+
+Represent expiration's effective time as the stored deadline, while retaining the actual transition-evaluation time for recovery/diagnostics. An expiration discovered tomorrow was effective at yesterday's deadline; do not label tomorrow's processing time as a new decision window. Approved/declined decisions use their authoritative evaluation time. Stable audit IDs ensure late materialization cannot create multiple expiration events.
+
+Cancellation eligibility and actors remain a separate product question. Recommended precedence, if cancellation of pending requests is supported: after the deadline an overdue request becomes expired rather than being relabeled cancelled; before it, an authorized cancellation releases eligibility without a refund. Cancelling a Restate invocation is not a business cancellation and must not bypass this state machine.
+
+#### Deadline examples and required proof
+
+| Ordering | Proposed result |
+|---|---|
+| Approval is evaluated just before the deadline and durably decided; execution resumes afterward | Complete approval and its original timestamp; the timer cannot overturn it. |
+| Admin clicks before the deadline, but the link evaluates the command at/after it | Expire the pending request and report that approval/decline was too late. |
+| Timer and admin command both become runnable after downtime past the deadline | Expiration wins regardless of which workflow future is polled first. |
+| Timer fires early | Request remains pending; schedule/retry the wake-up for the remaining duration. |
+| Fresh attempt arrives after old pending deadline, timer still delayed, link eligible with uses remaining | Expire old request and admit the new one; total uses increases by one, without refund. |
+| Same situation, but link is revoked or exhausted | Expire old request and reject new admission; no new use. |
+| Old admission is replayed after its request expired and another request was admitted | Return the original admission receipt; leave the newer blocker untouched. |
+| A late timer targets an old request after readmission | Return the old terminal state; never release the newer request's blocker. |
+
+Extend the native proof with a controlled clock for exact-before/equal/after comparisons and runtime interruption around complete transition journaling, old-request expiry, blocker release, new admission, and dispatch. Verify one expiration audit intent and exactly one new use, including expiry-plus-rejection. Add real timer/decision races and delayed workflow startup separately from pure comparisons. The existing proof's explicit `expired` transition does not validate deadline arbitration or these combined transitions. Worker/D1 execution remains deferred.
+
 ### Coherent multi-key transitions and reads
 
 Keep authoritative reads that combine link, request, outcome, or blocker records **exclusive** on the link object. They queue behind unfinished mutation/replay and cannot observe half-applied state. This includes immediate request status and replay lookup. Single-record shared reads could be added later with deliberately weaker in-flight semantics, but are not the initial authoritative interface.
@@ -206,9 +257,9 @@ Restate durably retains unfinished execution, but its journal is not automatical
 | What are the production capacity limits and retention policy? | Lazy split-key state and exclusive coherent reads passed the focused proof. Verify actual runtime/Cloud key/value limits, input/scope bounds, storage growth, and Worker round-trip cost before rollout. |
 | Does decision-time sampling work on the actual Worker target? | The clock is sampled inside the complete decision closure; before/after-decision expiration recovery passed natively in request-response mode. Verify Wasm clock behavior and the actual Worker endpoint. |
 | Confirm the proposed operation identity/retention contract? | Link-scoped operation IDs, requester bound in canonical input, separate server-generated request IDs, and no automatic outcome expiry are specified above. Confirm these choices and implement normalization/privacy/cross-link/retention-expiry verification. |
-| What pending lifetime is configured, and when is an admin decision timely? | Current code has seven days, but configuration scope and deadline-edge arbitration need confirmation. Recommend enforcing the stored deadline at the authoritative transition; timers only wake work. |
-| Does an overdue request block a fresh attempt until its timer runs? | Recommend admission first materialize an overdue pending request's expiry, so scheduler lag does not extend blocking. This behavior needs approval. |
-| How are auto-approval and cancellation represented? | Specify whether auto-approval is part of the admission transition; define cancellation actors and allowed states. Existing cancellation terminology does not by itself implement a cancellation command. |
+| Confirm lifetime and timely-decision semantics? | Proposed: initial application-wide seven-day lifetime, snapshotted per request; authoritative evaluation strictly before the deadline, with equality expiring. Before-deadline clicks queued past it lose. Verify transition/timer races. |
+| Confirm overdue materialization on admission/status? | Proposed: fresh admission and exclusive authoritative status can expire one directly addressed overdue request without waiting for its timer. Journal expiry plus new admission/rejection together; replay of an existing receipt remains side-effect-free. |
+| How are auto-approval and cancellation represented? | Proposed: auto-approval in admission with no pending timer. Define cancellation actors/allowed states; recommended overdue precedence is expiry. Existing terminology does not itself implement a cancellation command. |
 | Service or keyed object for projection; snapshots or ordered deltas? | Choose the smallest protocol that handles reordered writes, missing parents, and audit completeness. Verify on actual SQLx and D1 execution paths. |
 | How do authoritative status reads work during projection lag? | Specify authorization, lookup by link/request identity, and post-command SSR navigation, including freshly created links absent from SQL. |
 | What can be rebuilt after retention, administrative kill/purge, or independent restore? | Define Restate backup/state retention and projection rebuild/redrive procedures. Workflow restart after completed-workflow retention must not repeat downstream GitHub effects. |
