@@ -15,6 +15,9 @@ use serde_json::json;
 
 #[derive(Default)]
 struct StubState {
+    user_login: Option<String>,
+    addressed_id: Option<u64>,
+    access_role: Option<String>,
     calls: Vec<serde_json::Value>,
     collaborators: HashMap<(String, String, String), bool>,
     invitations: HashMap<(String, String, u64), serde_json::Value>,
@@ -34,6 +37,9 @@ enum Outcome {
     AlreadyCollaborator,
     TerminalFailure,
     TransientOnce,
+    CreatedResponseLost,
+    CreatedThenDeclined,
+    AccessLostOnce,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +70,23 @@ pub fn router() -> Router {
 
 fn routes(state: SharedState) -> Router {
     Router::new()
+        .route("/user/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move { Json(json!({"id":id,"login":state.lock().unwrap().user_login.as_deref().unwrap_or("alice")})) }))
+        .route("/users/{login}", get(|Path(login): Path<String>, State(state): State<SharedState>| async move { Json(json!({"id":state.lock().unwrap().addressed_id.unwrap_or(8),"login":login})) }))
+        .route("/identity", post(|State(state): State<SharedState>, Json(input): Json<serde_json::Value>| async move {
+            let mut state = state.lock().unwrap();
+            state.user_login = input["login"].as_str().map(str::to_owned);
+            state.addressed_id = input["addressed_id"].as_u64();
+            state.access_role = input["role_name"].as_str().map(str::to_owned);
+            StatusCode::NO_CONTENT
+        }))
+        .route("/repos/{owner}/{repo}/collaborators/{user}/permission",get(|State(state): State<SharedState>| async move {
+            let state = state.lock().unwrap();
+            match &state.access_role {
+                Some(role) => (StatusCode::OK,Json(json!({"user":{"id":8,"login":"alice"},"role_name":role,"permission":if role=="triage" {"read"} else {"write"}}))).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            }
+        }))
+        .route("/repos/{owner}/{repo}", get(|Path((owner, repo)): Path<(String, String)>| async move { Json(json!({"id":if repo == "api" {10} else {11},"full_name":format!("{owner}/{repo}"),"private":true})) }))
         .route(
             "/app/installations/{id}/access_tokens",
             post(create_access_token),
@@ -120,6 +143,11 @@ async fn add_collaborator(
 ) -> impl IntoResponse {
     let mut s = state.lock().unwrap();
     let key = (owner.clone(), repo.clone(), user.clone());
+    let lost = matches!(
+        s.outcomes.get(&key),
+        Some(Outcome::CreatedResponseLost | Outcome::CreatedThenDeclined)
+    );
+    let declined = matches!(s.outcomes.get(&key), Some(Outcome::CreatedThenDeclined));
     let status = match s.outcomes.get(&key) {
         Some(Outcome::AlreadyCollaborator) => {
             s.collaborators.insert(key.clone(), true);
@@ -130,6 +158,11 @@ async fn add_collaborator(
             s.outcomes.remove(&key);
             StatusCode::BAD_GATEWAY
         }
+        Some(Outcome::AccessLostOnce) => {
+            s.outcomes.remove(&key);
+            StatusCode::FORBIDDEN
+        }
+        Some(Outcome::CreatedResponseLost | Outcome::CreatedThenDeclined) => StatusCode::CREATED,
         None if s.collaborators.contains_key(&key) => StatusCode::NO_CONTENT,
         None => StatusCode::CREATED,
     };
@@ -159,7 +192,12 @@ async fn add_collaborator(
         "permissions": permissions,
         "created_at": Utc::now(),
     });
-    s.invitations.insert((owner, repo, id), invitation.clone());
+    if !declined {
+        s.invitations.insert((owner, repo, id), invitation.clone());
+    }
+    if lost {
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
     (StatusCode::CREATED, Json(invitation)).into_response()
 }
 

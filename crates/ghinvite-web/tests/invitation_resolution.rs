@@ -265,6 +265,17 @@ async fn build_lifecycle_app(
     mock: MockTransport,
     lifecycle: Option<Arc<dyn ghinvite_web::lifecycle::RequestLifecycle>>,
 ) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
+    build_delivery_app(link, requests, mock, lifecycle, Vec::new(), Vec::new()).await
+}
+
+async fn build_delivery_app(
+    link: InvitationLink,
+    requests: Vec<InvitationRequest>,
+    mock: MockTransport,
+    lifecycle: Option<Arc<dyn ghinvite_web::lifecycle::RequestLifecycle>>,
+    receipts: Vec<ghinvite_core::delivery::CreateReceipt>,
+    legacy: Vec<ghinvite_core::GithubInvitation>,
+) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
@@ -287,6 +298,12 @@ async fn build_lifecycle_app(
             .await
             .unwrap();
     }
+    for row in legacy {
+        storage.insert_github_invitation(&row).await.unwrap();
+    }
+    for receipt in receipts {
+        storage.project_delivery(&receipt).await.unwrap();
+    }
 
     let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(storage);
     let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
@@ -301,6 +318,116 @@ async fn build_lifecycle_app(
     state.request_lifecycle = lifecycle;
     let session_store = tower_sessions::MemoryStore::default();
     (build_app(state, session_store), calls)
+}
+
+#[tokio::test]
+async fn requester_sees_persisted_unknown_created_and_legacy_delivery_without_private_payloads() {
+    use ghinvite_core::{
+        GithubInvitationId, InvitationState,
+        delivery::{CreateCommand, CreateOutcome, CreateReceipt},
+    };
+    for (outcome, legacy_state, expected) in [
+        (
+            Some(CreateOutcome::OutcomeUnknown),
+            None,
+            "GitHub outcome unknown",
+        ),
+        (
+            Some(CreateOutcome::Created { upstream_id: 123 }),
+            None,
+            "GitHub invitation created",
+        ),
+        (
+            Some(CreateOutcome::Blocked {
+                reason: "private infrastructure detail".into(),
+            }),
+            None,
+            "Blocked — waiting for availability or identity verification",
+        ),
+        (None, Some(InvitationState::Sent), "GitHub invitation sent"),
+    ] {
+        let link = active_link(ACTIVE_SLUG);
+        let request = InvitationRequest {
+            id: RequestId::new(),
+            invitation_link_id: link.id,
+            requester_id: REQUESTER_ID,
+            justification: None,
+            state: RequestState::Approved,
+            decided_by: Some(CREATOR_ID),
+            decided_at: Some(Utc::now()),
+            decline_reason: None,
+            created_at: Utc::now(),
+        };
+        let id = GithubInvitationId::new();
+        let repo = &link.repos[0];
+        let receipts = outcome
+            .map(|outcome| CreateReceipt {
+                command: CreateCommand {
+                    version: 1,
+                    invitation_id: id,
+                    link_id: link.id,
+                    request_id: request.id,
+                    approval_id: "approval".into(),
+                    account_id: link.account_id,
+                    installation_id: link.installation_id,
+                    requester_id: REQUESTER_ID,
+                    repo_id: repo.repo_id,
+                    repo_full_name: repo.repo_full_name.clone(),
+                    permission: link.permission,
+                    approved_at: Utc::now(),
+                },
+                outcome,
+                revision: 1,
+            })
+            .into_iter()
+            .collect();
+        let legacy = legacy_state
+            .map(|state| ghinvite_core::GithubInvitation {
+                id,
+                invitation_request_id: request.id,
+                repo_id: repo.repo_id,
+                github_invitation_id: Some(123),
+                state,
+                error_message: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .into_iter()
+            .collect();
+        let (app, _) = build_delivery_app(
+            link,
+            vec![request],
+            MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+            None,
+            receipts,
+            legacy,
+        )
+        .await;
+        let cookie = sign_in(app.clone()).await;
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(text.contains(expected), "{expected}");
+        assert!(!text.contains("private infrastructure detail"));
+    }
 }
 
 #[tokio::test]
@@ -794,7 +921,8 @@ async fn signed_in_landing_shows_approved_status_instead_of_form() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Approved"));
-    assert!(text.contains("GitHub notifications and email"));
+    assert!(text.contains("Repository delivery is tracked separately"));
+    assert!(text.contains("Awaiting delivery confirmation"));
     assert!(!text.contains("Submit request"));
     assert!(!text.contains("http-equiv=\"refresh\""));
 }
@@ -989,7 +1117,8 @@ async fn inactive_link_with_existing_approved_request_shows_status() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Approved"));
-    assert!(text.contains("GitHub notifications and email"));
+    assert!(text.contains("Repository delivery is tracked separately"));
+    assert!(text.contains("Awaiting delivery confirmation"));
     assert!(!text.contains("revoked"));
     assert!(!text.contains("Submit request"));
 }

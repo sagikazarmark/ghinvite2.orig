@@ -161,6 +161,8 @@ pub trait InvitationRequestV1 {
     ) -> Result<Json<crate::request_lifecycle_v1::WorkflowResult>, TerminalError>;
     #[shared]
     async fn notify(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
+    #[shared]
+    async fn notification_status() -> Result<Json<Option<TerminalSignal>>, TerminalError>;
 }
 
 fn audit(
@@ -224,6 +226,20 @@ pub trait InvitationLinkV1 {
     async fn prepare_dispatch(
         input: Json<RequestStatus>,
     ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
+    async fn retain_dispatch(
+        input: Json<crate::request_lifecycle_v1::ApprovedDispatch>,
+    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
+    async fn record_submitted(
+        input: Json<crate::request_lifecycle_v1::SubmittedCommand>,
+    ) -> Result<(), TerminalError>;
+    async fn delivery_status(
+        input: Json<RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError>;
+    async fn delivery_progress(
+        input: Json<RequestStatus>,
+    ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError>;
+    async fn consume_lifecycle(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
+    async fn notification_needed(input: Json<TerminalSignal>) -> Result<Json<bool>, TerminalError>;
 }
 
 #[derive(Default)]
@@ -479,6 +495,24 @@ fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), Ter
     Ok(())
 }
 
+async fn validate_signal(
+    ctx: &ObjectContext<'_>,
+    signal: &TerminalSignal,
+) -> Result<(), TerminalError> {
+    validate_key(ctx, signal.link_id)?;
+    let Json(request) = ctx
+        .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", signal.request_id))
+        .await?
+        .ok_or_else(missing)?;
+    if request.revision != signal.revision
+        || request.state == RequestState::Pending
+        || request.decision.as_ref().map(|d| &d.decision_id) != Some(&signal.decision_id)
+    {
+        return Err(conflict());
+    }
+    Ok(())
+}
+
 fn validate_admin(admin: &AccountAdmin, account_id: u64) -> Result<(), TerminalError> {
     if admin.account_id != account_id || account_id == 0 || admin.user_id == 0 {
         return Err(missing());
@@ -520,6 +554,203 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
 }
 
 impl InvitationLinkV1 for InvitationLinkV1Impl {
+    async fn delivery_progress(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(query): Json<RequestStatus>,
+    ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError> {
+        use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
+        validate_key(&ctx, query.link_id)?;
+        let Json(request) = ctx
+            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", query.request_id))
+            .await?
+            .ok_or_else(missing)?;
+        if request.requester_id != query.requester_id {
+            return Err(missing());
+        }
+        if request.state != RequestState::Approved {
+            return Ok(Json(Vec::new()));
+        }
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let plan = ctx
+            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+                "v1/dispatch/{}",
+                query.request_id
+            ))
+            .await?;
+        let mut result = Vec::new();
+        for repo in &link.creation.repos {
+            let stage = if let Some(Json(plan)) = &plan {
+                let command = plan
+                    .commands
+                    .iter()
+                    .find(|c| c.repo_id == repo.repo_id)
+                    .ok_or_else(conflict)?;
+                if ctx
+                    .get::<Json<crate::request_lifecycle_v1::SubmittedCommand>>(&format!(
+                        "v1/submitted/{}",
+                        command.invitation_id
+                    ))
+                    .await?
+                    .is_some()
+                {
+                    DispatchStage::Submitted
+                } else {
+                    DispatchStage::Planned
+                }
+            } else {
+                DispatchStage::Approved
+            };
+            result.push(RepositoryProgress {
+                repo_id: repo.repo_id,
+                stage,
+            });
+        }
+        Ok(Json(result))
+    }
+    async fn consume_lifecycle(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(signal): Json<TerminalSignal>,
+    ) -> Result<(), TerminalError> {
+        validate_signal(&ctx, &signal).await?;
+        ctx.set(&format!("v1/consumed/{}", signal.request_id), Json(signal));
+        Ok(())
+    }
+
+    async fn notification_needed(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(signal): Json<TerminalSignal>,
+    ) -> Result<Json<bool>, TerminalError> {
+        validate_signal(&ctx, &signal).await?;
+        Ok(Json(
+            ctx.get::<Json<TerminalSignal>>(&format!("v1/consumed/{}", signal.request_id))
+                .await?
+                .is_none(),
+        ))
+    }
+
+    async fn retain_dispatch(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(plan): Json<crate::request_lifecycle_v1::ApprovedDispatch>,
+    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
+        // Trusted migration/repair interface: imported identities are supplied
+        // before first prepare, never inferred from a lagging SQL row.
+        validate_key(&ctx, plan.input.request.link_id)?;
+        let request_id = plan.input.request.request_id;
+        let Json(request) = ctx
+            .get::<Json<RequestSnapshot>>(&format!("v1/request/{request_id}"))
+            .await?
+            .ok_or_else(missing)?;
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let key = format!("v1/dispatch/{request_id}");
+        let expected = WorkflowEnvelope::from_authority(&link, request.clone());
+        if plan.dispatch_id != key
+            || plan.input != expected
+            || request.state != RequestState::Approved
+            || plan.commands.len() != expected.repos.len()
+        {
+            return Err(conflict());
+        }
+        let approval = request.decision.as_ref().ok_or_else(conflict)?;
+        let mut ids = std::collections::HashSet::new();
+        for (command, repo) in plan.commands.iter().zip(&expected.repos) {
+            if command.version != 1
+                || command.link_id != link.link_id
+                || command.request_id != request_id
+                || command.approval_id != approval.decision_id
+                || command.approved_at != approval.effective_at
+                || command.account_id != link.creation.account_id
+                || command.installation_id != expected.installation_id
+                || command.requester_id != request.requester_id
+                || command.permission != expected.permission
+                || command.repo_id != repo.repo_id
+                || command.repo_full_name != repo.repo_full_name
+                || !ids.insert(command.invitation_id)
+            {
+                return Err(conflict());
+            }
+        }
+        if let Some(Json(old)) = ctx
+            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&key)
+            .await?
+        {
+            if old != plan {
+                return Err(conflict());
+            }
+            return Ok(Json(old));
+        }
+        ctx.set(&key, Json(plan.clone()));
+        Ok(Json(plan))
+    }
+
+    async fn record_submitted(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(submitted): Json<crate::request_lifecycle_v1::SubmittedCommand>,
+    ) -> Result<(), TerminalError> {
+        let command = &submitted.command;
+        validate_key(&ctx, command.link_id)?;
+        let Json(plan) = ctx
+            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+                "v1/dispatch/{}",
+                command.request_id
+            ))
+            .await?
+            .ok_or_else(missing)?;
+        if !plan.commands.contains(command) || submitted.invocation_id.is_empty() {
+            return Err(conflict());
+        }
+        let key = format!("v1/submitted/{}", command.invitation_id);
+        if ctx
+            .get::<Json<crate::request_lifecycle_v1::SubmittedCommand>>(&key)
+            .await?
+            .is_none()
+        {
+            ctx.set(&key, Json(submitted));
+        }
+        Ok(())
+    }
+
+    async fn delivery_status(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(query): Json<RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError> {
+        validate_key(&ctx, query.link_id)?;
+        let Json(plan) = ctx
+            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+                "v1/dispatch/{}",
+                query.request_id
+            ))
+            .await?
+            .ok_or_else(missing)?;
+        if plan.input.request.requester_id != query.requester_id {
+            return Err(missing());
+        }
+        let mut submitted = Vec::new();
+        for command in &plan.commands {
+            if let Some(Json(record)) = ctx
+                .get(&format!("v1/submitted/{}", command.invitation_id))
+                .await?
+            {
+                submitted.push(record);
+            }
+        }
+        Ok(Json(crate::request_lifecycle_v1::DeliveryStatus {
+            plan,
+            submitted,
+        }))
+    }
+
     async fn prepare_dispatch(
         &self,
         ctx: ObjectContext<'_>,
@@ -544,12 +775,36 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .get::<Json<LinkSnapshot>>("v1/link")
             .await?
             .ok_or_else(missing)?;
-        let dispatch = crate::request_lifecycle_v1::ApprovedDispatch {
-            dispatch_id: key.clone(),
-            input: WorkflowEnvelope::from_authority(&link, request),
-        };
-        // Retained independently of workflow cleanup. #56 extends this checkpoint
-        // with per-repository receiving receipts; this does not claim delivery.
+        let Json(dispatch) = ctx
+            .run(|| async {
+                let decision = request.decision.as_ref().ok_or_else(conflict)?;
+                let commands = link
+                    .creation
+                    .repos
+                    .iter()
+                    .map(|repo| ghinvite_core::delivery::CreateCommand {
+                        version: 1,
+                        invitation_id: ghinvite_core::GithubInvitationId::new(),
+                        link_id: input.link_id,
+                        request_id: input.request_id,
+                        approval_id: decision.decision_id.clone(),
+                        account_id: link.creation.account_id,
+                        installation_id: link.creation.installation_id,
+                        requester_id: request.requester_id,
+                        repo_id: repo.repo_id,
+                        repo_full_name: repo.repo_full_name.clone(),
+                        permission: link.creation.permission,
+                        approved_at: decision.effective_at,
+                    })
+                    .collect();
+                Ok::<_, HandlerError>(Json(crate::request_lifecycle_v1::ApprovedDispatch {
+                    dispatch_id: key.clone(),
+                    input: WorkflowEnvelope::from_authority(&link, request.clone()),
+                    commands,
+                }))
+            })
+            .name("retain_dispatch_plan_v1")
+            .await?;
         ctx.set(&key, Json(dispatch.clone()));
         Ok(Json(dispatch))
     }

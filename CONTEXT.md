@@ -113,6 +113,16 @@ An approved invitation request may produce multiple GitHub invitations, one per 
 ### Repository Access
 A GitHub user's ability to collaborate on a repository at a specific permission level.
 
+### Delivery Outcome Unknown
+A repository delivery whose GitHub effect cannot yet be confirmed or ruled out.
+It is distinct from a definitive delivery failure and does not authorize sending
+another invitation.
+
+### Blocked Delivery
+A repository delivery waiting for an unavailable prerequisite before an external
+effect can safely proceed. Approval and the original repository scope remain in
+force while delivery is blocked.
+
 ### Permission Level
 The GitHub repository collaborator permission requested through an invitation link and used when sending GitHub invitations.
 

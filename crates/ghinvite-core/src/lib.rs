@@ -5,6 +5,7 @@
 
 pub mod account;
 pub mod audit;
+pub mod delivery;
 pub mod github_invitation;
 pub mod ids;
 pub mod invitation_link;

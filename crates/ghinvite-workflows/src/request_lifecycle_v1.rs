@@ -4,7 +4,7 @@ use crate::admission_v1::{
 };
 use ghinvite_core::RequestState;
 use restate_sdk::context::{
-    ContextClient, ContextPromises, ContextSideEffects, ContextTimers, RunFuture,
+    ContextClient, ContextPromises, ContextSideEffects, ContextTimers, InvocationHandle, RunFuture,
     SharedWorkflowContext, WorkflowContext,
 };
 use restate_sdk::endpoint::Builder;
@@ -20,10 +20,23 @@ pub struct WorkflowResult {
     pub dispatch: Option<ApprovedDispatch>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ApprovedDispatch {
     pub dispatch_id: String,
     pub input: WorkflowEnvelope,
+    pub commands: Vec<ghinvite_core::delivery::CreateCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubmittedCommand {
+    pub command: ghinvite_core::delivery::CreateCommand,
+    pub invocation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryStatus {
+    pub plan: ApprovedDispatch,
+    pub submitted: Vec<SubmittedCommand>,
 }
 
 #[derive(Default)]
@@ -35,6 +48,9 @@ pub struct InvitationRequestV1Impl {
 #[cfg(feature = "integration")]
 #[derive(Default)]
 pub struct WorkflowFaults {
+    pub pause_before_dispatch: std::sync::atomic::AtomicBool,
+    pub pause_after_send: std::sync::atomic::AtomicBool,
+    pub sent_before_pause: std::sync::atomic::AtomicUsize,
     pub early_wakes: std::sync::atomic::AtomicUsize,
     pub interrupt_notification: std::sync::atomic::AtomicBool,
     pub notification_attempts: std::sync::atomic::AtomicUsize,
@@ -66,6 +82,16 @@ pub fn bind(builder: Builder) -> Builder {
 }
 
 impl InvitationRequestV1 for InvitationRequestV1Impl {
+    async fn notification_status(
+        &self,
+        ctx: SharedWorkflowContext<'_>,
+    ) -> Result<Json<Option<TerminalSignal>>, TerminalError> {
+        Ok(Json(
+            ctx.peek_promise::<Json<TerminalSignal>>("terminal")
+                .await?
+                .map(|s| s.0),
+        ))
+    }
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -88,6 +114,27 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                 .await?;
             if request.state != RequestState::Pending {
                 let state = request.state;
+                #[cfg(feature = "integration")]
+                if let Some(faults) = &self.faults {
+                    ctx.run(|| async {
+                        if faults
+                            .pause_before_dispatch
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                        {
+                            return Err(std::io::Error::other(
+                                "fixture: pause before dispatch preparation",
+                            )
+                            .into());
+                        }
+                        Ok::<_, HandlerError>(())
+                    })
+                    .name("before_dispatch")
+                    .retry_policy(
+                        restate_sdk::context::RunRetryPolicy::default()
+                            .initial_delay(std::time::Duration::from_millis(100)),
+                    )
+                    .await?;
+                }
                 let dispatch = if state == RequestState::Approved {
                     Some(
                         ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
@@ -99,6 +146,58 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                 } else {
                     None
                 };
+                if let Some(plan) = &dispatch {
+                    for command in &plan.commands {
+                        let invocation_id = ctx
+                            .object_client::<crate::delivery_v1::GithubCreateV1Client>(
+                                command.invitation_id.to_string(),
+                            )
+                            .create(Json(command.clone()))
+                            .send()
+                            .invocation_id()
+                            .await?;
+                        #[cfg(feature = "integration")]
+                        if let Some(faults) = &self.faults {
+                            ctx.run(|| async {
+                                use std::sync::atomic::Ordering;
+                                if faults.pause_after_send.load(Ordering::SeqCst) {
+                                    faults.sent_before_pause.fetch_add(1, Ordering::SeqCst);
+                                    return Err(std::io::Error::other(
+                                        "fixture: send acknowledged before checkpoint loss",
+                                    )
+                                    .into());
+                                }
+                                Ok::<_, HandlerError>(())
+                            })
+                            .name("after_repository_send")
+                            .retry_policy(
+                                restate_sdk::context::RunRetryPolicy::default()
+                                    .initial_delay(std::time::Duration::from_millis(100)),
+                            )
+                            .await?;
+                        }
+                        ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                            .record_submitted(Json(SubmittedCommand {
+                                command: command.clone(),
+                                invocation_id,
+                            }))
+                            .call()
+                            .await?;
+                    }
+                }
+                let decision = request
+                    .decision
+                    .as_ref()
+                    .ok_or_else(|| TerminalError::new("terminal decision missing"))?;
+                ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                    .consume_lifecycle(Json(TerminalSignal {
+                        link_id: query.link_id,
+                        request_id: query.request_id,
+                        revision: request.revision,
+                        decision_id: decision.decision_id.clone(),
+                    }))
+                    .call()
+                    .await?;
                 return Ok(Json(WorkflowResult { state, dispatch }));
             }
             let deadline = request
@@ -186,6 +285,15 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                     "conflicting terminal signal",
                 ));
             }
+            return Ok(());
+        }
+        if !ctx
+            .object_client::<InvitationLinkV1Client>(signal.link_id.to_string())
+            .notification_needed(Json(signal.clone()))
+            .call()
+            .await?
+            .0
+        {
             return Ok(());
         }
         // Private ingress, a single link writer. peek is not a shared-handler CAS.

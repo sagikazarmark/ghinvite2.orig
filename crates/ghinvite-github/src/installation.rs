@@ -25,6 +25,66 @@ pub struct InstallationClient {
 }
 
 impl InstallationClient {
+    /// Read collaborator permission and the identity returned with it. Unlike
+    /// a login-only 204 membership probe this provides numeric identity evidence.
+    pub async fn collaborator_permission(
+        &self,
+        installation_id: u64,
+        owner: &str,
+        repo: &str,
+        login: &str,
+    ) -> Result<(u64, String)> {
+        #[derive(serde::Deserialize)]
+        struct Permission {
+            user: crate::payloads::GhUser,
+            permission: String,
+            #[serde(default)]
+            role_name: Option<String>,
+        }
+        let path = format!(
+            "/repos/{}/{}/collaborators/{}/permission",
+            path_segment(owner),
+            path_segment(repo),
+            path_segment(login)
+        );
+        let req = self
+            .auth_request(installation_id, Method::Get, &path)
+            .await?;
+        let result: Permission = self.transport.send(req).await?.ensure_success()?.json()?;
+        Ok((
+            result.user.id,
+            result.role_name.unwrap_or(result.permission),
+        ))
+    }
+    /// Resolve immutable user identity to addressing data and revalidate that
+    /// address. These are read-only calls; a mismatch must never authorize PUT.
+    pub async fn verified_user(
+        &self,
+        installation_id: u64,
+        user_id: u64,
+    ) -> Result<crate::payloads::GhUser> {
+        let req = self
+            .auth_request(installation_id, Method::Get, &format!("/user/{user_id}"))
+            .await?;
+        let user: crate::payloads::GhUser =
+            self.transport.send(req).await?.ensure_success()?.json()?;
+        let req = self
+            .auth_request(
+                installation_id,
+                Method::Get,
+                &format!("/users/{}", path_segment(&user.login)),
+            )
+            .await?;
+        let addressed: crate::payloads::GhUser =
+            self.transport.send(req).await?.ensure_success()?.json()?;
+        if user.id != user_id || addressed.id != user_id || user.login.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "requester identity mismatch".into(),
+            ));
+        }
+        Ok(user)
+    }
+
     pub fn new(transport: Arc<dyn HttpTransport>, signer: AppJwtSigner) -> Self {
         Self {
             transport,

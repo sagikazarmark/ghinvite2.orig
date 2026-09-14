@@ -11,6 +11,7 @@
 
 pub mod admission_v1;
 pub mod audit;
+pub mod delivery_v1;
 pub mod error;
 pub mod github_invitation;
 pub mod installation;

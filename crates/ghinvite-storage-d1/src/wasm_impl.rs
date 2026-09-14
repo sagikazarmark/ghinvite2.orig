@@ -115,6 +115,104 @@ impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
 
 #[async_trait]
 impl Storage for D1Storage {
+    async fn list_github_invitations_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<GithubInvitation>> {
+        wasm_send(async {
+            self.db
+                .prepare(
+                    "SELECT * FROM github_invitations WHERE invitation_request_id = ?1 ORDER BY id",
+                )
+                .bind(&[JsValue::from_str(&id.to_string())])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<GithubInvitationRow>()
+                .map_err(bind_err)?
+                .into_iter()
+                .map(|row| row.try_into_domain())
+                .collect()
+        })
+        .await
+    }
+    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
+        wasm_send(async {
+            #[derive(serde::Deserialize)]
+            struct Row {
+                invitation_id: String,
+            }
+            Ok(self
+                .db
+                .prepare("SELECT invitation_id FROM delivery_attempts WHERE invitation_id = ?1 AND retryable = 0")
+                .bind(&[JsValue::from_str(&id.to_string())])
+                .map_err(bind_err)?
+                .first::<Row>(None)
+                .await
+                .map_err(classify_d1_error)?
+                .is_some_and(|row| !row.invitation_id.is_empty()))
+        })
+        .await
+    }
+    async fn claim_delivery_attempt(
+        &self,
+        command: &ghinvite_core::delivery::CreateCommand,
+    ) -> Result<Option<u64>> {
+        wasm_send(async {
+            let encoded = serde_json::to_string(command).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            #[derive(serde::Deserialize)]
+            struct Generation { generation: u64 }
+            let result = self.db.prepare("INSERT INTO delivery_attempts(invitation_id, command) VALUES (?1, ?2) ON CONFLICT(invitation_id) DO UPDATE SET generation = generation + 1, retryable = 0 WHERE retryable = 1 AND command = excluded.command RETURNING generation")
+                .bind(&[JsValue::from_str(&command.invitation_id.to_string()), JsValue::from_str(&encoded)]).map_err(bind_err)?
+                .first::<Generation>(None).await.map_err(classify_d1_error)?;
+            #[derive(serde::Deserialize)]
+            struct Row { command: String }
+            let old = self.db.prepare("SELECT command FROM delivery_attempts WHERE invitation_id = ?1")
+                .bind(&[JsValue::from_str(&command.invitation_id.to_string())]).map_err(bind_err)?
+                .first::<Row>(None).await.map_err(classify_d1_error)?
+                .ok_or(ghinvite_core::storage::Error::ProjectionDependency)?;
+            if old.command != encoded { return Err(ghinvite_core::storage::Error::ProjectionInvariant("delivery attempt conflict".into())); }
+            Ok(result.map(|r| r.generation))
+        }).await
+    }
+
+    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
+        wasm_send(async {
+            self.db.prepare("UPDATE delivery_attempts SET retryable = 1 WHERE invitation_id = ?1 AND generation = ?2")
+                .bind(&[JsValue::from_str(&id.to_string()), JsValue::from_f64(generation as f64)]).map_err(bind_err)?
+                .run().await.map_err(classify_d1_error)?;
+            Ok(())
+        }).await
+    }
+
+    async fn project_delivery(
+        &self,
+        receipt: &ghinvite_core::delivery::CreateReceipt,
+    ) -> Result<()> {
+        wasm_send(async {
+            let encoded = serde_json::to_string(receipt).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            self.db.prepare("INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?1, ?2, ?3) ON CONFLICT(invitation_id) DO UPDATE SET receipt = excluded.receipt WHERE json_extract(excluded.receipt, '$.revision') >= json_extract(delivery_outcomes.receipt, '$.revision')")
+                .bind(&[JsValue::from_str(&receipt.command.invitation_id.to_string()), JsValue::from_str(&receipt.command.request_id.to_string()), JsValue::from_str(&encoded)]).map_err(bind_err)?
+                .run().await.map_err(classify_d1_error)?;
+            Ok(())
+        }).await
+    }
+
+    async fn list_delivery_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<ghinvite_core::delivery::CreateReceipt>> {
+        wasm_send(async {
+            #[derive(serde::Deserialize)]
+            struct Row { receipt: String }
+            self.db.prepare("SELECT receipt FROM delivery_outcomes WHERE request_id = ?1 ORDER BY invitation_id")
+                .bind(&[JsValue::from_str(&id.to_string())]).map_err(bind_err)?
+                .all().await.map_err(classify_d1_error)?.results::<Row>().map_err(bind_err)?
+                .into_iter().map(|row| serde_json::from_str(&row.receipt).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))).collect()
+        }).await
+    }
+
     // -------- installations --------
 
     async fn insert_installation(&self, account: &Account) -> Result<()> {

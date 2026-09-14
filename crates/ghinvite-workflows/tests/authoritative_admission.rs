@@ -109,6 +109,12 @@ impl InvitationProjectionV1 for Consumer {
 }
 
 impl InvitationRequestV1 for Consumer {
+    async fn notification_status(
+        &self,
+        _: restate_sdk::context::SharedWorkflowContext<'_>,
+    ) -> Result<Json<Option<admission_v1::TerminalSignal>>, TerminalError> {
+        Ok(Json(None))
+    }
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
@@ -184,9 +190,30 @@ impl Runtime {
             InvitationProjectionV1::serve(Consumer(received.clone(), offline.clone())),
         );
         let builder = if real_workflow {
-            ghinvite_workflows::request_lifecycle_v1::bind_with_faults(
+            let builder = ghinvite_workflows::request_lifecycle_v1::bind_with_faults(
                 builder,
                 workflow_faults.clone(),
+            );
+            // Bind the real receiver with unavailable projection prerequisites;
+            // this test checks durable submission without waiting on SQL/GitHub.
+            let storage = Arc::new(
+                ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                    .await
+                    .unwrap(),
+            );
+            let github = Arc::new(ghinvite_github::InstallationClient::new(
+                Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
+                    client.clone(),
+                )),
+                ghinvite_github::jwt::AppJwtSigner::from_pem(
+                    123,
+                    include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
+                )
+                .unwrap(),
+            ));
+            ghinvite_workflows::delivery_v1::bind(
+                builder,
+                ghinvite_workflows::AppState::new(storage.clone(), github),
             )
         } else {
             builder.bind_with_options(
@@ -418,6 +445,11 @@ async fn authoritative_workflow_contract() {
             )
             .await;
         assert_eq!(handoff, result["dispatch"]);
+        let commands = handoff["commands"].as_array().expect("retained repository commands");
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["repo_id"], 10);
+        assert_eq!(commands[0]["requester_id"], 93);
+        assert!(commands[0]["invitation_id"].as_str().unwrap().parse::<ghinvite_core::GithubInvitationId>().is_ok());
         assert_eq!(
             runtime
                 .ok(

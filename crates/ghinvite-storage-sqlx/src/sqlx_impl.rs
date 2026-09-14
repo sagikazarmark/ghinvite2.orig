@@ -191,6 +191,86 @@ fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -
 
 #[async_trait]
 impl Storage for SqlxStorage {
+    async fn list_github_invitations_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<GithubInvitation>> {
+        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
+            "SELECT * FROM github_invitations WHERE invitation_request_id = ? ORDER BY id",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        rows.into_iter().map(|row| row.try_into_domain()).collect()
+    }
+    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE invitation_id = ? AND retryable = 0)")
+            .bind(id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(crate::to_db_err)
+    }
+    async fn claim_delivery_attempt(
+        &self,
+        command: &ghinvite_core::delivery::CreateCommand,
+    ) -> Result<Option<u64>> {
+        let encoded = serde_json::to_string(command).map_err(|e| Error::Corrupt(e.to_string()))?;
+        let generation: Option<i64> = sqlx::query_scalar("INSERT INTO delivery_attempts(invitation_id, command) VALUES (?, ?) ON CONFLICT(invitation_id) DO UPDATE SET generation = generation + 1, retryable = 0 WHERE retryable = 1 AND command = excluded.command RETURNING generation")
+            .bind(command.invitation_id.to_string()).bind(&encoded).fetch_optional(&self.pool).await.map_err(crate::to_db_err)?;
+        let old: String =
+            sqlx::query_scalar("SELECT command FROM delivery_attempts WHERE invitation_id = ?")
+                .bind(command.invitation_id.to_string())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(crate::to_db_err)?;
+        if old != encoded {
+            return Err(Error::ProjectionInvariant(
+                "delivery attempt conflict".into(),
+            ));
+        }
+        Ok(generation.map(|n| n as u64))
+    }
+
+    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
+        sqlx::query(
+            "UPDATE delivery_attempts SET retryable = 1 WHERE invitation_id = ? AND generation = ?",
+        )
+        .bind(id.to_string())
+        .bind(generation as i64)
+        .execute(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
+    async fn project_delivery(
+        &self,
+        receipt: &ghinvite_core::delivery::CreateReceipt,
+    ) -> Result<()> {
+        sqlx::query("INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?, ?, ?) ON CONFLICT(invitation_id) DO UPDATE SET receipt = excluded.receipt WHERE json_extract(excluded.receipt, '$.revision') >= json_extract(delivery_outcomes.receipt, '$.revision')")
+            .bind(receipt.command.invitation_id.to_string()).bind(receipt.command.request_id.to_string())
+            .bind(serde_json::to_string(receipt).map_err(|e| Error::Corrupt(e.to_string()))?)
+            .execute(&self.pool).await.map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
+    async fn list_delivery_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<ghinvite_core::delivery::CreateReceipt>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT receipt FROM delivery_outcomes WHERE request_id = ? ORDER BY invitation_id",
+        )
+        .bind(id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        rows.into_iter()
+            .map(|row| serde_json::from_str(&row).map_err(|e| Error::Corrupt(e.to_string())))
+            .collect()
+    }
+
     async fn insert_installation(&self, account: &Account) -> Result<()> {
         let res = sqlx::query(
             r#"

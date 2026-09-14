@@ -83,6 +83,46 @@ pub struct GithubInvitationUpdate {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    /// Atomic input-bound HTTP attempt fence. Returns a generation authorizing
+    /// one PUT; None means uncertain/confirmed prior effect. Only an explicitly
+    /// rejected generation may permit a new attempt; acknowledgement loss fences it.
+    async fn claim_delivery_attempt(
+        &self,
+        _command: &crate::delivery::CreateCommand,
+    ) -> Result<Option<u64>> {
+        Err(Error::Database("delivery storage unavailable".into()))
+    }
+    async fn reject_delivery_attempt(
+        &self,
+        _id: GithubInvitationId,
+        _generation: u64,
+    ) -> Result<()> {
+        Err(Error::Database("delivery storage unavailable".into()))
+    }
+    async fn delivery_attempt_exists(&self, _id: GithubInvitationId) -> Result<bool> {
+        Err(Error::Database("delivery storage unavailable".into()))
+    }
+
+    /// Query projection of the receiving object's receipt, separate from lifecycle.
+    async fn project_delivery(&self, _receipt: &crate::delivery::CreateReceipt) -> Result<()> {
+        Err(Error::Database("delivery storage unavailable".into()))
+    }
+
+    async fn list_delivery_for_request(
+        &self,
+        _id: RequestId,
+    ) -> Result<Vec<crate::delivery::CreateReceipt>> {
+        Err(Error::Database("delivery storage unavailable".into()))
+    }
+    async fn list_github_invitations_for_request(
+        &self,
+        _id: RequestId,
+    ) -> Result<Vec<GithubInvitation>> {
+        Err(Error::Database(
+            "invitation history read unavailable".into(),
+        ))
+    }
+
     // -------- installations --------
 
     /// Insert a brand-new installation row.

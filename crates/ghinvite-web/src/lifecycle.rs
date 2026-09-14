@@ -8,6 +8,12 @@ use std::sync::Arc;
 pub trait RequestLifecycle: Send + Sync + 'static {
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt>;
     async fn status(&self, query: RequestStatus) -> Result<RequestSnapshot>;
+    async fn delivery_progress(
+        &self,
+        _query: RequestStatus,
+    ) -> Result<Vec<ghinvite_core::delivery::RepositoryProgress>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct RestateRequestLifecycle {
@@ -20,6 +26,19 @@ impl RestateRequestLifecycle {
 }
 #[async_trait::async_trait]
 impl RequestLifecycle for RestateRequestLifecycle {
+    async fn delivery_progress(
+        &self,
+        query: RequestStatus,
+    ) -> Result<Vec<ghinvite_core::delivery::RepositoryProgress>> {
+        self.client
+            .call(
+                "InvitationLinkV1",
+                &query.link_id.to_string(),
+                "delivery_progress",
+                &query,
+            )
+            .await
+    }
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt> {
         self.client
             .call(

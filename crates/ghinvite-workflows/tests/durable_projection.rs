@@ -45,6 +45,15 @@ impl ProjectionStorage for LostAcknowledgement {
 // #55 owns lifecycle execution; only its startup contract is needed here.
 struct RequestSink;
 impl admission_v1::InvitationRequestV1 for RequestSink {
+    async fn notification_status(
+        &self,
+        _: restate_sdk::context::SharedWorkflowContext<'_>,
+    ) -> Result<
+        restate_sdk::serde::Json<Option<admission_v1::TerminalSignal>>,
+        restate_sdk::errors::TerminalError,
+    > {
+        Ok(restate_sdk::serde::Json(None))
+    }
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,

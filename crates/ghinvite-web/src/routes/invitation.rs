@@ -73,6 +73,8 @@ async fn invitation_page(
         Err(_) => return invitation_not_found_response(&session),
     };
     let mut selection = select_requester_request_state(&context.requests, session.user_id);
+    let mut delivery_request_id = None;
+    let mut delivery_progress = Vec::new();
     if let Some(lifecycle) = &state.request_lifecycle {
         let request_id = query.request_id.or_else(|| {
             context
@@ -96,9 +98,49 @@ async fn invitation_page(
             // Render only lifecycle state; justification/reason and admin facts
             // from the private command response never become requester copy.
             selection.current_status = Some(request.state);
+            if request.state == ghinvite_core::RequestState::Approved {
+                delivery_progress = match lifecycle
+                    .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
+                        link_id: context.link.id,
+                        request_id,
+                        requester_id: session.user_id,
+                    })
+                    .await
+                {
+                    Ok(progress) => progress,
+                    Err(error) => return error.into_response(),
+                };
+            }
+            delivery_request_id = Some(request_id);
             selection.retry_notice = None;
         }
     }
+    let delivery_request_id = delivery_request_id.or_else(|| {
+        context
+            .requests
+            .iter()
+            .find(|r| {
+                r.requester_id == session.user_id
+                    && r.state == ghinvite_core::RequestState::Approved
+            })
+            .map(|r| r.id)
+    });
+    let delivery = match delivery_request_id {
+        Some(id) => match state.storage.list_delivery_for_request(id).await {
+            Ok(rows) => rows,
+            Err(error) => return crate::WebError::from(error).into_response(),
+        },
+        None => Vec::new(),
+    };
+    let legacy_delivery = match delivery_request_id {
+        Some(id) if state.request_lifecycle.is_none() => {
+            match state.storage.list_github_invitations_for_request(id).await {
+                Ok(rows) => rows,
+                Err(error) => return crate::WebError::from(error).into_response(),
+            }
+        }
+        _ => Vec::new(),
+    };
     if !context.link.is_active(now) && selection.current_status.is_none() {
         return invitation_not_found_response(&session);
     }
@@ -117,6 +159,9 @@ async fn invitation_page(
                 request_id: request_id.clone(),
                 current_status: selection.current_status,
                 retry_notice: selection.retry_notice,
+                delivery: delivery.clone(),
+                delivery_progress: delivery_progress.clone(),
+                legacy_delivery: legacy_delivery.clone(),
             }
         }
     });

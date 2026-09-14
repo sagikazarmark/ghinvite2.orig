@@ -33,6 +33,12 @@ pub struct RequestPageProps {
     pub justification: String,
     pub current_status: Option<RequestState>,
     pub retry_notice: Option<RequestState>,
+    #[props(default)]
+    pub delivery: Vec<ghinvite_core::delivery::CreateReceipt>,
+    #[props(default)]
+    pub delivery_progress: Vec<ghinvite_core::delivery::RepositoryProgress>,
+    #[props(default)]
+    pub legacy_delivery: Vec<ghinvite_core::GithubInvitation>,
 }
 
 fn retry_notice_copy(state: RequestState) -> Option<&'static str> {
@@ -111,8 +117,20 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                 div { class: "badge badge-success badge-lg", "Approved" }
                 h1 { class: "text-2xl font-semibold tracking-tight", "Approved" }
                 p { class: "text-sm leading-6 text-base-content/70",
-                    "Watch your GitHub notifications and email for the repository invitation from GitHub."
+                    "Your request is approved. Repository delivery is tracked separately below."
                 }
+                ul { class: "space-y-2",
+                    for repo in &props.link.repos {
+                        li {
+                            span { class: "font-mono text-sm", "{repo.repo_full_name}: " }
+                            {delivery_label(
+                                props.delivery.iter().find(|r| r.command.repo_id == repo.repo_id).map(|r| &r.outcome),
+                                props.delivery_progress.iter().find(|r| r.repo_id == repo.repo_id).map(|r| &r.stage),
+                                props.legacy_delivery.iter().find(|r| r.repo_id == repo.repo_id).map(|r| r.state))}
+                        }
+                    }
+                }
+                a { class: "btn btn-primary", href: "{check_href}", "Check again" }
             }
         },
         Some(RequestState::Declined)
@@ -195,6 +213,40 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
             refresh_seconds,
             children: rsx! { {content} },
         }
+    }
+}
+
+fn delivery_label(
+    outcome: Option<&ghinvite_core::delivery::CreateOutcome>,
+    stage: Option<&ghinvite_core::delivery::DispatchStage>,
+    legacy: Option<ghinvite_core::InvitationState>,
+) -> &'static str {
+    use ghinvite_core::{
+        InvitationState,
+        delivery::{CreateOutcome, DispatchStage},
+    };
+    match outcome {
+        None => match stage {
+            Some(DispatchStage::Approved) => "Approved — awaiting delivery plan",
+            Some(DispatchStage::Planned) => "Planned — awaiting submission",
+            Some(DispatchStage::Submitted) => "Submitted — awaiting GitHub confirmation",
+            None => match legacy {
+                Some(InvitationState::Sent) => "GitHub invitation sent",
+                Some(InvitationState::Accepted) => "Repository access accepted",
+                Some(InvitationState::Declined) => "GitHub invitation declined",
+                Some(InvitationState::Expired) => "GitHub invitation expired",
+                Some(InvitationState::Cancelled) => "GitHub invitation cancelled",
+                Some(InvitationState::Failed) => "GitHub rejected delivery",
+                _ => "Awaiting delivery confirmation",
+            },
+        },
+        Some(CreateOutcome::Blocked { .. }) => {
+            "Blocked — waiting for availability or identity verification"
+        }
+        Some(CreateOutcome::OutcomeUnknown) => "GitHub outcome unknown — awaiting reconciliation",
+        Some(CreateOutcome::Created { .. }) => "GitHub invitation created",
+        Some(CreateOutcome::AlreadyCollaborator) => "Already a collaborator",
+        Some(CreateOutcome::Failed { .. }) => "GitHub rejected delivery",
     }
 }
 
@@ -360,7 +412,7 @@ mod tests {
         });
 
         assert!(html.contains("Approved"));
-        assert!(html.contains("GitHub notifications and email"));
+        assert!(html.contains("Repository delivery is tracked separately"));
         assert!(!html.contains("textarea"));
         assert!(!html.contains("Submit request"));
     }
