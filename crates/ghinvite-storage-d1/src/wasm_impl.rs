@@ -71,6 +71,49 @@ unsafe impl Send for D1Storage {}
 unsafe impl Sync for D1Storage {}
 
 #[async_trait]
+impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
+    async fn get_projected_request(
+        &self,
+        id: ghinvite_core::RequestId,
+    ) -> Result<Option<ghinvite_core::storage::projection::RequestSnapshot>> {
+        wasm_send(async {
+            #[derive(serde::Deserialize)]
+            struct Row { projection_content: String }
+            let row = self.db.prepare("SELECT projection_content FROM invitation_requests WHERE id = ?1 AND projection_revision IS NOT NULL")
+                .bind(&[JsValue::from_str(&id.to_string())]).map_err(bind_err)?
+                .first::<Row>(None).await.map_err(classify_d1_error)?;
+            row.map(|row| serde_json::from_str(&row.projection_content)
+                .map_err(|_| ghinvite_core::storage::Error::Corrupt("projected request".into()))).transpose()
+        }).await
+    }
+
+    async fn apply_transition(
+        &self,
+        envelope: &ghinvite_core::storage::projection::ProjectionEnvelope,
+    ) -> Result<()> {
+        use ghinvite_core::storage::projection::sql;
+        let input = sql::encode(envelope)?;
+        wasm_send(async {
+            let statements = sql::STATEMENTS
+                .iter()
+                .map(|statement| {
+                    self.db
+                        .prepare(*statement)
+                        .bind(&[JsValue::from_str(&input)])
+                        .map_err(bind_err)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.db
+                .batch(statements)
+                .await
+                .map_err(|error| sql::classify(error.to_string()))?;
+            Ok(())
+        })
+        .await
+    }
+}
+
+#[async_trait]
 impl Storage for D1Storage {
     // -------- installations --------
 

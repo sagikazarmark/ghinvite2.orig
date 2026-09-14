@@ -87,6 +87,22 @@ impl SqlxStorage {
         Ok(())
     }
 
+    /// Test-only invalid projection storage rule, repaired by removing it.
+    #[cfg(feature = "test-util")]
+    pub async fn debug_set_projection_invariant_failure(&self, fail: bool) -> Result<()> {
+        let sql = if fail {
+            "CREATE TEMP TRIGGER fail_projection BEFORE INSERT ON audit_events
+             BEGIN SELECT RAISE(ABORT, 'projection_invariant'); END"
+        } else {
+            "DROP TRIGGER fail_projection"
+        };
+        sqlx::query(sql)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(())
+    }
+
     /// Simulate a committed audit insert whose acknowledgement was lost.
     /// SQLite's AFTER-trigger RAISE(FAIL) leaves the inserted row intact.
     /// Like `debug_set_audit_failure`, requires the single-connection test pool.

@@ -18,6 +18,7 @@ use thiserror::Error;
 pub mod test_suite;
 
 pub mod audit_read;
+pub mod projection;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -41,6 +42,12 @@ pub enum ConflictKind {
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("projection dependency missing")]
+    ProjectionDependency,
+
+    #[error("projection invariant violated: {0}")]
+    ProjectionInvariant(String),
+
     #[error("database error: {0}")]
     Database(String),
 

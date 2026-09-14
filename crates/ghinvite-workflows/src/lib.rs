@@ -17,6 +17,7 @@ pub mod installation;
 pub mod invitation_context;
 pub mod invitation_link;
 pub mod invitation_request;
+pub mod projection_v1;
 pub mod reconcile;
 pub mod state;
 

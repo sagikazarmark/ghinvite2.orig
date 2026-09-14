@@ -25,7 +25,9 @@ impl HandlerError {
     pub fn is_terminal(&self) -> bool {
         match self {
             HandlerError::Storage(e) => match e {
-                ghinvite_core::storage::Error::Database(_) => false, // transient
+                ghinvite_core::storage::Error::Database(_)
+                | ghinvite_core::storage::Error::ProjectionDependency
+                | ghinvite_core::storage::Error::ProjectionInvariant(_) => false, // retained for repair
                 ghinvite_core::storage::Error::Conflict(_)
                 | ghinvite_core::storage::Error::NotFound
                 | ghinvite_core::storage::Error::Corrupt(_) => true, // terminal

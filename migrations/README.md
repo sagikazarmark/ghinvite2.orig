@@ -25,7 +25,7 @@ Without this PRAGMA, FK violations silently succeed and orphan rows accumulate.
 - Files named `NNNN_short_description.sql` where `NNNN` is a zero-padded sequence number starting at `0001`.
 - SQLite-portable SQL only: no Postgres-isms, no `WITHOUT ROWID`, no `STRICT`.
 - No `CHECK (col IN (...))` on enum-shaped columns (see spec §7.2). Domain enums in `crates/ghinvite-core` validate values before write.
-- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format.
+- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format. Versioned projection batches use Chrono's equivalent UTC Serde encoding (`Z`), consistently for both writes and content checks.
 
 ### Audit ordering
 
@@ -48,6 +48,14 @@ cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignor
 ```
 
 ## Adding a new migration
+
+Migration 0004 adds v1 projection revisions, content/identity checks, deadlines,
+and audit identities. Its `projection_assertions` table is transient within each
+SQLx transaction/D1 batch: named CHECK failures abort the entire application,
+and successful batches remove the assertion rows before commit. NULL revisions
+remain legacy-owned. The legacy pending-only uniqueness guard excludes versioned
+rows so reordered projections can converge without becoming admission authority.
+See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
 1. Choose the next `NNNN`.
 2. Write `NNNN_purpose.sql` containing only `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, and `DROP INDEX` statements that are SQLite-portable.

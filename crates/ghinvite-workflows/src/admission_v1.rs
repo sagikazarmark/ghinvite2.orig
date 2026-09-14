@@ -22,44 +22,9 @@ use restate_sdk::serde::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AccountAdmin {
-    pub account_id: u64,
-    pub user_id: u64,
-}
-
-/// Allocate `link_id` once with `InvitationLinkId::new()` before the first
-/// submission. It is also the creation identity: never allocate it on retry.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CreateLink {
-    pub version: u32,
-    pub link_id: InvitationLinkId,
-    pub admin: AccountAdmin,
-    pub account_id: u64,
-    pub installation_id: u64,
-    pub description: String,
-    pub internal_note: Option<String>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub max_uses: Option<u32>,
-    pub permission: Permission,
-    pub approval_required: bool,
-    /// Verified available repositories from the trusted account-admin caller.
-    pub repos: Vec<InvitationLinkRepo>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LinkSnapshot {
-    pub link_id: InvitationLinkId,
-    pub creation: CreateLink,
-    pub invitation_code: String,
-    pub created_at: DateTime<Utc>,
-    pub uses: u64,
-    pub revision: u64,
-    pub revoked_at: Option<DateTime<Utc>>,
-    pub revoked_by: Option<u64>,
-}
+pub use ghinvite_core::storage::projection::{
+    AccountAdmin, AuditIntent, CreateLink, LinkSnapshot, ProjectionEnvelope, RequestSnapshot,
+};
 
 /// ULID parsing in the authoritative interface rejects aliases, overflow,
 /// delimiters and missing IDs; ASCII case alone is not a different identity.
@@ -128,19 +93,6 @@ struct OperationRecord {
     receipt: AdmissionReceipt,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RequestSnapshot {
-    pub request_id: RequestId,
-    pub link_id: InvitationLinkId,
-    pub account_id: u64,
-    pub requester_id: u64,
-    pub justification: Option<String>,
-    pub state: RequestState,
-    pub admitted_at: DateTime<Utc>,
-    pub decision_deadline: Option<DateTime<Utc>>,
-    pub revision: u64,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminLinkCommand {
@@ -165,29 +117,6 @@ struct AdmissionDecision {
     workflow: Option<WorkflowEnvelope>,
 }
 
-/// Bounded, versioned after-images plus independently deduplicated audit intents.
-/// Identity parents (account/installation/users) are pre-existing verified facts;
-/// the #54 consumer resolves missing SQL parents outside link exclusivity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ProjectionEnvelope {
-    pub version: u32,
-    pub transition_id: String,
-    pub link: LinkSnapshot,
-    pub requests: Vec<RequestSnapshot>,
-    pub events: Vec<AuditIntent>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AuditIntent {
-    pub event_id: String,
-    #[schemars(with = "String")]
-    pub kind: EventType,
-    pub actor_id: Option<u64>,
-    pub target_id: String,
-    pub effective_at: DateTime<Utc>,
-    pub evaluated_at: DateTime<Utc>,
-}
-
 /// Immutable startup input, sufficient before any projected request row exists.
 /// Admin-only link metadata is deliberately absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -200,7 +129,7 @@ pub struct WorkflowEnvelope {
     pub approval_required: bool,
 }
 
-/// Consumer contracts only. Production implementations land in #54/#55.
+/// Internal durable projection consumer; bind via `projection_v1::bind`.
 #[restate_sdk::service]
 pub trait InvitationProjectionV1 {
     async fn apply_transition(input: Json<ProjectionEnvelope>) -> Result<(), TerminalError>;

@@ -2,6 +2,7 @@
 //! [`ghinvite_core::storage::Storage`] port. Used by the dev binaries and
 //! tests; production (Cloudflare Workers) uses `ghinvite-storage-d1`.
 
+mod projection;
 pub mod records;
 pub mod sqlx_impl;
 
