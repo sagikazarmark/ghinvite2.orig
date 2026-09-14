@@ -9,6 +9,7 @@
 //! without a Restate runtime; full workflow integration tests against the local
 //! `restate-server` (compose.yaml) are deferred to Plan 8.
 
+pub mod admission_v1;
 pub mod audit;
 pub mod error;
 pub mod github_invitation;

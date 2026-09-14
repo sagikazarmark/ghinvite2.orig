@@ -75,3 +75,8 @@ metadata includes field names only, never description or internal-note values.
 See `docs/superpowers/plans/2026-05-04-ghinvite-restate-handlers.md` for the
 implementation plan, and `docs/superpowers/specs/2026-05-04-ghinvite-v1-design.md`
 §9 for the workflow specifications.
+
+## Isolated authoritative admission
+
+The opt-in `admission_v1` module and its native acceptance runner implement #53.
+See [the command and recovery contract](../../docs/admission-v1.md).

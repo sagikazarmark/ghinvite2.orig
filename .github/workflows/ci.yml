@@ -154,3 +154,5 @@ jobs:
       # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
       - name: Verify approval, fanout, retry, and duplicate operations
         run: bash scripts/test-restate.sh
+      - name: Verify isolated authoritative admission and recovery
+        run: bash scripts/test-restate.sh authoritative_admission
