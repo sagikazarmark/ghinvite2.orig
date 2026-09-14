@@ -266,6 +266,14 @@ commit acknowledgement loss and duplicate/out-of-order projection convergence.
 It also checks final-use concurrency, replay/payload conflicts, and expiration
 before versus after a durable decision.
 
+The split-state extension in `tests/admission_protocol_proof/split_state.rs`
+uses lazy-loaded link, operation, request, and requester-blocker keys. It aborts
+between state writes, verifies exclusive status reads wait for recovery, checks
+terminal release/approved suppression/stale-pointer protection, and observes
+request bodies to ensure unrelated history is not eagerly transferred. It
+does not test production lifecycle timers, cancellation authorization, or
+lifecycle projection/audit.
+
 The miniature SQL schema and handlers are protocol evidence, not production
 admission implementation or D1/Worker conformance. See
 [ADR 0003](adr/0003-restate-authoritative-admission.md) for results and remaining

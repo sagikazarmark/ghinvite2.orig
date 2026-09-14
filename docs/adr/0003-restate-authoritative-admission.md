@@ -81,6 +81,89 @@ The intended small command interface consists of link initialization, `admit`, `
 
 Pending-to-approved remains blocking. Decline/expiry/cancellation releases eligibility only through an authoritative transition. A late transition for an older request must not release the blocker belonging to a newer request. Request workflows wait and orchestrate, but do not independently decide authoritative request state and then asynchronously clear a second blocker map.
 
+### Selected production layout: lazy, split-key state
+
+Keep all authoritative keys in the **same link-ID object**, but separate growing history from the hot link record:
+
+| Key (logical encoding) | Value and access |
+|---|---|
+| `v1/link` | Link identity/account, fixed guardrails, metadata, revocation, uses, and monotonic revision. No requester list or outcome history. Read for new admission and link changes. |
+| `v1/op/<operation_id>` | Immutable canonical input/fingerprint and original accepted/rejected outcome. Direct lookup before eligibility. |
+| `v1/request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
+| `v1/blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
+
+Use canonical typed identifiers and versioned encoding, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the production proposal below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation. These precise identity/retention choices remain proposed for confirmation.
+
+### Proposed operation identity and retention contract
+
+The following completes the engineering recommendation for identity and retention. Same-input replay, changed-input conflict, remembered rejections, and stable outcomes after expiry/revocation are already approved. The precise scope, encoding, ID separation, and no-expiry policy below are proposed for maintainer confirmation; they are not additional runtime results.
+
+**Identity is `(invitation_link_id, admission_operation_id)`.** Use a strictly parsed ULID for the operation ID, generated before the first submission and encoded canonically for the object-state key. Parsing different textual representations of the same ULID must resolve to the same identity. Within a link, requester identity belongs to the bound input, not to a separate operation namespace. Thus reusing an operation ID for another requester cannot create a second request under the same scoped identity. Reusing the raw ID under a different link is a distinct operation; there is no global operation-ID registry.
+
+**Accepted request IDs are separate server-generated ULIDs.** Generate the request ID as part of the complete journaled accepted decision, store it in the outcome, and derive request-state/workflow/event identities from that recorded value. A retry must never generate a replacement for a committed request. A rejected operation has no created request ID. This avoids turning independently scoped client operation IDs into colliding global request IDs and keeps operation replay distinct from request lifecycle status. Random ID uniqueness follows the existing ULID convention; projection key conflicts with different immutable content are invariant failures, not successful deduplication.
+
+#### Input binding and validation
+
+For command version 1, compare a typed canonical input containing:
+
+- command kind/version (`admit`, version 1);
+- resolved immutable invitation link ID;
+- authenticated immutable GitHub requester ID;
+- optional justification, with leading/trailing whitespace trimmed and missing, empty, or whitespace-only input represented as absent. Preserve internal whitespace and character content.
+
+Keep this canonical value in the operation record initially, rather than depending on incidental serialized JSON bytes or an unspecified hash. If a fingerprint replaces it, specify the canonical encoding and digest version first. Restate invocation IDs, trace IDs, session/CSRF tokens, user login strings, form render times, submission times, and authoritative admission time are excluded from input equality. Validate and canonicalize at the authoritative command interface as well as at the trusted web caller. Keep version 1 canonicalization compatible for retained outcomes; deploying a new version must not silently reinterpret old receipts as new operations.
+
+Authenticate and authorize access to the command/result before returning any stored outcome. An operation ID is not a credential. For the same link/ID under a different authenticated requester, do not disclose the previous request, outcome, justification, or requester identity; return only the permitted generic conflict/not-found response after the existing access checks. Approval-policy changes are not retry payload changes: guardrails are immutable link state and admission outcomes preserve the policy used at acceptance.
+
+Malformed/missing operation IDs and invalid command structure are validation failures before admission and consume no use. Do not silently replace a malformed ID. A failure before a valid authoritative decision does not create a business outcome record. Once a valid command is decided, both acceptance and eligibility rejection bind its input and identity permanently under the proposed retention policy.
+
+#### Browser and transport behavior
+
+Generate the operation ID when rendering a fresh submission form and preserve it with the same business input on uncertain transport failure. Retrying that attempt reaches the authoritative outcome lookup before current link/repeat eligibility shortcuts. If the user edits the justification after an uncertain result, retain the original attempt for status/recovery and treat the edited form as an explicitly fresh attempt with a fresh ID. Do not automatically change IDs merely to get past a conflict. Separate tabs may have distinct IDs; pending/approved suppression still prevents another admitted request for the same requester/link.
+
+The current route in [`routes/invitation.rs`](../../crates/ghinvite-web/src/routes/invitation.rs) already generates a form ID and preserves it in its failed-POST response, but silently replaces invalid IDs and includes a newly generated submission timestamp on each retry. It also short-circuits on projected link/request eligibility. Production implementation must rename/distinguish the hidden operation ID from the accepted request ID, reject invalid IDs, exclude transport time from equality, and route replay through the authoritative command. Recovery across reload/navigation needs a concrete status/attempt lookup in the web-read ticket; the hidden field alone does not guarantee that continuity.
+
+Use the link object's application-level outcome lookup for business replay. Do not set the bare business operation ID as an ingress deduplication key if doing so bypasses payload comparison. A normal call may have a different transport invocation ID on retry; link exclusivity and the operation record still recover its result. Runtime-generated deduplication for retries of the same transport invocation is compatible with this contract. The new command version must actually reach the application to detect same-ID/different-version conflicts.
+
+#### Retention and cleanup
+
+**Proposed initial policy: no automatic expiry of authoritative admission outcomes**, including rejected outcomes. Link expiration/revocation, request completion, session expiry, database projection success, and completed-workflow/invocation journal cleanup do not remove them. An authenticated replay returns the original admission outcome, not the current request state, and never starts a completed workflow again simply because its runtime retention elapsed.
+
+Keep the minimal replay record: canonical input/version, outcome/reason, admission decision time, and accepted request ID/deadline/policy result where relevant. Delivery bookkeeping and historical request payloads have separate retention needs; projection completion is not permission to discard replay identity. A database copy does not become the admission authority if the Restate record is missing. A restored or unexpectedly missing authoritative state must enter the defined recovery path, not silently bootstrap a fresh attempt from a lagging projection.
+
+This policy deliberately accumulates state. Lazy lookup bounds normal access, not retained record count. A future finite replay window, account/link deletion, or archival scheme requires an explicit amendment specifying how an old identity remains distinguishable from a never-used one. A tombstone can prevent duplicate execution but cannot return the original outcome unless enough data or an authoritative archive remains. Never implement TTL eviction that turns an old operation ID into a fresh operation. Capacity/input bounds and operational monitoring remain rollout requirements, rather than an implicit permission to evict outcomes.
+
+#### Examples and verification still needed
+
+| Attempt | Required result under this proposal |
+|---|---|
+| Same link/ID/requester; `" access "` followed by `"access"` | Same canonical input; return the recorded outcome. |
+| Same link/ID/requester; absent followed by whitespace-only justification | Same canonical input. |
+| Same link/ID; changed justification, requester, or command version | Conflict without new effects; never disclose another requester's stored result. |
+| Same raw operation ID on two different links | Two distinct operations; accepted requests receive different server-generated IDs. |
+| Accepted operation replayed after decline and a later fresh request | Return the original accepted request identity; do not create another request or modify the current blocker. |
+| Definitive rejection replayed after eligibility becomes available | Return the original rejection; only a new ID starts a fresh attempt. |
+| Runtime has cleaned up the completed workflow and invocation journal | Retained object outcome still answers replay; it does not dispatch the workflow again. |
+| Missing or malformed hidden operation ID | Validation error; no silently generated replacement or use consumption. |
+
+The existing proofs cover same-input replay, changed justification conflict, and rejection replay after blocker release. Add versioned canonicalization/normalization, requester-confidentiality, cross-link ID separation, browser attempt continuity, and replay after actual runtime retention expiry when implementing this contract. No additional production code or retention test is implied by this documentation.
+
+**Enable lazy state explicitly** via Rust SDK `ServiceOptions::enable_lazy_state(true)` when binding the link object. Default eager loading sends the object's entire state to each execution, defeating split-key bounded access. In request-response mode, lazy reads introduce suspension/replay round trips. This is the accepted technical tradeoff for not transferring historical requests/outcomes with every command; measure actual Worker cost before optimizing read scheduling.
+
+A normal new admission performs direct reads of operation, link, and requester blocker, plus the blocking request if its lifecycle/deadline must be inspected. It never enumerates all state keys or scans history. The complete journaled decision contains only these touched records' after-images and bounded projection/workflow messages. An accepted attempt writes link, request, blocker, and operation outcome in deterministic order, then sends downstream work. A rejection records its outcome without rewriting history; advancing a link revision for rejection is optional and is used only for simplicity in the proof. Mutable request projections carry their own revisions.
+
+This is bounded **per-command access and payload**, subject to input/repository-scope limits, not bounded total storage. One operation record per retained attempt and one request record per admitted request still accumulate. Preserve outcomes without automatic deletion until retention/replay semantics are approved. Approved blockers remain while they confer repeat suppression. Capacity measurement, key/value limits, and retention remain production work; do not use an unbounded serialized map as a shortcut.
+
+### Coherent multi-key transitions and reads
+
+Keep authoritative reads that combine link, request, outcome, or blocker records **exclusive** on the link object. They queue behind unfinished mutation/replay and cannot observe half-applied state. This includes immediate request status and replay lookup. Single-record shared reads could be added later with deliberately weaker in-flight semantics, but are not the initial authoritative interface.
+
+Journal the bounded decision before applying its after-images. Apply each state write in deterministic order and recover using the original invocation's journaled reads/decision. A retrying writer continues to hold exclusivity. Consequently, another admission, lifecycle transition, or authoritative status read cannot slip between the writes. This supplies coherent command/read behavior without claiming the separate state writes form one rollback transaction.
+
+For a lifecycle transition, read the exact request and its requester blocker before writing. Pending → approved retains the pointer; pending → declined/expired/cancelled clears it only if it still names that request. Write the terminal request and pointer change within the same exclusive invocation. The transition's replayed original read must reach any unfinished pointer update; a fresh duplicate sees the terminal request and does not release a newer request's blocker. Production must also journal transition time/result and arrange its versioned projection/audit before completing.
+
+The [split-state proof](../../crates/ghinvite-workflows/tests/admission_protocol_proof/split_state.rs) verifies multi-key interruption recovery and these pointer rules. The original aggregate proof below retains evidence for admission clock/dispatch and SQL outage. Exclusive authoritative reads may wait during a stuck link mutation; asynchronous database projection still does not hold that mutation open. Administrative kill/purge remains outside ordinary replay recovery and requires a repair procedure before reopening the object to commands.
+
 ### Durable transition and dispatch: verified bounded sequence
 
 The [protocol proof](../../crates/ghinvite-workflows/tests/admission_protocol_proof.rs) exercises this sequence on Restate 1.7.9 with Rust SDK 0.10.0:
@@ -116,11 +199,13 @@ Restate durably retains unfinished execution, but its journal is not automatical
 
 ## Concrete questions to resolve before implementation
 
+**Sequencing update (2026-09-14):** The maintainer [deferred actual Worker/D1 verification](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5667489260) for now. Continue contract and lifecycle design using the recorded native evidence. Worker clock/endpoint and D1 adapter verification remain explicit follow-ups; native request-response/SQLx success does not satisfy them. This deferral does not establish production readiness or by itself close #48.
+
 | Question | Proposed next step / approval needed |
 |---|---|
-| How does the bounded state-and-dispatch sequence scale to production state? | The decision-journal → coherent state → durable sends sequence passed. Choose a split-key layout/retention strategy and prove coherent reads and recovery rather than copying an unbounded aggregate. |
+| What are the production capacity limits and retention policy? | Lazy split-key state and exclusive coherent reads passed the focused proof. Verify actual runtime/Cloud key/value limits, input/scope bounds, storage growth, and Worker round-trip cost before rollout. |
 | Does decision-time sampling work on the actual Worker target? | The clock is sampled inside the complete decision closure; before/after-decision expiration recovery passed natively in request-response mode. Verify Wasm clock behavior and the actual Worker endpoint. |
-| What is the operation-ID scope and retention? | Prefer an explicit link/requester scope and retained outcomes with no automatic expiry until a retention policy is approved. Specify cross-scope reuse behavior; do not claim link-local state enforces global identity uniqueness. |
+| Confirm the proposed operation identity/retention contract? | Link-scoped operation IDs, requester bound in canonical input, separate server-generated request IDs, and no automatic outcome expiry are specified above. Confirm these choices and implement normalization/privacy/cross-link/retention-expiry verification. |
 | What pending lifetime is configured, and when is an admin decision timely? | Current code has seven days, but configuration scope and deadline-edge arbitration need confirmation. Recommend enforcing the stored deadline at the authoritative transition; timers only wake work. |
 | Does an overdue request block a fresh attempt until its timer runs? | Recommend admission first materialize an overdue pending request's expiry, so scheduler lag does not extend blocking. This behavior needs approval. |
 | How are auto-approval and cancellation represented? | Specify whether auto-approval is part of the admission transition; define cancellation actors and allowed states. Existing cancellation terminology does not by itself implement a cancellation command. |
@@ -178,6 +263,18 @@ Evidence:
 - Final assertions: **five requests, five uses, fourteen logical audit events, and five observed workflow starts**, including the concurrent final-use winner. Each faulted link remains revoked at its latest projected revision.
 
 Scope: this is a disposable protocol experiment with test-only handlers, a small aggregate, and a scratch SQL schema. It does not invoke production admission or the production storage trait. It aborts endpoint execution tasks, not the Restate server or the host process. It verifies startup of a minimal workflow consumer, not approval/cancellation or exactly-once external GitHub effects. Actual D1 adapter/Worker execution, lifecycle repeat suppression, schema/foreign-key migration, retention, administrative kill/restore, and large state layout remain unverified. Wrangler is not installed in this environment; D1 conformance was not run. These gaps keep #48 open.
+
+### Split-state follow-up proof, 2026-09-14
+
+The same command, extended with `admission_protocol_proof/split_state.rs`, **passed in 12.70 seconds** including the original aggregate/outage scenarios. It registers a separate test-only object with lazy state enabled and exclusive status reads, using the same runtime, SDK, native request-response endpoint, and scratch SQL schema.
+
+- Aborted/replayed executions after each of link-header, request-record, requester-blocker, and operation-outcome writes recover a complete admission. An exclusive status invocation submitted during each interruption remains blocked until recovery and then observes matching outcome/request/blocker and exactly one consumed use.
+- A separate interruption after writing a terminal request but before clearing its blocker recovers the pointer update. Explicit declined/expired/cancelled transitions release blocking without refunding a use. A new operation is admitted afterward; the old rejected operation still replays its rejection.
+- Approved requests continue suppressing admission, and stale terminal updates to the old request do not clear a newer request's blocker. These are state-transition tests, not proof of production timer arbitration, authorization, cancellation commands, or lifecycle audit/projection.
+- Each of four split-key links finishes with two admitted request records and two consumed uses. The projector receives only the current link snapshot and touched request outcome, not accumulated history.
+- Each link contains an unrelated roughly 256 KiB history value. The endpoint observes raw Restate request bodies: the distinctive history payload never arrives, and the largest split-object invocation body is **2,176 bytes**. This verifies that lazy loading is actually effective in the pinned native request-response path; it is not a large-scale capacity benchmark or Wasm performance result.
+
+The selected layout resolves the growing-snapshot/coherent-read question for ordinary replay. Actual Worker/D1 execution, production-sized records, retention/migration, lifecycle projection, and kill/restore recovery remain open. All earlier proof limits still apply except the now-tested narrow split-state access and blocker transitions.
 
 ## Alternatives and consequences
 

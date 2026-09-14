@@ -5,6 +5,9 @@
 
 #![cfg(feature = "integration")]
 
+#[path = "admission_protocol_proof/split_state.rs"]
+mod split_state;
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -69,6 +72,8 @@ struct Faults {
     lost_acks: AtomicUsize,
     workflow_starts: AtomicUsize,
     tasks: Mutex<Vec<AbortHandle>>,
+    history_leaked: AtomicBool,
+    split_request_bytes: AtomicUsize,
 }
 
 impl Faults {
@@ -342,6 +347,18 @@ async fn serve(State(server): State<Server>, request: Request) -> axum::response
     // Buffer input like the Worker and advertise the same protocol mode.
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+    if parts.uri.path().contains("/AdmissionSplitProof/") {
+        server
+            .faults
+            .split_request_bytes
+            .fetch_max(bytes.len(), Ordering::SeqCst);
+        if bytes
+            .windows(b"UNRELATED_HISTORY_PAYLOAD".len())
+            .any(|window| window == b"UNRELATED_HISTORY_PAYLOAD")
+        {
+            server.faults.history_leaked.store(true, Ordering::SeqCst);
+        }
+    }
     let task = tokio::spawn(async move {
         let response = server.endpoint.handle_with_options(
             Request::from_parts(parts, Body::from(bytes)),
@@ -443,8 +460,8 @@ async fn scenario() {
                 faults: faults.clone(),
             }
             .serve(),
-        )
-        .build();
+        );
+    let endpoint = split_state::bind(endpoint, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = axum::Router::new().fallback(serve).with_state(Server {
@@ -740,5 +757,6 @@ async fn scenario() {
     println!(
         "PASS convergence: 5 requests, 5 uses, 14 events; late duplicate snapshots cannot undo revocation; real SQL commit acknowledgement loss retried"
     );
+    split_state::scenario(&client, &ingress, &faults, &pool).await;
     server.abort();
 }
