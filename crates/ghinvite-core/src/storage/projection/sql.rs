@@ -30,6 +30,10 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         || creation.repos.is_empty()
         || creation.repos.len() > 100
         || creation.description.chars().count() > 120
+        || link.description().is_empty()
+        || link.description().chars().count() > 120
+        || link.description().contains(['\r', '\n'])
+        || link.internal_note().is_some_and(|s| s.len() > 16_384)
         || creation
             .internal_note
             .as_ref()
@@ -52,6 +56,8 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
     let mut value = serde_json::to_value(envelope).map_err(|_| invalid())?;
     value["link"]["identity"] = json!([creation, link.invitation_code, link.created_at]);
     value["link"]["content"] = serde_json::to_value(link).map_err(|_| invalid())?;
+    value["link"]["current_description"] = json!(link.description());
+    value["link"]["current_internal_note"] = json!(link.internal_note());
     let mut requests = std::collections::BTreeSet::new();
     for (request, encoded) in envelope
         .requests
@@ -186,8 +192,8 @@ pub const STATEMENTS: &[&str] = &[
       uses_count IS NOT json_extract(projection_content,'$.uses') OR
       revoked_at IS NOT json_extract(projection_content,'$.revoked_at') OR
       revoked_by IS NOT json_extract(projection_content,'$.revoked_by') OR
-      description IS NOT json_extract(projection_content,'$.creation.description') OR
-      internal_note IS NOT json_extract(projection_content,'$.creation.internal_note') OR
+      description IS NOT CASE WHEN json_type(projection_content,'$.metadata') = 'object' THEN json_extract(projection_content,'$.metadata.description') ELSE json_extract(projection_content,'$.creation.description') END OR
+      internal_note IS NOT CASE WHEN json_type(projection_content,'$.metadata') = 'object' THEN json_extract(projection_content,'$.metadata.internal_note') ELSE json_extract(projection_content,'$.creation.internal_note') END OR
       (projection_revision = json_extract(?1,'$.link.revision') AND projection_content IS NOT json_extract(?1,'$.link.content'))))
     AND NOT EXISTS(SELECT 1 FROM invitation_link_repos r WHERE r.invitation_link_id = json_extract(?1,'$.link.link_id')
       AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.link.creation.repos') j
@@ -226,13 +232,13 @@ pub const STATEMENTS: &[&str] = &[
       json_extract(?1,'$.link.creation.admin.user_id'), json_extract(?1,'$.link.created_at'),
       json_extract(?1,'$.link.creation.expires_at'), json_extract(?1,'$.link.creation.max_uses'),
       json_extract(?1,'$.link.uses'), json_extract(?1,'$.link.creation.permission'),
-      json_extract(?1,'$.link.creation.approval_required'), json_extract(?1,'$.link.creation.description'),
-      json_extract(?1,'$.link.creation.internal_note'), json_extract(?1,'$.link.revoked_at'),
+      json_extract(?1,'$.link.creation.approval_required'), json_extract(?1,'$.link.current_description'),
+      json_extract(?1,'$.link.current_internal_note'), json_extract(?1,'$.link.revoked_at'),
       json_extract(?1,'$.link.revoked_by'), json_extract(?1,'$.link.revision'),
       json_extract(?1,'$.link.content'), json_extract(?1,'$.link.identity') WHERE true
     ON CONFLICT(id) DO UPDATE SET uses_count=excluded.uses_count, revoked_at=excluded.revoked_at,
       revoked_by=excluded.revoked_by, projection_revision=excluded.projection_revision,
-      projection_content=excluded.projection_content
+      projection_content=excluded.projection_content, description=excluded.description, internal_note=excluded.internal_note
     WHERE excluded.projection_revision > invitation_links.projection_revision"#,
     r#"INSERT INTO invitation_link_repos(invitation_link_id, repo_id, repo_full_name)
     SELECT json_extract(?1,'$.link.link_id'), json_extract(value,'$.repo_id'), json_extract(value,'$.repo_full_name')

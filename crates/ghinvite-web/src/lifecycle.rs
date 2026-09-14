@@ -31,7 +31,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
         query: RequestStatus,
     ) -> Result<Vec<ghinvite_core::delivery::RepositoryProgress>> {
         self.client
-            .call(
+            .authoritative_call(
                 "InvitationLinkV1",
                 &query.link_id.to_string(),
                 "delivery_progress",
@@ -41,7 +41,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     }
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt> {
         self.client
-            .call(
+            .authoritative_call(
                 "InvitationLinkV1",
                 &command.link_id.to_string(),
                 "decide",
@@ -51,7 +51,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     }
     async fn status(&self, query: RequestStatus) -> Result<RequestSnapshot> {
         self.client
-            .call(
+            .authoritative_call(
                 "InvitationLinkV1",
                 &query.link_id.to_string(),
                 "request_status",

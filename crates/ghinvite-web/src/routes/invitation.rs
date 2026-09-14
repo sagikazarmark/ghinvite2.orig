@@ -18,6 +18,8 @@ use tower_sessions::Session as TowerSession;
 
 #[derive(serde::Deserialize)]
 struct SubmitForm {
+    #[serde(default)]
+    operation_id: String,
     /// Pre-generated ULID from GET /i/{slug} handler for double-submit dedup.
     #[serde(default)]
     request_id: String,
@@ -63,7 +65,25 @@ async fn invitation_page(
         Err(error) => return crate::WebError::Session(error.to_string()).into_response(),
     };
     if !session.is_authenticated() {
-        return redirect_to_login(&canonical_invitation_path(&slug));
+        let mut path = canonical_invitation_path(&slug);
+        if let Some(id) = &query.operation_id {
+            let encoded: String = url::form_urlencoded::byte_serialize(id.as_bytes()).collect();
+            path.push_str(&format!("?operation_id={encoded}"));
+        }
+        return redirect_to_login(&path);
+    }
+
+    if let Some(admission) = &state.admission {
+        return super::invitation_v1::page(
+            &state,
+            &tower,
+            admission,
+            &session,
+            &slug,
+            query.operation_id.as_deref(),
+            query.fresh,
+        )
+        .await;
     }
 
     let now = Utc::now();
@@ -171,6 +191,9 @@ async fn invitation_page(
 #[derive(serde::Deserialize)]
 struct StatusQuery {
     request_id: Option<ghinvite_core::RequestId>,
+    operation_id: Option<String>,
+    #[serde(default)]
+    fresh: bool,
 }
 
 async fn unknown_nested(tower: TowerSession, uri: Uri) -> impl IntoResponse {
@@ -200,6 +223,19 @@ async fn submit_request(
     };
     if !session.is_authenticated() {
         return redirect_to_login(&canonical_invitation_path(&slug));
+    }
+
+    if let Some(admission) = &state.admission {
+        return super::invitation_v1::submit(
+            &state,
+            &tower,
+            admission,
+            &session,
+            &slug,
+            &form.operation_id,
+            form.justification,
+        )
+        .await;
     }
 
     let now = Utc::now();

@@ -22,6 +22,412 @@ use tower::ServiceExt;
 
 mod common;
 
+async fn body_text(response: axum::response::Response) -> String {
+    String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+/// Transport seam: committed admission with a lost acknowledgement. Domain
+/// replay/revoke races are separately exercised against the real Restate object.
+#[derive(Clone)]
+struct LostAdmissionResponse {
+    link_id: InvitationLinkId,
+    attempts: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+    latest: Arc<Mutex<Option<String>>>,
+}
+impl wiremock::Respond for LostAdmissionResponse {
+    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+        use serde_json::{Value, json};
+        use wiremock::ResponseTemplate;
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let method = request.url.path().rsplit('/').next().unwrap();
+        let mut attempts = self.attempts.lock().unwrap();
+        match method {
+            "resolve" => ResponseTemplate::new(200).set_body_json(self.link_id),
+            "prepare_attempt" => {
+                let id = body["operation_id"].as_str().unwrap().to_owned();
+                if let Some(old) = attempts.get(&id) {
+                    if old["input"] != body {
+                        return ResponseTemplate::new(409);
+                    }
+                } else {
+                    attempts.insert(id.clone(), json!({"input": body, "receipt": null}));
+                    *self.latest.lock().unwrap() = Some(id.clone());
+                }
+                ResponseTemplate::new(200).set_body_json(attempts[&id].clone())
+            }
+            "admit" => {
+                let id = body["operation_id"].as_str().unwrap();
+                let attempt = attempts.get_mut(id).unwrap();
+                if attempt["receipt"].is_null() {
+                    attempt["receipt"] = json!({"decided_at": "2026-09-14T12:00:00Z", "result": {
+                        "kind": "accepted", "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "state": "pending",
+                        "decision_deadline": "2026-09-21T12:00:00Z" }});
+                    ResponseTemplate::new(503).set_body_string("private transport detail")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(attempt["receipt"].clone())
+                }
+            }
+            "requester_page" => {
+                let id = body["operation_id"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| self.latest.lock().unwrap().clone());
+                let attempt = id.as_ref().and_then(|id| attempts.get(id));
+                if attempt.is_some_and(|a| a["input"]["requester_id"] != body["requester_id"]) {
+                    return ResponseTemplate::new(404);
+                }
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"link_id": self.link_id, "invitation_code": ACTIVE_SLUG,
+                    "repos": [{"repo_id": 1, "repo_full_name": "acme/api"}], "permission": "pull",
+                    "approval_required": true, "attempt": attempt, "request": null}),
+                )
+            }
+            _ => ResponseTemplate::new(404),
+        }
+    }
+}
+
+async fn lost_response_app() -> (axum::Router, wiremock::MockServer) {
+    let ingress = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(LostAdmissionResponse {
+            link_id: InvitationLinkId::new(),
+            attempts: Default::default(),
+            latest: Default::default(),
+        })
+        .mount(&ingress)
+        .await;
+    let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+        .await
+        .unwrap();
+    let state = AppState::new(
+        Arc::new(storage),
+        Arc::new(MockTransport::scripted(oauth_expectations(
+            "octocat",
+            REQUESTER_ID,
+        ))),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_admission(Arc::new(
+        ghinvite_web::RestateClient::new(ingress.uri()).unwrap(),
+    ));
+    (
+        build_app(state, tower_sessions::MemoryStore::default()),
+        ingress,
+    )
+}
+
+#[tokio::test]
+async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_is_explicit() {
+    let (app, ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let id = RequestId::new().to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={id}&justification=++original++"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let html = body_text(response).await;
+    assert!(!html.contains("private transport detail"));
+    assert!(html.contains("Outcome unknown"));
+    for uri in [
+        format!("/i/{ACTIVE_SLUG}"),
+        format!("/i/{ACTIVE_SLUG}?operation_id={id}"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_text(response).await.contains("Request accepted at"));
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}?fresh=true"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_text(response).await;
+    assert!(html.contains("This is a fresh attempt"));
+    assert!(html.contains(&format!("operation_id={id}")));
+    assert!(!html.contains(&format!("value=\"{id}\"")));
+    assert!(!html.contains("readonly=\"true\""));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={id}&justification=edited"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        body_text(response)
+            .await
+            .contains("Recover the original attempt")
+    );
+    assert_eq!(
+        ingress
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path().ends_with("/admit"))
+            .count(),
+        1
+    );
+}
+
+/// Playwright drives this real router with JavaScript disabled. Authentication
+/// is obtained via the existing public OAuth test flow before serving.
+#[tokio::test]
+#[ignore = "long-running Playwright fixture"]
+async fn admission_browser_server() {
+    use axum::response::IntoResponse;
+    let (app, _ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    let app = app.route(
+        "/fixture-login",
+        axum::routing::get(move || {
+            let cookie = cookie.clone();
+            async move {
+                (
+                    [(
+                        "set-cookie",
+                        format!("{cookie}; Path=/; HttpOnly; SameSite=Lax"),
+                    )],
+                    axum::response::Redirect::to(&format!("/i/{ACTIVE_SLUG}")),
+                )
+                    .into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:4174")
+        .await
+        .unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+#[tokio::test]
+async fn authoritative_native_form_validates_identity_and_preserves_unknown_input_without_sql_link()
+{
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let ingress = MockServer::start().await;
+    let link_id = InvitationLinkId::new();
+    Mock::given(method("POST"))
+        .and(path(format!("/InvitationCodeV1/{ACTIVE_SLUG}/resolve")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(link_id))
+        .mount(&ingress)
+        .await;
+    Mock::given(path(format!("/InvitationLinkV1/{link_id}/requester_page")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "link_id": link_id, "invitation_code": ACTIVE_SLUG, "repos": [], "permission": "pull",
+            "approval_required": true, "attempt": null, "request": null
+        })))
+        .mount(&ingress)
+        .await;
+    Mock::given(path(format!("/InvitationLinkV1/{link_id}/prepare_attempt")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&ingress)
+        .await;
+    let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+        .await
+        .unwrap();
+    let state = AppState::new(
+        Arc::new(storage),
+        Arc::new(MockTransport::scripted(oauth_expectations(
+            "octocat",
+            REQUESTER_ID,
+        ))),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_admission(Arc::new(
+        ghinvite_web::RestateClient::new(ingress.uri()).unwrap(),
+    ));
+    let backend = ghinvite_web::session_store::SqliteBackend::new(
+        sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
+    );
+    backend.migrate().await.unwrap();
+    let app = build_app(
+        state,
+        ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
+    );
+    let cookie = sign_in(app.clone()).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body_text(response).await;
+    let field = |name: &str| {
+        html.split(&format!("name=\"{name}\" value=\""))
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let csrf = field("csrf_token");
+    let operation = field("operation_id");
+    for id in ["", "bad", "8ZZZZZZZZZZZZZZZZZZZZZZZZZ", &operation] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={csrf}&operation_id={id}&justification=++original++"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if id == operation {
+            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+            let html = body_text(response).await;
+            assert!(html.contains("Outcome unknown"));
+            assert!(html.contains(&format!("value=\"{operation}\"")));
+            assert!(html.contains("original"));
+            assert!(html.contains("Start a fresh attempt"));
+        } else {
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+    let calls = ingress.received_requests().await.unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|r| r.url.path().ends_with("prepare_attempt"))
+            .count(),
+        1
+    );
+    // Preparation itself was unavailable: recover from the explicitly saved
+    // session continuation after navigating away from the failed POST.
+    ingress.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&ingress)
+        .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={operation}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let html = body_text(response).await;
+    assert!(html.contains("original"));
+    assert!(html.contains(&format!("value=\"{operation}\"")));
+    assert!(
+        html.contains(&format!("operation_id={operation}")) && html.contains("fresh=true"),
+        "{html}"
+    );
+    let post = |id: String, text: &str| {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/i/{ACTIVE_SLUG}"))
+            .header("cookie", &cookie)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "csrf_token={csrf}&operation_id={id}&justification={text}"
+            )))
+            .unwrap()
+    };
+    let changed = app
+        .clone()
+        .oneshot(post(operation.clone(), "edited"))
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    let second = RequestId::new().to_string();
+    let third = RequestId::new().to_string();
+    let (a, b) = tokio::join!(
+        app.clone().oneshot(post(second.clone(), "second")),
+        app.clone().oneshot(post(third.clone(), "third"))
+    );
+    assert_eq!(a.unwrap().status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(b.unwrap().status(), StatusCode::BAD_GATEWAY);
+    for (id, text) in [
+        (operation, "original"),
+        (second, "second"),
+        (third, "third"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(body_text(response).await.contains(text));
+    }
+}
+
 #[tokio::test]
 async fn request_submission_requires_the_rendered_session_token() {
     let (app, calls) = build_test_app(

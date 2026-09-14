@@ -157,6 +157,12 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             "request_id": accepted["result"]["request_id"], "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 100, "user_id": 7}, "action": {"kind": "decline", "reason": "Admin-only context"}})).await;
         assert_eq!(decision["outcome"], "applied");
+        let browser = ghinvite_web::admission::RestateAdmission::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
+        let metadata = browser.update_metadata(ghinvite_core::admission::UpdateMetadata {
+            link_id, admin: ghinvite_core::storage::projection::AccountAdmin { account_id: 100, user_id: 7 },
+            description: "Updated workshop".into(), internal_note: Some("Private updated note".into()),
+        }).await.unwrap();
+        assert_eq!(metadata.creation.description, "Workshop");
         loop {
             let response = client.post(format!("{admin}/query")).header("accept", "application/json")
                 .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjectionV1'"}))
@@ -185,9 +191,11 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             let link = storage.get_invitation_link_by_id(link_id).await.unwrap();
             let requests = storage.list_requests_for_link(link_id).await.unwrap();
             let events = storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap();
-            if link.as_ref().is_some_and(|l| l.revoked_at.is_some()) && requests.len() == 1 && events.events.len() == 5
+            if link.as_ref().is_some_and(|l| l.revoked_at.is_some() && l.description == "Updated workshop") && requests.len() == 1 && events.events.len() == 6
                 && acknowledgements.committed_attempts.load(Ordering::SeqCst) >= 5 {
-                assert_eq!(link.unwrap().uses_count, 1);
+                let link = link.unwrap();
+                assert_eq!(link.uses_count, 1);
+                assert_eq!(link.internal_note.as_deref(), Some("Private updated note"));
                 assert_eq!(requests[0].id.to_string(), accepted["result"]["request_id"]);
                 assert_eq!(requests[0].state, ghinvite_core::RequestState::Declined);
                 assert_eq!(requests[0].decided_by, Some(7));

@@ -14,6 +14,8 @@ pub struct AppState {
     pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
     pub request_lifecycle: Option<Arc<dyn crate::lifecycle::RequestLifecycle>>,
+    pub admission: Option<Arc<crate::admission::RestateAdmission>>,
+    pub(crate) attempt_store: Option<Arc<dyn tower_sessions::SessionStore>>,
 }
 
 impl AppState {
@@ -29,6 +31,8 @@ impl AppState {
             commands,
             config,
             request_lifecycle: None,
+            admission: None,
+            attempt_store: None,
         }
     }
 
@@ -39,6 +43,15 @@ impl AppState {
         lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
     ) -> Self {
         self.request_lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Isolated v1 deployment only, after migration. Neither binary enables it.
+    pub fn with_admission(mut self, client: Arc<crate::RestateClient>) -> Self {
+        self.request_lifecycle = Some(Arc::new(crate::lifecycle::RestateRequestLifecycle::new(
+            client.clone(),
+        )));
+        self.admission = Some(Arc::new(crate::admission::RestateAdmission::new(client)));
         self
     }
 }

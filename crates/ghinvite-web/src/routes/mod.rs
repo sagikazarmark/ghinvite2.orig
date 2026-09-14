@@ -2,6 +2,7 @@ pub mod console;
 pub mod health;
 pub mod home;
 pub mod invitation;
+mod invitation_v1;
 pub mod not_found;
 pub mod oauth;
 pub mod setup;

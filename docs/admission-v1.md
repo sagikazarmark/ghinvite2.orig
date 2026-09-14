@@ -25,7 +25,7 @@ and retain the entire `CreateLink` command across uncertain transport failures.
 The canonical link ID is both object key and creation identity. Reuse with
 different normalized creation input conflicts. Successful creation replay returns
 the original creation snapshot, including its invitation code, even after revoke.
-Invitation-code routing is part of #57; projection uniqueness conflicts remain
+Invitation-code routing is implemented in the isolated [browser path](browser-admission-v1.md); projection uniqueness conflicts remain
 inspectable pending repair rather than changing the authoritative creation;
 new commands currently address immutable link IDs directly.
 
@@ -125,7 +125,7 @@ Request revisions are independent of link revisions. Audit insertions always run
 even alongside stale snapshots, and uses are assigned from authoritative snapshots.
 The v1 `creation` field is immutable command input, including original metadata;
 future metadata commands must add a separate current-metadata snapshot rather than
-rewrite retained creation identity. No v1 metadata command exists yet.
+rewrite retained creation identity. `update_metadata` now writes a separate optional current metadata snapshot.
 
 Migration 0004 adds nullable revision/content/identity columns, request deadlines,
 and logical audit IDs/evaluation times. NULL revisions identify legacy-owned rows;

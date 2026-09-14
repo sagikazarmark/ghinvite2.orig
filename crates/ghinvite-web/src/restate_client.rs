@@ -94,6 +94,29 @@ impl RestateClient {
         method: &str,
         input: &I,
     ) -> Result<O> {
+        self.call_inner(service, key, method, input, false).await
+    }
+
+    /// Confirm authoritative completion. Transport failures remain unknown;
+    /// only documented terminal command statuses are definitive.
+    pub async fn authoritative_call<I: Serialize, O: DeserializeOwned>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+    ) -> Result<O> {
+        self.call_inner(service, key, method, input, true).await
+    }
+
+    async fn call_inner<I: Serialize, O: DeserializeOwned>(
+        &self,
+        service: &str,
+        key: &str,
+        method: &str,
+        input: &I,
+        authoritative: bool,
+    ) -> Result<O> {
         // Same Send-bound rationale as `send` above.
         crate::wasm_compat::wasm_send(async move {
             let url = if key.is_empty() {
@@ -110,6 +133,14 @@ impl RestateClient {
                 .map_err(|e| WebError::Restate(format!("call {service}/{method}: {e}")))?;
             let status = resp.status();
             if !status.is_success() {
+                if authoritative {
+                    return Err(match status.as_u16() {
+                        400 => WebError::BadRequest("Invalid command.".into()),
+                        404 => WebError::NotFound,
+                        409 => WebError::Conflict,
+                        _ => WebError::Restate("Outcome unknown. Retry the same attempt.".into()),
+                    });
+                }
                 let body = resp.text().await.unwrap_or_default();
                 return Err(WebError::Restate(format!(
                     "call {service}/{method} -> {}: {body}",

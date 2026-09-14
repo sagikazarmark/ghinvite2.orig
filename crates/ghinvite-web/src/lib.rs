@@ -32,11 +32,12 @@ use axum::Router;
 /// over SQLite and KV respectively; tests can inject failure stores.
 ///
 /// `state` carries storage, github transport, command facade, and config.
-pub fn build_app<S>(state: AppState, session_store: S) -> Router
+pub fn build_app<S>(mut state: AppState, session_store: S) -> Router
 where
     S: tower_sessions::SessionStore + Clone + 'static,
 {
     use tower_sessions::{Expiry, SessionManagerLayer};
+    state.attempt_store = Some(std::sync::Arc::new(session_store.clone()));
 
     let session_layer = SessionManagerLayer::new(session_store)
         .with_secure(state.config.cookie_secure)
@@ -120,3 +121,4 @@ fn static_asset(content_type: &'static str, body: &'static str) -> axum::respons
     use axum::response::IntoResponse;
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
+pub mod admission;

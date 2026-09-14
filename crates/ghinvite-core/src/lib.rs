@@ -4,6 +4,7 @@
 //! (native) and `ghinvite-storage-d1` (Cloudflare Workers).
 
 pub mod account;
+pub mod admission;
 pub mod audit;
 pub mod delivery;
 pub mod github_invitation;

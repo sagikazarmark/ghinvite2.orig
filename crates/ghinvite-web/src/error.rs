@@ -8,6 +8,8 @@ pub type Result<T> = std::result::Result<T, WebError>;
 
 #[derive(Debug, Error)]
 pub enum WebError {
+    #[error("operation conflict")]
+    Conflict,
     #[error("storage error: {0}")]
     Storage(#[from] ghinvite_core::storage::Error),
 
@@ -50,6 +52,7 @@ pub enum WebError {
 impl IntoResponse for WebError {
     fn into_response(self) -> Response {
         let (status, body) = match self {
+            WebError::Conflict => (StatusCode::CONFLICT, "Operation conflict. Recover the original attempt or explicitly start a fresh attempt.".into()),
             WebError::NotFound | WebError::Forbidden => {
                 (StatusCode::NOT_FOUND, "Not Found".to_string())
             }

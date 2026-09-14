@@ -37,6 +37,8 @@ pub use crate::link_form::{LinkFormErrors, LinkFormValues};
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormPageProps {
+    #[props(default)]
+    pub action: Option<String>,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
@@ -54,7 +56,10 @@ pub struct LinkCreateFormPageProps {
 #[component]
 pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
-    let action = format!("/console/accounts/{login}/links");
+    let action = props
+        .action
+        .clone()
+        .unwrap_or_else(|| format!("/console/accounts/{login}/links"));
     let island_props = LinkFormIslandProps {
         csrf_token: try_consume_context::<crate::csrf::CsrfToken>()
             .unwrap_or_default()

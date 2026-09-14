@@ -291,7 +291,18 @@ async fn new_link_form(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let form = crate::views::links::LinkFormValues::default();
 
-    link_form_response(&admin, flash, repos, form, Utc::now())
+    let now = Utc::now();
+    if state.admission.is_some() {
+        return creation_form_response(
+            &admin,
+            flash,
+            repos,
+            form,
+            now,
+            Some(ghinvite_core::InvitationLinkId::new()),
+        );
+    }
+    link_form_response(&admin, flash, repos, form, now)
 }
 
 /// Render the new invitation link page, both fresh and re-rendered with
@@ -307,12 +318,30 @@ fn link_form_response(
     form: crate::views::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
 ) -> axum::response::Response {
+    creation_form_response(admin, flash, repos, form, now, None)
+}
+
+fn creation_form_response(
+    admin: &RequireConsoleAdminOf,
+    flash: Option<session::Flash>,
+    repos: Vec<RepositoryChoice>,
+    form: crate::views::links::LinkFormValues,
+    now: chrono::DateTime<Utc>,
+    link_id: Option<ghinvite_core::InvitationLinkId>,
+) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
+    let action = link_id.map(|id| {
+        format!(
+            "/console/accounts/{account_login}/links?link_id={id}&anchor={}",
+            now.timestamp()
+        )
+    });
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::links::LinkCreateFormPage {
+                action: action.clone(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -358,9 +387,23 @@ async fn load_installation_repos_for_form(
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
+    axum::extract::Query(identity): axum::extract::Query<CreationIdentity>,
     CsrfForm(form): CsrfForm<CreateLinkSubmission>,
 ) -> impl IntoResponse {
-    let now = Utc::now();
+    let (now, link_id) = if state.admission.is_some() {
+        let (Some(id), Some(anchor)) = (identity.link_id, identity.anchor) else {
+            return crate::WebError::BadRequest(
+                "Missing creation identity. Open a new creation form.".into(),
+            )
+            .into_response();
+        };
+        let Some(now) = chrono::DateTime::from_timestamp(anchor, 0) else {
+            return crate::WebError::BadRequest("Invalid creation time.".into()).into_response();
+        };
+        (now, Some(id))
+    } else {
+        (Utc::now(), None)
+    };
 
     // Loaded once, before validating: the validators need the available
     // repositories to resolve the repository scope, and the error path needs
@@ -370,9 +413,58 @@ async fn create_link(
     let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
         Err(errors) => {
-            return link_form_response(&admin, None, repos, form.into_view_values(*errors), now);
+            return creation_form_response(
+                &admin,
+                None,
+                repos,
+                form.into_view_values(*errors),
+                now,
+                link_id,
+            );
         }
     };
+
+    if let Some(admission) = &state.admission {
+        let id = link_id.unwrap();
+        let command = ghinvite_core::storage::projection::CreateLink {
+            version: 1,
+            link_id: id,
+            admin: admin_assertion(&admin),
+            account_id: admin.account.account_id,
+            installation_id: admin.account.installation_id,
+            description: validated.description,
+            internal_note: validated.internal_note,
+            expires_at: validated.expires_at,
+            max_uses: validated.max_uses,
+            permission: validated.permission,
+            approval_required: validated.approval_required,
+            repos: validated.repos,
+        };
+        return match admission.create(command).await {
+            Ok(_) => axum::response::Redirect::to(&format!(
+                "/console/accounts/{}/links/{id}",
+                admin.account.account_login
+            ))
+            .into_response(),
+            Err(crate::WebError::Restate(_)) => {
+                let mut errors = crate::views::links::LinkFormErrors::default();
+                errors.summary.push("Creation outcome unknown. Retry these same values or check the link detail URL before starting another link.".into());
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    creation_form_response(
+                        &admin,
+                        None,
+                        repos,
+                        form.into_view_values(errors),
+                        now,
+                        Some(id),
+                    ),
+                )
+                    .into_response()
+            }
+            Err(error) => super::invitation_v1::safe_error(error),
+        };
+    }
 
     let output = match state
         .commands
@@ -422,6 +514,12 @@ async fn create_link(
     .into_response()
 }
 
+#[derive(serde::Deserialize)]
+struct CreationIdentity {
+    link_id: Option<ghinvite_core::InvitationLinkId>,
+    anchor: Option<i64>,
+}
+
 async fn edit_link_form(
     State(state): State<AppState>,
     admin: RequireConsoleAdminOf,
@@ -430,13 +528,7 @@ async fn edit_link_form(
     let Ok(id) = id.parse() else {
         return console_not_found_response(&admin);
     };
-    let link = match find_account_admin_invitation_link(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        id,
-    )
-    .await
-    {
+    let link = match authoritative_or_projected_link(&state, &admin, id).await {
         Ok(link) => link,
         Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
         Err(error) => return error.into_response(),
@@ -462,10 +554,7 @@ async fn save_link_details(
     let Ok(id) = id.parse() else {
         return console_not_found_response(&admin);
     };
-    if let Err(error) =
-        find_account_admin_invitation_link(state.storage.as_ref(), admin.account.account_id, id)
-            .await
-    {
+    if let Err(error) = authoritative_or_projected_link(&state, &admin, id).await {
         return match error {
             crate::error::WebError::NotFound => console_not_found_response(&admin),
             _ => (
@@ -485,6 +574,16 @@ async fn save_link_details(
         Ok(metadata) => metadata,
         Err(error) => return edit_link_response(&admin, id, values, Some(error), None),
     };
+    if let Some(admission) = &state.admission {
+        return match admission.update_metadata(ghinvite_core::admission::UpdateMetadata {
+            link_id: id, admin: admin_assertion(&admin), description, internal_note,
+        }).await {
+            Ok(_) => axum::response::Redirect::to(&format!("/console/accounts/{}/links/{id}", admin.account.account_login)).into_response(),
+            Err(crate::WebError::Restate(_)) => (axum::http::StatusCode::BAD_GATEWAY,
+                edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response(),
+            Err(error) => super::invitation_v1::safe_error(error),
+        };
+    }
     if state
         .commands
         .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
@@ -561,13 +660,7 @@ async fn link_detail(
         Ok(id) => id,
         Err(_) => return console_not_found_response(&admin),
     };
-    let link = match find_account_admin_invitation_link(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        link_id,
-    )
-    .await
-    {
+    let link = match authoritative_or_projected_link(&state, &admin, link_id).await {
         Ok(link) => link,
         Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
         Err(e) => return e.into_response(),
@@ -606,6 +699,27 @@ async fn revoke_link(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
+    if let Some(admission) = &state.admission {
+        return match admission
+            .revoke(ghinvite_core::admission::AdminLinkCommand {
+                link_id,
+                admin: admin_assertion(&admin),
+            })
+            .await
+        {
+            Ok(_) => axum::response::Redirect::to(&format!(
+                "/console/accounts/{}/links/{link_id}",
+                admin.account.account_login
+            ))
+            .into_response(),
+            Err(crate::WebError::Restate(_)) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "Revocation outcome unknown. Check the link details or retry revocation.",
+            )
+                .into_response(),
+            Err(error) => super::invitation_v1::safe_error(error),
+        };
+    }
     if let Err(e) = find_account_admin_invitation_link(
         state.storage.as_ref(),
         admin.account.account_id,
@@ -908,11 +1022,49 @@ async fn authoritative_decision(
             ))
             .into_response()
         }
+        Err(
+            error @ (crate::WebError::BadRequest(_)
+            | crate::WebError::NotFound
+            | crate::WebError::Conflict),
+        ) => error.into_response(),
         Err(_) => (
             axum::http::StatusCode::BAD_GATEWAY,
             "Decision outcome could not be confirmed. Retry the same submitted form.",
         )
             .into_response(),
+    }
+}
+
+fn admin_assertion(
+    admin: &RequireConsoleAdminOf,
+) -> ghinvite_core::storage::projection::AccountAdmin {
+    ghinvite_core::storage::projection::AccountAdmin {
+        account_id: admin.account.account_id,
+        user_id: admin.session.user_id,
+    }
+}
+
+async fn authoritative_or_projected_link(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    link_id: ghinvite_core::InvitationLinkId,
+) -> crate::Result<ghinvite_core::InvitationLink> {
+    match &state.admission {
+        Some(admission) => admission
+            .link_status(ghinvite_core::admission::AdminLinkCommand {
+                link_id,
+                admin: admin_assertion(admin),
+            })
+            .await
+            .map(|s| s.as_link()),
+        None => {
+            find_account_admin_invitation_link(
+                state.storage.as_ref(),
+                admin.account.account_id,
+                link_id,
+            )
+            .await
+        }
     }
 }
 

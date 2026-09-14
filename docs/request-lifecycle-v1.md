@@ -37,7 +37,8 @@ Decision actor/time/reason update the existing SQLx/D1 request columns, with the
 same revision/conflict checks as other projected fields. Audit payloads exclude
 decline reasons. Requester status removes the reason; the web page renders only
 lifecycle state. `/i/<code>?request_id=<id>` can read an acknowledged request before
-its projected row arrives; link-code resolution still uses the link projection.
+its projected row arrives. The complete [v1 browser path](browser-admission-v1.md)
+also resolves fresh link codes and attempts directly through Restate.
 
 The workflow reads exclusive authority on startup and after any wake. A direct
 `terminal` promise carries identity/revision, never approval authority. The link

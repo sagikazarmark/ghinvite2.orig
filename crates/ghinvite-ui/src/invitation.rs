@@ -216,7 +216,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
     }
 }
 
-fn delivery_label(
+pub fn delivery_label(
     outcome: Option<&ghinvite_core::delivery::CreateOutcome>,
     stage: Option<&ghinvite_core::delivery::DispatchStage>,
     legacy: Option<ghinvite_core::InvitationState>,

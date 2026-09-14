@@ -30,74 +30,15 @@ pub use ghinvite_core::storage::projection::{
     AccountAdmin, AuditIntent, CreateLink, LinkSnapshot, ProjectionEnvelope, RequestSnapshot,
 };
 
-/// ULID parsing in the authoritative interface rejects aliases, overflow,
-/// delimiters and missing IDs; ASCII case alone is not a different identity.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(try_from = "String", into = "String")]
-pub struct AdmissionOperationId(RequestId);
-
-impl TryFrom<String> for AdmissionOperationId {
-    type Error = &'static str;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        ghinvite_core::request_lifecycle::parse_operation_id(&value).map(Self)
-    }
-}
-
-impl From<AdmissionOperationId> for String {
-    fn from(id: AdmissionOperationId) -> Self {
-        id.0.to_string()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct Admit {
-    pub version: u32,
-    pub link_id: InvitationLinkId,
-    pub operation_id: AdmissionOperationId,
-    pub requester_id: u64,
-    pub justification: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct AdmissionReceipt {
-    pub decided_at: DateTime<Utc>,
-    pub result: AdmissionResult,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AdmissionResult {
-    Accepted {
-        request_id: RequestId,
-        state: RequestState,
-        decision_deadline: Option<DateTime<Utc>>,
-    },
-    Rejected {
-        reason: Rejection,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum Rejection {
-    Revoked,
-    Expired,
-    Exhausted,
-    ExistingRequest,
-}
+pub use ghinvite_core::admission::{
+    AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, Attempt,
+    AttemptQuery, Rejection, RequesterPage, UpdateMetadata,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct OperationRecord {
     input: Admit,
     receipt: AdmissionReceipt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AdminLinkCommand {
-    pub link_id: InvitationLinkId,
-    pub admin: AccountAdmin,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -211,8 +152,48 @@ async fn send_projection(
 /// Application-wide policy; every pending request snapshots its own deadline.
 pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
 
+/// Private, immutable routing registry; never consults SQL or calls a link.
+#[restate_sdk::object]
+pub trait InvitationCodeV1 {
+    async fn register(input: Json<InvitationLinkId>) -> Result<(), TerminalError>;
+    async fn resolve(input: Json<()>) -> Result<Json<InvitationLinkId>, TerminalError>;
+}
+struct InvitationCodeV1Impl;
+impl InvitationCodeV1 for InvitationCodeV1Impl {
+    async fn register(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(id): Json<InvitationLinkId>,
+    ) -> Result<(), TerminalError> {
+        Slug::from_string(ctx.key().into()).map_err(|_| invalid())?;
+        if let Some(Json(old)) = ctx.get::<Json<InvitationLinkId>>("link").await? {
+            if old != id {
+                return Err(conflict());
+            }
+        } else {
+            ctx.set("link", Json(id));
+        }
+        Ok(())
+    }
+    async fn resolve(
+        &self,
+        ctx: ObjectContext<'_>,
+        _: Json<()>,
+    ) -> Result<Json<InvitationLinkId>, TerminalError> {
+        Slug::from_string(ctx.key().into()).map_err(|_| missing())?;
+        ctx.get("link").await?.ok_or_else(missing)
+    }
+}
+
 #[restate_sdk::object]
 pub trait InvitationLinkV1 {
+    async fn update_metadata(
+        input: Json<UpdateMetadata>,
+    ) -> Result<Json<LinkSnapshot>, TerminalError>;
+    async fn prepare_attempt(input: Json<Admit>) -> Result<Json<Attempt>, TerminalError>;
+    async fn requester_page(
+        input: Json<AttemptQuery>,
+    ) -> Result<Json<RequesterPage>, TerminalError>;
     async fn create(input: Json<CreateLink>) -> Result<Json<LinkSnapshot>, TerminalError>;
     async fn admit(input: Json<Admit>) -> Result<Json<AdmissionReceipt>, TerminalError>;
     async fn revoke(input: Json<AdminLinkCommand>) -> Result<Json<LinkSnapshot>, TerminalError>;
@@ -457,25 +438,29 @@ async fn send_terminal(
 
 #[cfg(feature = "integration")]
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Builder {
-    builder.bind_with_options(
-        InvitationLinkV1Impl {
-            faults: Some(faults),
-        }
-        .serve(),
-        ServiceOptions::new()
-            .enable_lazy_state(true)
-            .idempotency_retention(std::time::Duration::from_secs(2))
-            .journal_retention(std::time::Duration::from_secs(2)),
-    )
+    builder
+        .bind(InvitationCodeV1Impl.serve())
+        .bind_with_options(
+            InvitationLinkV1Impl {
+                faults: Some(faults),
+            }
+            .serve(),
+            ServiceOptions::new()
+                .enable_lazy_state(true)
+                .idempotency_retention(std::time::Duration::from_secs(2))
+                .journal_retention(std::time::Duration::from_secs(2)),
+        )
 }
 
 /// Explicit opt-in for the isolated command path. Lazy state is required, not
 /// an optimization: retained operation/request history must never load eagerly.
 pub fn bind(builder: Builder) -> Builder {
-    builder.bind_with_options(
-        InvitationLinkV1Impl::default().serve(),
-        ServiceOptions::new().enable_lazy_state(true),
-    )
+    builder
+        .bind(InvitationCodeV1Impl.serve())
+        .bind_with_options(
+            InvitationLinkV1Impl::default().serve(),
+            ServiceOptions::new().enable_lazy_state(true),
+        )
 }
 
 fn invalid() -> TerminalError {
@@ -554,6 +539,197 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
 }
 
 impl InvitationLinkV1 for InvitationLinkV1Impl {
+    async fn update_metadata(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(mut input): Json<UpdateMetadata>,
+    ) -> Result<Json<LinkSnapshot>, TerminalError> {
+        validate_key(&ctx, input.link_id)?;
+        let Json(mut link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        validate_admin(&input.admin, link.creation.account_id)?;
+        input.description = input.description.trim().into();
+        input.internal_note = input
+            .internal_note
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if input.description.is_empty()
+            || input.description.chars().count() > 120
+            || input.description.contains(['\r', '\n'])
+            || input
+                .internal_note
+                .as_ref()
+                .is_some_and(|s| s.len() > 16_384)
+        {
+            return Err(invalid());
+        }
+        if link.description() == input.description
+            && link.internal_note() == input.internal_note.as_deref()
+        {
+            return Ok(Json(link));
+        }
+        link.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
+            description: input.description,
+            internal_note: input.internal_note,
+        });
+        link.revision += 1;
+        let Json(event) = ctx
+            .run(|| async {
+                let mut event = audit(
+                    EventType::InvitationLinkMetadataUpdated,
+                    link.link_id,
+                    Some(input.admin.user_id),
+                    self.now(),
+                );
+                event.event_id = format!("v1/link/{}/metadata/{}", link.link_id, link.revision);
+                Ok::<_, HandlerError>(Json(event))
+            })
+            .name("metadata_event_v1")
+            .await?;
+        ctx.set("v1/link", Json(link.clone()));
+        send_projection(&ctx, projection(&link, vec![], vec![event])).await?;
+        Ok(Json(link))
+    }
+    async fn prepare_attempt(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(mut input): Json<Admit>,
+    ) -> Result<Json<Attempt>, TerminalError> {
+        validate_key(&ctx, input.link_id)?;
+        input.normalize();
+        if input.requester_id == 0
+            || input.version != 1
+            || input
+                .justification
+                .as_ref()
+                .is_some_and(|s| s.len() > 16_384)
+        {
+            return Err(invalid());
+        }
+        ctx.get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let id = String::from(input.operation_id.clone());
+        if let Some(Json(old)) = ctx
+            .get::<Json<OperationRecord>>(&format!("v1/op/{id}"))
+            .await?
+        {
+            if old.input != input {
+                return Err(conflict());
+            }
+            return Ok(Json(Attempt {
+                input,
+                receipt: Some(old.receipt),
+            }));
+        }
+        let key = format!("v1/attempt/{id}");
+        if let Some(Json(old)) = ctx.get::<Json<Admit>>(&key).await? {
+            if old != input {
+                return Err(conflict());
+            }
+        } else {
+            ctx.set(&key, Json(input.clone()));
+            ctx.set(
+                &format!("v1/latest-attempt/{}", input.requester_id),
+                Json(input.operation_id.clone()),
+            );
+        }
+        Ok(Json(Attempt {
+            input,
+            receipt: None,
+        }))
+    }
+
+    async fn requester_page(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(query): Json<AttemptQuery>,
+    ) -> Result<Json<RequesterPage>, TerminalError> {
+        validate_key(&ctx, query.link_id)?;
+        if query.requester_id == 0 {
+            return Err(missing());
+        }
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        let explicit = query.operation_id.is_some();
+        let operation_id = match query.operation_id {
+            Some(id) => Some(id),
+            None => ctx
+                .get::<Json<AdmissionOperationId>>(&format!(
+                    "v1/latest-attempt/{}",
+                    query.requester_id
+                ))
+                .await?
+                .map(|v| v.0),
+        };
+        let mut attempt = None;
+        if let Some(id) = operation_id {
+            let id = String::from(id);
+            if let Some(Json(old)) = ctx
+                .get::<Json<OperationRecord>>(&format!("v1/op/{id}"))
+                .await?
+            {
+                attempt = Some(Attempt {
+                    input: old.input,
+                    receipt: Some(old.receipt),
+                });
+            } else if let Some(Json(input)) =
+                ctx.get::<Json<Admit>>(&format!("v1/attempt/{id}")).await?
+            {
+                attempt = Some(Attempt {
+                    input,
+                    receipt: None,
+                });
+            }
+            if attempt
+                .as_ref()
+                .is_some_and(|a| a.input.requester_id != query.requester_id)
+                || (explicit && attempt.is_none())
+            {
+                return Err(missing());
+            }
+        }
+        let request_id = match attempt
+            .as_ref()
+            .and_then(|a| a.receipt.as_ref())
+            .map(|r| &r.result)
+        {
+            Some(AdmissionResult::Accepted { request_id, .. }) => Some(*request_id),
+            _ => ctx
+                .get::<Json<RequestId>>(&format!("v1/blocker/{}", query.requester_id))
+                .await?
+                .map(|v| v.0),
+        };
+        let request = if let Some(id) = request_id {
+            let Json(request) = ctx
+                .get::<Json<RequestSnapshot>>(&format!("v1/request/{id}"))
+                .await?
+                .ok_or_else(missing)?;
+            if request.requester_id != query.requester_id {
+                return Err(missing());
+            }
+            let mut request = self.transition(&ctx, request, None).await?;
+            if let Some(decision) = &mut request.decision {
+                decision.decline_reason = None;
+            }
+            Some(request)
+        } else {
+            None
+        };
+        Ok(Json(RequesterPage {
+            link_id: link.link_id,
+            invitation_code: link.invitation_code,
+            repos: link.creation.repos,
+            permission: link.creation.permission,
+            approval_required: link.creation.approval_required,
+            attempt,
+            request,
+        }))
+    }
     async fn delivery_progress(
         &self,
         ctx: ObjectContext<'_>,
@@ -837,6 +1013,17 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             return Ok(Json(previous.receipt));
         }
         // A retained identity must reach comparison even with a future version.
+        if let Some(Json(prepared)) = ctx
+            .get::<Json<Admit>>(&format!(
+                "v1/attempt/{}",
+                String::from(input.operation_id.clone())
+            ))
+            .await?
+        {
+            if prepared != input {
+                return Err(conflict());
+            }
+        }
         if input.version != 1 {
             return Err(invalid());
         }
@@ -1018,6 +1205,10 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             self.checkpoint(&ctx, "after-blocker").await?;
         }
         ctx.set(&operation_key, Json(decision.operation.clone()));
+        ctx.set(
+            &format!("v1/latest-attempt/{}", input.requester_id),
+            Json(input.operation_id.clone()),
+        );
         self.checkpoint(&ctx, "after-outcome").await?;
         if let Some(envelope) = decision.projection {
             send_projection(&ctx, envelope).await?;
@@ -1207,6 +1398,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     return Err(HandlerError::from(invalid()));
                 }
                 Ok::<_, HandlerError>(Json(LinkSnapshot {
+                    metadata: None,
                     link_id: input.link_id,
                     creation: input.clone(),
                     invitation_code: Slug::generate(&mut rand::rngs::OsRng).as_str().into(),
@@ -1221,6 +1413,12 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .await?;
         ctx.set("v1/link", Json(link.clone()));
         ctx.set("v1/creation", Json(link.clone()));
+        // Complete routing before acknowledging creation; this registry never
+        // calls the link, avoiding an exclusive-object cycle.
+        ctx.object_client::<InvitationCodeV1Client>(&link.invitation_code)
+            .register(Json(link.link_id))
+            .call()
+            .await?;
         send_projection(
             &ctx,
             projection(

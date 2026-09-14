@@ -622,6 +622,107 @@ async fn authoritative_admission_contract() {
         let created = runtime.ok(id, "create", &input).await;
         assert_eq!(created["link_id"], id);
         assert_eq!(created["uses"], 0);
+        // Browser command facade resolves fresh links without SQL and recovers
+        // normalized input after navigation, even while projection is offline.
+        use ghinvite_web::admission::RestateAdmission;
+        let browser = RestateAdmission::new(Arc::new(
+            ghinvite_web::RestateClient::new(&runtime.ingress).unwrap(),
+        ));
+        let code = created["invitation_code"].as_str().unwrap();
+        let page = browser.lookup(code, 501, None).await.unwrap();
+        assert_eq!(page.link_id.to_string(), id);
+        assert!(page.attempt.is_none());
+        let operation = ghinvite_core::RequestId::new().to_string();
+        let command = browser
+            .command(page.link_id, &operation, 501, Some("  access  ".into()))
+            .unwrap();
+        browser.prepare(command.clone()).await.unwrap();
+        let recovered = browser
+            .lookup(code, 501, None)
+            .await
+            .unwrap()
+            .attempt
+            .unwrap();
+        assert_eq!(recovered.input.justification.as_deref(), Some("access"));
+        assert!(recovered.receipt.is_none());
+        assert!(browser.lookup(code, 502, Some(&operation)).await.is_err());
+        let metadata_input = creation();
+        let metadata_link = browser
+            .create(serde_json::from_value(metadata_input.clone()).unwrap())
+            .await
+            .unwrap();
+        let metadata = ghinvite_core::admission::UpdateMetadata {
+            link_id: metadata_link.link_id,
+            admin: serde_json::from_value(input["admin"].clone()).unwrap(),
+            description: "Updated workshop".into(),
+            internal_note: Some("Still private".into()),
+        };
+        let updated = browser.update_metadata(metadata).await.unwrap();
+        assert_eq!(
+            updated.metadata.as_ref().unwrap().description,
+            "Updated workshop"
+        );
+        assert_eq!(updated.creation.description, "Workshop");
+        let retry_input = creation();
+        let retry_link = browser
+            .create(serde_json::from_value(retry_input.clone()).unwrap())
+            .await
+            .unwrap();
+        let retry_operation = ghinvite_core::RequestId::new().to_string();
+        let retry = browser
+            .command(retry_link.link_id, &retry_operation, 601, None)
+            .unwrap();
+        browser.prepare(retry.clone()).await.unwrap();
+        // Discard the first acknowledgement, then navigate back after revoke.
+        let accepted = browser.admit(retry.clone()).await.unwrap();
+        browser
+            .revoke(ghinvite_core::admission::AdminLinkCommand {
+                link_id: retry_link.link_id,
+                admin: retry_link.creation.admin.clone(),
+            })
+            .await
+            .unwrap();
+        let mut normalized_retry = retry.clone();
+        normalized_retry.justification = Some(" \t\n ".into());
+        assert_eq!(browser.admit(normalized_retry).await.unwrap(), accepted);
+        let recovered = browser
+            .lookup(&retry_link.invitation_code, 601, None)
+            .await
+            .unwrap();
+        assert_eq!(recovered.attempt.unwrap().receipt.unwrap(), accepted);
+        let changed = browser
+            .command(
+                retry_link.link_id,
+                &retry_operation,
+                601,
+                Some("edited".into()),
+            )
+            .unwrap();
+        assert!(matches!(
+            browser.admit(changed).await,
+            Err(ghinvite_web::WebError::Conflict)
+        ));
+        let foreign = browser
+            .command(retry_link.link_id, &retry_operation, 602, None)
+            .unwrap();
+        assert!(matches!(
+            browser.admit(foreign).await,
+            Err(ghinvite_web::WebError::Conflict)
+        ));
+        let second_tab = browser
+            .command(
+                retry_link.link_id,
+                &ghinvite_core::RequestId::new().to_string(),
+                601,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            browser.admit(second_tab).await.unwrap().result,
+            ghinvite_core::admission::AdmissionResult::Rejected {
+                reason: ghinvite_core::admission::Rejection::Revoked
+            }
+        ));
         assert_eq!(created, runtime.ok(id, "create", &input).await);
         let mut changed = input.clone();
         changed["max_uses"] = json!(2);
@@ -728,7 +829,18 @@ async fn authoritative_admission_contract() {
             loop {
                 let ready = {
                     let received = runtime.received.lock().unwrap();
-                    received.projections.len() == 3 && received.workflows.len() == 1
+                    received
+                        .projections
+                        .iter()
+                        .filter(|p| p.link.link_id.to_string() == id)
+                        .count()
+                        == 3
+                        && received
+                            .workflows
+                            .iter()
+                            .filter(|w| w.request.link_id.to_string() == id)
+                            .count()
+                            == 1
                 };
                 if ready {
                     break;
@@ -740,7 +852,11 @@ async fn authoritative_admission_contract() {
         .expect("durable consumers did not receive creation/admission/revoke");
         {
             let received = runtime.received.lock().unwrap();
-            let workflow = &received.workflows[0];
+            let workflow = received
+                .workflows
+                .iter()
+                .find(|w| w.request.link_id.to_string() == id)
+                .unwrap();
             assert_eq!(workflow.version, 1);
             assert_eq!(
                 workflow.request.request_id.to_string(),
@@ -757,6 +873,7 @@ async fn authoritative_admission_contract() {
             let events: Vec<_> = received
                 .projections
                 .iter()
+                .filter(|p| p.link.link_id.to_string() == id)
                 .flat_map(|e| e.events.iter())
                 .collect();
             for kind in [

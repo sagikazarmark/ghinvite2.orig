@@ -22,6 +22,88 @@ use tower::ServiceExt;
 mod common;
 
 #[tokio::test]
+async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let ingress = MockServer::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    let snapshot = serde_json::json!({"link_id": id, "creation": {
+        "version": 1, "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
+        "installation_id": 1, "description": "Original", "internal_note": null, "expires_at": null,
+        "max_uses": null, "permission": "pull", "approval_required": true,
+        "repos": [{"repo_id": 1, "repo_full_name": "octocat/api"}]},
+        "metadata": {"description": "Authoritative details", "internal_note": null},
+        "invitation_code": "abcdEFGH01234567", "created_at": "2026-09-14T12:00:00Z",
+        "uses": 0, "revision": 2, "revoked_at": null, "revoked_by": null});
+    for method in ["link_status", "update_metadata", "revoke"] {
+        Mock::given(path(format!("/InvitationLinkV1/{id}/{method}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(snapshot.clone()))
+            .mount(&ingress)
+            .await;
+    }
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    storage
+        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .await
+        .unwrap();
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/console/accounts/octocat/links/{id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response_html(response)
+            .await
+            .contains("Authoritative details")
+    );
+    for action in ["edit", "revoke"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/console/accounts/octocat/links/{id}/{action}"))
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={csrf}&description=Changed&account_id=666&user_id=666"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+    for request in ingress.received_requests().await.unwrap() {
+        assert!(!request.url.path().ends_with("/send"));
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(
+            body["admin"],
+            serde_json::json!({"account_id": 42, "user_id": 42})
+        );
+    }
+}
+
+#[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
     use ghinvite_core::storage::projection::RequestSnapshot;
