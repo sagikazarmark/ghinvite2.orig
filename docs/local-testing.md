@@ -274,6 +274,22 @@ request bodies to ensure unrelated history is not eagerly transferred. It
 does not test production lifecycle timers, cancellation authorization, or
 lifecycle projection/audit.
 
+The deadline extension in `tests/admission_protocol_proof/deadlines.rs` adds
+controlled-clock before/equal/after arbitration, interrupted timely decisions,
+combined expiry/readmission and expiry/rejection recovery, status-triggered
+expiry, auto-approval, and real durable timer races/delayed startup. It remains
+a test-only fixed-requester model; production notifications, cancellation
+permissions, full lifecycle projections, and Worker/D1 are not covered.
+
+`tests/admission_protocol_proof/notifications.rs` tests direct workflow promises
+before startup, while waiting, across interrupted resolution, and after actual
+two-second workflow retention cleanup. The proof runner sets the disposable
+runtime's cleanup scan to one second (`RESTATE_PROOF_CLEANUP_INTERVAL`); ordinary
+smoke/dev runs retain the default hourly scan. Late notifications may recreate
+promise state but must not start the workflow. This is standalone notification
+evidence; authoritative link validation, dispatch checkpoints, and orphan-state
+cleanup are still production integration work.
+
 The miniature SQL schema and handlers are protocol evidence, not production
 admission implementation or D1/Worker conformance. See
 [ADR 0003](adr/0003-restate-authoritative-admission.md) for results and remaining

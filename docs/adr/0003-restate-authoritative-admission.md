@@ -92,11 +92,11 @@ Keep all authoritative keys in the **same link-ID object**, but separate growing
 | `v1/request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
 | `v1/blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
 
-Use canonical typed identifiers and versioned encoding, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the production proposal below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation. These precise identity/retention choices remain proposed for confirmation.
+Use canonical typed identifiers and versioned encoding, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the approved production contract below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation.
 
-### Proposed operation identity and retention contract
+### Approved operation identity and retention contract
 
-The following completes the engineering recommendation for identity and retention. Same-input replay, changed-input conflict, remembered rejections, and stable outcomes after expiry/revocation are already approved. The precise scope, encoding, ID separation, and no-expiry policy below are proposed for maintainer confirmation; they are not additional runtime results.
+The maintainer [approved the identity/retention and deadline defaults](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5667650036) after reviewing the explicit recommendation list. Link-scoped operation identity, separate request identity, and no automatic outcome expiry are accepted; unimplemented normalization, privacy, and retention-expiry verification remain proof obligations.
 
 **Identity is `(invitation_link_id, admission_operation_id)`.** Use a strictly parsed ULID for the operation ID, generated before the first submission and encoded canonically for the object-state key. Parsing different textual representations of the same ULID must resolve to the same identity. Within a link, requester identity belongs to the bound input, not to a separate operation namespace. Thus reusing an operation ID for another requester cannot create a second request under the same scoped identity. Reusing the raw ID under a different link is a distinct operation; there is no global operation-ID registry.
 
@@ -115,7 +115,7 @@ Keep this canonical value in the operation record initially, rather than dependi
 
 Authenticate and authorize access to the command/result before returning any stored outcome. An operation ID is not a credential. For the same link/ID under a different authenticated requester, do not disclose the previous request, outcome, justification, or requester identity; return only the permitted generic conflict/not-found response after the existing access checks. Approval-policy changes are not retry payload changes: guardrails are immutable link state and admission outcomes preserve the policy used at acceptance.
 
-Malformed/missing operation IDs and invalid command structure are validation failures before admission and consume no use. Do not silently replace a malformed ID. A failure before a valid authoritative decision does not create a business outcome record. Once a valid command is decided, both acceptance and eligibility rejection bind its input and identity permanently under the proposed retention policy.
+Malformed/missing operation IDs and invalid command structure are validation failures before admission and consume no use. Do not silently replace a malformed ID. A failure before a valid authoritative decision does not create a business outcome record. Once a valid command is decided, both acceptance and eligibility rejection bind its input and identity under the approved no-automatic-expiry policy.
 
 #### Browser and transport behavior
 
@@ -127,7 +127,7 @@ Use the link object's application-level outcome lookup for business replay. Do n
 
 #### Retention and cleanup
 
-**Proposed initial policy: no automatic expiry of authoritative admission outcomes**, including rejected outcomes. Link expiration/revocation, request completion, session expiry, database projection success, and completed-workflow/invocation journal cleanup do not remove them. An authenticated replay returns the original admission outcome, not the current request state, and never starts a completed workflow again simply because its runtime retention elapsed.
+**Initial policy: no automatic expiry of authoritative admission outcomes**, including rejected outcomes. Link expiration/revocation, request completion, session expiry, database projection success, and completed-workflow/invocation journal cleanup do not remove them. An authenticated replay returns the original admission outcome, not the current request state, and never starts a completed workflow again simply because its runtime retention elapsed.
 
 Keep the minimal replay record: canonical input/version, outcome/reason, admission decision time, and accepted request ID/deadline/policy result where relevant. Delivery bookkeeping and historical request payloads have separate retention needs; projection completion is not permission to discard replay identity. A database copy does not become the admission authority if the Restate record is missing. A restored or unexpectedly missing authoritative state must enter the defined recovery path, not silently bootstrap a fresh attempt from a lagging projection.
 
@@ -135,7 +135,7 @@ This policy deliberately accumulates state. Lazy lookup bounds normal access, no
 
 #### Examples and verification still needed
 
-| Attempt | Required result under this proposal |
+| Attempt | Required result |
 |---|---|
 | Same link/ID/requester; `" access "` followed by `"access"` | Same canonical input; return the recorded outcome. |
 | Same link/ID/requester; absent followed by whitespace-only justification | Same canonical input. |
@@ -154,9 +154,9 @@ A normal new admission performs direct reads of operation, link, and requester b
 
 This is bounded **per-command access and payload**, subject to input/repository-scope limits, not bounded total storage. One operation record per retained attempt and one request record per admitted request still accumulate. Preserve outcomes without automatic deletion until retention/replay semantics are approved. Approved blockers remain while they confer repeat suppression. Capacity measurement, key/value limits, and retention remain production work; do not use an unbounded serialized map as a shortcut.
 
-### Proposed deadline arbitration and overdue-request contract
+### Approved deadline arbitration and overdue-request contract
 
-Independent request deadlines are approved. The duration, deadline-edge ordering, and overdue materialization rules below are concrete recommendations for confirmation; committing this ADR does not by itself approve them.
+The maintainer approved the seven-day initial lifetime, processing-time deadline arbitration, overdue expiry on fresh admission and authoritative status, and auto-approval within admission with no pending deadline. The approval is linked above. Cancellation permissions and recovery/migration details remain open; approval of behavior does not assert runtime verification.
 
 **Initial lifetime: seven days for newly admitted manual-approval requests**, expressed as an application-wide policy value rather than a per-link editable guardrail. Snapshot `decision_deadline = admitted_at + pending_lifetime` in each accepted pending request. Existing requests keep their recorded deadline when the policy changes. Test fixtures may use short lifetimes. Do not infer this deadline from current link expiration or a workflow's start/restart time. Migration must explicitly assign deadlines to historical pending requests rather than silently recomputing them on read.
 
@@ -170,7 +170,7 @@ This deliberately accepts processing-time semantics: a command submitted before 
 - Prefer a short link command for the decision, followed by a durable one-way notification to the request workflow. A forwarding workflow handler may call the link object, but the link handler must never wait for that workflow's completion or callback. This prevents a circular wait and keeps SQL projection out of the critical path.
 - A timer, admin command, or new admission may discover that a pending request is overdue. They all use the same transition logic and stable request-expiration event identity. Exactly one logical pending-to-expired transition releases its blocker; late notifications are harmless.
 - A terminal request is never overwritten by a late decision or timer. Return its authoritative current state, distinguishing an already-completed matching decision from an incompatible action. Precise lifecycle operation identity/payload-conflict semantics remain part of the lifecycle command interface; admission-operation receipts alone do not solve decision replay.
-- GitHub dispatch is authorized only by the recorded approved request transition. Auto-approval should be recorded as approved during admission, with no pending deadline or timer; this is the proposed representation, not a change already made to production handlers.
+- GitHub dispatch is authorized only by the recorded approved request transition. Record auto-approval as approved during admission, with no pending deadline or timer. This accepted representation is not yet implemented in production handlers.
 
 #### Late timers and fresh admission
 
@@ -180,7 +180,7 @@ Expiration does not refund the old use. Evaluate new admission against the curre
 
 **Recorded admission replay remains first.** Replaying an existing accepted or rejected operation returns its original outcome without opportunistically creating a new request or re-running its admission eligibility. It is not the overdue-cleanup trigger; a fresh operation, timer, or lifecycle/status command performs that work.
 
-For an immediate authoritative status query, recommend using the same short exclusive expiration check before returning a still-pending request. This keeps the displayed actionable state consistent with the deadline. Such a handler can materialize expiry and durably arrange notifications/projection; it is not a shared read-only handler. Database-backed lists may temporarily show an overdue pending row, but commands always enforce the deadline. Whether to adopt this status-query behavior needs confirmation alongside the existing exclusive-read interface.
+For an immediate authoritative status query, use the same short exclusive expiration check before returning a still-pending request. This keeps the displayed actionable state consistent with the deadline. Such a handler can materialize expiry and durably arrange notifications/projection; it is not a shared read-only handler. Database-backed lists may temporarily show an overdue pending row, but commands always enforce the deadline.
 
 #### Timer scheduling and timestamps
 
@@ -192,7 +192,7 @@ Cancellation eligibility and actors remain a separate product question. Recommen
 
 #### Deadline examples and required proof
 
-| Ordering | Proposed result |
+| Ordering | Required result |
 |---|---|
 | Approval is evaluated just before the deadline and durably decided; execution resumes afterward | Complete approval and its original timestamp; the timer cannot overturn it. |
 | Admin clicks before the deadline, but the link evaluates the command at/after it | Expire the pending request and report that approval/decline was too late. |
@@ -250,17 +250,87 @@ Restate durably retains unfinished execution, but its journal is not automatical
 
 ## Concrete questions to resolve before implementation
 
+### Proposed production projection interface
+
+Use a separate ordinary Restate service with one internal `apply_transition(envelope)` command. The link object sends to it durably and does not await completion. The service may process different envelopes concurrently; correctness comes from conditional database writes and stable identities, not assumed delivery order. A keyed projector is unnecessary initially unless measured database contention warrants serialization. This is the concrete implementation recommendation, not an additional verified production adapter.
+
+Each versioned envelope contains:
+
+- schema version and a stable transition ID generated/recorded with the authoritative decision;
+- account/link identity and a full current link snapshot with its monotonic revision;
+- a bounded list of touched request snapshots, each with immutable creation facts, current state, absolute deadline, and its own revision;
+- immutable audit events with stable event IDs, actor/target, safe event-specific metadata, and effective/evaluation timestamps as defined above;
+- the immutable parent/relationship facts needed to make these writes valid, or explicit prerequisite identities for durable dependency resolution.
+
+Admission normally touches one request; overdue expiry plus readmission touches at most the old and new requests. A rejection without lifecycle effects need not create a projected request. Never include all operation/request history in an envelope. Operation receipts stay authoritative in the link object; projecting copies is optional and must not gate replay.
+
+For each mutable row, insert if absent, replace only when the incoming revision is greater, and treat equal revision with equal content as replay. Equal revision with different authoritative content or an immutable identity/account mismatch is an invariant failure to repair, not an ignorable duplicate. Lower revision snapshots cannot undo newer state. Request state and link state use separate revision comparisons: receiving a newer link snapshot must not suppress a still-needed request snapshot from an older envelope.
+
+Always attempt all immutable audit insertions independently of snapshot freshness. The same event ID with identical content is replay; different content conflicts. Derive exhaustion identity from the logical link exhaustion transition and expiration identity from the exact request expiration transition, not whichever invocation happens to publish them. This prevents old snapshots arriving late from losing historical events.
+
+Apply one envelope's related writes in a SQLx transaction or a fixed D1 batch where practical. Encode conditional writes so a stale/equal snapshot does not block missing event insertion. Validate conflicts inside the atomic application rather than relying on a post-commit row count to roll back. Actual D1 verification is deferred, so the concrete portable statements remain an implementation task.
+
+Parent records require special care: the projector cannot assume an installation/user/link row from another execution has already arrived. Envelopes can create immutable relationship stubs using only verified identity facts; they must not overwrite newer user profiles, installation status, or account authority with admission-time snapshots. Alternatively, resolve prerequisite projection through a separate durable call in the projector. Choose the exact schema/stub strategy during migration design. Waiting for prerequisites is acceptable in projection, never in the authoritative link command, and must not introduce a dependency cycle.
+
+Keep retryable storage failure retryable, including ambiguous acknowledgement loss. Invariant/encoding failures retain inspectable failed work for repair and redrive; do not acknowledge projection success and drop the envelope. Operational inspection should correlate transition ID, target identity, and retry status without logging private request payloads. Runtime journal retention is not a replacement for a projection rebuild plan after independent database loss.
+
+### Selected workflow notification protocol: direct promises
+
+The native notification experiment below resolves the earlier mailbox question: **use direct workflow promises initially; do not introduce a separate mailbox object.** Restate 1.7.9 accepts a shared-handler promise resolution before workflow startup, and the later run consumes that fact. A waiting workflow also receives it, and interrupted resolution recovers. Retention cleanup removes the promise, but a late shared-handler notification is still callable and does not start the run handler. The authoritative terminal record already lives in the link object and supplies long-lived recovery truth.
+
+The production protocol is:
+
+1. The link durably sends stable request-workflow startup during admission. A terminal transition durably sends a notification to that workflow's shared handler, without awaiting workflow completion. These sends may execute in either order.
+2. The notification is a wake-up carrying request/link identity and immutable decision identity/revision. The shared handler resolves one named terminal promise. Repeated identical facts are accepted; a different fact is not permission to change the request's state.
+3. At startup, the workflow reads authoritative request status from the link. If terminal, it proceeds directly; if pending, it waits on the promise or deadline. A terminal transition between that read and the wait is retained by the promise.
+4. After notification or timer wake-up, obtain/validate the authoritative terminal fact from the link before dispatch. A timer can ask the link to materialize expiry; a notification never decides approval. Only approved authoritative state permits GitHub dispatch.
+5. Retain admission outcomes and lifecycle/dispatch checkpoints in link-owned state. Replaying admission never restarts its workflow. Explicit post-retention workflow redrive must consult those checkpoints before external effects; automatic run re-creation is not a supported replay mechanism.
+
+The proof uses `peek_promise` to compare identical/conflicting terminal facts. This is **not an atomic compare-and-set across concurrent shared handlers**. Production correctness depends on the link emitting only one immutable terminal decision, private/trusted notification ingress, and the workflow verifying authority. Do not claim the proof's sequential conflicting-payload test establishes concurrent arbitrary-writer conflict handling.
+
+A late notification after workflow cleanup can recreate orphaned promise state. It does not resurrect the run handler in the tested runtime, but cleanup of that orphan state needs a retention/operations policy. A link-owned consumed/dispatch checkpoint can suppress deliberate redelivery; its exact atomic update and recovery protocol remains part of lifecycle implementation. Errors or absent promises after cleanup are not evidence that the authoritative decision disappeared.
+
+The following mailbox design is retained only as a considered alternative, superseded as the initial recommendation by the direct-promise evidence. Revisit it if a concrete delivery or cleanup requirement cannot be met with link-owned checkpoints and direct signals.
+
+#### Considered alternative: request-keyed mailbox
+
+The link object owns terminal request decisions; the workflow consumes them to stop waiting or dispatch GitHub invitations. A notification contains the exact request/link IDs, terminal state, request revision, decision identity/time, and required immutable workflow context. It is a durable fact, not another instruction to decide approval. Only the authoritative link path may emit it.
+
+Startup and a terminal notification can race: auto-approval occurs during admission, a timer may run late, or an admin may decide before workflow startup completes. A direct call to an unstarted or retention-expired workflow promise must not be assumed reliable without proof.
+
+The alternative transport is a small request-ID-keyed result mailbox Virtual Object, holding only the immutable terminal result and at most the current workflow waiter registration. This is delivery state, not a second admission/lifecycle authority. It has no use counter, requester blocker, or permission to decide transitions.
+
+1. The link durably sends workflow startup and, when terminal, `publish(result)` to the mailbox. These sends may execute in either order. The link waits only for durable dispatch identities.
+2. The workflow creates a durable awakeable and calls `subscribe(waiter_id)` on its mailbox before waiting. The short exclusive mailbox handler either records the waiter or returns the already-published result immediately. Never hold mailbox exclusivity while waiting for a result or for the workflow to finish.
+3. `publish` records the terminal result and resolves any registered waiter using durable context operations. Same result/decision identity is replay; a different terminal result for the same request is an invariant conflict. A resumed publish must complete an unfinished waiter resolution even if result state was already written.
+4. The workflow races its notification wait against its deadline wake-up. If the timer wins, it asks the link to evaluate expiration and consumes that authoritative result, which may already be approved. If a notification wins, it consumes the terminal fact. Neither path invents a terminal state based on polling order.
+5. Only an approved fact authorizes downstream dispatch. Persist stable dispatch identities and completion evidence so ordinary replay cannot repeat logical dispatch. Admission replay returns its receipt and does not launch another workflow.
+
+Retain the terminal mailbox result independently of completed-workflow retention initially. This lets a late duplicate notification be answered without resurrecting a completed workflow. An already-completed workflow is not automatically restarted by mailbox publication. Registration cleanup, stale/unavailable awakeable resolution, mailbox state retention, and administrative recovery must be specified and tested. In particular, late resolution failure must not replace or discard the terminal fact; use the durable result read on recovery. A workflow recreated after retention requires an explicit redrive protocol and dispatch checkpoint check, not automatic re-execution of GitHub work.
+
+This adds one small durable delivery module per request. Direct promise evidence now removes the assumed need for an extra startup mailbox. The mailbox itself has not been implemented or verified; it would introduce waiter-resolution and cleanup obligations in addition to authoritative link records. The selected direct approach still requires production link-status/dispatch-checkpoint integration, beyond the standalone promise proof.
+
+### Cancellation scope recommendation
+
+[`RequestState::Cancelled`](../../crates/ghinvite-core/src/invitation_request.rs) is currently reserved and has no v1 request-cancellation command. Its comment and the historical v1 spec describe future cascading link revocation; that assumption is superseded by the approved rule that link revocation does not change existing requests. GitHub invitation cancellation is a separate existing lifecycle and does not cancel an approved invitation request or refund its use.
+
+**Recommend deferring new request-cancellation UI/permissions from this admission work.** Preserve cancelled records and their retry eligibility during migration, reads, and state-machine tests, but do not invent a caller able to produce cancellation. Approval/decline remain account-admin decisions; decline already closes pending work from that role. This is a scope recommendation for confirmation, not approval of requester or admin cancellation rights.
+
+If request withdrawal is wanted now, decide explicitly whether the requester, an account admin, or both may cancel a pending request. Then define audit actor/reason visibility and command replay. The recommended state rule is pending-only cancellation before its deadline, expiry at/after the deadline, no use refund, and no cascade to an approved request/GitHub invitation. Administrative Restate cancellation/kill remains operational recovery and is not a domain cancellation command.
+
+## Remaining implementation decisions
+
 **Sequencing update (2026-09-14):** The maintainer [deferred actual Worker/D1 verification](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5667489260) for now. Continue contract and lifecycle design using the recorded native evidence. Worker clock/endpoint and D1 adapter verification remain explicit follow-ups; native request-response/SQLx success does not satisfy them. This deferral does not establish production readiness or by itself close #48.
 
 | Question | Proposed next step / approval needed |
 |---|---|
 | What are the production capacity limits and retention policy? | Lazy split-key state and exclusive coherent reads passed the focused proof. Verify actual runtime/Cloud key/value limits, input/scope bounds, storage growth, and Worker round-trip cost before rollout. |
 | Does decision-time sampling work on the actual Worker target? | The clock is sampled inside the complete decision closure; before/after-decision expiration recovery passed natively in request-response mode. Verify Wasm clock behavior and the actual Worker endpoint. |
-| Confirm the proposed operation identity/retention contract? | Link-scoped operation IDs, requester bound in canonical input, separate server-generated request IDs, and no automatic outcome expiry are specified above. Confirm these choices and implement normalization/privacy/cross-link/retention-expiry verification. |
-| Confirm lifetime and timely-decision semantics? | Proposed: initial application-wide seven-day lifetime, snapshotted per request; authoritative evaluation strictly before the deadline, with equality expiring. Before-deadline clicks queued past it lose. Verify transition/timer races. |
-| Confirm overdue materialization on admission/status? | Proposed: fresh admission and exclusive authoritative status can expire one directly addressed overdue request without waiting for its timer. Journal expiry plus new admission/rejection together; replay of an existing receipt remains side-effect-free. |
-| How are auto-approval and cancellation represented? | Proposed: auto-approval in admission with no pending timer. Define cancellation actors/allowed states; recommended overdue precedence is expiry. Existing terminology does not itself implement a cancellation command. |
-| Service or keyed object for projection; snapshots or ordered deltas? | Choose the smallest protocol that handles reordered writes, missing parents, and audit completeness. Verify on actual SQLx and D1 execution paths. |
+| What identity/retention verification remains? | The contract is approved. Implement normalization/privacy/cross-link/retention-expiry verification; the current proof deliberately reuses operation/request IDs. |
+| What deadline implementation verification remains? | Lifetime/arbitration and overdue materialization are approved; narrow native checks passed below. Verify production workflow notifications, configuration/migration, revoked/expired-link readmission, and lifecycle operation replay. |
+| Confirm cancellation scope? | Recommend retaining cancelled-state semantics while deferring a new cancellation command/UI. If withdrawal is required now, choose actors and audit visibility explicitly. |
+| Finalize projection envelope and prerequisites? | Recommend an ordinary service with per-record versioned snapshots plus immutable audit events. Settle parent-row schema/dependency strategy and verify portable conditional writes. |
+| What notification integration remains? | Direct promises were selected after native early/late/interrupted delivery proof. Implement authoritative status verification, trusted ingress, dispatch/consumption checkpoints, and orphan-promise cleanup/redrive policy. |
 | How do authoritative status reads work during projection lag? | Specify authorization, lookup by link/request identity, and post-command SSR navigation, including freshly created links absent from SQL. |
 | What can be rebuilt after retention, administrative kill/purge, or independent restore? | Define Restate backup/state retention and projection rebuild/redrive procedures. Workflow restart after completed-workflow retention must not repeat downstream GitHub effects. |
 
@@ -326,6 +396,31 @@ The same command, extended with `admission_protocol_proof/split_state.rs`, **pas
 - Each link contains an unrelated roughly 256 KiB history value. The endpoint observes raw Restate request bodies: the distinctive history payload never arrives, and the largest split-object invocation body is **2,176 bytes**. This verifies that lazy loading is actually effective in the pinned native request-response path; it is not a large-scale capacity benchmark or Wasm performance result.
 
 The selected layout resolves the growing-snapshot/coherent-read question for ordinary replay. Actual Worker/D1 execution, production-sized records, retention/migration, lifecycle projection, and kill/restore recovery remain open. All earlier proof limits still apply except the now-tested narrow split-state access and blocker transitions.
+
+### Deadline follow-up proof, 2026-09-14
+
+`bash scripts/test-restate.sh admission_protocol_proof` **passed in 18.84 seconds**, including the earlier aggregate and split-key scenarios and the new [deadline extension](../../crates/ghinvite-workflows/tests/admission_protocol_proof/deadlines.rs). It uses the same pinned native request-response runtime and scratch SQL projector.
+
+- A test-controlled clock verifies approval and decline strictly before, exactly at, and after the deadline. At/after expiry, effective expiration time remains the stored deadline rather than delayed processing time.
+- Task abort/replay before transition decision uses the later time and expires; interruption after a timely journaled approval preserves approval on replay past the deadline.
+- Combined old-request expiration plus fresh admission recovers interruptions after old-request expiry, link/blocker/use state, new-request state, and durable projection send. A separate exhausted-link case expires the old request but rejects the fresh attempt without consuming a new use. Each checks one projected expiration event, unchanged old admission replay, and stale timer protection for the newer blocker.
+- Early expiration checks stay pending; authoritative status materializes due expiry. Auto-admission records approved state with no deadline.
+- Real durable sleeps race a post-deadline approval command; both observe expired. A workflow started after its deadline also expires immediately through the link command rather than granting a fresh lifetime.
+
+This is test-only state-machine evidence, not production handlers. The extension uses a fixed requester and a compact link/blocker record plus split request/operation keys; the separate split-state suite proves separate blocker-key recovery. Its operation/request IDs are deliberately conflated and its projection carries link counters and event identities, not a full lifecycle read model. It does not verify revoked/expired-link combined rejection, exact wake-up latency, workflow notification delivery, cancellation permissions, retained-ID behavior after runtime cleanup, or actual Worker/D1. Those remain explicit gaps. The recorded approval settles the product rules independently of these proof limits.
+
+### Notification follow-up proof, 2026-09-14
+
+`bash scripts/test-restate.sh admission_protocol_proof` **passed in 21.96 seconds**, including all earlier scenarios and [notifications.rs](../../crates/ghinvite-workflows/tests/admission_protocol_proof/notifications.rs). Targeted Clippy with `-D warnings` passed. The proof configures two-second completion retention on its workflow and a one-second cleanup scan on the disposable smoke runtime only. The pinned runtime otherwise scans hourly, with an initial delay: simply waiting two seconds did not exercise cleanup. See pinned [cleaner implementation](https://github.com/restatedev/restate/blob/v1.7.9/crates/worker/src/partition/cleaner.rs).
+
+- Notification before startup returns HTTP 200, and promise inspection returns the recorded fact while the run counter remains zero. Starting the workflow consumes it without a second notification.
+- A separately started waiting workflow receives a later fact. After promise resolution, a retryable interruption followed by endpoint task abort recovers the notification and completes the waiting run.
+- Sequential identical publication returns already-delivered; a different retained fact returns 409. Arbitrary concurrent conflicting writers are not tested or supported by that peek-then-resolve check.
+- Actual cleanup is observed as the promise becoming absent, **not** a failed shared-handler HTTP status. After cleanup, late notification returns HTTP 200 and recreates the promise. The run counter stays unchanged: notification does not restart the workflow.
+
+The first experiments failed because they expected shared handlers to become unavailable and then expected immediate retention cleanup under the default hourly scan. The corrected proof measures promise absence and accelerates the real cleaner; it does not simulate cleanup or infer it from elapsed time. Two-second retention and one-second scanning are proof settings, not production policy.
+
+This establishes native direct-promise mechanics, not full link-to-workflow integration or exactly-once GitHub delivery. Post-retention orphan-state cleanup, authoritative fact verification, consumption/dispatch checkpoints, notification/timer integration in the production workflow, and administrative redrive remain implementation obligations. Worker/D1 stays deferred.
 
 ## Alternatives and consequences
 

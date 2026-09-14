@@ -5,6 +5,10 @@
 
 #![cfg(feature = "integration")]
 
+#[path = "admission_protocol_proof/deadlines.rs"]
+mod deadlines;
+#[path = "admission_protocol_proof/notifications.rs"]
+mod notifications;
 #[path = "admission_protocol_proof/split_state.rs"]
 mod split_state;
 
@@ -71,6 +75,7 @@ struct Faults {
     lose_ack: AtomicBool,
     lost_acks: AtomicUsize,
     workflow_starts: AtomicUsize,
+    notification_runs: AtomicUsize,
     tasks: Mutex<Vec<AbortHandle>>,
     history_leaked: AtomicBool,
     split_request_bytes: AtomicUsize,
@@ -461,7 +466,10 @@ async fn scenario() {
             }
             .serve(),
         );
-    let endpoint = split_state::bind(endpoint, faults.clone()).build();
+    let deadline_clock = Arc::new(std::sync::atomic::AtomicI64::new(0));
+    let endpoint = split_state::bind(endpoint, faults.clone());
+    let endpoint = deadlines::bind(endpoint, faults.clone(), deadline_clock.clone());
+    let endpoint = notifications::bind(endpoint, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = axum::Router::new().fallback(serve).with_state(Server {
@@ -758,5 +766,7 @@ async fn scenario() {
         "PASS convergence: 5 requests, 5 uses, 14 events; late duplicate snapshots cannot undo revocation; real SQL commit acknowledgement loss retried"
     );
     split_state::scenario(&client, &ingress, &faults, &pool).await;
+    deadlines::scenario(&client, &ingress, &faults, &deadline_clock, &pool).await;
+    notifications::scenario(&client, &ingress, &faults).await;
     server.abort();
 }

@@ -7,6 +7,9 @@ case "$target" in
   integration_test|admission_protocol_proof) ;;
   *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [integration_test|admission_protocol_proof]' >&2; exit 2 ;;
 esac
+if [[ "$target" == admission_protocol_proof ]]; then
+  export RESTATE_PROOF_CLEANUP_INTERVAL=1s
+fi
 deadline=$(command -v timeout || command -v gtimeout) || {
   printf '%s\n' 'Restate acceptance FAILED: GNU timeout (coreutils) is required.' >&2
   exit 1
