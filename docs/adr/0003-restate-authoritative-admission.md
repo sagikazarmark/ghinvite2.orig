@@ -310,11 +310,11 @@ Retain the terminal mailbox result independently of completed-workflow retention
 
 This adds one small durable delivery module per request. Direct promise evidence now removes the assumed need for an extra startup mailbox. The mailbox itself has not been implemented or verified; it would introduce waiter-resolution and cleanup obligations in addition to authoritative link records. The selected direct approach still requires production link-status/dispatch-checkpoint integration, beyond the standalone promise proof.
 
-### Cancellation scope recommendation
+### Cancellation scope: deferred new actions
 
 [`RequestState::Cancelled`](../../crates/ghinvite-core/src/invitation_request.rs) is currently reserved and has no v1 request-cancellation command. Its comment and the historical v1 spec describe future cascading link revocation; that assumption is superseded by the approved rule that link revocation does not change existing requests. GitHub invitation cancellation is a separate existing lifecycle and does not cancel an approved invitation request or refund its use.
 
-**Recommend deferring new request-cancellation UI/permissions from this admission work.** Preserve cancelled records and their retry eligibility during migration, reads, and state-machine tests, but do not invent a caller able to produce cancellation. Approval/decline remain account-admin decisions; decline already closes pending work from that role. This is a scope recommendation for confirmation, not approval of requester or admin cancellation rights.
+**New request-cancellation UI/permissions are deferred from this admission work.** The maintainer instructed publication of the implementation breakdown with this recommended scope on 2026-09-14. Preserve cancelled records and their retry eligibility during migration, reads, and state-machine tests, but do not invent a caller able to produce cancellation. Approval/decline remain account-admin decisions; decline already closes pending work from that role. The published lifecycle and migration tickets carry this scope explicitly.
 
 If request withdrawal is wanted now, decide explicitly whether the requester, an account admin, or both may cancel a pending request. Then define audit actor/reason visibility and command replay. The recommended state rule is pending-only cancellation before its deadline, expiry at/after the deadline, no use refund, and no cascade to an approved request/GitHub invitation. Administrative Restate cancellation/kill remains operational recovery and is not a domain cancellation command.
 
@@ -385,7 +385,7 @@ Required rehearsal: legacy pending/approved/terminal records, `Sent` and ambiguo
 | Does decision-time sampling work on the actual Worker target? | The clock is sampled inside the complete decision closure; before/after-decision expiration recovery passed natively in request-response mode. Verify Wasm clock behavior and the actual Worker endpoint. |
 | What identity/retention verification remains? | The contract is approved. Implement normalization/privacy/cross-link/retention-expiry verification; the current proof deliberately reuses operation/request IDs. |
 | What deadline implementation verification remains? | Lifetime/arbitration and overdue materialization are approved; narrow native checks passed below. Verify production workflow notifications, configuration/migration, revoked/expired-link readmission, and lifecycle operation replay. |
-| Confirm cancellation scope? | Recommend retaining cancelled-state semantics while deferring a new cancellation command/UI. If withdrawal is required now, choose actors and audit visibility explicitly. |
+| Future cancellation scope? | New cancellation command/UI is deferred; preserve existing cancelled-state semantics. A future withdrawal feature must choose actors and audit visibility explicitly. |
 | Finalize projection envelope and prerequisites? | Recommend an ordinary service with per-record versioned snapshots plus immutable audit events. Settle parent-row schema/dependency strategy and verify portable conditional writes. |
 | What notification integration remains? | Direct promises were selected after native early/late/interrupted delivery proof. Implement authoritative status verification, trusted ingress, dispatch/consumption checkpoints, and orphan-promise cleanup/redrive policy. |
 | How do authoritative status reads work during projection lag? | Specify authorization, lookup by link/request identity, and post-command SSR navigation, including freshly created links absent from SQL. |
@@ -412,7 +412,21 @@ After resolving the questions above, split narrow Batch 3 tickets around these t
 4. Web command outcomes and authorized immediate status reads under projection lag.
 5. Existing-data/in-flight-writer cutover and projection repair/rebuild procedures.
 
-These are candidate ticket seams, not published tickets or a claim that the protocol has passed its gate. Establish dependencies from the proof rather than executing them as independent migrations.
+### Published implementation tickets
+
+The maintainer approved publication of the seven-part breakdown on 2026-09-14. Each ticket delivers a verifiable command-to-result slice; early slices use an isolated versioned path until writer cutover. GitHub native blocking links mirror this table.
+
+| Ticket | Delivery | Blocked by |
+|---|---|---|
+| [#53](https://github.com/sagikazarmark/ghinvite2.orig/issues/53) | Authoritative link creation/admission/replay/revocation and status through real Restate | None; #47 runtime gate is complete |
+| [#54](https://github.com/sagikazarmark/ghinvite2.orig/issues/54) | Command-to-queryable projection/audit with outage and parent-dependency recovery | #53 |
+| [#55](https://github.com/sagikazarmark/ghinvite2.orig/issues/55) | Pending decisions, overdue expiry/readmission, direct notifications, and projected status/audit | #53, #54 |
+| [#56](https://github.com/sagikazarmark/ghinvite2.orig/issues/56) | Approved request to per-repository delivery with retained plans/create receipts | #55, #49 |
+| [#57](https://github.com/sagikazarmark/ghinvite2.orig/issues/57) | Recoverable native browser submission and authoritative status under projection lag | #55 |
+| [#58](https://github.com/sagikazarmark/ghinvite2.orig/issues/58) | Resumable writer cutover and native migration/recovery rehearsal | #56, #57 |
+| [#59](https://github.com/sagikazarmark/ghinvite2.orig/issues/59) | Actual Worker/D1 integration and rollout verification | #58; explicitly deferred pending maintainer resumption |
+
+#49 remains the source for installation loss, recipient identity, and ambiguous outbound-result policy. #56 depends on that decision rather than silently establishing those policies here. #53–#58 carry `ready-for-agent` with their blocking edges; only the unblocked frontier is actionable. #59 is `ready-for-human` for the explicit scheduling deferral. Ticket publication does not claim implementation or deployment verification. The ticket-writing workflow leaves parent #48 unchanged; its final acceptance/closure is a separate tracker step.
 
 ## Required focused proof
 
