@@ -15,10 +15,15 @@ pub struct AppState {
     pub config: WebConfig,
     pub request_lifecycle: Option<Arc<dyn crate::lifecycle::RequestLifecycle>>,
     pub admission: Option<Arc<crate::admission::RestateAdmission>>,
+    pub write_maintenance: bool,
     pub(crate) attempt_store: Option<Arc<dyn tower_sessions::SessionStore>>,
 }
 
 impl AppState {
+    pub fn with_write_maintenance(mut self) -> Self {
+        self.write_maintenance = true;
+        self
+    }
     pub fn new(
         storage: Arc<dyn Storage>,
         github_transport: Arc<dyn HttpTransport>,
@@ -32,6 +37,7 @@ impl AppState {
             config,
             request_lifecycle: None,
             admission: None,
+            write_maintenance: false,
             attempt_store: None,
         }
     }
@@ -46,7 +52,7 @@ impl AppState {
         self
     }
 
-    /// Isolated v1 deployment only, after migration. Neither binary enables it.
+    /// Native v1 deployment after the controlled writer cutover.
     pub fn with_admission(mut self, client: Arc<crate::RestateClient>) -> Self {
         self.request_lifecycle = Some(Arc::new(crate::lifecycle::RestateRequestLifecycle::new(
             client.clone(),

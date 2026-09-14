@@ -24,9 +24,7 @@ use restate_sdk::http_server::HttpServer;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = match std::env::var(
-        "GHINVITE_DATABASE_PATH",
-    ) {
+    let storage = match std::env::var("GHINVITE_DATABASE_PATH") {
         Ok(path) => {
             let s =
                 ghinvite_storage_sqlx::SqlxStorage::at_path(std::path::Path::new(&path)).await?;
@@ -68,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(InstallationClient::new(transport, signer))
     };
 
-    let state = AppState::new(storage, github_client);
+    let state = AppState::new(storage.clone(), github_client);
     // Identity verification is optional for local dev (docker compose Restate
     // does not sign requests). In production the Worker reads
     // RESTATE_IDENTITY_KEY from wrangler secrets.
@@ -81,7 +79,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              (safe for local dev only)"
         );
     }
-    let endpoint = build_endpoint(state, identity_key.as_deref())?;
+    let endpoint =
+        match std::env::var("GHINVITE_ADMISSION_MODE")
+            .as_deref()
+            .unwrap_or("legacy")
+        {
+            "legacy" => build_endpoint(state, identity_key.as_deref())?,
+            "authoritative" => {
+                ghinvite_workflows::build_cutover_endpoint(state, storage, identity_key.as_deref())?
+            }
+            _ => return Err(
+                "invalid GHINVITE_ADMISSION_MODE (stop/isolate legacy endpoint for maintenance)"
+                    .into(),
+            ),
+        };
 
     let addr: SocketAddr = std::env::var("GHINVITE_LISTEN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9080".into())

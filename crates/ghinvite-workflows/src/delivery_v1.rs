@@ -17,10 +17,21 @@ use restate_sdk::{
 
 #[restate_sdk::object]
 pub trait GithubCreateV1 {
+    async fn project_import() -> Result<(), TerminalError>;
+    async fn import_receipt(input: Json<ImportReceipt>) -> Result<(), TerminalError>;
     async fn create(input: Json<CreateCommand>) -> Result<Json<CreateReceipt>, TerminalError>;
     async fn recheck(input: Json<CreateCommand>) -> Result<(), TerminalError>;
     #[shared]
     async fn status() -> Result<Json<Option<CreateReceipt>>, TerminalError>;
+}
+
+#[derive(
+    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct ImportReceipt {
+    pub migration_id: String,
+    pub manifest_checksum: String,
+    pub receipt: CreateReceipt,
 }
 
 pub struct GithubCreateV1Impl {
@@ -115,6 +126,61 @@ impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
 }
 
 impl GithubCreateV1 for GithubCreateV1Impl {
+    async fn project_import(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
+        let Json(receipt) = ctx
+            .get::<Json<CreateReceipt>>("v1/receipt")
+            .await?
+            .ok_or_else(|| TerminalError::new_with_code(404, "receipt missing"))?;
+        ctx.run(|| async { project(&self.state, &receipt).await })
+            .name("project_imported_receipt")
+            .await
+    }
+    async fn import_receipt(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ImportReceipt>,
+    ) -> Result<(), TerminalError> {
+        let conflict = || TerminalError::new_with_code(409, "receipt import conflict");
+        if ctx.key() != input.receipt.command.invitation_id.to_string()
+            || input.migration_id.is_empty()
+            || input.manifest_checksum.len() != 64
+            || input.receipt.revision == 0
+            || input.receipt.command.version != 1
+        {
+            return Err(conflict());
+        }
+        if let Some(Json(old)) = ctx
+            .get::<Json<ImportReceipt>>("migration/v1/source")
+            .await?
+        {
+            return if old == input {
+                Ok(())
+            } else {
+                Err(conflict())
+            };
+        }
+        if !ctx.get_keys().await?.is_empty() {
+            return Err(conflict());
+        }
+        // Unknown legacy effects remain fenced even if SQL is restored without
+        // its invitation row. Never permit the first guarded PUT on redrive.
+        if matches!(input.receipt.outcome, CreateOutcome::OutcomeUnknown) {
+            ctx.run(|| async {
+                self.state
+                    .storage
+                    .claim_delivery_attempt(&input.receipt.command)
+                    .await
+                    .map(|_| ())
+                    .map_err(HandlerError::from)
+            })
+            .name("import_uncertain_http_fence")
+            .await?;
+        }
+        ctx.set("v1/input", Json(input.receipt.command.clone()));
+        ctx.set("v1/receipt", Json(input.receipt.clone()));
+        ctx.set("migration/v1/source", Json(input));
+        Ok(())
+    }
     async fn recheck(
         &self,
         ctx: ObjectContext<'_>,

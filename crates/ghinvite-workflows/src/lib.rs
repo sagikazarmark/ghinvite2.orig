@@ -18,6 +18,8 @@ pub mod installation;
 pub mod invitation_context;
 pub mod invitation_link;
 pub mod invitation_request;
+pub mod migration_v1;
+mod obsolete_writers;
 pub mod projection_v1;
 pub mod reconcile;
 pub mod request_lifecycle_v1;
@@ -31,6 +33,46 @@ pub use error::{HandlerError, Result};
 pub use state::AppState;
 
 use restate_sdk::endpoint::Endpoint;
+
+/// Native cutover endpoint, registered only after checkpoint and old endpoint
+/// isolation. Projection ownership and ingress reopening are operator gates.
+pub fn build_cutover_endpoint(
+    state: AppState,
+    projection: std::sync::Arc<dyn ghinvite_core::storage::projection::ProjectionStorage>,
+    identity_key: Option<&str>,
+) -> std::result::Result<Endpoint, String> {
+    use github_invitation::GithubInvitation as _;
+    use installation::Installation as _;
+    use reconcile::Reconcile as _;
+    let builder = Endpoint::builder()
+        .bind(invitation_link::InvitationLink::serve(
+            obsolete_writers::Obsolete,
+        ))
+        .bind(invitation_request::InvitationRequest::serve(
+            obsolete_writers::Obsolete,
+        ))
+        .bind(obsolete_writers::GithubLifecycle(state.clone()).serve())
+        .bind(
+            installation::InstallationImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
+        .bind(
+            reconcile::ReconcileImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        );
+    let builder = admission_v1::bind(builder);
+    let builder = projection_v1::bind(builder, projection);
+    let builder = request_lifecycle_v1::bind(builder);
+    let mut builder = delivery_v1::bind(builder, state);
+    if let Some(key) = identity_key {
+        builder = builder.identity_key(key).map_err(|e| e.to_string())?;
+    }
+    Ok(builder.build())
+}
 
 /// Build a fully-bound Restate endpoint with all five ghinvite services.
 ///

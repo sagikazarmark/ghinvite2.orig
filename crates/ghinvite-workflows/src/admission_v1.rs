@@ -77,7 +77,7 @@ pub struct WorkflowEnvelope {
 }
 
 impl WorkflowEnvelope {
-    fn from_authority(link: &LinkSnapshot, request: RequestSnapshot) -> Self {
+    pub(crate) fn from_authority(link: &LinkSnapshot, request: RequestSnapshot) -> Self {
         Self {
             version: 1,
             request,
@@ -187,6 +187,21 @@ impl InvitationCodeV1 for InvitationCodeV1Impl {
 
 #[restate_sdk::object]
 pub trait InvitationLinkV1 {
+    async fn verify_import(
+        input: Json<crate::migration_v1::HandoffImport>,
+    ) -> Result<Json<crate::migration_v1::VerifyImport>, TerminalError>;
+    async fn handoff_import(
+        input: Json<crate::migration_v1::HandoffImport>,
+    ) -> Result<(), TerminalError>;
+    async fn import_request(
+        input: Json<crate::migration_v1::ImportRequest>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
+    async fn begin_import(
+        input: Json<crate::migration_v1::BeginImport>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
+    async fn activate_import(
+        input: Json<crate::migration_v1::ActivateImport>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
     async fn update_metadata(
         input: Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError>;
@@ -473,18 +488,53 @@ fn conflict() -> TerminalError {
     TerminalError::new_with_code(409, "operation conflict")
 }
 
-fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), TerminalError> {
+pub(crate) fn validate_import_plan(
+    link: &LinkSnapshot,
+    request: &RequestSnapshot,
+    plan: &crate::request_lifecycle_v1::ApprovedDispatch,
+) -> Result<(), TerminalError> {
+    let expected = WorkflowEnvelope::from_authority(link, request.clone());
+    if plan.dispatch_id != format!("v1/dispatch/{}", request.request_id)
+        || plan.input != expected
+        || request.state != RequestState::Approved
+        || plan.commands.len() != expected.repos.len()
+    {
+        return Err(conflict());
+    }
+    let approval = request.decision.as_ref().ok_or_else(conflict)?;
+    let mut ids = std::collections::HashSet::new();
+    for (command, repo) in plan.commands.iter().zip(&expected.repos) {
+        if command.version != 1
+            || command.link_id != link.link_id
+            || command.request_id != request.request_id
+            || command.approval_id != approval.decision_id
+            || command.approved_at != approval.effective_at
+            || command.account_id != link.creation.account_id
+            || command.installation_id != expected.installation_id
+            || command.requester_id != request.requester_id
+            || command.permission != expected.permission
+            || command.repo_id != repo.repo_id
+            || command.repo_full_name != repo.repo_full_name
+            || !ids.insert(command.invitation_id)
+        {
+            return Err(conflict());
+        }
+    }
+    Ok(())
+}
+
+async fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), TerminalError> {
     if ctx.key() != id.to_string() {
         return Err(missing());
     }
-    Ok(())
+    crate::migration_v1::ensure_open(ctx).await
 }
 
 async fn validate_signal(
     ctx: &ObjectContext<'_>,
     signal: &TerminalSignal,
 ) -> Result<(), TerminalError> {
-    validate_key(ctx, signal.link_id)?;
+    validate_key(ctx, signal.link_id).await?;
     let Json(request) = ctx
         .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", signal.request_id))
         .await?
@@ -539,12 +589,49 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
 }
 
 impl InvitationLinkV1 for InvitationLinkV1Impl {
+    async fn verify_import(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::migration_v1::HandoffImport>,
+    ) -> Result<Json<crate::migration_v1::VerifyImport>, TerminalError> {
+        crate::migration_v1::verify(&ctx, input).await.map(Json)
+    }
+    async fn handoff_import(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::migration_v1::HandoffImport>,
+    ) -> Result<(), TerminalError> {
+        crate::migration_v1::handoff(&ctx, input).await
+    }
+    async fn import_request(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::migration_v1::ImportRequest>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
+        let result = crate::migration_v1::import_request(&ctx, input).await?;
+        self.checkpoint(&ctx, "migration-after-item").await?;
+        Ok(Json(result))
+    }
+    async fn begin_import(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::migration_v1::BeginImport>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
+        crate::migration_v1::begin(&ctx, input).await.map(Json)
+    }
+    async fn activate_import(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::migration_v1::ActivateImport>,
+    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
+        crate::migration_v1::activate(&ctx, input).await.map(Json)
+    }
     async fn update_metadata(
         &self,
         ctx: ObjectContext<'_>,
         Json(mut input): Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(mut link) = ctx
             .get::<Json<LinkSnapshot>>("v1/link")
             .await?
@@ -597,7 +684,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(mut input): Json<Admit>,
     ) -> Result<Json<Attempt>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         input.normalize();
         if input.requester_id == 0
             || input.version != 1
@@ -647,7 +734,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(query): Json<AttemptQuery>,
     ) -> Result<Json<RequesterPage>, TerminalError> {
-        validate_key(&ctx, query.link_id)?;
+        validate_key(&ctx, query.link_id).await?;
         if query.requester_id == 0 {
             return Err(missing());
         }
@@ -736,7 +823,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         Json(query): Json<RequestStatus>,
     ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError> {
         use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
-        validate_key(&ctx, query.link_id)?;
+        validate_key(&ctx, query.link_id).await?;
         let Json(request) = ctx
             .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", query.request_id))
             .await?
@@ -817,7 +904,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
     ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
         // Trusted migration/repair interface: imported identities are supplied
         // before first prepare, never inferred from a lagging SQL row.
-        validate_key(&ctx, plan.input.request.link_id)?;
+        validate_key(&ctx, plan.input.request.link_id).await?;
         let request_id = plan.input.request.request_id;
         let Json(request) = ctx
             .get::<Json<RequestSnapshot>>(&format!("v1/request/{request_id}"))
@@ -828,33 +915,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .await?
             .ok_or_else(missing)?;
         let key = format!("v1/dispatch/{request_id}");
-        let expected = WorkflowEnvelope::from_authority(&link, request.clone());
-        if plan.dispatch_id != key
-            || plan.input != expected
-            || request.state != RequestState::Approved
-            || plan.commands.len() != expected.repos.len()
-        {
-            return Err(conflict());
-        }
-        let approval = request.decision.as_ref().ok_or_else(conflict)?;
-        let mut ids = std::collections::HashSet::new();
-        for (command, repo) in plan.commands.iter().zip(&expected.repos) {
-            if command.version != 1
-                || command.link_id != link.link_id
-                || command.request_id != request_id
-                || command.approval_id != approval.decision_id
-                || command.approved_at != approval.effective_at
-                || command.account_id != link.creation.account_id
-                || command.installation_id != expected.installation_id
-                || command.requester_id != request.requester_id
-                || command.permission != expected.permission
-                || command.repo_id != repo.repo_id
-                || command.repo_full_name != repo.repo_full_name
-                || !ids.insert(command.invitation_id)
-            {
-                return Err(conflict());
-            }
-        }
+        validate_import_plan(&link, &request, &plan)?;
         if let Some(Json(old)) = ctx
             .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&key)
             .await?
@@ -874,7 +935,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         Json(submitted): Json<crate::request_lifecycle_v1::SubmittedCommand>,
     ) -> Result<(), TerminalError> {
         let command = &submitted.command;
-        validate_key(&ctx, command.link_id)?;
+        validate_key(&ctx, command.link_id).await?;
         let Json(plan) = ctx
             .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
                 "v1/dispatch/{}",
@@ -901,7 +962,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(query): Json<RequestStatus>,
     ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError> {
-        validate_key(&ctx, query.link_id)?;
+        validate_key(&ctx, query.link_id).await?;
         let Json(plan) = ctx
             .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
                 "v1/dispatch/{}",
@@ -932,7 +993,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<RequestStatus>,
     ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(request) = ctx
             .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
             .await?
@@ -990,7 +1051,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(mut input): Json<Admit>,
     ) -> Result<Json<AdmissionReceipt>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         if input.requester_id == 0 {
             return Err(missing());
         }
@@ -1019,10 +1080,9 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                 String::from(input.operation_id.clone())
             ))
             .await?
+            && prepared != input
         {
-            if prepared != input {
-                return Err(conflict());
-            }
+            return Err(conflict());
         }
         if input.version != 1 {
             return Err(invalid());
@@ -1236,7 +1296,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<AdminLinkCommand>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
             .get::<Json<LinkSnapshot>>("v1/link")
             .await?
@@ -1250,7 +1310,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<RequestStatus>,
     ) -> Result<Json<RequestSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(request) = ctx
             .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
             .await?
@@ -1270,7 +1330,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(mut input): Json<DecideRequest>,
     ) -> Result<Json<DecisionReceipt>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
             .get::<Json<LinkSnapshot>>("v1/link")
             .await?
@@ -1340,7 +1400,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<AdminLinkCommand>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
             .get::<Json<LinkSnapshot>>("v1/link")
             .await?
@@ -1382,7 +1442,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<CreateLink>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id)?;
+        validate_key(&ctx, input.link_id).await?;
         let input = normalize_creation(input)?;
         if let Some(Json(link)) = ctx.get::<Json<LinkSnapshot>>("v1/link").await? {
             if link.creation != input {

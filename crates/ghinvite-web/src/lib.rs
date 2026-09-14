@@ -60,6 +60,25 @@ where
 
     let router = island_assets(router, &state.config);
 
+    let maintenance = state.write_maintenance;
+    let router = router.layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| async move {
+            if maintenance
+                && request.uri().path() != "/health"
+                && !request.uri().path().starts_with("/static/")
+            {
+                use axum::response::IntoResponse;
+                return (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "60")],
+                    "Write maintenance in progress. Retry your existing attempt later.",
+                )
+                    .into_response();
+            }
+            next.run(request).await
+        },
+    ));
+
     router
         .fallback(routes::not_found::public)
         .layer(middleware::csp::layer())

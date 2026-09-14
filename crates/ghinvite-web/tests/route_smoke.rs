@@ -78,6 +78,55 @@ async fn health_returns_ok() {
 }
 
 #[tokio::test]
+async fn cutover_maintenance_closes_browser_and_webhook_writes() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let transport = Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![]));
+    let restate = Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap());
+    let state = AppState::new(
+        storage,
+        transport,
+        Arc::new(RestateCommands::new(restate)),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_write_maintenance();
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    for path in [
+        "/i/testcode12345678",
+        "/console/accounts/acme/links",
+        "/webhooks/github",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(
+        app.oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap()
+        )
+        .await
+        .unwrap()
+        .status(),
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn login_redirects_to_github_authorize() {
     let app = build_test_app().await;
     let resp = app

@@ -1,5 +1,10 @@
 # Isolated authoritative admission (#53)
 
+Native cutover tooling and endpoint/routing activation are now available under
+[#58's maintenance procedure](admission-cutover.md). The original isolated-path
+description below documents the earlier slices; defaults remain legacy until an
+operator performs cutover. Worker/D1 activation is still gated by #59.
+
 `ghinvite_workflows::admission_v1::bind(builder)` registers `InvitationLinkV1`
 with lazy state. The existing native/Worker endpoint and browser writers still
 use the legacy services. An isolated endpoint must also bind implementations of

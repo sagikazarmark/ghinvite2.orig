@@ -38,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Restate client: ingress at config.restate_ingress (defaults to
     // 127.0.0.1:8080 from `docker compose up -d restate`).
     let restate = Arc::new(RestateClient::new(&config.restate_ingress)?);
-    let commands = Arc::new(RestateCommands::new(restate));
+    let commands = Arc::new(RestateCommands::new(restate.clone()));
 
     // Session store: a local sqlite database.
     let session_pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
@@ -47,6 +47,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_store = ProtectedStore::new(backend, config.session_secret);
 
     let state = AppState::new(storage, transport, commands, config);
+    let state = match std::env::var("GHINVITE_ADMISSION_MODE")
+        .as_deref()
+        .unwrap_or("legacy")
+    {
+        "legacy" => state,
+        "maintenance" => state.with_write_maintenance(),
+        "authoritative" => state.with_admission(restate),
+        _ => return Err("invalid GHINVITE_ADMISSION_MODE".into()),
+    };
     let app = build_app(state, session_store);
 
     let addr = "127.0.0.1:8787".parse::<std::net::SocketAddr>()?;

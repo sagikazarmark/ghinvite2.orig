@@ -158,3 +158,5 @@ jobs:
         run: bash scripts/test-restate.sh authoritative_admission
       - name: Verify retained delivery and uncertain HTTP recovery
         run: bash scripts/test-restate.sh retained_delivery
+      - name: Rehearse authoritative writer cutover
+        run: bash scripts/test-restate.sh writer_cutover
