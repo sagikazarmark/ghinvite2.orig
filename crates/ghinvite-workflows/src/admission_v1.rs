@@ -4,7 +4,7 @@
 //! service. Ingress is private: the trusted caller authenticates requesters and
 //! verifies current GitHub account-admin authority before constructing commands.
 //! Identity fields are assertions from that caller, never browser form authority.
-//! No SQL reads/writes or installation-access policy belong in this object.
+//! Installation observations come from the account object, after receipt replay.
 
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
@@ -57,7 +57,7 @@ struct LifecycleDecision {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct AdmissionDecision {
     link: LinkSnapshot,
-    operation: OperationRecord,
+    operation: Option<OperationRecord>,
     request: Option<RequestSnapshot>,
     projection: Option<ProjectionEnvelope>,
     workflow: Option<WorkflowEnvelope>,
@@ -239,6 +239,8 @@ pub trait InvitationLinkV1 {
 
 #[derive(Default)]
 pub struct InvitationLinkV1Impl {
+    #[cfg(feature = "integration")]
+    skip_availability: bool,
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<Faults>>,
 }
@@ -456,6 +458,7 @@ pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Bui
         .bind_with_options(
             InvitationLinkV1Impl {
                 faults: Some(faults),
+                skip_availability: true,
             }
             .serve(),
             ServiceOptions::new()
@@ -476,8 +479,47 @@ pub fn bind(builder: Builder) -> Builder {
         )
 }
 
+/// Isolated protocol fixtures supply no installation integration.
+#[cfg(feature = "integration")]
+pub fn bind_protocol_fixture(builder: Builder) -> Builder {
+    builder
+        .bind(InvitationCodeV1Impl.serve())
+        .bind_with_options(
+            InvitationLinkV1Impl {
+                skip_availability: true,
+                faults: None,
+            }
+            .serve(),
+            ServiceOptions::new().enable_lazy_state(true),
+        )
+}
+
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid command")
+}
+
+fn local_rejection(
+    link: &LinkSnapshot,
+    request: Option<&RequestSnapshot>,
+    now: DateTime<Utc>,
+) -> Option<Rejection> {
+    if link.revoked_at.is_some() {
+        Some(Rejection::Revoked)
+    } else if link.creation.expires_at.is_some_and(|at| now >= at) {
+        Some(Rejection::Expired)
+    } else if link
+        .creation
+        .max_uses
+        .is_some_and(|max| link.uses >= u64::from(max))
+    {
+        Some(Rejection::Exhausted)
+    } else if request
+        .is_some_and(|r| matches!(r.state, RequestState::Pending | RequestState::Approved))
+    {
+        Some(Rejection::ExistingRequest)
+    } else {
+        None
+    }
 }
 fn missing() -> TerminalError {
     TerminalError::new_with_code(404, "not found")
@@ -1104,6 +1146,49 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             None
         };
         self.checkpoint(&ctx, "before-decision").await?;
+        let check_availability = ctx
+            .run(|| async {
+                Ok::<_, HandlerError>(
+                    link.revoked_at.is_none()
+                        && link.creation.expires_at.is_none_or(|at| self.now() < at)
+                        && link
+                            .creation
+                            .max_uses
+                            .is_none_or(|max| link.uses < u64::from(max)),
+                )
+            })
+            .name("needs_availability")
+            .await?;
+        #[cfg(feature = "integration")]
+        let check_availability = check_availability && !self.skip_availability;
+        let (availability, availability_unknown) = if check_availability {
+            let observation = ctx
+                .object_client::<crate::availability::AccountInstallationV1Client>(
+                    link.creation.account_id.to_string(),
+                )
+                .eligibility(Json(crate::availability::Scope {
+                    account_id: link.creation.account_id,
+                    repo_ids: link
+                        .creation
+                        .repos
+                        .iter()
+                        .map(|repo| repo.repo_id)
+                        .collect(),
+                }))
+                .call()
+                .await;
+            let observation = match observation {
+                Ok(Json(observation)) => observation,
+                Err(_) => crate::availability::Eligibility::Unknown,
+            };
+            match observation {
+                crate::availability::Eligibility::Available => (None, false),
+                crate::availability::Eligibility::Unavailable { reason } => (Some(reason), false),
+                crate::availability::Eligibility::Unknown => (None, true),
+            }
+        } else {
+            (None, false)
+        };
         let Json(decision) = ctx
             .run(|| async {
                 let now = self.now();
@@ -1115,25 +1200,12 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     None
                 };
                 let expired = expiry_event.as_ref().and(blocking_request.clone());
-                let reason = if link.revoked_at.is_some() {
-                    Some(Rejection::Revoked)
-                } else if link.creation.expires_at.is_some_and(|at| now >= at) {
-                    Some(Rejection::Expired)
-                } else if link
-                    .creation
-                    .max_uses
-                    .is_some_and(|max| link.uses >= u64::from(max))
-                {
-                    Some(Rejection::Exhausted)
-                } else if blocking_request.as_ref().is_some_and(|r| {
-                    matches!(r.state, RequestState::Pending | RequestState::Approved)
-                }) {
-                    Some(Rejection::ExistingRequest)
-                } else {
-                    None
-                };
+                let reason = local_rejection(&link, blocking_request.as_ref(), now)
+                    .or_else(|| availability.clone());
                 let (result, request) = if let Some(reason) = reason {
-                    (AdmissionResult::Rejected { reason }, None)
+                    (Some(AdmissionResult::Rejected { reason }), None)
+                } else if availability_unknown {
+                    (None, None)
                 } else {
                     let request_id = RequestId::new();
                     let state = if link.creation.approval_required {
@@ -1171,11 +1243,11 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                         }),
                     };
                     (
-                        AdmissionResult::Accepted {
+                        Some(AdmissionResult::Accepted {
                             request_id,
                             state,
                             decision_deadline,
-                        },
+                        }),
                         Some(request),
                     )
                 };
@@ -1228,13 +1300,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     projection,
                     workflow,
                     expired,
-                    operation: OperationRecord {
+                    operation: result.map(|result| OperationRecord {
                         input: input.clone(),
                         receipt: AdmissionReceipt {
                             decided_at: now,
                             result,
                         },
-                    },
+                    }),
                 }))
             })
             .name("decide_admission_v1")
@@ -1262,7 +1334,9 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             ctx.set(&blocker_key, Json(request.request_id));
             self.checkpoint(&ctx, "after-blocker").await?;
         }
-        ctx.set(&operation_key, Json(decision.operation.clone()));
+        if let Some(operation) = &decision.operation {
+            ctx.set(&operation_key, Json(operation.clone()));
+        }
         ctx.set(
             &format!("v1/latest-attempt/{}", input.requester_id),
             Json(input.operation_id.clone()),
@@ -1285,7 +1359,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .await?;
         }
         self.checkpoint(&ctx, "after-workflow-send").await?;
-        Ok(Json(decision.operation.receipt))
+        match decision.operation {
+            Some(operation) => Ok(Json(operation.receipt)),
+            None => Err(TerminalError::new_with_code(
+                503,
+                "Repository availability could not be confirmed. Retry the same attempt.",
+            )),
+        }
     }
 
     async fn link_status(

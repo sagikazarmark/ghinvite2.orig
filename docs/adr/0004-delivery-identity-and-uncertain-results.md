@@ -64,6 +64,9 @@ features are already implemented. Verification seams approved by the maintainer:
 public Restate commands/status, a real runtime with GitHub HTTP stub, and current
 read interfaces exposing persisted outcomes.
 
+#60's [installation convergence and admission integration](../installation-availability.md)
+implements the remaining policy at the account and link command boundaries.
+
 The receiving implementation also retains an input-bound SQL HTTP-attempt fence:
 Restate run closures may re-execute if their result acknowledgement is lost. The
 fence prevents a second PUT across that gap, while confirmed receipts remain in

@@ -25,6 +25,67 @@ pub struct InstallationClient {
 }
 
 impl InstallationClient {
+    /// App-authenticated identity/status observation, independent of cached tokens.
+    pub async fn get_installation(
+        &self,
+        installation_id: u64,
+    ) -> Result<crate::payloads::GhAppInstallation> {
+        let jwt = self.signer.sign(Utc::now())?;
+        let request = Request::new(
+            Method::Get,
+            format!("{}/app/installations/{installation_id}", self.base_url),
+        )
+        .header("accept", "application/vnd.github+json")
+        .header("authorization", format!("Bearer {jwt}"))
+        .header("user-agent", "ghinvite")
+        .header("x-github-api-version", "2022-11-28");
+        self.transport.send(request).await?.ensure_success()?.json()
+    }
+
+    /// Complete numeric repository scope. A partial or changing pagination result
+    /// is unknown, never an authoritative removal of the missing repositories.
+    pub async fn all_installation_repo_ids(&self, installation_id: u64) -> Result<Vec<u64>> {
+        let mut ids = std::collections::BTreeSet::new();
+        let mut expected = None;
+        for page in 1..=1000 {
+            let path = if page == 1 {
+                "/installation/repositories?per_page=100".into()
+            } else {
+                format!("/installation/repositories?per_page=100&page={page}")
+            };
+            let request = self
+                .auth_request(installation_id, Method::Get, &path)
+                .await?;
+            let result: GhInstallationRepos = self
+                .transport
+                .send(request)
+                .await?
+                .ensure_success()?
+                .json()?;
+            if expected.is_some_and(|count| count != result.total_count) {
+                break;
+            }
+            expected = Some(result.total_count);
+            let empty = result.repositories.is_empty();
+            for repo in result.repositories {
+                if repo.id == 0 || !ids.insert(repo.id) {
+                    return Err(crate::Error::InvalidInput(
+                        "inconsistent repository refresh".into(),
+                    ));
+                }
+            }
+            if ids.len() as u64 == result.total_count {
+                return Ok(ids.into_iter().collect());
+            }
+            if empty || ids.len() as u64 > result.total_count {
+                break;
+            }
+        }
+        Err(crate::Error::InvalidInput(
+            "incomplete repository refresh".into(),
+        ))
+    }
+
     /// Read collaborator permission and the identity returned with it. Unlike
     /// a login-only 204 membership probe this provides numeric identity evidence.
     pub async fn collaborator_permission(

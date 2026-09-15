@@ -378,6 +378,13 @@ impl Storage for SqlxStorage {
         row.map(|r| r.try_into_domain()).transpose()
     }
 
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        let row: Option<InstallationRow> = sqlx::query_as(
+            "SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos FROM installations WHERE account_login = ? ORDER BY installed_at DESC, installation_id DESC LIMIT 1",
+        ).bind(login).fetch_optional(&self.pool).await.map_err(crate::to_db_err)?;
+        row.map(|r| r.try_into_domain()).transpose()
+    }
+
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         let rows: Vec<InstallationRow> = sqlx::query_as(
             r#"SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos
@@ -941,6 +948,13 @@ impl Storage for SqlxStorage {
         // that primary-key replay, not other constraints or database failures.
         if event.event_type == ghinvite_core::audit::EventType::InvitationLinkMetadataUpdated {
             sql.push_str(" ON CONFLICT(id) DO NOTHING");
+        } else if matches!(
+            event.event_type,
+            ghinvite_core::audit::EventType::InstallationCreated
+                | ghinvite_core::audit::EventType::InstallationReposChanged
+                | ghinvite_core::audit::EventType::InstallationUninstalled
+        ) {
+            sql.push_str(ghinvite_core::storage::INSTALLATION_AUDIT_REPLAY);
         }
         sqlx::query(&sql)
             .bind(event.id.to_string())

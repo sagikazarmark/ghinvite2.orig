@@ -371,6 +371,9 @@ fn receipt_copy(receipt: &AdmissionReceipt) -> String {
                 Rejection::Expired => "the invitation link expired",
                 Rejection::Exhausted => "the invitation link has reached its max use",
                 Rejection::ExistingRequest => "you already have a pending or approved request",
+                Rejection::InstallationUnavailable => "the GitHub installation is unavailable",
+                Rejection::RepositoryUnavailable =>
+                    "one or more repositories in this invitation link are unavailable",
             }
         ),
     }
@@ -406,7 +409,10 @@ fn render(
                 if let Some(page) = &page {
                     p { "Permission: {page.permission}" }
                     ul { for repo in &page.repos { li { "{repo.repo_full_name}" } } }
-                    if let Some(request) = &page.request { p { "Current request status: {request.state}" } }
+                    if let Some(request) = &page.request {
+                        p { "Current request status: {request.state}" }
+                        p { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." }
+                    }
                 }
                 ul { for row in &delivery { li { "{row}" } } }
                 if mode != FormMode::Closed {

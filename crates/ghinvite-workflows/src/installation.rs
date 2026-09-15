@@ -6,7 +6,10 @@ use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
-use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
+use restate_sdk::context::{
+    ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
+    RunFuture,
+};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
 use schemars::JsonSchema;
@@ -55,13 +58,24 @@ impl Installation for InstallationImpl {
         input: Json<OnboardInput>,
     ) -> std::result::Result<(), TerminalError> {
         let Json(input) = input;
-        let request_id = Some(ctx.invocation_id().to_string());
-        ctx.run(|| async {
-            onboard_logic(&self.state, &input, request_id.clone())
-                .await
-                .map_err(crate::error::to_sdk_handler_error)
-        })
-        .name("onboard")
+        validate_key(&ctx, input.installation_id)?;
+        if ctx.get::<bool>("uninstalled").await?.is_some() {
+            return Ok(());
+        }
+        if let Some(account_id) = ctx.get::<u64>("account_id").await?
+            && account_id != input.account_id
+        {
+            return Err(TerminalError::new_with_code(
+                409,
+                "installation identity conflict",
+            ));
+        }
+        ctx.set("account_id", input.account_id);
+        ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+            input.account_id.to_string(),
+        )
+        .onboard(Json(input))
+        .call()
         .await
     }
 
@@ -71,14 +85,19 @@ impl Installation for InstallationImpl {
         input: Json<ReposChangedInput>,
     ) -> std::result::Result<(), TerminalError> {
         let Json(input) = input;
-        let request_id = Some(ctx.invocation_id().to_string());
-        ctx.run(|| async {
-            repos_changed_logic(&self.state, &input, request_id.clone())
-                .await
-                .map_err(crate::error::to_sdk_handler_error)
-        })
-        .name("repos_changed")
-        .await
+        validate_key(&ctx, input.installation_id)?;
+        if ctx.get::<bool>("uninstalled").await?.is_some() {
+            return Ok(());
+        }
+        if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
+            ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+                account_id.to_string(),
+            )
+            .refresh(Json(input.installation_id))
+            .call()
+            .await?;
+        }
+        Ok(())
     }
 
     async fn uninstall(
@@ -87,14 +106,53 @@ impl Installation for InstallationImpl {
         input: Json<UninstallInput>,
     ) -> std::result::Result<(), TerminalError> {
         let Json(input) = input;
-        let request_id = Some(ctx.invocation_id().to_string());
-        ctx.run(|| async {
-            uninstall_logic(&self.state, &input, request_id.clone())
-                .await
-                .map_err(crate::error::to_sdk_handler_error)
-        })
-        .name("uninstall")
-        .await
+        validate_key(&ctx, input.installation_id)?;
+        ctx.set("uninstalled", true);
+        if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
+            ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+                account_id.to_string(),
+            )
+            .uninstall(Json(input))
+            .call()
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_key(ctx: &ObjectContext<'_>, id: u64) -> std::result::Result<(), TerminalError> {
+    if id == 0 || ctx.key() != id.to_string() {
+        return Err(TerminalError::new_with_code(
+            400,
+            "invalid installation key",
+        ));
+    }
+    Ok(())
+}
+impl InstallationImpl {
+    async fn account_id(
+        &self,
+        ctx: &ObjectContext<'_>,
+        id: u64,
+    ) -> std::result::Result<Option<u64>, TerminalError> {
+        if let Some(id) = ctx.get("account_id").await? {
+            return Ok(Some(id));
+        }
+        let Json(account_id) = ctx
+            .run(|| async {
+                self.state
+                    .storage
+                    .get_installation(id)
+                    .await
+                    .map(|a| Json(a.map(|a| a.account_id)))
+                    .map_err(restate_sdk::errors::HandlerError::from)
+            })
+            .name("resolve_installation_account")
+            .await?;
+        if let Some(account_id) = account_id {
+            ctx.set("account_id", account_id);
+        }
+        Ok(account_id)
     }
 }
 

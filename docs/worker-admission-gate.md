@@ -71,8 +71,9 @@ host failure may need manual cleanup of the printed unique Compose project.
 - Actual Wasm discovery and Restate request-response calls; lazy reads and
   suspension; real clock sampling and seven-day deadline.
 - Final-use competitors, revoke, original-receipt replay, changed-input conflict,
-  and authoritative completion while D1 has no usable schema.
-- D1 schema/identity-parent restoration followed by durable projection convergence,
+  and authoritative completion while D1 user parents are missing. Installation
+  facts are adopted separately for #60's account availability integration.
+- D1 identity-parent restoration followed by durable projection convergence,
   with verification through the Rust Storage read interfaces.
 - Fixed-batch reordered/duplicate snapshots, stale snapshot with missing historical
   audit, equal-version conflict rollback including events, event content conflict,

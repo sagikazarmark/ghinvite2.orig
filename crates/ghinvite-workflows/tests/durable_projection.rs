@@ -91,7 +91,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             sleep(Duration::from_millis(100)).await;
         }
         let acknowledgements = Arc::new(LostAcknowledgement { storage: storage.clone(), committed_attempts: AtomicUsize::new(0) });
-        let endpoint = projection_v1::bind(admission_v1::bind(Endpoint::builder()), acknowledgements.clone())
+        let endpoint = projection_v1::bind(admission_v1::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())
             .bind(admission_v1::InvitationRequestV1::serve(RequestSink)).build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

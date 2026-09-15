@@ -186,6 +186,27 @@ try {
   server.on('session', session => { sessions.add(session); session.on('close', () => sessions.delete(session)); });
   await new Promise(resolve => server.listen(0, '0.0.0.0', resolve));
   await http(`${admin}/deployments`, { uri: `http://host.docker.internal:${server.address().port}`, additionalHeaders: {} });
+  github = spawn(`${metadata.target_directory}/debug/examples/stub`, ['--port', '0'], { stdio: ['ignore', 'ignore', 'pipe'] });
+  children.add(github);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('GitHub stub startup timeout')), 10_000);
+    let diagnostics = '';
+    github.once('error', error => { clearTimeout(timer); reject(error); });
+    github.once('exit', code => { clearTimeout(timer); reject(new Error(`GitHub stub exited ${code}: ${diagnostics}`)); });
+    github.stderr.on('data', chunk => {
+      diagnostics += chunk;
+      const address = diagnostics.match(/github-stub listening on (127\.0\.0\.1:\d+)\s/)?.[1];
+      if (address) { githubUrl = `http://${address}`; clearTimeout(timer); resolve(); }
+    });
+  });
+  const db = await mf.getD1Database('DB');
+  for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
+    const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
+    await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
+  }
+  await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'[10,11]')").run();
+  // Adopt existing installation facts before exercising projection failure.
+  // Missing user parents keep link/request projection unavailable.
   const input = creation();
   const command = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
   const created = await command('create', input);
@@ -209,19 +230,12 @@ try {
   assert.equal((await command('link_status', { link_id: input.link_id, admin: input.admin })).uses, 1);
   console.log('PASS final-use concurrency, seven-day deadline, revoke/replay/conflict while D1 unavailable');
   await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id);
-  const db = await mf.getD1Database('DB');
-  for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
-    // D1 exec splits on newlines, so submit the entire migration via prepare.
-    const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
-    await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
-  }
-  await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'all')").run();
   for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   console.log('PASS compatible D1 migrations and restored identity parents');
   await eventually(() => storage('link', input.link_id), link => link?.uses_count === 1 && link.revoked_at);
   await eventually(() => storage('request', receipt.result.request_id), request => request?.state === 'pending');
   await eventually(() => storage('audit', 100), page => page.events.length === 4);
-  console.log('PASS real asynchronous D1 adapter converges after missing schema/parent recovery');
+  console.log('PASS real asynchronous D1 adapter converges after missing parent recovery');
   const projection = creation();
   const snapshot = { link_id: projection.link_id, creation: projection, invitation_code: 'projection123456',
     created_at: '2026-01-01T00:00:00Z', uses: 0, revision: 1, revoked_at: null, revoked_by: null };
@@ -354,19 +368,6 @@ try {
   const bounds = { before, after, maxStateWrite: Math.max(...observed.filter(f => f.type === 0x0403).map(f => f.bytes)),
     maxMessage: Math.max(...observed.map(f => f.bytes)) };
   console.log(`PASS lazy history bounds (bytes): ${JSON.stringify(bounds)}`);
-  github = spawn(`${metadata.target_directory}/debug/examples/stub`, ['--port', '0'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  children.add(github);
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('GitHub stub startup timeout')), 10_000);
-    let diagnostics = '';
-    github.once('error', error => { clearTimeout(timer); reject(error); });
-    github.once('exit', code => { clearTimeout(timer); reject(new Error(`GitHub stub exited ${code}: ${diagnostics}`)); });
-    github.stderr.on('data', chunk => {
-      diagnostics += chunk;
-      const address = diagnostics.match(/github-stub listening on (127\.0\.0\.1:\d+)\s/)?.[1];
-      if (address) { githubUrl = `http://${address}`; clearTimeout(timer); resolve(); }
-    });
-  });
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   const autoInput = { ...creation(), approval_required: false };
   const auto = (handler, body) => http(`${ingress}/InvitationLinkV1/${autoInput.link_id}/${handler}`, body);

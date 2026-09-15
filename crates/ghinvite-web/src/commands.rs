@@ -1,4 +1,4 @@
-use crate::error::{Result, WebError};
+use crate::error::Result;
 use crate::restate_client::RestateClient;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -6,7 +6,6 @@ use ghinvite_core::storage::Storage;
 use octoevents::{Action, Dispatcher, EventKind, Payload};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 #[async_trait]
@@ -572,9 +571,12 @@ struct InstallationPayload {
 #[payload(EventKind::InstallationRepositories)]
 struct InstallationRepositoriesPayload {
     installation: WebhookId,
-    repository_selection: RepositorySelection,
-    repositories_removed: Vec<WebhookId>,
-    repositories_added: Vec<WebhookId>,
+    #[serde(rename = "repository_selection")]
+    _repository_selection: RepositorySelection,
+    #[serde(rename = "repositories_removed")]
+    _repositories_removed: Vec<WebhookId>,
+    #[serde(rename = "repositories_added")]
+    _repositories_added: Vec<WebhookId>,
 }
 
 #[derive(Deserialize)]
@@ -634,27 +636,15 @@ pub fn github_webhook_dispatcher(
         .on(
             [Action::Added, Action::Removed],
             move |payload: InstallationRepositoriesPayload| {
-                let storage = storage.clone();
                 let commands = commands.clone();
                 async move {
                     let installation_id = payload.installation.id;
-                    let current = storage
-                        .get_installation(installation_id)
-                        .await?
-                        .ok_or_else(|| {
-                            WebError::Internal(format!(
-                                "installation_repositories: unknown installation {installation_id}"
-                            ))
-                        })?;
-                    let Some(selected_repos) =
-                        selected_repos_from_repository_event(&payload, &current.selected_repos)
-                    else {
-                        return Ok(());
-                    };
                     commands
                         .record_repository_selection_change(RecordRepositorySelectionChange {
                             installation_id,
-                            selected_repos,
+                            // Compatibility field only. Serialized processing refreshes
+                            // GitHub rather than trusting delivery-time deltas.
+                            selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
                             source: RepositorySelectionChangeSource::Webhook,
                         })
                         .await
@@ -664,36 +654,11 @@ pub fn github_webhook_dispatcher(
         .build()
 }
 
-fn selected_repos_from_repository_event(
-    payload: &InstallationRepositoriesPayload,
-    current: &ghinvite_core::SelectedRepos,
-) -> Option<ghinvite_core::SelectedRepos> {
-    match payload.repository_selection {
-        RepositorySelection::All => Some(ghinvite_core::SelectedRepos::All),
-        RepositorySelection::Selected => {
-            let mut ids: BTreeSet<u64> = match current {
-                ghinvite_core::SelectedRepos::All => return None,
-                ghinvite_core::SelectedRepos::Subset(existing) => {
-                    existing.iter().copied().collect()
-                }
-            };
-            for repo in &payload.repositories_removed {
-                ids.remove(&repo.id);
-            }
-            for repo in &payload.repositories_added {
-                ids.insert(repo.id);
-            }
-            Some(ghinvite_core::SelectedRepos::Subset(
-                ids.into_iter().collect(),
-            ))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::RestateClient;
+    use crate::error::WebError;
     use axum::extract::Path;
     use axum::response::IntoResponse;
     use axum::routing::post;
@@ -1431,15 +1396,14 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             [RecordedCommand::RecordRepositorySelectionChange {
                 installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![11, 12]),
+                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
                 source: RepositorySelectionChangeSource::Webhook,
             }]
         );
     }
 
     #[tokio::test]
-    async fn github_installation_repositories_all_event_delegates_to_all_repository_selection_command()
-     {
+    async fn github_installation_repositories_all_event_requests_refresh() {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
@@ -1471,14 +1435,14 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             [RecordedCommand::RecordRepositorySelectionChange {
                 installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::All,
+                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
                 source: RepositorySelectionChangeSource::Webhook,
             }]
         );
     }
 
     #[tokio::test]
-    async fn github_installation_repositories_all_to_selected_delta_is_ignored() {
+    async fn github_installation_repositories_all_to_selected_requests_refresh() {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
@@ -1505,11 +1469,18 @@ mod tests {
         .await;
 
         outcome.result.unwrap();
-        assert!(calls.lock().unwrap().is_empty());
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            [RecordedCommand::RecordRepositorySelectionChange {
+                installation_id: 77,
+                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
+                source: RepositorySelectionChangeSource::Webhook,
+            }]
+        );
     }
 
     #[tokio::test]
-    async fn github_repository_deltas_sort_unique_ids_and_ignore_extra_fields() {
+    async fn github_repository_deltas_request_refresh_and_ignore_extra_fields() {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
@@ -1546,7 +1517,7 @@ mod tests {
             calls.lock().unwrap().as_slice(),
             [RecordedCommand::RecordRepositorySelectionChange {
                 installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![5, 11, 12, 20]),
+                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
                 source: RepositorySelectionChangeSource::Webhook,
             }]
         );

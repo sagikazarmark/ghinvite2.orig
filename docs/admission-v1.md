@@ -22,8 +22,10 @@ admin authority, installation/account relationship, and available repository
 selection before constructing commands. `AccountAdmin` and `requester_id` are
 trusted identity assertions, not credentials or browser-supplied authority. The
 object checks account scope, nonzero identities, canonical object key, and
-guardrails without consulting SQL projections. Installation access loss remains
-#49's policy decision. Bind with endpoint identity verification when deployed.
+guardrails without consulting SQL projections. Installation access loss follows
+[the #60 availability integration](installation-availability.md): bind
+`AccountInstallationV1` alongside the link service (the cutover endpoint does so).
+Bind with endpoint identity verification when deployed.
 
 Allocate `InvitationLinkId::new()` **once before the first create submission**
 and retain the entire `CreateLink` command across uncertain transport failures.
@@ -56,7 +58,9 @@ comparison before unsupported-version validation for fresh attempts.
 HTTP 400 means invalid structure/guardrails, 404 means missing or inaccessible,
 and 409 means identity conflict. HTTP 200 carries either an accepted receipt or
 a durable business rejection, with precedence revoked, expired, exhausted, then
-existing pending/approved request. An uncertain transport/infrastructure result
+existing pending/approved request, then installation/repository unavailability.
+An unknown availability observation returns 503 without a business receipt.
+An uncertain transport/infrastructure result
 requires retrying the same identity/input; it is not business rejection.
 
 ## State and recovery

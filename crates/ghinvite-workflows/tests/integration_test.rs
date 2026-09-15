@@ -199,9 +199,16 @@ async fn scenario() {
     // The runner provides fresh Restate state, and workflow/object keys are unique.
     let run_id = RequestId::new();
     success(
+        "configure installation identity",
+        client
+            .post(format!("{stub_base}/installation-identity"))
+            .json(&json!({"id":42,"login":"test-org","type":"Organization"})),
+    )
+    .await;
+    success(
         "Installation::onboard",
         client
-            .post(format!("{ingress}/Installation/{run_id}/onboard"))
+            .post(format!("{ingress}/Installation/1/onboard"))
             .json(&json!({
                 "installation_id": 1,
                 "actor_user_id": 7,
@@ -220,6 +227,14 @@ async fn scenario() {
         .expect("installation persisted");
     assert_eq!(installation.account_id, 42);
     assert_eq!(installation.account_login, "test-org");
+    let onboarding_calls: serde_json::Value = client
+        .get(format!("{stub_base}/calls"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
 
     let response = success(
         "InvitationLink::create",
@@ -289,8 +304,8 @@ async fn scenario() {
         .unwrap();
     assert_eq!(
         audit.events.len(),
-        4,
-        "installation, link, request creation and expiration"
+        5,
+        "installation, repository refresh, link, request creation and expiration"
     );
     for expected in [
         EventType::InstallationCreated,
@@ -324,7 +339,7 @@ async fn scenario() {
     );
     assert_eq!(
         stub_calls(&client, &stub_base).await,
-        json!({"count": 0, "requests": []}),
+        onboarding_calls,
         "expiration must not contact GitHub"
     );
     let observer = IngressObserver {

@@ -15,6 +15,8 @@
 pub mod admission_v1;
 pub mod audit;
 #[allow(deprecated)]
+pub mod availability;
+#[allow(deprecated)]
 pub mod delivery_v1;
 pub mod error;
 #[allow(deprecated)]
@@ -74,6 +76,16 @@ pub fn build_cutover_endpoint(
             .serve(),
         );
     let builder = admission_v1::bind(builder);
+    let builder = builder.bind(availability::AccountInstallationV1::serve(
+        availability::AccountInstallationV1Impl {
+            state: state.clone(),
+        },
+    ));
+    let builder = builder.bind(availability::InstallationProjectionV1::serve(
+        availability::InstallationProjectionV1Impl {
+            state: state.clone(),
+        },
+    ));
     let builder = projection_v1::bind(builder, projection);
     let builder = request_lifecycle_v1::bind(builder);
     let mut builder = delivery_v1::bind(builder, state);
@@ -131,6 +143,16 @@ pub fn build_endpoint(
             }
             .serve(),
         )
+        .bind(availability::AccountInstallationV1::serve(
+            availability::AccountInstallationV1Impl {
+                state: state.clone(),
+            },
+        ))
+        .bind(availability::InstallationProjectionV1::serve(
+            availability::InstallationProjectionV1Impl {
+                state: state.clone(),
+            },
+        ))
         .bind(reconcile::ReconcileImpl { state }.serve());
 
     if let Some(key) = identity_key {

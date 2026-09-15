@@ -104,6 +104,66 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
 }
 
 #[tokio::test]
+async fn pending_decision_remains_accessible_after_uninstall() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let ingress = MockServer::start().await;
+    let link = ghinvite_core::InvitationLinkId::new();
+    let request = ghinvite_core::RequestId::new();
+    Mock::given(path(format!("/InvitationLinkV1/{link}/decide")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":"applied","request":{
+            "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":"approved",
+            "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
+        .expect(1).mount(&ingress).await;
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let account = identity_account(42, "octocat", AccountType::User);
+    storage.insert_installation(&account).await.unwrap();
+    storage
+        .mark_installation_uninstalled(account.installation_id, Utc::now())
+        .await
+        .unwrap();
+    let state = AppState::new(
+        storage,
+        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/console/accounts/octocat/requests/{request}/approve"
+                ))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&link_id={link}&operation_id={}",
+                    ghinvite_core::RequestId::new()
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response =
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response_html(response)
+            .await
+            .contains("Unavailable repositories may block delivery")
+    );
+}
+
+#[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
     use ghinvite_core::storage::projection::RequestSnapshot;

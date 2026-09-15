@@ -23,6 +23,11 @@ pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Installation projectors retain complete audit events before insertion. An
+/// identical primary-key replay succeeds; differing content violates NOT NULL
+/// and leaves the stored event intact. Shared SQLite/D1 statement semantics.
+pub const INSTALLATION_AUDIT_REPLAY: &str = " ON CONFLICT(id) DO UPDATE SET account_id = CASE WHEN audit_events.account_id IS excluded.account_id AND audit_events.occurred_at IS excluded.occurred_at AND audit_events.event_type IS excluded.event_type AND audit_events.actor_kind IS excluded.actor_kind AND audit_events.actor_id IS excluded.actor_id AND audit_events.target_kind IS excluded.target_kind AND audit_events.target_id IS excluded.target_id AND audit_events.metadata IS excluded.metadata AND audit_events.request_id IS excluded.request_id THEN audit_events.account_id ELSE NULL END";
+
 /// Reasons a write may fail with [`Error::Conflict`]. Each variant pinpoints a
 /// specific unique-constraint or invariant the storage layer enforced.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -183,6 +188,12 @@ pub trait Storage: Send + Sync + 'static {
     ///
     /// **Errors:** [`Error::Database`] only.
     async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
+
+    /// Console history lookup after uninstall. Never grants authority: callers
+    /// must validate the returned numeric account against current GitHub identity.
+    async fn get_latest_installation_by_login(&self, _login: &str) -> Result<Option<Account>> {
+        Ok(None)
+    }
 
     /// List every active installation, ordered by `installed_at` ascending.
     /// Used by the daily reconcile sweep.

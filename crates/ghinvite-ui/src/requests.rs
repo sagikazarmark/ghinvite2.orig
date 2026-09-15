@@ -57,7 +57,8 @@ mod tests {
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("acme/api"));
         assert!(html.contains("acme/web"));
-        assert!(html.contains("Approving sends GitHub invitations"));
+        assert!(html.contains("Approval authorizes delivery"));
+        assert!(html.contains("unavailable repositories may block delivery"));
         assert!(!html.contains("GitHub collaborator invitations"));
         assert!(html.contains("Need access for launch"));
         assert!(html.contains("Decision queue"));
@@ -201,7 +202,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 _ => rsx! {},
                                             }}
                                             {if repos_available {
-                                                rsx! { p { class: "text-xs text-base-content/65", "Approving sends GitHub invitations for the repositories listed here." } }
+                                                rsx! { p { class: "text-xs text-base-content/65", "Approval authorizes delivery for the repositories listed here. Available repositories can proceed; unavailable repositories may block delivery. The original scope and decision deadline stay unchanged." } }
                                             } else {
                                                 rsx! { p { class: "text-xs text-base-content/65", "This invitation request cannot be completed until its invitation link details are available." } }
                                             }}

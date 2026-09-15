@@ -257,14 +257,26 @@ async fn partial_import_stays_closed_and_identical_manifest_resumes() {
             .unwrap(),
     );
     storage.run_migrations().await.unwrap();
-    let github = std::sync::Arc::new(ghinvite_github::InstallationClient::new(
-        std::sync::Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-        ghinvite_github::jwt::AppJwtSigner::from_pem(
-            123,
-            include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
+    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", stub.local_addr().unwrap());
+    let stub_server = tokio::spawn(async move {
+        axum::serve(stub, ghinvite_github::stub::router())
+            .await
+            .unwrap();
+    });
+    let github = std::sync::Arc::new(
+        ghinvite_github::InstallationClient::new(
+            std::sync::Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
+                client.clone(),
+            )),
+            ghinvite_github::jwt::AppJwtSigner::from_pem(
+                123,
+                include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    ));
+        .with_base(base),
+    );
     let storage_for_fence = storage.clone();
     let endpoint = ghinvite_workflows::build_cutover_endpoint(
         ghinvite_workflows::AppState::new(storage.clone(), github),
@@ -372,5 +384,6 @@ async fn partial_import_stays_closed_and_identical_manifest_resumes() {
     .await
     .unwrap();
     cutover_server.abort();
+    stub_server.abort();
     server.abort();
 }

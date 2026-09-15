@@ -162,3 +162,5 @@ jobs:
         run: bash scripts/test-restate.sh retained_delivery
       - name: Rehearse authoritative writer cutover
         run: bash scripts/test-restate.sh writer_cutover
+      - name: Verify installation convergence and admission availability
+        run: bash scripts/test-restate.sh installation_availability

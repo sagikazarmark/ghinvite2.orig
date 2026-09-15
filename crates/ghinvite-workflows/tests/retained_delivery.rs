@@ -62,7 +62,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .with_base(&base),
     );
     let state = ghinvite_workflows::AppState::new(storage.clone(), github);
-    let builder = ghinvite_workflows::admission_v1::bind(Endpoint::builder());
+    let builder = ghinvite_workflows::admission_v1::bind_protocol_fixture(Endpoint::builder());
     let builder = ghinvite_workflows::projection_v1::bind(builder, storage.clone());
     let workflow_faults =
         Arc::new(ghinvite_workflows::request_lifecycle_v1::WorkflowFaults::default());

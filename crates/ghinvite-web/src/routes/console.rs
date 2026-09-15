@@ -1005,13 +1005,16 @@ async fn authoritative_decision(
                 session::Flash {
                     level: session::FlashLevel::Success,
                     message: format!(
-                        "Request {}{}.",
+                        "Request {}{}.{}",
                         if receipt.outcome == DecisionOutcome::AlreadyCompleted {
                             "already "
                         } else {
                             ""
                         },
-                        receipt.request.state
+                        receipt.request.state,
+                        if receipt.request.state == ghinvite_core::RequestState::Approved {
+                            " Unavailable repositories may block delivery. The original scope and decision deadline stay unchanged."
+                        } else { "" }
                     ),
                 },
             )

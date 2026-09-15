@@ -363,6 +363,17 @@ impl Storage for D1Storage {
         .await
     }
 
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        let login = login.to_owned();
+        wasm_send(async {
+            let row: Option<InstallationRow> = self.db.prepare(
+                "SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos FROM installations WHERE account_login = ? ORDER BY installed_at DESC, installation_id DESC LIMIT 1",
+            ).bind(&[JsValue::from_str(&login)]).map_err(bind_err)?
+                .first::<InstallationRow>(None).await.map_err(classify_d1_error)?;
+            row.map(|r| r.try_into_domain()).transpose()
+        }).await
+    }
+
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         wasm_send(async {
             let rows: Vec<InstallationRow> = self
@@ -1151,6 +1162,13 @@ impl Storage for D1Storage {
         // Only metadata commands supply a journaled, replay-stable event ID.
         if event.event_type == ghinvite_core::audit::EventType::InvitationLinkMetadataUpdated {
             sql.push_str(" ON CONFLICT(id) DO NOTHING");
+        } else if matches!(
+            event.event_type,
+            ghinvite_core::audit::EventType::InstallationCreated
+                | ghinvite_core::audit::EventType::InstallationReposChanged
+                | ghinvite_core::audit::EventType::InstallationUninstalled
+        ) {
+            sql.push_str(ghinvite_core::storage::INSTALLATION_AUDIT_REPLAY);
         }
 
         wasm_send(async {

@@ -38,7 +38,7 @@ impl fmt::Display for AccountType {
 }
 
 /// A GitHub account on which the App is (or was) installed.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Account {
     pub installation_id: u64,
     pub account_id: u64,

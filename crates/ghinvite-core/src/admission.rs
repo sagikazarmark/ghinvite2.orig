@@ -61,6 +61,8 @@ pub enum Rejection {
     Expired,
     Exhausted,
     ExistingRequest,
+    InstallationUnavailable,
+    RepositoryUnavailable,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

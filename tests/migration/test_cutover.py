@@ -23,7 +23,7 @@ class CutoverTest(unittest.TestCase):
             if not db.execute("SELECT name FROM sqlite_master WHERE name='users'").fetchone():
                 for path in sorted((ROOT / "migrations").glob("*.sql")):
                     db.executescript(path.read_text())
-            db.execute("INSERT INTO installations VALUES (9,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'\"all\"')")
+            db.execute("INSERT INTO installations VALUES (9,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'all')")
             db.execute("INSERT INTO users VALUES (7,'admin',NULL,'2026-01-01T00:00:00Z')")
             db.execute("INSERT INTO users VALUES (8,'alice',NULL,'2026-01-01T00:00:00Z')")
             db.execute("""INSERT INTO invitation_links

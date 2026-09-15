@@ -92,6 +92,13 @@ pub struct GhUserInstallation {
     pub target_id: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GhAppInstallation {
+    pub id: u64,
+    pub account: GhUser,
+    pub suspended_at: Option<DateTime<Utc>>,
+}
+
 /// OAuth code-exchange success payload. GitHub returns `application/json`
 /// when `Accept: application/json` is set.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

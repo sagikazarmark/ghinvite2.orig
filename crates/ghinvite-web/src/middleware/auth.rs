@@ -93,7 +93,7 @@ fn generic_not_found_response(session: &Session) -> axum::response::Response {
 /// Extractor for routes nested under `/console/accounts/{login}/...`. Loads the
 /// session, resolves `:login` → `ghinvite_core::Account` via storage, and runs the
 /// admin recheck (60s cache per `crate::session::AdminCheck`). On any
-/// concealment path — no install, not admin, install is uninstalled — surfaces
+/// concealment path — no account history or not admin — surfaces
 /// as a generic public 404. Unauthenticated console requests redirect to login
 /// before account authorization checks run.
 ///
@@ -158,6 +158,13 @@ where
 
         let account = match state.storage.get_active_installation_by_login(&login).await {
             Ok(Some(account)) => account,
+            Ok(None) if state.request_lifecycle.is_some() => {
+                match state.storage.get_latest_installation_by_login(&login).await {
+                    Ok(Some(account)) => account,
+                    Ok(None) => return Err(generic_not_found_response(&session)),
+                    Err(error) => return Err(WebError::Storage(error).into_response()),
+                }
+            }
             Ok(None) => return Err(generic_not_found_response(&session)),
             Err(error) => return Err(WebError::Storage(error).into_response()),
         };
