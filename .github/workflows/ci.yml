@@ -88,6 +88,7 @@ jobs:
       - run: cargo binstall -y wasm-bindgen-cli@0.2.120
       - run: npm ci --prefix tests/worker
       - run: npm test --prefix tests/worker
+      - run: npm run test:deadlines --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker
 
   island:

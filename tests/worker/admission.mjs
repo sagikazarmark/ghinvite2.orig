@@ -11,6 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { browserAdmission } from './browser-admission.mjs';
 import { settlement } from './settlement.mjs';
 import { frames, fields } from './protocol.mjs';
+import { deadlineRecovery, stalledResponse } from './deadline-recovery.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { cwd: root, encoding: 'utf8', timeout: 120_000 }));
@@ -18,7 +19,7 @@ const project = `ghinvite-worker-${process.pid}-${randomBytes(4).toString('hex')
 const compose = (...args) => execFileSync('docker', ['compose', '-f', 'compose.yaml', '--profile', 'smoke', '-p', project, ...args], {
   cwd: root, encoding: 'utf8', timeout: 180_000,
 });
-const deadline = setTimeout(() => terminate('Worker gate deadline', 1), 180_000);
+const deadline = setTimeout(() => terminate('Worker gate deadline', 1), 300_000);
 process.once('SIGINT', () => terminate('SIGINT', 130));
 process.once('SIGTERM', () => terminate('SIGTERM', 143));
 let server;
@@ -36,6 +37,18 @@ let migrationDirectory;
 const children = new Set();
 let cleanupPromise;
 let primaryFailure;
+let networkFault;
+let faultPuts = 0;
+const stalledCleanup = [];
+function fault(phase) {
+  if (!phase) { networkFault = null; return; }
+  faultPuts = 0;
+  let wrote, observed;
+  const write = new Promise(resolve => { wrote = resolve; });
+  const observation = new Promise(resolve => { observed = resolve; });
+  networkFault = { phase, wrote, observed };
+  return { write, observation, puts: () => faultPuts };
+}
 const stopCompose = () => new Promise((resolve, reject) => {
   execFile('docker', ['compose', '-f', 'compose.yaml', '--profile', 'smoke', '-p', project,
     'down', '--volumes', '--remove-orphans', '--timeout', '5'],
@@ -51,6 +64,7 @@ async function cleanup() {
     const errors = [];
     const step = async action => { try { await action(); } catch (error) { errors.push(error); } };
     await step(stopCompose);
+    for (const release of stalledCleanup) release();
     for (const child of children) await step(async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
       const exited = once(child, 'exit');
@@ -112,6 +126,11 @@ const mf = new Miniflare({
     if (new URL(request.url).origin !== 'https://api.github.com' || !githubUrl) {
       unexpectedOutbound++;
       return new Response('Outbound network disabled', { status: 502 });
+    }
+    if (request.method === 'PUT') faultPuts++;
+    if (networkFault && (request.method === 'PUT' || new URL(request.url).pathname === '/app/installations/1')) {
+      if (request.method === 'PUT') networkFault.wrote(); else networkFault.observed();
+      return stalledResponse(networkFault.phase, stalledCleanup);
     }
     const response = await fetch(githubUrl + new URL(request.url).pathname + new URL(request.url).search, {
       method: request.method, headers: request.headers,
@@ -462,6 +481,9 @@ try {
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
     pause: value => { pauseWorkflows = value; } });
+  await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
+    pause: value => { pauseWorkflows = value; } });
+  await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
   migrationDirectory = mkdtempSync(join(tmpdir(), 'ghinvite-d1-cutover-'));
   execFileSync('python3', ['tests/worker/migration.py', migrationDirectory], { cwd: root, timeout: 30_000 });
   // Import the adopted offline checkpoint into this disposable D1. Existing

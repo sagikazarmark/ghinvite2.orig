@@ -1,5 +1,12 @@
 # Worker Runtime Smoke Test
 
+For stalled upstream headers/bodies, run
+`npm run test:deadlines --prefix tests/worker`. The admission gate also verifies
+durable timeout recovery and released account exclusivity. See the
+[network deadline policy and evidence](../../docs/network-deadlines.md).
+Test builds enable `runtime-tests` to expose production client/storage seams;
+these fixture routes are excluded from ordinary deployment builds.
+
 For authoritative admission, recovery, D1 projection and cutover execution, run
 `npm run test:admission --prefix tests/worker` from the root. See the
 [separate gate/results](../../docs/worker-admission-gate.md), including its explicit

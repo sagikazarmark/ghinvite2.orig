@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
+import { stalledResponse } from './deadline-recovery.mjs';
 
 const ingressApiKey = 'synthetic-worker-ingress-key';
 
-export async function browserAdmission(ingress, code, requester, operation) {
+export async function browserAdmission(ingress, code, requester, operation, recovery) {
   let authenticatedIngressCalls = 0;
+  let stall;
+  let committed;
+  const cleanup = [];
+  const attempted = [];
   const mf = new Miniflare({
     log: new Log(LogLevel.ERROR), modules: true,
     scriptPath: fileURLToPath(new URL('./worker.mjs', import.meta.url)),
@@ -24,8 +29,16 @@ export async function browserAdmission(ingress, code, requester, operation) {
       if (url.origin === ingress) {
         assert.equal(request.headers.get('authorization'), `Bearer ${ingressApiKey}`);
         authenticatedIngressCalls++;
+        const input = request.method === 'GET' ? undefined : Buffer.from(await request.arrayBuffer());
+        const mutation = url.pathname.endsWith('/admit');
+        if (mutation) attempted.push(JSON.parse(input));
         const response = await fetch(request.url, { method: request.method, headers: request.headers,
-          body: request.method === 'GET' ? undefined : Buffer.from(await request.arrayBuffer()), signal: AbortSignal.timeout(25_000) });
+          body: input });
+        if (stall && mutation) {
+          assert.equal(response.status, 200);
+          committed = await response.json();
+          return stalledResponse(stall, cleanup);
+        }
         return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
       }
       // Controlled OAuth boundary only; Rust session creation/rotation is real.
@@ -53,5 +66,43 @@ export async function browserAdmission(ingress, code, requester, operation) {
     assert.ok(authenticatedIngressCalls > 0, 'browser status must call authenticated ingress');
     assert.equal(page.headers.get('cache-control'), 'private, no-store');
     console.log('PASS browser Worker Bearer ingress binding and authoritative status with empty D1');
-  } finally { await mf.dispose(); }
+    if (recovery) for (const phase of ['headers', 'body']) {
+      const input = recovery.creation();
+      const created = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/create`, input);
+      const path = `https://browser.test/i/${created.invitation_code}`;
+      const form = await mf.dispatchFetch(path, { headers: { cookie } });
+      assert.equal(form.status, 200);
+      const html = await form.text();
+      const field = name => {
+        const value = html.match(new RegExp(`name="${name}"[^>]*value="([^"]+)"`))?.[1];
+        assert.ok(value, `missing ${name}`);
+        return value;
+      };
+      const operation_id = field('operation_id');
+      const body = new URLSearchParams({ csrf_token: field('csrf_token'), operation_id, justification: 'Original input' }).toString();
+      const submit = () => mf.dispatchFetch(path, { method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, body, redirect: 'manual' });
+      stall = phase;
+      const start = Date.now();
+      const response = await submit();
+      assert.equal(response.status, 502);
+      const unknown = await response.text();
+      assert.match(unknown, /Outcome unknown/);
+      assert.ok(unknown.includes(operation_id));
+      assert.ok(unknown.includes('Original input'));
+      assert.ok(Date.now() - start >= 14_000 && Date.now() - start < 20_000);
+      assert.equal(committed.result.kind, 'accepted');
+      assert.equal(attempted.at(-1).operation_id, operation_id);
+      stall = null;
+      const retried = await submit();
+      assert.equal(retried.status, 303, await retried.text());
+      assert.ok(retried.headers.get('location').includes(operation_id));
+      const status = await mf.dispatchFetch(`https://browser.test${retried.headers.get('location')}`, { headers: { cookie } });
+      assert.equal(status.status, 200, await status.text());
+      const result = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/admit`, attempted.at(-1));
+      assert.deepEqual(result, committed);
+      const link = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/link_status`, { link_id: input.link_id, admin: input.admin });
+      assert.equal(link.uses, 1);
+      console.log(`PASS browser Worker ${phase} mutation timeout after commit: original form identity/input and one-use recovery`);
+    }
+  } finally { for (const release of cleanup) release(); await mf.dispose(); }
 }

@@ -18,7 +18,7 @@ assert.ok(version, 'wasm-bindgen version missing from Cargo.lock');
 const actual = execFileSync(cli, ['--version'], { encoding: 'utf8' }).trim();
 assert.equal(actual, `wasm-bindgen ${version}`, 'Install the wasm-bindgen CLI matching Cargo.lock');
 
-execFileSync('cargo', ['build', '--locked', '-p', crate, '--target', 'wasm32-unknown-unknown', ...(workflows ? ['--features', 'runtime-tests'] : [])], {
+execFileSync('cargo', ['build', '--locked', '-p', crate, '--target', 'wasm32-unknown-unknown', '--features', 'runtime-tests'], {
   cwd: root, stdio: 'inherit',
 });
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], {

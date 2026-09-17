@@ -110,10 +110,8 @@ impl RestateClient {
                 "Authenticated ingress requires HTTPS (except loopback development).".into(),
             ));
         }
-        // `reqwest::ClientBuilder::timeout` is not available on the wasm32 target
-        // (Cloudflare Workers): on wasm reqwest dispatches to fetch, which has
-        // no timeout knob. The Workers runtime applies its own per-request
-        // limits, so skipping the builder option is correct.
+        // Wasm uses RequestBuilder::timeout below: Worker execution limits
+        // do not impose a wall-clock deadline on upstream fetches.
         let mut headers = HeaderMap::new();
         if let Some(authorization) = auth.authorization {
             headers.insert(AUTHORIZATION, authorization);
@@ -157,6 +155,7 @@ impl RestateClient {
             let resp = self
                 .client
                 .post(&url)
+                .timeout(std::time::Duration::from_secs(15))
                 .json(input)
                 .send()
                 .await
@@ -217,6 +216,9 @@ impl RestateClient {
             let resp = self
                 .client
                 .post(&url)
+                // A single reqwest deadline spans headers and body consumption
+                // on both native and Wasm; a timeout never proves no effect.
+                .timeout(std::time::Duration::from_secs(15))
                 .json(input)
                 .send()
                 .await
