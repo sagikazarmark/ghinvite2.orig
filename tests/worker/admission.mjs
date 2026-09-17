@@ -518,6 +518,37 @@ try {
   const rollback = await cli('restore-legacy', '--database', join(migrationDirectory, 'checkpoint.db'), '--restored-coordinated-checkpoint', 'stale');
   assert.notEqual(rollback.code, 0); assert.match(rollback.text, /reverse reconciliation/);
   console.log('PASS #58 offline checkpoint → actual D1/Worker import, legacy states, resumable activation, late-writer fence and forward-only recovery');
+  // #66 on actual D1 bindings: installation 40 is the shape adoption exists for.
+  // Its command already retains the numeric account binding, while account 300
+  // has never been observed and must adopt the existing row.
+  await http(`${githubUrl}/installation-identity`, { id: 300, login: 'adopted', type: 'Organization' });
+  await db.prepare("INSERT INTO installations VALUES (40,300,'adopted','Organization','2026-01-01T00:00:00Z',NULL,'[]')").run();
+  await fetch(`${admin}/services/Installation/state`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ object_key: '40', new_state: { account_id: [...Buffer.from('300')] } }), signal: AbortSignal.timeout(25_000) });
+  await eventually(() => http(`${admin}/query`, { query: "SELECT key FROM state WHERE service_name = 'Installation' AND service_key = '40'" }),
+    state => state.rows.length > 0);
+  // Installation reads fail on the real binding while GitHub stays reachable.
+  await db.prepare('ALTER TABLE installations RENAME TO installations_offline').run();
+  const reposChanged = { installation_id: 40, selected_repos: 'all' };
+  const acknowledged = await http(`${ingress}/Installation/40/repos_changed/send`, reposChanged);
+  assert.ok(acknowledged.invocationId, 'repository webhook is acknowledged by its durable send');
+  // The command completes rather than holding exclusivity, and a duplicate
+  // event joins the retained continuation instead of competing with it.
+  await http(`${ingress}/Installation/40/repos_changed`, reposChanged);
+  await http(`${ingress}/AccountInstallationV1/300/refresh`, 41);
+  const held = Date.now();
+  const offline = await fetch(`${ingress}/AccountInstallationV1/300/status`, { method: 'POST', signal: AbortSignal.timeout(25_000) });
+  assert.equal(offline.status, 503, 'synchronous observation fails promptly instead of holding exclusivity');
+  assert.ok(Date.now() - held < 15_000);
+  await db.prepare('ALTER TABLE installations_offline RENAME TO installations').run();
+  // Restoration alone converges: no further webhook and no user action.
+  await eventually(() => db.prepare('SELECT selected_repos FROM installations WHERE installation_id=40').first(),
+    row => row?.selected_repos === '[10,11]');
+  const adopted = await http(`${ingress}/AccountInstallationV1/300/status`);
+  assert.equal(adopted.account.installation_id, 40);
+  assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
+  await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
+  console.log('PASS #66 acknowledged webhook survives first D1 adoption outage and converges without another event');
 } catch (error) {
   primaryFailure = error;
   console.error(runtimeLogs.join(''));

@@ -40,7 +40,11 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .await
             .unwrap();
     }
-    let observed = Arc::new(Mutex::new(json!({"id":9,"repos":[10],"failed":false})));
+    // `adopted` is #66's pre-existing installation, observed alongside `id` so
+    // the account it belongs to is the only one it can answer for.
+    let observed = Arc::new(Mutex::new(
+        json!({"id":9,"adopted":40,"repos":[10],"failed":false}),
+    ));
     let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", stub.local_addr().unwrap());
     let data = observed.clone();
@@ -58,6 +62,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
                     let repos = data["repos"].as_array().unwrap();
                     (200, json!({"total_count":repos.len(),"repositories":repos.iter().skip(page * 100).take(100).map(|id|json!({"id":id,"full_name":"acme/api","private":true})).collect::<Vec<_>>()}))
                 }
+                else if path == format!("/app/installations/{}", data["adopted"]) { (200, json!({"id":data["adopted"],"account":{"id":300,"login":"adopted","type":"Organization"},"suspended_at":null})) }
                 else if path == format!("/app/installations/{}", data["id"]) { (200, json!({"id":data["id"],"account":{"id":data.get("account_id").unwrap_or(&json!(100)),"login":"renamed","type":"Organization"},"suspended_at":null})) }
                 else { (404, json!({})) };
                 (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(body))
@@ -323,6 +328,224 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .await
     .unwrap();
     observed.lock().unwrap()["failed"] = json!(false);
+    // #66: a repository webhook is acknowledged by its durable send, so the
+    // account object's first storage adoption failure must retain recovery
+    // instead of dropping acknowledged work. Installation 40 is the shape
+    // adoption exists for: its command already retains the numeric account
+    // binding, while account 300 has never been observed and must adopt the
+    // existing row.
+    observed.lock().unwrap()["repos"] = json!([10, 11]);
+    storage
+        .insert_installation(&ghinvite_core::Account {
+            installation_id: 40,
+            account_id: 300,
+            account_login: "adopted".into(),
+            account_type: ghinvite_core::AccountType::Organization,
+            installed_at: chrono::Utc::now(),
+            uninstalled_at: None,
+            selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
+        })
+        .await
+        .unwrap();
+    let seeded = client
+        .post(format!("{admin}/services/Installation/state"))
+        .json(&json!({"object_key":"40","new_state":{"account_id":serde_json::to_vec(&300u64).unwrap()}}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        seeded.status().is_success(),
+        "{}",
+        seeded.text().await.unwrap()
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let state: Value = client
+                .post(format!("{admin}/query"))
+                .header("accept", "application/json")
+                .json(&json!({"query":"SELECT key FROM state WHERE service_name = 'Installation' AND service_key = '40'"}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if !state["rows"].as_array().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // An account-scoped link admits through the same observation admission uses.
+    let adopted_link = ghinvite_core::InvitationLinkId::new().to_string();
+    assert!(
+        client
+            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/create"))
+            .json(&json!({"version":1,"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
+                "description":"Adopted","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    // Installation reads fail while GitHub stays reachable.
+    sqlx::query("ALTER TABLE installations RENAME TO installations_offline")
+        .execute(&failures)
+        .await
+        .unwrap();
+    let repos_changed = json!({"installation_id":40,"selected_repos":"all"});
+    // The webhook acknowledges the event with a durable send, exactly as the
+    // repository-change command does.
+    assert!(
+        client
+            .post(format!("{ingress}/Installation/40/repos_changed/send"))
+            .json(&repos_changed)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    // The command also completes rather than holding its own exclusivity
+    // through indefinite retries, and a duplicate event joins the retained
+    // continuation instead of competing with it.
+    for _ in 0..2 {
+        assert!(
+            installation(40, "repos_changed", repos_changed.clone())
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    // A delayed event for an identity this account never adopts is retained
+    // just as safely.
+    assert!(
+        client
+            .post(format!("{ingress}/AccountInstallationV1/300/refresh"))
+            .json(&json!(41))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    // Admission's synchronous observation still fails promptly with an
+    // infrastructure result, holding no exclusivity and recording no rejection.
+    let started = std::time::Instant::now();
+    let adopted_attempt = json!({"version":1,"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
+    assert_eq!(
+        client
+            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/admit"))
+            .json(&adopted_attempt)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503
+    );
+    assert_eq!(
+        client
+            .post(format!("{ingress}/AccountInstallationV1/300/status"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503
+    );
+    assert!(started.elapsed() < Duration::from_secs(15));
+    sqlx::query("ALTER TABLE installations_offline RENAME TO installations")
+        .execute(&failures)
+        .await
+        .unwrap();
+    // Restoration alone converges: no further webhook and no user action.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if storage
+                .get_installation(40)
+                .await
+                .unwrap()
+                .is_some_and(|a| {
+                    a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![10, 11])
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let adopted: Value = client
+        .post(format!("{ingress}/AccountInstallationV1/300/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(adopted["account"]["installation_id"], 40);
+    assert_eq!(adopted["observation"]["repo_ids"], json!([10, 11]));
+    // The attempt that met the outage was never decided, so the same operation
+    // still admits once the observation is available.
+    assert_eq!(
+        client
+            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/admit"))
+            .json(&adopted_attempt)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["result"]["kind"],
+        "accepted"
+    );
+    // A delayed event for a retired identity observes nothing, so recovered
+    // scope survives it.
+    assert!(
+        installation(
+            40,
+            "uninstall",
+            json!({"installation_id":40,"uninstalled_at":chrono::Utc::now()})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success()
+    );
+    assert!(
+        client
+            .post(format!("{ingress}/AccountInstallationV1/300/refresh"))
+            .json(&json!(40))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let retired: Value = client
+        .post(format!("{ingress}/AccountInstallationV1/300/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(retired["account"].is_null());
+    assert_eq!(
+        storage
+            .get_installation(40)
+            .await
+            .unwrap()
+            .unwrap()
+            .selected_repos,
+        ghinvite_core::SelectedRepos::Subset(vec![10, 11])
+    );
     // New installation arrives before the old uninstall. Numeric account identity
     // survives a renamed account and obsolete events cannot mutate the replacement.
     observed.lock().unwrap()["id"] = json!(20);

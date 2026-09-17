@@ -43,9 +43,37 @@ pub struct InstallationStatus {
     pub observation: Observation,
 }
 
+/// What a refresh follows: the identity an event named, or the periodic
+/// observation recheck, which always follows whichever identity is current.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RefreshTarget {
+    Identity { installation_id: u64 },
+    CurrentObservation,
+}
+
+impl RefreshTarget {
+    /// The state key holding this target's single scheduled continuation.
+    fn slot(&self) -> String {
+        match self {
+            Self::Identity { installation_id } => format!("refresh_retry/{installation_id}"),
+            Self::CurrentObservation => RECHECK_SLOT.to_owned(),
+        }
+    }
+}
+
+/// One refresh and every continuation retained for it. `attempt` counts the
+/// adoption outages this refresh has already waited out, so the first is zero.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RefreshContinuation {
+    pub target: RefreshTarget,
+    pub attempt: u32,
+}
+
 #[restate_sdk::object]
 pub trait AccountInstallationV1 {
     async fn retry_uninstall(input: Json<UninstallInput>) -> Result<(), TerminalError>;
+    async fn retry_refresh(input: Json<RefreshContinuation>) -> Result<(), TerminalError>;
     async fn recheck() -> Result<(), TerminalError>;
     async fn onboard(input: Json<OnboardInput>) -> Result<(), TerminalError>;
     async fn refresh(input: Json<u64>) -> Result<(), TerminalError>;
@@ -191,12 +219,7 @@ impl AccountInstallationV1Impl {
                     .get_active_installation_by_account_id(account_id)
                     .await
                     .map(Json)
-                    .map_err(|_| {
-                        HandlerError::from(TerminalError::new_with_code(
-                            503,
-                            "installation adoption unavailable",
-                        ))
-                    })
+                    .map_err(|_| HandlerError::from(adoption_unavailable()))
             })
             .name("adopt_installation")
             .await?;
@@ -273,12 +296,12 @@ impl AccountInstallationV1Impl {
                 account.selected_repos = selected;
             }
             if !matches!(observation, Observation::Available { .. })
-                && ctx.get::<bool>("refresh_scheduled").await?.is_none()
+                && ctx.get::<bool>(RECHECK_SLOT).await?.is_none()
             {
-                ctx.set("refresh_scheduled", true);
+                ctx.set(RECHECK_SLOT, true);
                 ctx.object_client::<AccountInstallationV1Client>(ctx.key())
                     .recheck()
-                    .send_after(std::time::Duration::from_secs(60))
+                    .send_after(RECHECK_INTERVAL)
                     .await?;
             }
             status.observation = observation;
@@ -288,10 +311,97 @@ impl AccountInstallationV1Impl {
         ctx.set("installation/v1", Json(status.clone()));
         Ok(status)
     }
+
+    /// Shared body of `refresh`, `recheck` and every continuation retained for
+    /// them. Refresh work is acknowledged by a durable send before it runs, so a
+    /// first adoption that cannot read installation storage keeps the work as a
+    /// continuation instead of failing it away.
+    async fn continue_refresh(
+        &self,
+        ctx: &ObjectContext<'_>,
+        refresh: RefreshContinuation,
+    ) -> Result<(), TerminalError> {
+        let status = match self.load(ctx).await {
+            Ok(status) => status,
+            // An unusable key is not an outage; only unreadable storage is
+            // worth waiting for.
+            Err(error) if error.code() != ADOPTION_UNAVAILABLE => return Err(error),
+            Err(_) => return self.retain_refresh(ctx, refresh).await,
+        };
+        match refresh.target {
+            RefreshTarget::Identity { installation_id } => {
+                // Only a continuation retires its own slot; a fresh event that
+                // found storage readable leaves the pending one to finish.
+                if refresh.attempt > 0 {
+                    ctx.clear(&refresh.target.slot());
+                }
+                // Duplicate, superseded, and retired identities observe nothing:
+                // only the adopted identity may refresh.
+                if status
+                    .account
+                    .as_ref()
+                    .is_none_or(|account| account.installation_id != installation_id)
+                {
+                    return Ok(());
+                }
+            }
+            // The recheck's slot is consumed by the invocation it scheduled.
+            RefreshTarget::CurrentObservation => ctx.clear(RECHECK_SLOT),
+        }
+        self.refresh_status(ctx, status).await?;
+        Ok(())
+    }
+
+    /// Retains one durable continuation per target. A fresh event joins the
+    /// continuation already scheduled for that identity rather than starting a
+    /// competing chain; the recheck's own slot is already reserved for it.
+    async fn retain_refresh(
+        &self,
+        ctx: &ObjectContext<'_>,
+        refresh: RefreshContinuation,
+    ) -> Result<(), TerminalError> {
+        let slot = refresh.target.slot();
+        if matches!(refresh.target, RefreshTarget::Identity { .. })
+            && refresh.attempt == 0
+            && ctx.get::<bool>(&slot).await?.is_some()
+        {
+            return Ok(());
+        }
+        ctx.set(&slot, true);
+        ctx.object_client::<AccountInstallationV1Client>(ctx.key())
+            .retry_refresh(Json(RefreshContinuation {
+                target: refresh.target,
+                attempt: refresh.attempt.saturating_add(1),
+            }))
+            .send_after(refresh_backoff(refresh.attempt))
+            .await?;
+        Ok(())
+    }
 }
 
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
+}
+
+/// Installation storage could not be read, so adoption is unknown rather than
+/// absent. Synchronous callers fail promptly with this; acknowledged refresh
+/// work retains a continuation instead.
+const ADOPTION_UNAVAILABLE: u16 = 503;
+
+fn adoption_unavailable() -> TerminalError {
+    TerminalError::new_with_code(ADOPTION_UNAVAILABLE, "installation adoption unavailable")
+}
+
+/// Steady-state cadence of the durable observation recheck, and the state key
+/// reserving its single scheduled invocation.
+const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const RECHECK_SLOT: &str = "refresh_scheduled";
+
+/// Bounded backoff for a retained refresh continuation: short first retries so a
+/// brief storage outage converges quickly, settling on the recheck cadence so a
+/// long one costs no more than the recheck it already runs.
+fn refresh_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1 << attempt.min(6)).min(RECHECK_INTERVAL)
 }
 
 impl AccountInstallationV1 for AccountInstallationV1Impl {
@@ -302,11 +412,22 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
     ) -> Result<(), TerminalError> {
         self.uninstall(ctx, Json(input)).await
     }
+    async fn retry_refresh(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(refresh): Json<RefreshContinuation>,
+    ) -> Result<(), TerminalError> {
+        self.continue_refresh(&ctx, refresh).await
+    }
     async fn recheck(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
-        ctx.clear("refresh_scheduled");
-        let status = self.load(&ctx).await?;
-        self.refresh_status(&ctx, status).await?;
-        Ok(())
+        self.continue_refresh(
+            &ctx,
+            RefreshContinuation {
+                target: RefreshTarget::CurrentObservation,
+                attempt: 0,
+            },
+        )
+        .await
     }
     async fn onboard(
         &self,
@@ -451,15 +572,16 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
         ctx: ObjectContext<'_>,
         Json(id): Json<u64>,
     ) -> Result<(), TerminalError> {
-        let status = self.load(&ctx).await?;
-        if status
-            .account
-            .as_ref()
-            .is_some_and(|a| a.installation_id == id)
-        {
-            self.refresh_status(&ctx, status).await?;
-        }
-        Ok(())
+        self.continue_refresh(
+            &ctx,
+            RefreshContinuation {
+                target: RefreshTarget::Identity {
+                    installation_id: id,
+                },
+                attempt: 0,
+            },
+        )
+        .await
     }
     async fn uninstall(
         &self,
@@ -519,5 +641,22 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
             }
             Observation::Available { .. } => Eligibility::Available,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refresh_backoff_is_bounded_by_the_recheck_cadence() {
+        assert_eq!(refresh_backoff(0), std::time::Duration::from_secs(1));
+        assert_eq!(refresh_backoff(1), std::time::Duration::from_secs(2));
+        assert_eq!(refresh_backoff(5), std::time::Duration::from_secs(32));
+        // A long outage never waits longer than the recheck it already runs,
+        // and never overflows the shift for a continuation that outlives it.
+        for attempt in [6, 7, 64, u32::MAX] {
+            assert_eq!(refresh_backoff(attempt), RECHECK_INTERVAL);
+        }
     }
 }
