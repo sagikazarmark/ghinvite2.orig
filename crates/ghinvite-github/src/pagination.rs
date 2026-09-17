@@ -13,14 +13,10 @@ use crate::transport::Response;
 ///
 /// Returns `Ok(None)` on the last page: no `Link` header, or one that parses
 /// and carries no `next` relation. Errors when the header cannot be trusted to
-/// mean "no next page" — unparseable, an off-base host, or a target equal to
-/// `current` (which would loop forever) — because silently stopping there would
-/// fabricate absence.
-pub(crate) fn next_page_path(
-    response: &Response,
-    base_url: &str,
-    current: &str,
-) -> Result<Option<String>> {
+/// mean "no next page" — unparseable, or pointing off the API base — because
+/// silently stopping there would fabricate absence. Whether the target advances
+/// is the caller's business: only it knows which pages it has already walked.
+pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Option<String>> {
     let Some(link) = response.headers.get("link") else {
         return Ok(None);
     };
@@ -32,11 +28,6 @@ pub(crate) fn next_page_path(
             "pagination link outside {base_url}: {next}"
         )));
     };
-    if path == current {
-        return Err(Error::InvalidInput(format!(
-            "pagination link does not advance past {current}"
-        )));
-    }
     Ok(Some(path.to_owned()))
 }
 
@@ -72,17 +63,27 @@ fn next_relation(header: &str) -> Result<Option<&str>> {
     }
 }
 
+/// Is `next` among this link's relations? Parameter names and relation types
+/// are case-insensitive, and `rel` may hold a space-separated list (RFC 8288
+/// §3.3), so `rel="NEXT last"` names a next page just as `rel="next"` does.
+/// Reading either as "no next page" would truncate the walk.
 fn is_next(params: &str) -> bool {
     params.split(';').any(|param| {
+        let Some((name, value)) = param.split_once('=') else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case("rel") {
+            return false;
+        }
         // The trailing `,` belongs to the comma separating this link from the
         // next one in the header, not to the parameter value.
-        param
+        value
             .trim()
-            .strip_prefix("rel")
-            .and_then(|rest| rest.trim_start().strip_prefix('='))
-            .is_some_and(|value| {
-                value.trim().trim_end_matches(',').trim().trim_matches('"') == "next"
-            })
+            .trim_end_matches(',')
+            .trim()
+            .trim_matches('"')
+            .split_whitespace()
+            .any(|relation| relation.eq_ignore_ascii_case("next"))
     })
 }
 
@@ -106,7 +107,7 @@ mod tests {
     #[test]
     fn no_link_header_is_the_last_page() {
         assert_eq!(
-            next_page_path(&response(None), "https://api.github.test", "/x").unwrap(),
+            next_page_path(&response(None), "https://api.github.test").unwrap(),
             None
         );
     }
@@ -116,12 +117,7 @@ mod tests {
         let link = "<https://api.github.test/x?page=1>; rel=\"prev\", \
                     <https://api.github.test/x?page=1>; rel=\"first\"";
         assert_eq!(
-            next_page_path(
-                &response(Some(link)),
-                "https://api.github.test",
-                "/x?page=2"
-            )
-            .unwrap(),
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
             None
         );
     }
@@ -132,12 +128,7 @@ mod tests {
                     <https://api.github.test/x?page=3>; rel=\"next\", \
                     <https://api.github.test/x?page=9>; rel=\"last\"";
         assert_eq!(
-            next_page_path(
-                &response(Some(link)),
-                "https://api.github.test",
-                "/x?page=2"
-            )
-            .unwrap(),
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
             Some("/x?page=3".into())
         );
     }
@@ -146,12 +137,7 @@ mod tests {
     fn unquoted_rel_is_accepted() {
         let link = "<https://api.github.test/x?page=3>; rel=next";
         assert_eq!(
-            next_page_path(
-                &response(Some(link)),
-                "https://api.github.test",
-                "/x?page=2"
-            )
-            .unwrap(),
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
             Some("/x?page=3".into())
         );
     }
@@ -160,12 +146,7 @@ mod tests {
     fn a_url_containing_a_comma_survives_parsing() {
         let link = "<https://api.github.test/x?ids=1,2&page=3>; rel=\"next\"";
         assert_eq!(
-            next_page_path(
-                &response(Some(link)),
-                "https://api.github.test",
-                "/x?page=2"
-            )
-            .unwrap(),
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
             Some("/x?ids=1,2&page=3".into())
         );
     }
@@ -173,59 +154,62 @@ mod tests {
     #[test]
     fn off_base_next_link_is_an_error() {
         let link = "<https://evil.test/x?page=3>; rel=\"next\"";
-        let err =
-            next_page_path(&response(Some(link)), "https://api.github.test", "/x").unwrap_err();
+        let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
     }
 
     #[test]
     fn host_prefix_alone_does_not_make_a_link_on_base() {
         let link = "<https://api.github.test.evil.test/x?page=3>; rel=\"next\"";
-        let err =
-            next_page_path(&response(Some(link)), "https://api.github.test", "/x").unwrap_err();
+        let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
     }
 
     #[test]
-    fn a_next_link_back_to_the_current_page_is_an_error() {
-        let link = "<https://api.github.test/x?page=2>; rel=\"next\"";
-        let err = next_page_path(
-            &response(Some(link)),
-            "https://api.github.test",
-            "/x?page=2",
-        )
-        .unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    fn a_rel_list_containing_next_is_a_next_link() {
+        let link = "<https://api.github.test/x?page=3>; rel=\"next last\"";
+        assert_eq!(
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
+            Some("/x?page=3".into())
+        );
+    }
+
+    #[test]
+    fn relation_and_parameter_names_are_case_insensitive() {
+        let link = "<https://api.github.test/x?page=3>; REL=\"NEXT\"";
+        assert_eq!(
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
+            Some("/x?page=3".into())
+        );
+    }
+
+    #[test]
+    fn a_parameter_that_merely_starts_with_rel_is_not_a_relation() {
+        let link = "<https://api.github.test/x?page=3>; relation=\"next\"";
+        assert_eq!(
+            next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
+            None
+        );
     }
 
     #[test]
     fn an_unclosed_link_header_is_an_error_not_the_last_page() {
         let link = "<https://api.github.test/x?page=3; rel=\"next\"";
-        let err = next_page_path(
-            &response(Some(link)),
-            "https://api.github.test",
-            "/x?page=2",
-        )
-        .unwrap_err();
+        let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
     }
 
     #[test]
     fn a_link_header_carrying_no_link_at_all_is_an_error() {
-        let err = next_page_path(&response(Some("rel=next")), "https://api.github.test", "/x")
-            .unwrap_err();
+        let err =
+            next_page_path(&response(Some("rel=next")), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
     }
 
     #[test]
     fn an_unclosed_link_after_a_complete_one_is_an_error() {
         let link = "<https://api.github.test/x?page=1>; rel=\"prev\", <https://api.github.test/x";
-        let err = next_page_path(
-            &response(Some(link)),
-            "https://api.github.test",
-            "/x?page=2",
-        )
-        .unwrap_err();
+        let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
     }
 }

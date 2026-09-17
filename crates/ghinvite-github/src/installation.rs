@@ -366,7 +366,16 @@ impl InstallationClient {
             path_segment(repo)
         );
         let mut listed = Vec::new();
+        // Every page already walked. A cycle of any length — not just a link
+        // back to the page in hand — is a paging fault, and catching it here
+        // spends one request on it instead of the whole page budget.
+        let mut walked = std::collections::HashSet::new();
         for _ in 0..MAX_INVITATION_PAGES {
+            if !walked.insert(path.clone()) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "pagination returns to {path}"
+                )));
+            }
             let req = self
                 .auth_request(installation_id, Method::Get, &path)
                 .await?;
@@ -377,7 +386,7 @@ impl InstallationClient {
                     return Err(err);
                 }
             };
-            let next = crate::pagination::next_page_path(&resp, &self.base_url, &path)?;
+            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
             listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
             match next {
                 Some(next) => path = next,
@@ -936,6 +945,31 @@ mod reconcile_tests {
             invitation_page(
                 "https://api.github.test/repos/acme/api/invitations?per_page=100",
                 serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100"),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_rejects_a_pagination_cycle_on_the_first_repeat() {
+        // Page two links back to page one. The script holds exactly the two
+        // requests the walk is allowed to spend before it gives up — anything
+        // more exhausts it and panics, so the page budget cannot absorb a cycle.
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_json(2)]),
                 Some("https://api.github.test/repos/acme/api/invitations?per_page=100"),
             ),
         ]);

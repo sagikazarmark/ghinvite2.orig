@@ -83,8 +83,8 @@ Settlement and delivery recovery read GitHub's pending-invitation listing and
 treat a tracked invitation's absence from it as evidence. That evidence is only
 sound over a complete observation, so the listing follows every
 `Link: rel="next"` page. An incomplete walk — a failed later page, a malformed
-body or `Link` header, a link off the API base, or one that does not advance —
-fails the read instead of returning a shorter list. Reconciliation then leaves the invitation pending and
+body or `Link` header, a link off the API base, or a return to a page already
+read — fails the read instead of returning a shorter list. Reconciliation then leaves the invitation pending and
 retries; retained-create recovery keeps the outcome unknown. GitHub's offset
 pages are still not a consistent snapshot: an invitation cancelled on an earlier
 page mid-walk can shift a later one out of view. That residual race is unchanged
