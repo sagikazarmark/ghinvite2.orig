@@ -9,6 +9,18 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
     let input: serde_json::Value = serde_json::from_slice(&bytes).map_err(super::worker_err)?;
     let storage = ghinvite_storage_d1::D1Storage::new(env.d1("DB")?);
     let result = match path.as_str() {
+        "/__fixture/settle" => storage
+            .settle_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|_| serde_json::Value::Null),
+        "/__fixture/insert_invitation" => storage
+            .insert_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|_| serde_json::Value::Null),
+        "/__fixture/invitation" => storage
+            .get_github_invitation(serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/apply" => storage
             .apply_transition(&serde_json::from_value(input).map_err(super::worker_err)?)
             .await

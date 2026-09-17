@@ -115,6 +115,27 @@ impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
 
 #[async_trait]
 impl Storage for D1Storage {
+    async fn settle_github_invitation(
+        &self,
+        transition: &ghinvite_core::storage::settlement::Settlement,
+    ) -> Result<()> {
+        use ghinvite_core::storage::settlement;
+        let input = settlement::encode(transition)?;
+        wasm_send(async {
+            let statements = settlement::STATEMENTS
+                .iter()
+                .map(|sql| {
+                    self.db
+                        .prepare(*sql)
+                        .bind(&[JsValue::from_str(&input)])
+                        .map_err(bind_err)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.db.batch(statements).await.map_err(classify_d1_error)?;
+            Ok(())
+        })
+        .await
+    }
     async fn list_github_invitations_for_request(
         &self,
         id: RequestId,

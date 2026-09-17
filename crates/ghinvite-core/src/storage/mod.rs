@@ -19,6 +19,7 @@ pub mod test_suite;
 
 pub mod audit_read;
 pub mod projection;
+pub mod settlement;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -88,6 +89,11 @@ pub struct GithubInvitationUpdate {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    /// Atomically settle the observed Sent invitation and publish its audit.
+    /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
+    async fn settle_github_invitation(&self, _transition: &settlement::Settlement) -> Result<()> {
+        Err(Error::Database("settlement storage unavailable".into()))
+    }
     /// Atomic input-bound HTTP attempt fence. Returns a generation authorizing
     /// one PUT; None means uncertain/confirmed prior effect. Only an explicitly
     /// rejected generation may permit a new attempt; acknowledgement loss fences it.

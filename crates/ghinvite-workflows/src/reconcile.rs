@@ -5,7 +5,7 @@ use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use ghinvite_core::InvitationState;
 use ghinvite_core::audit::EventType;
-use restate_sdk::context::{Context, ContextSideEffects, RunFuture};
+use restate_sdk::context::{Context, ContextClient, ContextSideEffects, RunFuture};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
 use schemars::JsonSchema;
@@ -18,6 +18,7 @@ pub struct DailyRunInput {
 
 #[restate_sdk::service]
 pub trait Reconcile {
+    async fn daily_run_v1(input: Json<DailyRunInput>) -> std::result::Result<(), TerminalError>;
     async fn daily_run(input: Json<DailyRunInput>) -> std::result::Result<(), TerminalError>;
 }
 
@@ -26,6 +27,52 @@ pub struct ReconcileImpl {
 }
 
 impl Reconcile for ReconcileImpl {
+    async fn daily_run_v1(
+        &self,
+        ctx: Context<'_>,
+        Json(input): Json<DailyRunInput>,
+    ) -> std::result::Result<(), TerminalError> {
+        let Json(rows) = ctx
+            .run(|| async {
+                let mut rows = Vec::new();
+                for account in self.state.storage.list_active_installations().await? {
+                    rows.extend(
+                        self.state
+                            .storage
+                            .list_pending_github_invitations_for_installation(
+                                account.installation_id,
+                            )
+                            .await?
+                            .into_iter()
+                            .filter(crate::settlement_v1::eligible),
+                    );
+                }
+                Ok::<_, restate_sdk::errors::HandlerError>(Json(rows))
+            })
+            .name("settlement_candidates_v1")
+            .await?;
+        for row in rows {
+            let Json(evidence) = ctx.run(|| async {
+                match crate::settlement_v1::observe(&self.state, &row, input.at).await {
+                    Ok(evidence) => Ok(Json(evidence)),
+                    Err(e) if e.is_terminal() => {
+                        tracing::warn!(invitation_id = %row.id, err = %e, "settlement observation failed");
+                        Ok(Json(None))
+                    },
+                    Err(e) => Err(crate::error::to_sdk_handler_error(e)),
+                }
+            }).name("observe_invitation_v1").await?;
+            if let Some(evidence) = evidence {
+                ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
+                    row.id.to_string(),
+                )
+                .reconcile_v1(Json(evidence))
+                .call()
+                .await?;
+            }
+        }
+        Ok(())
+    }
     async fn daily_run(
         &self,
         ctx: Context<'_>,

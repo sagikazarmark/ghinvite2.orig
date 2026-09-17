@@ -191,6 +191,22 @@ fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -
 
 #[async_trait]
 impl Storage for SqlxStorage {
+    async fn settle_github_invitation(
+        &self,
+        transition: &ghinvite_core::storage::settlement::Settlement,
+    ) -> Result<()> {
+        use ghinvite_core::storage::settlement;
+        let input = settlement::encode(transition)?;
+        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
+        for statement in settlement::STATEMENTS {
+            sqlx::query(statement)
+                .bind(&input)
+                .execute(&mut *tx)
+                .await
+                .map_err(crate::to_db_err)?;
+        }
+        tx.commit().await.map_err(crate::to_db_err)
+    }
     async fn list_github_invitations_for_request(
         &self,
         id: RequestId,

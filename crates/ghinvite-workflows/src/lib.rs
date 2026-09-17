@@ -34,6 +34,7 @@ pub mod projection_v1;
 #[allow(deprecated)]
 pub mod reconcile;
 pub mod request_lifecycle_v1;
+pub mod settlement_v1;
 pub mod state;
 
 #[cfg(test)]
@@ -69,12 +70,7 @@ pub fn build_cutover_endpoint(
             }
             .serve(),
         )
-        .bind(
-            reconcile::ReconcileImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        );
+        .bind(obsolete_writers::ReconcileLifecycle(state.clone()).serve());
     let builder = admission_v1::bind(builder);
     let builder = builder.bind(availability::AccountInstallationV1::serve(
         availability::AccountInstallationV1Impl {

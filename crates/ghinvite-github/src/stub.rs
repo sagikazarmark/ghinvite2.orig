@@ -91,7 +91,7 @@ fn routes(state: SharedState) -> Router {
         .route("/repos/{owner}/{repo}/collaborators/{user}/permission",get(|State(state): State<SharedState>| async move {
             let state = state.lock().unwrap();
             match &state.access_role {
-                Some(role) => (StatusCode::OK,Json(json!({"user":{"id":8,"login":"alice"},"role_name":role,"permission":if role=="triage" {"read"} else {"write"}}))).into_response(),
+                Some(role) => (StatusCode::OK,Json(json!({"user":{"id":state.addressed_id.unwrap_or(8),"login":state.user_login.as_deref().unwrap_or("alice")},"role_name":role,"permission":if role=="triage" {"read"} else {"write"}}))).into_response(),
                 None => StatusCode::NOT_FOUND.into_response(),
             }
         }))

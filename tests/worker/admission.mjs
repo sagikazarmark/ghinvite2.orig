@@ -9,6 +9,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http2';
 import { randomBytes } from 'node:crypto';
 import { browserAdmission } from './browser-admission.mjs';
+import { settlement } from './settlement.mjs';
 import { frames, fields } from './protocol.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -399,6 +400,9 @@ try {
   assert.equal(manualResult.state, 'approved');
   await eventually(() => http(`${ingress}/GithubCreateV1/${manualResult.dispatch.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
   console.log('PASS manual approval and direct notification to waiting Worker lifecycle');
+  await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
+    requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
+    pause: value => { pauseWorkflows = value; } });
   migrationDirectory = mkdtempSync(join(tmpdir(), 'ghinvite-d1-cutover-'));
   execFileSync('python3', ['tests/worker/migration.py', migrationDirectory], { cwd: root, timeout: 30_000 });
   // Import the adopted offline checkpoint into this disposable D1. Existing
