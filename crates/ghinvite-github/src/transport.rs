@@ -151,9 +151,8 @@ pub struct ReqwestTransport {
 
 impl ReqwestTransport {
     pub fn new() -> Result<Self> {
-        // `reqwest::ClientBuilder::timeout` is gated to non-wasm targets:
-        // on wasm reqwest delegates to `fetch`, which has no timeout knob
-        // (the Workers runtime applies its own per-request limits).
+        // Wasm applies the same deadline per request below. Worker execution
+        // limits do not bound wall-clock time spent waiting for upstream I/O.
         let builder = reqwest::Client::builder();
         #[cfg(not(target_arch = "wasm32"))]
         let builder = builder.timeout(std::time::Duration::from_secs(30));
@@ -210,6 +209,12 @@ impl HttpTransport for ReqwestTransport {
                 Method::Delete => reqwest::Method::DELETE,
             };
             let mut builder = self.client.request(method, &request.url);
+            // reqwest's Wasm AbortGuard retains this timer through bytes(),
+            // bounding headers and body together and cancelling fetch on drop.
+            #[cfg(target_arch = "wasm32")]
+            {
+                builder = builder.timeout(std::time::Duration::from_secs(30));
+            }
             for (k, v) in &request.headers {
                 builder = builder.header(k, v);
             }

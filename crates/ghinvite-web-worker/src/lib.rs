@@ -193,6 +193,9 @@ impl std::io::Write for ConsoleWriter {
     }
 }
 
+#[cfg(feature = "runtime-tests")]
+mod fixture;
+
 #[event(fetch)]
 async fn fetch(
     req: HttpRequest,
@@ -207,6 +210,11 @@ async fn fetch(
         .with_ansi(false)
         .with_writer(|| ConsoleWriter)
         .try_init();
+
+    #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/") {
+        return fixture::fetch(req, &env).await;
+    }
 
     let config = config_from_env(&env)?;
     let db = env.d1("DB")?;

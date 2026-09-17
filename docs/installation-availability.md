@@ -46,6 +46,10 @@ Transient GitHub failures return 503 without recording a business rejection;
 retry the same attempt. Restoration never changes an old rejection: use a fresh
 operation for a fresh attempt.
 
+GitHub requests have explicit [30-second network deadlines](network-deadlines.md),
+including on Workers. A stalled observation becomes unknown and completes its
+exclusive handler, allowing queued status to proceed and durable recheck to run.
+
 Admission observations retain Restate state and durably arrange projection without
 waiting for SQL. Initial adoption requires installation storage to be readable;
 an adoption failure returns 503 rather than indefinitely holding exclusivity.

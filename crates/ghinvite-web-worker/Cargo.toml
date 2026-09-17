@@ -9,6 +9,9 @@ publish.workspace = true
 path = "src/lib.rs"
 crate-type = ["cdylib"]
 
+[features]
+runtime-tests = []
+
 # This crate is the Cloudflare Workers entry point for the web binary. The
 # whole crate exists only on wasm32 — `worker`, `console_error_panic_hook`,
 # `tracing-wasm`, and the wasm32-only D1 backing in `ghinvite-storage-d1` are gated to
