@@ -175,6 +175,7 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
     assert!(html.contains("acme/api"));
     assert!(html.contains("Account admins review your request before access is approved."));
     assert!(html.contains("Optional, visible to account admins."));
+    assert!(html.contains("Maximum 16384 UTF-8 bytes"));
     assert!(html.contains(&format!("name=\"return_to\" value=\"/i/{ACTIVE_SLUG}\"")));
     let csrf = common::csrf_token(&app, &cookie).await;
     for (token, expected) in [
@@ -1548,6 +1549,8 @@ async fn signed_in_landing_renders_merged_request_form() {
     assert!(text.contains("acme/api"));
     assert!(text.contains("Permission: Read (pull)"));
     assert!(text.contains("Justification"));
+    assert!(text.contains("Optional, visible to account admins."));
+    assert!(!text.contains("Maximum 16384 UTF-8 bytes"));
     assert!(text.contains("action=\"/i/abcdEFGH01234567\""));
     assert!(!text.contains("AI coding workshop"));
     assert!(!text.contains("http-equiv=\"refresh\""));

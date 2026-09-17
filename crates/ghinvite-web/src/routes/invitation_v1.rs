@@ -519,6 +519,7 @@ fn render(
                         input { r#type: "hidden", name: "operation_id", value: "{id}" }
                         ghinvite_ui::invitation::JustificationField {
                             value: justification.clone(), readonly: mode == FormMode::Retry,
+                            max_bytes: Some(ghinvite_core::admission::MAX_JUSTIFICATION_BYTES),
                             error: if mode == FormMode::Validation { ghinvite_ui::request_form::justification_error(&justification) } else { None },
                         }
                         div { class: "card-actions justify-end",

@@ -73,8 +73,8 @@ pub fn JustificationField(
     value: String,
     #[props(default)] readonly: bool,
     error: Option<String>,
+    max_bytes: Option<usize>,
 ) -> Element {
-    let limit = ghinvite_core::admission::MAX_JUSTIFICATION_BYTES;
     rsx! {
         div { class: "form-control gap-2",
             label { class: "label", r#for: "justification", span { class: "label-text font-medium", "Justification" } }
@@ -87,7 +87,10 @@ pub fn JustificationField(
                 "{value}"
             }
             p { id: "justification-help", class: "text-sm text-base-content/70",
-                "Optional, visible to account admins. Maximum {limit} UTF-8 bytes; non-ASCII characters may use multiple bytes."
+                "Optional, visible to account admins."
+                if let Some(limit) = max_bytes {
+                    " Maximum {limit} UTF-8 bytes; non-ASCII characters may use multiple bytes."
+                }
             }
             if let Some(error) = &error {
                 p { id: "justification-error", class: "text-sm text-error", "{error}" }
