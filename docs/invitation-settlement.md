@@ -77,6 +77,31 @@ acknowledgement before retry, and exercises historical Sent rows, cancellation,
 and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
 late legacy writer rejection.
 
+## Recovery after reinstall
+
+Issue [#65](https://github.com/sagikazarmark/ghinvite2.orig/issues/65) makes
+`Reconcile/daily_run_v1` discover pending work by the link's immutable account ID
+across historical installations. Each observation reloads the current active
+installation, verifies its installation/account IDs and suspension status with
+GitHub, and validates the scoped numeric repository ID before reading invitation
+or requester access evidence. Another account or a reused repository name cannot
+supply settlement authority. Missing installations, unavailable credentials, or
+unverified identities leave the invitation recoverable for a later sweep;
+transient API/storage failures retain the existing retry behavior.
+
+The original link installation ID, request, fixed scope, create receipt and audit
+history are preserved. Settlement still runs through the invitation-keyed owner.
+The native runtime test covers A approval → blocked delivery → B delivery →
+credential outage/identity mismatch → missed-webhook settlement. The Worker gate
+covers replacement discovery and account mismatch using actual D1 and Restate.
+
+Deploy as a new immutable deployment; keep in-flight sweeps pinned to their
+original deployment. The `daily_run_v1` journal entry shapes and ordering are
+unchanged: account-based discovery and authority verification happen inside the
+existing candidate/observation run closures. A completed old candidate snapshot
+may omit historical rows; a fresh scheduled sweep discovers them. No migration
+or create-handler journal change is required.
+
 ## Complete pending-invitation observation
 
 Settlement and delivery recovery read GitHub's pending-invitation listing and

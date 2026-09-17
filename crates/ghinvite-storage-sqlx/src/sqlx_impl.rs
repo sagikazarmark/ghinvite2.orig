@@ -881,6 +881,26 @@ impl Storage for SqlxStorage {
         .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
+    async fn list_pending_github_invitations_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
+            r#"SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id, g.state,
+                      g.error_message, g.created_at, g.updated_at
+               FROM github_invitations g
+               JOIN invitation_requests r ON r.id = g.invitation_request_id
+               JOIN invitation_links l ON l.id = r.invitation_link_id
+               WHERE l.account_id = ?1 AND g.state IN ('sending', 'sent')
+               ORDER BY g.created_at"#,
+        )
+        .bind(u64_to_i64(account_id))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
+    }
+
     async fn invitation_link_belongs_to_account(
         &self,
         account_id: u64,

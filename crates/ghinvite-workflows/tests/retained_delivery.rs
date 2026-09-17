@@ -43,8 +43,34 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     }
     let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", stub.local_addr().unwrap());
+    let credentials_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let repository_reassigned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let github_tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let unavailable = credentials_unavailable.clone();
+    let reassigned = repository_reassigned.clone();
+    let tokens = github_tokens.clone();
+    let router = ghinvite_github::stub::router().layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let unavailable = unavailable.clone();
+            let reassigned = reassigned.clone();
+            let tokens = tokens.clone();
+            async move {
+                if let Some(token) = request.headers().get("authorization").and_then(|h| h.to_str().ok())
+                    && token.starts_with("Bearer test-token-for-") {
+                    tokens.lock().unwrap().push(token.to_owned());
+                    if unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+                        return axum::response::Response::builder().status(401).body(axum::body::Body::empty()).unwrap();
+                    }
+                }
+                if request.uri().path() == "/repos/acme/api" && reassigned.load(std::sync::atomic::Ordering::SeqCst) {
+                    return axum::response::IntoResponse::into_response(axum::Json(json!({"id":999,"full_name":"acme/api","private":true})));
+                }
+                next.run(request).await
+            }
+        },
+    ));
     let stub_task = tokio::spawn(async move {
-        axum::serve(stub, ghinvite_github::stub::router())
+        axum::serve(stub, router)
             .await
             .unwrap();
     });
@@ -1127,8 +1153,99 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             1
         );
     }
+    // #65: approval and scope belong to A even when delivery resumes through B.
+    client.delete(format!("{base}/reset")).send().await.unwrap();
+    let historical_link = ghinvite_core::InvitationLinkId::new();
+    let created = call("InvitationLinkV1", historical_link.to_string(), "create", json!({
+        "version":1,"link_id":historical_link,"account_id":100,"installation_id":9,
+        "admin":{"account_id":100,"user_id":7},"description":"Reinstalled account",
+        "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
+    })).send().await.unwrap();
+    assert!(created.status().is_success());
+    let admitted: Value = call("InvitationLinkV1", historical_link.to_string(), "admit", json!({
+        "version":1,"link_id":historical_link,"requester_id":8,"operation_id":RequestId::new()
+    })).send().await.unwrap().json().await.unwrap();
+    let query = json!({"link_id":historical_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
+    let plan: Value = call("InvitationLinkV1", historical_link.to_string(), "prepare_dispatch", query.clone())
+        .send().await.unwrap().json().await.unwrap();
+    let command = plan["commands"][0].clone();
+    let id = command["invitation_id"].as_str().unwrap();
+    storage.mark_installation_uninstalled(9, chrono::Utc::now()).await.unwrap();
+    let blocked: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(blocked["outcome"]["kind"], "blocked");
+    let mut replacement = storage.get_installation(9).await.unwrap().unwrap();
+    replacement.installation_id = 19;
+    replacement.installed_at = chrono::Utc::now();
+    replacement.uninstalled_at = None;
+    storage.insert_installation(&replacement).await.unwrap();
+    let delivered: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(delivered["outcome"]["kind"], "created");
+    assert_eq!(delivered["command"], command);
+    let original_link = storage.get_invitation_link_by_id(historical_link).await.unwrap().unwrap();
+    let original_request = storage.get_invitation_request(command["request_id"].as_str().unwrap().parse().unwrap()).await.unwrap().unwrap();
+    let original_deliveries = storage.list_delivery_for_request(original_request.id).await.unwrap();
+    let original_audit = assert_create_audit(&*storage, &delivered).await.unwrap();
+    // GitHub acceptance without a webhook: remove pending evidence, expose access.
+    client.delete(format!("{base}/repos/acme/api/invitations/{}", delivered["outcome"]["upstream_id"].as_u64().unwrap()))
+        .send().await.unwrap();
+    client.post(format!("{base}/identity")).json(&json!({"login":"alice","addressed_id":8,"role_name":"write"}))
+        .send().await.unwrap();
+    // A stale/corrupt local installation mapping must not grant another account
+    // authority to observe this request, even if its repo/login evidence matches.
+    client.post(format!("{base}/installation-identity"))
+        .json(&json!({"id":200,"login":"acme","type":"Organization"}))
+        .send().await.unwrap();
+    run_sweep(&client, &ingress).await;
+    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
+        ghinvite_core::InvitationState::Sent, "another account cannot supply observation authority");
+    client.post(format!("{base}/installation-identity"))
+        .json(&json!({"id":100,"login":"acme","type":"Organization"}))
+        .send().await.unwrap();
+    credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    github_tokens.lock().unwrap().clear();
+    run_sweep(&client, &ingress).await;
+    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
+        ghinvite_core::InvitationState::Sent, "unavailable credentials must preserve recoverability");
+    let tokens = github_tokens.lock().unwrap().clone();
+    assert!(!tokens.is_empty());
+    assert!(tokens.iter().all(|token| token == "Bearer test-token-for-19"), "{tokens:?}");
+    credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+    repository_reassigned.store(true, std::sync::atomic::Ordering::SeqCst);
+    run_sweep(&client, &ingress).await;
+    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
+        ghinvite_core::InvitationState::Sent, "a reused repository name cannot supply evidence");
+    repository_reassigned.store(false, std::sync::atomic::Ordering::SeqCst);
+    run_sweep(&client, &ingress).await;
+    let settled = storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap();
+    assert_eq!(settled.state, ghinvite_core::InvitationState::Accepted,
+        "active replacement sweeps must discover the historical invitation");
+    assert_eq!(settled.github_invitation_id, delivered["outcome"]["upstream_id"].as_u64());
+    assert_eq!(storage.get_invitation_link_by_id(historical_link).await.unwrap().unwrap(), original_link);
+    assert_eq!(original_link.installation_id, 9);
+    assert_eq!(storage.get_invitation_request(original_request.id).await.unwrap().unwrap(), original_request);
+    assert_eq!(storage.list_delivery_for_request(original_request.id).await.unwrap(), original_deliveries);
+    let retained_plan: Value = call("InvitationLinkV1", historical_link.to_string(), "prepare_dispatch", query)
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(retained_plan, plan);
+    let events = storage.list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest).await.unwrap().events;
+    assert!(events.contains(&original_audit));
+    let settlements: Vec<_> = events.iter().filter(|event| event.target_id == id && event.event_type == ghinvite_core::audit::EventType::InvitationAccepted).collect();
+    assert_eq!(settlements.len(), 1);
+    assert_eq!(settlements[0].metadata, json!({"reconciled":true}));
     server.abort();
     stub_task.abort();
+}
+
+async fn run_sweep(client: &reqwest::Client, ingress: &str) {
+    let response = client
+        .post(format!("{ingress}/Reconcile/daily_run_v1"))
+        .json(&json!({"at": chrono::Utc::now()}))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.text().await.unwrap());
 }
 
 async fn assert_create_audit(

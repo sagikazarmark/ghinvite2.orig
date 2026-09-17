@@ -1072,6 +1072,29 @@ impl Storage for D1Storage {
         .await
     }
 
+    async fn list_pending_github_invitations_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        wasm_send(async {
+            let rows = self.db.prepare(
+                "SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id,
+                        g.state, g.error_message, g.created_at, g.updated_at
+                 FROM github_invitations g
+                 JOIN invitation_requests r ON r.id = g.invitation_request_id
+                 JOIN invitation_links l ON l.id = r.invitation_link_id
+                 WHERE l.account_id = ?1 AND g.state IN ('sending', 'sent')
+                 ORDER BY g.created_at",
+            )
+            .bind(&[JsValue::from_f64(account_id as f64)])
+            .map_err(bind_err)?
+            .all().await.map_err(classify_d1_error)?
+            .results::<GithubInvitationRow>()
+            .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            rows.into_iter().map(|r| r.try_into_domain()).collect()
+        }).await
+    }
+
     // -------- audit --------
 
     async fn invitation_link_belongs_to_account(

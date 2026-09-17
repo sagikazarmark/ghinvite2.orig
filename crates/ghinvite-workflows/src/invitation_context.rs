@@ -77,6 +77,57 @@ pub(crate) async fn load_github_invitation_account_context(
     })
 }
 
+/// Observation authority follows the immutable account; the link retains its
+/// original installation and fixed repository scope as historical facts.
+/// The returned account supplies the verified active installation's credentials.
+pub(crate) async fn load_verified_settlement_context(
+    state: &AppState,
+    invitation: &GithubInvitation,
+) -> Result<Option<GithubInvitationContext>> {
+    let mut context = load_github_invitation_context_for_loaded(state, invitation).await?;
+    if context.account.account_id != context.link.account_id {
+        return Err(HandlerError::Invariant(
+            "historical installation account mismatch".into(),
+        ));
+    }
+    let Some(account) = state
+        .storage
+        .get_active_installation_by_account_id(context.link.account_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let verified = state
+        .github
+        .get_installation(account.installation_id)
+        .await?;
+    if verified.id != account.installation_id
+        || verified.account.id != context.link.account_id
+        || account.account_id != context.link.account_id
+        || verified.suspended_at.is_some()
+    {
+        return Ok(None);
+    }
+    if let ghinvite_core::SelectedRepos::Subset(ids) = &account.selected_repos
+        && !ids.contains(&context.repo.repo_id)
+    {
+        return Ok(None);
+    }
+    let repo = state
+        .github
+        .get_repo(
+            account.installation_id,
+            context.repository.owner(),
+            context.repository.name(),
+        )
+        .await?;
+    if repo.id != context.repo.repo_id {
+        return Ok(None);
+    }
+    context.account = account;
+    Ok(Some(context))
+}
+
 pub(crate) async fn load_github_invitation_context_for_account(
     state: &AppState,
     account: &Account,
