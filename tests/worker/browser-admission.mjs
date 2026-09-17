@@ -12,6 +12,7 @@ export async function browserAdmission(ingress, code, requester, operation) {
     bindings: {
       GHINVITE_ADMISSION_MODE: 'authoritative', GHINVITE_BASE_URL: 'https://browser.test',
       GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: ingress,
+      GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
       GHINVITE_GITHUB_CLIENT_ID: 'dummy', GHINVITE_GITHUB_CLIENT_SECRET: 'dummy', GHINVITE_WEBHOOK_SECRET: 'dummy',
     },

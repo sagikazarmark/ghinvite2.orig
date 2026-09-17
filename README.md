@@ -130,6 +130,7 @@ GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
 GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
 GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
+GHINVITE_RESTATE_AUTH=local-unauthenticated \
 cargo run -p ghinvite-web
 ```
 

@@ -22,6 +22,68 @@ use tower::ServiceExt;
 
 mod common;
 
+#[tokio::test]
+async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
+    use ghinvite_web::restate_client::RestateAuth;
+    use ghinvite_web::{RestateClient, RestateCommands};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    const API_KEY: &str = "browser-secrecy-ingress-test-key";
+    let ingress = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::header(
+            "authorization",
+            format!("Bearer {API_KEY}"),
+        ))
+        .respond_with(ResponseTemplate::new(401).set_body_string(format!("Rejected {API_KEY}")))
+        .expect(1)
+        .mount(&ingress)
+        .await;
+    let config = WebConfig {
+        restate_ingress: ingress.uri(),
+        restate_auth: RestateAuth::from_config(None, Some(API_KEY)).unwrap(),
+        ..WebConfig::for_local_dev_with_secret([7; 32])
+    };
+    assert!(!format!("{config:?}").contains(API_KEY));
+    let restate = Arc::new(
+        RestateClient::with_auth(&config.restate_ingress, config.restate_auth.clone()).unwrap(),
+    );
+    let state = AppState::new(
+        Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        ),
+        Arc::new(MockTransport::scripted(oauth_expectations(
+            "octocat",
+            REQUESTER_ID,
+        ))),
+        Arc::new(RestateCommands::new(restate.clone())),
+        config,
+    )
+    .with_admission(restate);
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(app.clone()).await;
+    for (uri, status) in [
+        ("/".into(), StatusCode::OK),
+        (format!("/i/{ACTIVE_SLUG}"), StatusCode::BAD_GATEWAY),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert!(!format!("{:?}", response.headers()).contains(API_KEY));
+        assert!(!body_text(response).await.contains(API_KEY));
+    }
+}
+
 async fn body_text(response: axum::response::Response) -> String {
     String::from_utf8(
         response
