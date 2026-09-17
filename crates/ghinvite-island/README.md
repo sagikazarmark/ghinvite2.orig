@@ -119,10 +119,14 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 
 Valid noncanonical numeric text (for example, `"007"` or `" 7 "`) still goes
 through the typed model and `format_count`, yielding `"7"` on mount. This is
-existing behavior: the migration restores invalid raw input from rejected
-responses, not arbitrary numeric spelling. First-frame byte parity is not
-promised for valid noncanonical numeric text or invalid numeric props with no
-response errors. The server remains the validation authority.
+existing behavior: restoration covers invalid raw input, not arbitrary numeric
+spelling. First-frame byte parity is not promised for valid noncanonical
+numeric text, nor for invalid numeric props with no response errors — there the
+first frame shows the parse error the server's markup does not carry. No
+*response* has that shape (the server always attaches a parse error to input it
+rejects); it arises from the takeover adopting a value the admin typed after
+the page was rendered, which the server never saw. The server remains the
+validation authority.
 
 ## Registry Input Integration
 
