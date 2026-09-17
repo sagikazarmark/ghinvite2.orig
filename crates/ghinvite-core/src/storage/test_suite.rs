@@ -106,6 +106,209 @@ where
     scenario_audit_appends(make_storage().await).await;
     scenario_audit_pages(make_storage().await).await;
     scenario_timestamp_precision(make_storage().await).await;
+    scenario_delivery_audit(make_storage().await).await;
+}
+
+/// Confirmed create facts are account history, even after lifecycle advances.
+pub async fn scenario_delivery_audit<S: Storage>(s: S) {
+    use super::AuditPosition;
+    s.insert_installation(&sample_account(1, 100, "acme"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(7, "admin")).await.unwrap();
+    s.upsert_user(&sample_user(8, "requester")).await.unwrap();
+    let link = sample_link(100, 1, 7, 64);
+    s.insert_invitation_link(&link).await.unwrap();
+    let request = sample_request(link.id, 8);
+    s.insert_invitation_request_and_increment_uses(&request)
+        .await
+        .unwrap();
+    let id = GithubInvitationId::new();
+    s.insert_github_invitation(&GithubInvitation {
+        id,
+        invitation_request_id: request.id,
+        repo_id: 10,
+        github_invitation_id: None,
+        state: InvitationState::Sending,
+        error_message: None,
+        created_at: request.created_at,
+        updated_at: request.created_at,
+    })
+    .await
+    .unwrap();
+    let receipt: crate::delivery::CreateReceipt = serde_json::from_value(serde_json::json!({
+        "command": {"version":1,"invitation_id":id,"link_id":link.id,"request_id":request.id,
+            "approval_id":"approval-64","account_id":100,"installation_id":1,"requester_id":8,
+            "repo_id":10,"repo_full_name":"acme/api","permission":"pull","approved_at":request.created_at},
+        "outcome":{"kind":"created","upstream_id":99123},"revision":2,
+        "confirmed_at":"2026-05-04T13:00:00.123456789Z"
+    })).unwrap();
+    s.project_delivery(&receipt).await.unwrap();
+    let events = s
+        .list_audit_events(100, None, AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        events.len(),
+        1,
+        "confirmed create must publish account history"
+    );
+    let event = &events[0];
+    assert_eq!(event.event_type, EventType::InvitationSent);
+    assert_eq!(event.account_id, 100);
+    assert_eq!(event.occurred_at, dt("2026-05-04T13:00:00.123456789Z"));
+    assert_eq!(event.actor_kind, ActorKind::System);
+    assert_eq!(event.actor_id, None);
+    assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+    assert_eq!(event.target_id, id.to_string());
+    assert_eq!(
+        event.metadata,
+        serde_json::json!({"repo_full_name":"acme/api","requester_id":8,"github_invitation_id":99123})
+    );
+    s.update_github_invitation(&GithubInvitationUpdate {
+        id,
+        state: InvitationState::Declined,
+        github_invitation_id: None,
+        error_message: None,
+        updated_at: dt("2026-05-05T12:00:00Z"),
+    })
+    .await
+    .unwrap();
+    s.project_delivery(&receipt).await.unwrap();
+    assert_eq!(
+        s.list_audit_events(100, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events,
+        events
+    );
+    assert_eq!(
+        s.get_github_invitation(id).await.unwrap().unwrap().state,
+        InvitationState::Declined
+    );
+    assert!(
+        s.list_audit_events(101, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    for (outcome, kind, actor, reason) in [
+        (
+            serde_json::json!({"kind":"already_collaborator"}),
+            EventType::InvitationAccepted,
+            ActorKind::Github,
+            "already_collaborator",
+        ),
+        (
+            serde_json::json!({"kind":"failed","status":422}),
+            EventType::InvitationSendFailed,
+            ActorKind::System,
+            "github_rejected",
+        ),
+    ] {
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        let id = GithubInvitationId::new();
+        value["command"]["invitation_id"] = serde_json::json!(id);
+        value["outcome"] = outcome;
+        let confirmed: crate::delivery::CreateReceipt = serde_json::from_value(value).unwrap();
+        s.project_delivery(&confirmed).await.unwrap();
+        s.project_delivery(&confirmed).await.unwrap();
+        let events = s
+            .list_audit_events(100, Some(kind), AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].account_id, 100);
+        assert_eq!(events[0].target_kind, TargetKind::GithubInvitation);
+        assert_eq!(events[0].target_id, id.to_string());
+        assert_eq!(events[0].actor_kind, actor);
+        assert_eq!(events[0].actor_id, None);
+        assert_eq!(events[0].occurred_at, dt("2026-05-04T13:00:00.123456789Z"));
+        assert_eq!(
+            events[0].metadata,
+            serde_json::json!({"repo_full_name":"acme/api","requester_id":8,"reason":reason})
+        );
+    }
+    let before = s
+        .list_audit_events(100, None, AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    for outcome in [
+        serde_json::json!({"kind":"blocked","reason":"private-upstream-diagnostic"}),
+        serde_json::json!({"kind":"outcome_unknown"}),
+    ] {
+        let mut value = serde_json::to_value(&receipt).unwrap();
+        value["command"]["invitation_id"] = serde_json::json!(GithubInvitationId::new());
+        value["outcome"] = outcome;
+        value.as_object_mut().unwrap().remove("confirmed_at");
+        let unconfirmed = serde_json::from_value(value).unwrap();
+        s.project_delivery(&unconfirmed).await.unwrap();
+    }
+    assert_eq!(
+        s.list_audit_events(100, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events,
+        before
+    );
+
+    // A later observation can arrive first; historical events still arrive.
+    let mut newer = receipt.clone();
+    newer.command.invitation_id = GithubInvitationId::new();
+    newer.revision = 3;
+    newer.confirmed_at = None;
+    newer.outcome = crate::delivery::CreateOutcome::OutcomeUnknown;
+    s.project_delivery(&newer).await.unwrap();
+    let mut older = receipt.clone();
+    older.command = newer.command.clone();
+    s.project_delivery(&older).await.unwrap();
+    s.project_delivery(&older).await.unwrap();
+    let events = s
+        .list_audit_events(100, Some(EventType::InvitationSent), AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        events.len(),
+        2,
+        "stale snapshot must not suppress its historical event"
+    );
+    assert!(
+        s.list_delivery_for_request(request.id)
+            .await
+            .unwrap()
+            .contains(&newer)
+    );
+    let mut conflict = older.clone();
+    conflict.confirmed_at = Some(dt("2026-05-04T14:00:00Z"));
+    assert!(
+        s.project_delivery(&conflict).await.is_err(),
+        "same event identity cannot change content even on stale receipt"
+    );
+    assert_eq!(
+        s.list_audit_events(100, Some(EventType::InvitationSent), AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events,
+        events
+    );
+    let mut wrong_account = older.clone();
+    wrong_account.command.account_id = 101;
+    assert!(
+        s.project_delivery(&wrong_account).await.is_err(),
+        "stale receipts must still enforce command identity"
+    );
+    assert!(
+        s.list_audit_events(101, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
 }
 
 /// Account history survives installation changes and missing actors/resources;

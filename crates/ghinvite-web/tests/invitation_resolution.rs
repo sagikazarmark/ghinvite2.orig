@@ -768,6 +768,8 @@ async fn requester_sees_persisted_unknown_created_and_legacy_delivery_without_pr
         let repo = &link.repos[0];
         let receipts = outcome
             .map(|outcome| CreateReceipt {
+                confirmed_at: None,
+                recovered: false,
                 command: CreateCommand {
                     version: 1,
                     invitation_id: id,

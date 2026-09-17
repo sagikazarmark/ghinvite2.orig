@@ -202,6 +202,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let result: Value = response.json().await.unwrap();
     assert_eq!(result["outcome"]["kind"], "created");
+    let original_event = assert_create_audit(&*storage, &result).await.unwrap();
     let replay: Value = call("GithubCreateV1", id.clone(), "create", command.clone())
         .send()
         .await
@@ -295,6 +296,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .await
             .unwrap();
         assert_eq!(result["outcome"]["kind"], expected);
+        assert_create_audit(&*storage, &result).await;
         let replay: Value = call("GithubCreateV1", id, "create", command)
             .send()
             .await
@@ -333,6 +335,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             serde_json::to_value(&rows[0]).unwrap()["outcome"],
             replay["outcome"]
         );
+        assert_create_audit(&*storage, &replay).await;
     }
     tokio::time::timeout(Duration::from_secs(15), async { loop {
         let response: Value = client.post(format!("{admin}/query")).header("accept","application/json")
@@ -382,6 +385,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     assert_eq!(replay, result);
+    assert_eq!(
+        assert_create_audit(&*storage, &replay).await.unwrap(),
+        original_event
+    );
     assert_eq!(
         storage
             .get_github_invitation(command["invitation_id"].as_str().unwrap().parse().unwrap())
@@ -773,6 +780,57 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         result["outcome"],
         json!({"kind":"created","upstream_id":99123})
     );
+    assert_eq!(result["recovered"], true);
+    assert_create_audit(&*storage, &result).await;
+    // A retained pre-#64 receipt gains a stable recovery observation on replay.
+    let mut old = result.clone();
+    old.as_object_mut().unwrap().remove("confirmed_at");
+    old.as_object_mut().unwrap().remove("recovered");
+    let old_id = ghinvite_core::GithubInvitationId::new();
+    old["command"]["invitation_id"] = json!(old_id);
+    let imported = call(
+        "GithubCreateV1",
+        old_id.to_string(),
+        "import_receipt",
+        json!({
+            "migration_id":"audit-recovery", "manifest_checksum":"a".repeat(64), "receipt":old
+        }),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(imported.status().is_success());
+    let recovered: Value = call(
+        "GithubCreateV1",
+        old_id.to_string(),
+        "create",
+        old["command"].clone(),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(recovered["recovered"], true);
+    let event = assert_create_audit(&*storage, &recovered).await.unwrap();
+    let replay: Value = call(
+        "GithubCreateV1",
+        old_id.to_string(),
+        "create",
+        old["command"].clone(),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(replay, recovered);
+    assert_eq!(
+        assert_create_audit(&*storage, &replay).await.unwrap(),
+        event
+    );
     let retained: Value = call(
         "InvitationLinkV1",
         imported_link.to_string(),
@@ -859,6 +917,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(rejected["outcome"]["kind"], "blocked");
+    assert_create_audit(&*storage, &rejected).await;
     let sweep = client
         .post(format!("{ingress}/Reconcile/daily_run_v1"))
         .json(&json!({"at":chrono::Utc::now()}))
@@ -887,6 +946,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(resumed["outcome"]["kind"], "created");
+    assert_create_audit(&*storage, &resumed).await;
     let sent = storage
         .get_github_invitation(id.parse().unwrap())
         .await
@@ -1069,4 +1129,56 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     }
     server.abort();
     stub_task.abort();
+}
+
+async fn assert_create_audit(
+    storage: &impl Storage,
+    receipt: &Value,
+) -> Option<ghinvite_core::audit::AuditEvent> {
+    use ghinvite_core::{
+        audit::{ActorKind, EventType, TargetKind},
+        storage::AuditPosition,
+    };
+    let events = storage
+        .list_audit_events(100, None, AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| event.target_id == receipt["command"]["invitation_id"].as_str().unwrap())
+        .collect();
+    let (kind, actor) = match receipt["outcome"]["kind"].as_str().unwrap() {
+        "created" => (EventType::InvitationSent, ActorKind::System),
+        "already_collaborator" => (EventType::InvitationAccepted, ActorKind::Github),
+        "failed" => (EventType::InvitationSendFailed, ActorKind::System),
+        _ => {
+            assert!(events.is_empty());
+            return None;
+        }
+    };
+    assert_eq!(events.len(), 1);
+    let event = events.into_iter().next().unwrap();
+    assert_eq!(event.event_type, kind);
+    assert_eq!(event.actor_kind, actor);
+    assert_eq!(event.actor_id, None);
+    assert_eq!(event.target_kind, TargetKind::GithubInvitation);
+    assert_eq!(
+        event.occurred_at,
+        receipt["confirmed_at"]
+            .as_str()
+            .unwrap()
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap()
+    );
+    assert!(
+        event.occurred_at
+            >= receipt["command"]["approved_at"]
+                .as_str()
+                .unwrap()
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap()
+    );
+    assert!(event.request_id.is_none());
+    Some(event)
 }

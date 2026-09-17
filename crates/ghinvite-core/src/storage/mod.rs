@@ -18,6 +18,7 @@ use thiserror::Error;
 pub mod test_suite;
 
 pub mod audit_read;
+pub mod delivery_projection;
 pub mod projection;
 pub mod settlement;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};

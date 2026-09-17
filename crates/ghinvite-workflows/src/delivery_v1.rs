@@ -128,10 +128,11 @@ impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
 
 impl GithubCreateV1 for GithubCreateV1Impl {
     async fn project_import(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
-        let Json(receipt) = ctx
+        let Json(mut receipt) = ctx
             .get::<Json<CreateReceipt>>("v1/receipt")
             .await?
             .ok_or_else(|| TerminalError::new_with_code(404, "receipt missing"))?;
+        retain_recovery_time(&ctx, &mut receipt).await?;
         ctx.run(|| async { project(&self.state, &receipt).await })
             .name("project_imported_receipt")
             .await
@@ -234,13 +235,14 @@ impl GithubCreateV1 for GithubCreateV1Impl {
                 "unsupported command version",
             ));
         }
-        let previous = ctx
+        let mut previous = ctx
             .get::<Json<CreateReceipt>>("v1/receipt")
             .await?
             .map(|r| r.0);
-        if let Some(receipt) = &previous
+        if let Some(receipt) = &mut previous
             && receipt.outcome.confirmed()
         {
+            retain_recovery_time(&ctx, receipt).await?;
             ctx.run(|| async { project(&self.state, receipt).await })
                 .name("repair_create_projection")
                 .await?;
@@ -376,6 +378,8 @@ async fn attempt(
                 command: command.clone(),
                 outcome: CreateOutcome::Created { upstream_id },
                 revision: 1,
+                confirmed_at: Some(chrono::Utc::now()),
+                recovered: true,
             });
         }
         // Fence ambiguous legacy Sending/terminal rows before reconciliation.
@@ -397,6 +401,8 @@ async fn attempt(
             }
         },
         revision: 1,
+        confirmed_at: None,
+        recovered: false,
     };
     let Some(account) = state
         .storage
@@ -502,6 +508,8 @@ async fn attempt(
     };
     Ok(CreateReceipt {
         command: command.clone(),
+        confirmed_at: outcome.confirmed().then(chrono::Utc::now),
+        recovered: false,
         outcome,
         revision: 1,
     })
@@ -517,6 +525,23 @@ fn permission_matches(value: &str, permission: ghinvite_core::Permission) -> boo
                 ghinvite_core::Permission::Maintain => "maintain",
                 ghinvite_core::Permission::Admin => "admin",
             }
+}
+
+async fn retain_recovery_time(
+    ctx: &ObjectContext<'_>,
+    receipt: &mut CreateReceipt,
+) -> Result<(), TerminalError> {
+    if receipt.outcome.confirmed() && receipt.confirmed_at.is_none() {
+        let Json(at) = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
+            .name("observe_retained_create_outcome")
+            .await?;
+        receipt.confirmed_at = Some(at);
+        receipt.recovered = true;
+        receipt.revision += 1;
+        ctx.set("v1/receipt", Json(receipt.clone()));
+    }
+    Ok(())
 }
 
 async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), HandlerError> {
