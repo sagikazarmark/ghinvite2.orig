@@ -26,7 +26,11 @@ pub enum Error {
     OAuth(String),
 
     /// Something is wrong with the calling code's inputs (e.g. bad URL,
-    /// unparseable PEM, expired JWT key). Never thrown by the transport itself.
+    /// unparseable PEM, expired JWT key), or a well-formed response this crate
+    /// refuses to act on: an incomplete repository refresh, a pending-invitation
+    /// listing whose pages could not be walked, an identity mismatch. Never
+    /// thrown by the transport itself. Callers treat it as unknown, not as a
+    /// terminal answer.
     #[error("invalid input: {0}")]
     InvalidInput(String),
 

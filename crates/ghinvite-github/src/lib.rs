@@ -14,6 +14,7 @@ pub mod error;
 pub mod installation;
 pub mod jwt;
 pub mod oauth;
+mod pagination;
 pub mod payloads;
 pub mod token_cache;
 pub mod transport;

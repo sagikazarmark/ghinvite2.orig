@@ -75,4 +75,25 @@ reconciliation evidence; concurrent reconciliation; atomic rollback on audit
 failure; and one terminal audit. The D1 test executes the real batch and loses its
 acknowledgement before retry, and exercises historical Sent rows, cancellation,
 and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
-late legacy writer rejection. Complete GitHub pagination remains separate work.
+late legacy writer rejection.
+
+## Complete pending-invitation observation
+
+Settlement and delivery recovery read GitHub's pending-invitation listing and
+treat a tracked invitation's absence from it as evidence. That evidence is only
+sound over a complete observation, so the listing follows every
+`Link: rel="next"` page. An incomplete walk — a failed later page, a malformed
+body or `Link` header, a link off the API base, or a return to a page already
+read — fails the read instead of returning a shorter list. Reconciliation then leaves the invitation pending and
+retries; retained-create recovery keeps the outcome unknown. GitHub's offset
+pages are still not a consistent snapshot: an invitation cancelled on an earlier
+page mid-walk can shift a later one out of view. That residual race is unchanged
+by this work and is bounded by the settlement fence, which admits one terminal
+transition per invitation. Native tests cover
+lifecycle reconciliation (`Reconcile/daily_run` and `settlement_v1::observe`) and
+retained-create evidence with multi-page results and a failing later page:
+
+```sh
+cargo test --locked -p ghinvite-github --lib
+cargo test --locked -p ghinvite-workflows --lib
+```

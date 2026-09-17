@@ -14,6 +14,10 @@ use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
+/// Backstop on the pending-invitation walk. At 100 per page this is far past
+/// any real repository; exceeding it is a paging fault, not a complete list.
+const MAX_INVITATION_PAGES: usize = 1000;
+
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
 #[derive(Clone)]
@@ -340,9 +344,15 @@ impl InstallationClient {
         }
     }
 
-    /// `GET /repos/{owner}/{repo}/invitations` — list pending invitations on a
+    /// `GET /repos/{owner}/{repo}/invitations` — every pending invitation on a
     /// repo. Used by the reconciler to check that our `github_invitations` rows
-    /// in `sent` state still exist upstream.
+    /// in `sent` state still exist upstream, and by delivery recovery to look
+    /// for a retained create.
+    ///
+    /// Follows GitHub's `Link: rel="next"` pages to the end. Callers read
+    /// absence from this list as evidence that an invitation is gone, so a
+    /// partial walk is an error, never a shorter list: a failed, malformed, or
+    /// unfollowable later page leaves the observation unknown.
     #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn list_invitations(
         &self,
@@ -350,21 +360,42 @@ impl InstallationClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<GhInvitationListItem>> {
-        let path = format!(
+        let mut path = format!(
             "/repos/{}/{}/invitations?per_page=100",
             path_segment(owner),
             path_segment(repo)
         );
-        let req = self
-            .auth_request(installation_id, Method::Get, &path)
-            .await?;
-        match self.transport.send(req).await?.ensure_success() {
-            Ok(resp) => resp.json(),
-            Err(err) => {
-                tracing::warn!(status = ?err.status(), "github request failed");
-                Err(err)
+        let mut listed = Vec::new();
+        // Every page already walked. A cycle of any length — not just a link
+        // back to the page in hand — is a paging fault, and catching it here
+        // spends one request on it instead of the whole page budget.
+        let mut walked = std::collections::HashSet::new();
+        for _ in 0..MAX_INVITATION_PAGES {
+            if !walked.insert(path.clone()) {
+                return Err(crate::Error::InvalidInput(format!(
+                    "pagination returns to {path}"
+                )));
+            }
+            let req = self
+                .auth_request(installation_id, Method::Get, &path)
+                .await?;
+            let resp = match self.transport.send(req).await?.ensure_success() {
+                Ok(resp) => resp,
+                Err(err) => {
+                    tracing::warn!(status = ?err.status(), "github request failed");
+                    return Err(err);
+                }
+            };
+            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
+            listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
+            match next {
+                Some(next) => path = next,
+                None => return Ok(listed),
             }
         }
+        Err(crate::Error::InvalidInput(
+            "incomplete pending invitation listing".into(),
+        ))
     }
 
     /// `GET /repos/{owner}/{repo}/collaborators/{username}` — confirm membership.
@@ -768,5 +799,184 @@ mod reconcile_tests {
                 .await
                 .unwrap()
         );
+    }
+
+    /// One pending-invitation page. `next` becomes a GitHub-style `Link`
+    /// header so the client has to follow it to see the rest.
+    fn invitation_page(url: &str, body: serde_json::Value, next: Option<&str>) -> Expectation {
+        let mut expectation = Expectation::ok_json(Method::Get, url, body);
+        if let Some(next) = next {
+            expectation.response.headers.insert(
+                "link".into(),
+                format!("<{next}>; rel=\"next\", <{next}>; rel=\"last\""),
+            );
+        }
+        expectation
+    }
+
+    fn invitation_json(id: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "invitee": {"id": 42, "login": "octocat"},
+            "permissions": "write",
+            "created_at": "2026-05-04T12:00:00Z"
+        })
+    }
+
+    #[tokio::test]
+    async fn list_invitations_follows_every_page() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_json(2)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=3"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=3",
+                serde_json::json!([invitation_json(3)]),
+                None,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let listed = client.list_invitations(9, "acme", "api").await.unwrap();
+        assert_eq!(
+            listed.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_follows_repository_id_next_links() {
+        // GitHub answers with `/repositories/{id}/...` next links on this endpoint.
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repositories/77/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repositories/77/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_json(2)]),
+                None,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let listed = client.list_invitations(9, "acme", "api").await.unwrap();
+        assert_eq!(listed.iter().map(|i| i.id).collect::<Vec<_>>(), vec![1, 2]);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_later_page_failure_is_not_a_short_list() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                500,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert_eq!(err.status(), Some(500));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_malformed_later_page_is_not_a_short_list() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!({"message": "not a list"}),
+                None,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert!(matches!(err, crate::Error::Decode(_)), "got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_refuses_a_next_link_off_the_api_host() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://evil.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
+        // The off-host page was never requested.
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_rejects_a_next_link_that_does_not_advance() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100"),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_invitations_rejects_a_pagination_cycle_on_the_first_repeat() {
+        // Page two links back to page one. The script holds exactly the two
+        // requests the walk is allowed to spend before it gives up — anything
+        // more exhausts it and panics, so the page budget cannot absorb a cycle.
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_json(1)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_json(2)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100"),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
+        assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
+        mock.assert_exhausted();
     }
 }

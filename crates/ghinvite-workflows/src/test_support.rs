@@ -72,3 +72,157 @@ pub(crate) async fn fixture_state_with_transport(transport: Arc<dyn HttpTranspor
 pub(crate) fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
+
+/// A single mocked installation-token mint, consumed first by any test whose
+/// scripted transport makes an installation-authenticated call.
+pub(crate) fn token_mint(installation_id: u64) -> ghinvite_github::mocks::Expectation {
+    use ghinvite_github::mocks::Expectation;
+    use ghinvite_github::transport::{Method, Response};
+    Expectation {
+        method: Method::Post,
+        url: format!("https://api.github.test/app/installations/{installation_id}/access_tokens"),
+        required_headers: std::collections::BTreeMap::new(),
+        expected_body: None,
+        response: Response {
+            status: 201,
+            headers: std::collections::BTreeMap::new(),
+            body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+        },
+    }
+}
+
+/// Identities of the rows [`seed_pending_invitation`] inserted, for tests that
+/// address the request or the link as well as the invitation.
+pub(crate) struct SeededInvitation {
+    pub invitation_id: ghinvite_core::GithubInvitationId,
+    pub link_id: ghinvite_core::InvitationLinkId,
+    pub request_id: ghinvite_core::RequestId,
+}
+
+/// Seed: installation 9 / account 100, two users, one invitation link with one
+/// repo (repo ID 10), one approved invitation request, and one
+/// `github_invitation` row in `Sent` state with upstream ID 9988.
+pub(crate) async fn seed_pending_invitation(
+    state: &AppState,
+    repo_full_name: &str,
+) -> SeededInvitation {
+    use ghinvite_core::{
+        AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
+        InvitationState, Permission, RequestId, RequestState, SelectedRepos, Slug,
+    };
+    use rand::SeedableRng;
+
+    state
+        .storage
+        .insert_installation(&ghinvite_core::Account {
+            installation_id: 9,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        })
+        .await
+        .unwrap();
+    for (user_id, login) in [(7, "creator"), (8, "alice")] {
+        state
+            .storage
+            .upsert_user(&ghinvite_core::User {
+                user_id,
+                login: login.into(),
+                avatar_url: None,
+                last_seen_at: dt("2026-05-04T12:00:00Z"),
+            })
+            .await
+            .unwrap();
+    }
+    let link = InvitationLink {
+        id: InvitationLinkId::new(),
+        slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
+        installation_id: 9,
+        account_id: 100,
+        created_by: 7,
+        created_at: dt("2026-05-04T12:00:00Z"),
+        expires_at: None,
+        max_uses: None,
+        uses_count: 0,
+        permission: Permission::Push,
+        approval_required: false,
+        description: "AI coding workshop".into(),
+        internal_note: None,
+        revoked_at: None,
+        revoked_by: None,
+        repos: vec![InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: repo_full_name.into(),
+        }],
+    };
+    state.storage.insert_invitation_link(&link).await.unwrap();
+    let request_id = RequestId::new();
+    state
+        .storage
+        .insert_invitation_request_and_increment_uses(&ghinvite_core::InvitationRequest {
+            id: request_id,
+            invitation_link_id: link.id,
+            requester_id: 8,
+            justification: None,
+            state: RequestState::Approved,
+            decided_by: Some(7),
+            decided_at: Some(dt("2026-05-04T13:00:00Z")),
+            decline_reason: None,
+            created_at: dt("2026-05-04T12:30:00Z"),
+        })
+        .await
+        .unwrap();
+    let invitation_id = GithubInvitationId::new();
+    state
+        .storage
+        .insert_github_invitation(&ghinvite_core::GithubInvitation {
+            id: invitation_id,
+            invitation_request_id: request_id,
+            repo_id: 10,
+            github_invitation_id: Some(9988),
+            state: InvitationState::Sent,
+            error_message: None,
+            created_at: dt("2026-05-04T13:00:00Z"),
+            updated_at: dt("2026-05-04T13:00:00Z"),
+        })
+        .await
+        .unwrap();
+    SeededInvitation {
+        invitation_id,
+        link_id: link.id,
+        request_id,
+    }
+}
+
+/// One pending-invitation page from the GitHub list endpoint. `next` becomes a
+/// `Link: rel="next"` header, so a client only sees the rest by following it.
+pub(crate) fn invitation_page(
+    url: &str,
+    body: serde_json::Value,
+    next: Option<&str>,
+) -> ghinvite_github::mocks::Expectation {
+    use ghinvite_github::mocks::Expectation;
+    use ghinvite_github::transport::Method;
+    let mut expectation = Expectation::ok_json(Method::Get, url, body);
+    if let Some(next) = next {
+        expectation
+            .response
+            .headers
+            .insert("link".into(), format!("<{next}>; rel=\"next\""));
+    }
+    expectation
+}
+
+/// A pending-invitation list entry for GitHub invitation ID `id`, addressed to
+/// the requester seeded by [`seed_pending_invitation`].
+pub(crate) fn invitation_item(id: u64) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "invitee": {"id": 8, "login": "alice"},
+        "permissions": "write",
+        "created_at": "2026-05-04T13:00:00Z"
+    })
+}
