@@ -61,6 +61,106 @@ async fn parents(storage: &SqlxStorage) {
 }
 
 #[tokio::test]
+async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outcome() {
+    let path = std::env::temp_dir().join(format!(
+        "delivery-audit-{}.db",
+        ghinvite_core::RequestId::new()
+    ));
+    let storage = SqlxStorage::at_path(&path).await.unwrap();
+    parents(&storage).await;
+    let envelope = envelope();
+    storage.apply_transition(&envelope).await.unwrap();
+    let fault = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    for (outcome, kind, actor) in [
+        (
+            json!({"kind":"created","upstream_id":9876}),
+            "invitation.sent",
+            "system",
+        ),
+        (
+            json!({"kind":"already_collaborator"}),
+            "invitation.accepted",
+            "github",
+        ),
+        (
+            json!({"kind":"failed","status":422}),
+            "invitation.send_failed",
+            "system",
+        ),
+    ] {
+        let id = ghinvite_core::GithubInvitationId::new();
+        let receipt: ghinvite_core::delivery::CreateReceipt = serde_json::from_value(json!({
+            "command":{"version":1,"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
+                "approval_id":"approval","account_id":100,"installation_id":1,"requester_id":8,"repo_id":10,
+                "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
+            "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
+        })).unwrap();
+        // Pre-#64 rows used typed serde encoding rather than a sorted JSON Value.
+        let mut legacy = receipt.clone();
+        legacy.confirmed_at = None;
+        sqlx::query(
+            "INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(receipt.command.request_id.to_string())
+        .bind(serde_json::to_string(&legacy).unwrap())
+        .execute(&fault)
+        .await
+        .unwrap();
+        storage.project_delivery(&legacy).await.unwrap();
+        let receipt = ghinvite_core::delivery::CreateReceipt {
+            revision: 2,
+            ..receipt
+        };
+        sqlx::query("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").execute(&fault).await.unwrap();
+        assert!(storage.project_delivery(&receipt).await.is_err());
+        assert!(
+            storage
+                .list_delivery_for_request(receipt.command.request_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row == &legacy)
+        );
+        assert!(
+            storage
+                .list_audit_events(100, Some(kind.parse().unwrap()), AuditPosition::Latest)
+                .await
+                .unwrap()
+                .events
+                .is_empty()
+        );
+        sqlx::query("DROP TRIGGER fail_delivery_audit")
+            .execute(&fault)
+            .await
+            .unwrap();
+        storage.project_delivery(&receipt).await.unwrap();
+        let events = storage
+            .list_audit_events(100, Some(kind.parse().unwrap()), AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].actor_kind.to_string(), actor);
+        assert_eq!(events[0].occurred_at, receipt.confirmed_at.unwrap());
+        storage.project_delivery(&receipt).await.unwrap();
+        assert_eq!(
+            storage
+                .list_audit_events(100, Some(kind.parse().unwrap()), AuditPosition::Latest)
+                .await
+                .unwrap()
+                .events,
+            events
+        );
+    }
+    fault.close().await;
+    drop(storage);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
     let storage = SqlxStorage::in_memory().await.unwrap();
     parents(&storage).await;

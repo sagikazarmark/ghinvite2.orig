@@ -2355,6 +2355,11 @@ async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
         ),
         (EventType::RequestCreated, serde_json::Value::Null, "—"),
         (
+            EventType::InvitationSent,
+            serde_json::json!({"recovered":true,"repo_full_name":"private-repo","requester_id":8}),
+            "Confirmed outcome observed during recovery",
+        ),
+        (
             EventType::RequestCreated,
             serde_json::json!(["arbitrary-array"]),
             "—",

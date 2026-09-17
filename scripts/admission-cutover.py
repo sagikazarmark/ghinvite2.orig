@@ -72,7 +72,19 @@ def run_import(args):
                             raise ValueError("imported legacy replay differs")
                         for receipt in record["receipts"]:
                             actual_receipt = http(args.ingress, f"/GithubCreateV1/{receipt['command']['invitation_id']}/status", method="POST")
-                            if actual_receipt != receipt:
+                            comparable = dict(actual_receipt) if actual_receipt else None
+                            # #64 may have observed an old confirmed outcome on
+                            # a prior projection pass. Accept only that one-time
+                            # enrichment; command/outcome remain input-bound.
+                            if (comparable and "confirmed_at" not in receipt
+                                    and receipt["outcome"]["kind"] in ("created", "already_collaborator", "failed")
+                                    and comparable.get("recovered") is True
+                                    and comparable.get("confirmed_at")
+                                    and comparable.get("revision") == receipt["revision"] + 1):
+                                timestamp(comparable.pop("confirmed_at"))
+                                comparable.pop("recovered")
+                                comparable["revision"] = receipt["revision"]
+                            if comparable != receipt:
                                 raise ValueError("imported receiving outcome differs")
                             http(args.ingress, f"/GithubCreateV1/{receipt['command']['invitation_id']}/project_import", method="POST")
                     # Exercise the production projector against the ADOPTED rows,

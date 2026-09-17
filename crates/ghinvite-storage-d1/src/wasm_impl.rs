@@ -212,12 +212,21 @@ impl Storage for D1Storage {
         receipt: &ghinvite_core::delivery::CreateReceipt,
     ) -> Result<()> {
         wasm_send(async {
-            let encoded = serde_json::to_string(receipt).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
-            self.db.prepare("INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?1, ?2, ?3) ON CONFLICT(invitation_id) DO UPDATE SET receipt = excluded.receipt WHERE json_extract(excluded.receipt, '$.revision') >= json_extract(delivery_outcomes.receipt, '$.revision')")
-                .bind(&[JsValue::from_str(&receipt.command.invitation_id.to_string()), JsValue::from_str(&receipt.command.request_id.to_string()), JsValue::from_str(&encoded)]).map_err(bind_err)?
-                .run().await.map_err(classify_d1_error)?;
+            use ghinvite_core::storage::delivery_projection as sql;
+            let encoded = sql::encode(receipt)?;
+            let statements = sql::statements()
+                .iter()
+                .map(|statement| {
+                    self.db
+                        .prepare(statement)
+                        .bind(&[JsValue::from_str(&encoded)])
+                        .map_err(bind_err)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            self.db.batch(statements).await.map_err(classify_d1_error)?;
             Ok(())
-        }).await
+        })
+        .await
     }
 
     async fn list_delivery_for_request(

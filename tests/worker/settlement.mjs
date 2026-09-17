@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 
 // Public command and Storage boundaries; SQL is used only for fault injection.
 export async function settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually, requestId, invitationId, pause }) {
-  const at = '2026-09-17T12:00:00Z';
+  const at = new Date().toISOString();
   const lifecycle = (key, handler, body) => http(`${ingress}/GithubInvitation/${key}/${handler}`, body);
   const sent = await eventually(() => storage('invitation', invitationId), row => row?.state === 'sent');
   await db.prepare("CREATE TRIGGER settlement_audit_failure BEFORE INSERT ON audit_events WHEN NEW.target_kind = 'github_invitation' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END").run();
@@ -15,8 +15,9 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await Promise.all([lifecycle(sent.id, 'reconcile_v1', evidence), lifecycle(sent.id, 'reconcile_v1', evidence)]);
   assert.equal((await storage('invitation', sent.id)).state, 'accepted');
   let events = (await storage('audit', 100)).events.filter(event => event.target_id === sent.id);
-  assert.equal(events.length, 1);
-  assert.equal(events[0].event_type, 'invitation.accepted');
+  assert.equal(events.length, 2);
+  assert.equal(events.filter(event => event.event_type === 'invitation.sent').length, 1);
+  assert.equal(events.filter(event => event.event_type === 'invitation.accepted').length, 1);
   assert.equal((await storage('invitation', sent.id)).github_invitation_id, sent.github_invitation_id);
 
   // D1 really commits, then the JS binding loses the batch acknowledgement.

@@ -27,6 +27,40 @@ to the controlled cutover in ADR 0003 and #58.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
 
+## Create-outcome audit history
+
+Confirmed receipts retain `confirmed_at` in the invitation object before database
+projection. Created, already-collaborator, and definitive-failure outcomes publish
+`invitation.sent` (System), `invitation.accepted` (GitHub), and
+`invitation.send_failed` (System), respectively. The target is the internal GitHub
+invitation ID and account scope comes from the immutable create command. Blocked
+and outcome-unknown receipts publish none of these events.
+
+The audit ID is the first 128 bits of SHA-256 of
+`ghinvite/delivery/audit/v1/<invitation_id>`, encoded as a ULID for existing audit
+cursors. This mapping and the event metadata contract are versioned, retained
+protocol: changing them requires explicit migration. Metadata contains only
+repository name, numeric requester identity, and upstream invitation ID or a safe
+outcome reason. Audit browsing renders allowlisted summaries, never raw metadata,
+request justification, internal notes, or GitHub diagnostics.
+
+SQLx transactions and D1 batches apply receipt/lifecycle and audit insertion
+atomically. Audit insertion runs even for stale receipts or a lifecycle already
+beyond Sending; identical event content replays, conflicting content fails the
+whole projection. Ordinary retry and `DeliveryRecoveryV1/recover` repair missing
+history without another GitHub write, including after workflow retention cleanup.
+
+Pre-#64 receipts lack a reliable original confirmation time. On first create
+replay or `project_import`, the receiver journals a recovery observation time,
+retains it with `recovered: true`, and advances the receipt revision once. Existing
+legacy invitation evidence is likewise marked recovered. Console history labels
+these entries **Confirmed outcome observed during recovery**; their time is not
+the original send time. Existing audit history is preserved. The cutover verifier
+accepts only this specific enrichment when resuming an older manifest. Deploy
+these compatible handlers with in-flight invocations drained or pinned to their
+original deployment; do not switch a partially journaled old handler onto a
+changed durable-command sequence.
+
 The fence must be backed up alongside Restate and must never be reset or expired.
 Independent database restore requires maintenance and reconciliation of all
 unfinished attempts before writes reopen. A Restate backup alone cannot recover
@@ -82,8 +116,17 @@ HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
 numeric identity/rename validation, and recovery after actual workflow cleanup.
 `authoritative_admission` additionally checks missing delivery projection
-prerequisites do not block link commands or workflow submission. Actual Worker/D1
-verification is tracked in #59; compilation is not runtime evidence.
+prerequisites do not block link commands or workflow submission.
+
+For #64, `cargo test -p ghinvite-storage-sqlx --test sqlx_suite` and `--test projection`
+verify all confirmed audit outcomes, uncertain/blocked exclusion, stale event
+delivery, immutable-content conflicts, old serialized receipt compatibility,
+audit-write rollback and retry. `retained_delivery` checks the same history through
+real Restate, including stable recovery observations and workflow cleanup.
+`npm run test:admission --prefix tests/worker` runs the shared conformance scenario
+on actual D1, injects audit insertion failures into D1 batches, and checks events
+from actual Worker GitHub 201/204/422 delivery and migration resume. Console HTTP
+summary/privacy coverage is in `console_flow` (`audit_` filter).
 
 #49's approved policy is recorded in ADR 0004. #60 implements admission availability
 enforcement and installation-event convergence; #57 handles full browser cutover.

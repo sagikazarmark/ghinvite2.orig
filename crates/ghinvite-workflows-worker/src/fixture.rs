@@ -7,7 +7,12 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
     let path = req.uri().path().to_owned();
     let bytes = req.into_body().collect().await?.to_bytes();
     let input: serde_json::Value = serde_json::from_slice(&bytes).map_err(super::worker_err)?;
-    let storage = ghinvite_storage_d1::D1Storage::new(env.d1("DB")?);
+    let storage =
+        ghinvite_storage_d1::D1Storage::new(env.d1(if path == "/__fixture/delivery-suite" {
+            "DB_DELIVERY"
+        } else {
+            "DB"
+        })?);
     let result = match path.as_str() {
         "/__fixture/settle" => storage
             .settle_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
@@ -19,6 +24,18 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .map(|_| serde_json::Value::Null),
         "/__fixture/invitation" => storage
             .get_github_invitation(serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
+        "/__fixture/delivery-suite" => {
+            ghinvite_core::storage::test_suite::scenario_delivery_audit(storage).await;
+            Ok(serde_json::Value::Null)
+        }
+        "/__fixture/delivery" => storage
+            .project_delivery(&serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|_| serde_json::Value::Null),
+        "/__fixture/delivery-read" => storage
+            .list_delivery_for_request(serde_json::from_value(input).map_err(super::worker_err)?)
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/apply" => storage

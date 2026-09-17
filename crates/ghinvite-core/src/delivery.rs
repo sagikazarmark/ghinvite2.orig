@@ -45,6 +45,14 @@ pub struct CreateReceipt {
     pub command: CreateCommand,
     pub outcome: CreateOutcome,
     pub revision: u64,
+    /// Time the outcome was confirmed, retained independently of projection and
+    /// workflow retention. Older receipts have no trustworthy confirmation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_at: Option<DateTime<Utc>>,
+    /// Older retained/legacy evidence was first observed during recovery; the
+    /// confirmation time is not represented as the original GitHub effect time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

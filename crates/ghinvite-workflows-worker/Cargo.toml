@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [features]
 # Disposable binding conformance harness only; never enable in deployed builds.
-runtime-tests = []
+runtime-tests = ["ghinvite-core/test-suite"]
 
 # This crate is the Cloudflare Workers entry point for the Restate service
 # binary. The whole crate exists only on wasm32 — `worker`,

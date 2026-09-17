@@ -102,7 +102,7 @@ const mf = new Miniflare({
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   compatibilityDate: '2024-09-23',
   compatibilityFlags: ['nodejs_compat'],
-  d1Databases: ['DB'],
+  d1Databases: ['DB', 'DB_DELIVERY'],
   bindings: {
     GHINVITE_ADMISSION_MODE: 'authoritative',
     GHINVITE_GITHUB_APP_ID: '123',
@@ -118,7 +118,7 @@ const mf = new Miniflare({
       body: ['GET', 'HEAD'].includes(request.method) ? undefined : Buffer.from(await request.arrayBuffer()),
       signal: AbortSignal.timeout(10_000),
     });
-    return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
+    return new Response([204, 205, 304].includes(response.status) ? null : await response.arrayBuffer(), { status: response.status, headers: response.headers });
   },
 });
 
@@ -201,10 +201,14 @@ try {
     });
   });
   const db = await mf.getD1Database('DB');
+  const deliveryDb = await mf.getD1Database('DB_DELIVERY');
   for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
     const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
     await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
+    await deliveryDb.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
   }
+  await storage('delivery-suite', null);
+  console.log('PASS shared SQLx/D1 confirmed-create audit conformance: all outcomes, replay, ordering and immutable content');
   await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'[10,11]')").run();
   // Adopt existing installation facts before exercising projection failure.
   // Missing user parents keep link/request projection unavailable.
@@ -382,6 +386,38 @@ try {
   const plan = await auto('prepare_dispatch', progressQuery);
   const receiving = await eventually(() => http(`${ingress}/GithubCreateV1/${plan.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
   assert.ok(receiving.outcome.upstream_id > 0);
+  await http(`${ingress}/GithubCreateV1/${receiving.command.invitation_id}/create`, receiving.command);
+  const createEvents = async receipt => (await storage('audit', 100)).events.filter(event => event.target_id === receipt.command.invitation_id);
+  const firstEvents = await createEvents(receiving);
+  assert.equal(firstEvents.length, 1);
+  assert.equal(firstEvents[0].event_type, 'invitation.sent');
+  assert.equal(firstEvents[0].occurred_at, receiving.confirmed_at);
+  assert.equal(firstEvents[0].actor_kind, 'system');
+  await http(`${ingress}/GithubCreateV1/${receiving.command.invitation_id}/create`, receiving.command);
+  assert.deepEqual(await createEvents(receiving), firstEvents);
+  // D1 batch rolls back receipt/lifecycle if the audit insertion fails. Retry
+  // after repair (and replay after an unobserved successful response) is safe.
+  for (const [outcome, eventType, actor] of [
+    [{ kind: 'created', upstream_id: 9876 }, 'invitation.sent', 'system'],
+    [{ kind: 'already_collaborator' }, 'invitation.accepted', 'github'],
+    [{ kind: 'failed', status: 422 }, 'invitation.send_failed', 'system'],
+  ]) {
+    const receipt = { ...receiving, command: { ...receiving.command, invitation_id: id() }, outcome };
+    await db.prepare("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").run();
+    await storage('delivery', receipt, 409);
+    assert.ok(!(await storage('delivery-read', receipt.command.request_id)).some(row => row.command.invitation_id === receipt.command.invitation_id));
+    assert.deepEqual(await createEvents(receipt), []);
+    await db.prepare('DROP TRIGGER fail_delivery_audit').run();
+    await storage('delivery', receipt);
+    const events = await createEvents(receipt);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event_type, eventType);
+    assert.equal(events[0].actor_kind, actor);
+    assert.equal(events[0].occurred_at, receipt.confirmed_at);
+    await storage('delivery', receipt);
+    assert.deepEqual(await createEvents(receipt), events);
+  }
+  console.log('PASS actual D1 audit-write failure rollback and lost-ack replay for all three confirmed outcomes');
   const calls = await http(`${githubUrl}/calls`, undefined, 'GET');
   assert.equal(calls.requests.filter(call => call.method === 'PUT').length, 1);
   assert.deepEqual(await auto('admit', autoAttempt), approved);
@@ -389,6 +425,29 @@ try {
   assert.equal((await http(`${githubUrl}/calls`, undefined, 'GET')).requests.filter(call => call.method === 'PUT').length, 1);
   assert.equal(unexpectedOutbound, 0);
   console.log('PASS auto-approval, actual Worker GitHub stub delivery and confirmed-create replay');
+  for (const [stubOutcome, kind, eventType, actor] of [
+    ['already_collaborator', 'already_collaborator', 'invitation.accepted', 'github'],
+    ['terminal_failure', 'failed', 'invitation.send_failed', 'system'],
+  ]) {
+    await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: stubOutcome });
+    const input = { ...creation(), approval_required: false };
+    const call = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
+    await call('create', input);
+    const admitted = await call('admit', { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
+    const plan = await call('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+    const receipt = await http(`${ingress}/GithubCreateV1/${plan.commands[0].invitation_id}/create`, plan.commands[0]);
+    assert.equal(receipt.outcome.kind, kind);
+    const events = await createEvents(receipt);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event_type, eventType);
+    assert.equal(events[0].actor_kind, actor);
+    assert.equal(events[0].occurred_at, receipt.confirmed_at);
+    assert.deepEqual(await http(`${ingress}/GithubCreateV1/${receipt.command.invitation_id}/create`, receipt.command), receipt);
+    assert.deepEqual(await createEvents(receipt), events);
+  }
+  await http(`${githubUrl}/reset`, undefined, 'DELETE');
+  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  console.log('PASS actual Worker GitHub 204/422 outcomes publish retained D1 audit events');
   const manualInput = creation();
   const manual = (handler, body) => http(`${ingress}/InvitationLinkV1/${manualInput.link_id}/${handler}`, body);
   await manual('create', manualInput);

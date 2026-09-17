@@ -264,10 +264,17 @@ impl Storage for SqlxStorage {
         &self,
         receipt: &ghinvite_core::delivery::CreateReceipt,
     ) -> Result<()> {
-        sqlx::query("INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?, ?, ?) ON CONFLICT(invitation_id) DO UPDATE SET receipt = excluded.receipt WHERE json_extract(excluded.receipt, '$.revision') >= json_extract(delivery_outcomes.receipt, '$.revision')")
-            .bind(receipt.command.invitation_id.to_string()).bind(receipt.command.request_id.to_string())
-            .bind(serde_json::to_string(receipt).map_err(|e| Error::Corrupt(e.to_string()))?)
-            .execute(&self.pool).await.map_err(crate::to_db_err)?;
+        use ghinvite_core::storage::delivery_projection as sql;
+        let encoded = sql::encode(receipt)?;
+        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
+        for statement in sql::statements() {
+            sqlx::query(&statement)
+                .bind(&encoded)
+                .execute(&mut *tx)
+                .await
+                .map_err(crate::to_db_err)?;
+        }
+        tx.commit().await.map_err(crate::to_db_err)?;
         Ok(())
     }
 
