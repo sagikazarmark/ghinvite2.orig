@@ -20,7 +20,8 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 | Path | What |
 | --- | --- |
 | `src/lib.rs` | `LinkFormIsland(props: LinkFormIslandProps)` — the reactive form. Compiles natively (for tests) and for the browser. |
-| `src/main.rs` | The wasm32 entrypoint: reads the props blob, empties `#link-form-island`, sets `data-island="mounted"` on it, launches Dioxus there. An empty `main` on native. |
+| `src/takeover.rs` | Which of the props blob and the live DOM describes each control, plus the focus state to put back. Pure, unit-tested natively. |
+| `src/main.rs` | The wasm32 entrypoint: reads the props blob, folds the live form over it, records focus, empties `#link-form-island`, sets `data-island="mounted"` on it, launches Dioxus there, and restores focus. An empty `main` on native. |
 | `tests/parity.rs` | Renders `LinkCreateForm` (server) and `LinkFormIsland` (island) with `dioxus_ssr` for the covered props and asserts the HTML is **identical**, byte for byte. |
 | `examples/ssr_fixture.rs` | Prints the server-rendered page as a full HTML document, for local smoke tests (see below). |
 
@@ -32,10 +33,46 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    serialised `LinkFormIslandProps` (`action`, the preserved `values` with
    the server's errors, the available `repos`, the server's `now`), and
    `<script type="module" src="/assets/ghinvite-island.js">`.
-2. `main` deserialises the blob. `dioxus-web`'s non-hydrating mount *appends*
-   to its root, so the entrypoint empties the container first (otherwise two
-   forms end up in the DOM — spike finding, #33), then launches.
-3. `LinkFormIsland` builds the `CreateLinkForm` model from the values (the
+2. `main` deserialises the blob, then **reads the live form and folds it over
+   those props** (`takeover::adopt`). The bundle can land long after the page
+   did, so the props describe the form the server sent, not the form the admin
+   has been filling in; re-rendering from the props alone reverted their work
+   and could turn "Require account admin approval" back off (#67). Every
+   control whose DOM `value` still equals the server-rendered default
+   (`defaultValue`, `defaultChecked`, the `selected` option) keeps its props
+   value; every control that differs is taken from the DOM, and the server
+   error attached to it is dropped, since it described the value that is gone.
+   "Differs" is measured against what the browser **shows** for the server's
+   value, not against the markup: every control applies its own value
+   sanitisation before anyone touches it, and adopting a rewrite the browser
+   performed would silently repair a model the server rejected. An unsupported
+   permission displays as `pull`; a `type="number"` input shows nothing for
+   text that is not a number it can hold; a `type="text"` input strips CR and
+   LF, so a rejected multiline description reads back shortened; a `<textarea>`
+   normalises its newlines to LF. "A number it can hold" is HTML's *valid
+   floating-point number* rule plus finiteness — checked against Chromium,
+   which is what does the emptying: `.5` is shown, `5.` and `1e999` are not —
+   and never the shared parsers', since the server renders plenty of numbers
+   the browser shows and the domain rejects (`0`, `4294967296`), and clearing
+   one of those before mounting is a real edit that must survive.
+   Each of those two gaps has a floor. An admin who *deliberately* picks `pull`
+   over a raw `owner`, or clears a numeric field the browser had already
+   emptied, leaves the control exactly as the server rendered it, so the
+   takeover reads it as untouched and keeps the raw value and its blocker. The
+   form then stays visibly rejected until a distinguishable input corrects it,
+   which is the safe direction; the same edit made after mounting is picked up
+   normally. If any control is missing — or the repository scope group offers
+   anything other than exactly the available repositories, in order — the
+   takeover is abandoned and the usable server-rendered form is left in place,
+   because reading part of a form this island did not render would quietly
+   narrow the scope the admin had in front of them.
+3. `dioxus-web`'s non-hydrating mount *appends* to its root, so the entrypoint
+   records where focus and the caret sat, empties the container (otherwise two
+   forms end up in the DOM — spike finding, #33), then launches and puts focus
+   back once the first frame is in the DOM. Focus restoration is best effort:
+   the values are already preserved, and a control that cannot be found again
+   is not worth failing the mount over.
+4. `LinkFormIsland` builds the `CreateLinkForm` model from the values (the
    same mapping as the server's `to_model`: text verbatim, a numeric guardrail
    that does not parse left blank), configures the form with
    `register_validators(core, &repos, now)` and `ValidationMode::on_commit()`,
@@ -44,7 +81,7 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    `LinkCreateForm` with a `LinkFormValues` read back from the bindings and a
    `LinkFormHandlers` bundle of the bindings' listeners. Field ids stay the
    shared components' (`description`, `permission`, `repo_ids`, …).
-4. **Restoring a rejected browser POST**: when `values.errors` is non-empty,
+5. **Restoring a rejected browser POST**: when `values.errors` is non-empty,
    the config uses `FormConfig::browser_rejection((), …)` before
    `use_form_config`. It supplies a `BrowserRejection` with
    `SubmitError::field(path, msg)` for each field slot and
@@ -54,19 +91,25 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    marking fields touched or starting a fake submission. Rerenders do not
    replay it. Client-reproducible errors and server-only field/form messages
    now coexist; client validation no longer causes server diagnostics to be lost.
-5. **Raw numeric text that does not parse** (`max_uses: "abc"`,
+6. **Raw numeric text that does not parse** (`max_uses: "abc"`,
    `expires_in_days: "0"`) is attached to that rejection with `raw_field`.
    The parsed bindings consume the restored input when they mount, preserving
    the raw text and parse error without simulating `on_input` or marking the
-   field touched. This restoration is configured only for failed responses
-   with non-empty errors. Chromium sanitises non-numeric text out of a
-   `type="number"` input, so there the field shows empty with the error;
-   the binding still holds the parse blocker.
-6. Errors are folded back into `LinkFormErrors` with the same `attach` the
+   field touched. This is **not** gated on the response having failed: the
+   takeover adopts what the admin typed before the island mounted, so a `0`
+   typed into a form the server never rejected reaches the same code path, and
+   `initial_model` would otherwise blank it into "unlimited" — losing both the
+   guardrail and the blocker that should stop the POST. `browser_rejection` is
+   dioform's only public way to seed raw text, so such a page records one
+   rejected attempt with no errors; the parse error is then visible from the
+   first frame rather than on leaving the field. Chromium sanitises
+   non-numeric text out of a `type="number"` input, so there the field shows
+   empty with the error; the binding still holds the parse blocker.
+7. Errors are folded back into `LinkFormErrors` with the same `attach` the
    server uses (parse errors first, then visible validation errors; summary
    line added on the first attach; form-level messages appended), so the
    first frame matches the server's HTML for the covered response values.
-7. **Correction and retry**: editing a related field clears its restored
+8. **Correction and retry**: editing a related field clears its restored
    field error; unrelated field errors and form-level messages remain. A fresh
    core preflight retires the prior rejection and validates the current values,
    allowing an unchanged retry when only server-side errors were present and
@@ -76,10 +119,14 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
 
 Valid noncanonical numeric text (for example, `"007"` or `" 7 "`) still goes
 through the typed model and `format_count`, yielding `"7"` on mount. This is
-existing behavior: the migration restores invalid raw input from rejected
-responses, not arbitrary numeric spelling. First-frame byte parity is not
-promised for valid noncanonical numeric text or invalid numeric props with no
-response errors. The server remains the validation authority.
+existing behavior: restoration covers invalid raw input, not arbitrary numeric
+spelling. First-frame byte parity is not promised for valid noncanonical
+numeric text, nor for invalid numeric props with no response errors — there the
+first frame shows the parse error the server's markup does not carry. No
+*response* has that shape (the server always attaches a parse error to input it
+rejects); it arises from the takeover adopting a value the admin typed after
+the page was rendered, which the server never saw. The server remains the
+validation authority.
 
 ## Registry Input Integration
 
@@ -195,11 +242,11 @@ and the `wasm32-unknown-unknown` target; `dx` invokes the `cargo` on your
 `PATH`, so keep the rustup-managed one first so `rust-toolchain.toml` is
 honoured.
 
-The dioform 0.7 rejection-restoration migration measured approximately 342 KiB gzipped Wasm + JS,
-compared with 337 KiB for NativeSelect, 328 KiB for the description Field-context
-migration, and the 243 KiB pre-registry baseline, below the
-600 KiB budget. Sizes vary with toolchain and source; the build script reports
-and enforces the current total.
+The DOM takeover measured approximately 349 KiB gzipped Wasm + JS, compared
+with 342 KiB for the dioform 0.7 rejection-restoration migration, 337 KiB for
+NativeSelect, 328 KiB for the description Field-context migration, and the
+243 KiB pre-registry baseline, below the 600 KiB budget. Sizes vary with
+toolchain and source; the build script reports and enforces the current total.
 
 `[profile.island]` in the root `Cargo.toml` (inherits `release`; `opt-level =
 "z"`, `lto`, `codegen-units = 1`, `panic = "abort"`, `strip`) exists for this

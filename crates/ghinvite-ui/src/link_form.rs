@@ -191,14 +191,33 @@ impl LinkFormErrors {
         }
     }
 
+    /// Retire the message attached to `field`: it described a value that is
+    /// gone, because the admin changed that control (the browser island's
+    /// takeover does this for edits made before it mounted). The inverse of
+    /// [`Self::attach`], so the summary line goes with the last field message —
+    /// an alert reading "fix the highlighted fields" must never survive the
+    /// last highlighted field. Form-level messages keep both.
+    pub fn retire(&mut self, field: &FieldIdentity) {
+        if let Some(slot) = self.slot_mut(field) {
+            *slot = None;
+        }
+        if !self.has_field_message() && self.summary == [SUMMARY_MESSAGE] {
+            self.summary.clear();
+        }
+    }
+
     /// No message has been attached.
     pub fn is_empty(&self) -> bool {
-        self.summary.is_empty()
-            && self.description.is_none()
-            && self.permission.is_none()
-            && self.max_uses.is_none()
-            && self.expires_in_days.is_none()
-            && self.repo_scope.is_none()
+        self.summary.is_empty() && !self.has_field_message()
+    }
+
+    /// Some control carries a message of its own.
+    fn has_field_message(&self) -> bool {
+        self.description.is_some()
+            || self.permission.is_some()
+            || self.max_uses.is_some()
+            || self.expires_in_days.is_some()
+            || self.repo_scope.is_some()
     }
 
     /// The slot a model field's errors render in, if it has one.
@@ -935,6 +954,53 @@ mod tests {
         );
         assert_eq!(errors.description, None);
         assert_eq!(errors.repo_scope, None);
+    }
+
+    #[test]
+    fn retiring_the_last_field_message_takes_the_summary_line_with_it() {
+        let fields = CreateLinkForm::fields();
+        let mut errors = LinkFormErrors::default();
+        errors.attach(Some(&fields.description().identity()), "d".to_string());
+        errors.attach(Some(&fields.max_uses().identity()), "m".to_string());
+
+        errors.retire(&fields.description().identity());
+
+        assert_eq!(errors.description, None);
+        assert_eq!(errors.max_uses.as_deref(), Some("m"));
+        assert_eq!(errors.summary, vec![SUMMARY_MESSAGE.to_string()]);
+
+        errors.retire(&fields.max_uses().identity());
+
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn retiring_every_field_message_keeps_a_form_level_one_and_its_summary_line() {
+        let fields = CreateLinkForm::fields();
+        let mut errors = LinkFormErrors::default();
+        errors.attach(Some(&fields.description().identity()), "d".to_string());
+        errors.attach(None, "whole form".to_string());
+
+        errors.retire(&fields.description().identity());
+
+        assert_eq!(
+            errors.summary,
+            vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()]
+        );
+        assert!(!errors.is_empty());
+    }
+
+    #[test]
+    fn retiring_a_field_without_a_slot_or_a_message_changes_nothing() {
+        let fields = CreateLinkForm::fields();
+        let mut errors = LinkFormErrors::default();
+        errors.attach(Some(&fields.max_uses().identity()), "m".to_string());
+        let before = errors.clone();
+
+        errors.retire(&fields.internal_note().identity());
+        errors.retire(&fields.description().identity());
+
+        assert_eq!(errors, before);
     }
 
     // --- island props ------------------------------------------------------

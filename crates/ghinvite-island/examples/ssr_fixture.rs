@@ -70,6 +70,21 @@ fn main() {
             form.errors.max_uses = Some(ghinvite_ui::link_form::MAX_USES_NOT_POSITIVE.into());
         }
         form
+    } else if args.iter().any(|arg| arg == "--multiline-description") {
+        // Only a crafted POST reaches the server with newlines in a
+        // single-line field, but the server preserves and rejects what it got.
+        // A `type="text"` input then shows it without the newline, which the
+        // island must not read as the admin having rewritten it.
+        LinkFormValues {
+            description: "Workshop\nsecond line".into(),
+            selected_repo_ids: vec![10],
+            errors: LinkFormErrors {
+                summary: vec![SUMMARY_MESSAGE.into()],
+                description: Some(ghinvite_ui::link_form::DESCRIPTION_SINGLE_LINE.into()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        }
     } else if args.iter().any(|arg| arg == "--preserved-values") {
         preserved_submission()
     } else if args.iter().any(|arg| arg == "--with-errors") {

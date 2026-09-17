@@ -105,11 +105,16 @@ and expiration timestamp overflow is still checked by the shared server/browser
 validator. Errors still arrive through `LinkFormValues` props, folded with parse
 errors before visible validator errors, then passed into the same metadata.
 Unbound SSR uses the preserved raw-value memo; bound browser Inputs read directly
-from their bindings, including invalid raw text restored from a failed response
-with non-empty errors. Chromium sanitizes `abc` out of the native number display,
+from their bindings, including invalid raw text restored on mount. Chromium
+sanitizes `abc` out of the native number display,
 but the binding retains it and its parse error until
 edited; unchanged blur or unrelated edits do not silently turn it into `None`.
-Invalid numeric props without response errors do not configure restoration.
+Restoration is configured whenever a numeric value fails to parse, whether or
+not the response carried errors: the island's DOM takeover (ADR 0001) adopts
+what the admin typed before it mounted, and the typed model cannot hold a `0`
+they entered on a form the server never rejected. Such a first frame shows the
+parse error the server did not render, so it is outside the markup-parity
+guarantee below.
 Valid noncanonical text such as `"007"` or `" 7 "` still formats from the typed
 model as `"7"` on mount; preserving that spelling or byte-identical markup for
 it is not a guarantee of this migration.

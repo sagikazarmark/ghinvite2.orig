@@ -374,9 +374,13 @@ fn raw_parse_failures_coexist_with_server_only_diagnostics_on_first_render() {
     let form_error = "This installation is suspended.";
     // Cover either parsed binding alone and both together. Raw values must
     // survive binding registration without discarding the restored errors.
-    // Invalid raw values with empty errors are not a supported response:
-    // production only configures restoration when errors are present, and
-    // the server always attaches parse errors for these rejected inputs.
+    // Invalid raw values with empty errors are deliberately absent. The server
+    // always attaches a parse error to input it rejects, so no *response* has
+    // that shape; the combination now reaches production only from the
+    // island's DOM takeover (ADR 0001), where the admin typed the value after
+    // the server rendered the page. Restoration then makes the parse error
+    // visible on the first frame, which the server's markup does not carry —
+    // there is no server HTML for that state to be identical to.
     for (max_uses, expires_in_days, max_error, expires_error) in [
         ("abc", "45", Some(link_form::MAX_USES_NOT_POSITIVE), None),
         (
