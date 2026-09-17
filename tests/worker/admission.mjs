@@ -481,6 +481,7 @@ try {
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
     pause: value => { pauseWorkflows = value; } });
+  if (process.env.SETTLEMENT_ONLY !== '1') {
   await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
     pause: value => { pauseWorkflows = value; } });
   await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
@@ -571,6 +572,7 @@ try {
   assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
   console.log('PASS #66 acknowledged webhook survives first D1 adoption outage and converges without another event');
+  }
 } catch (error) {
   primaryFailure = error;
   console.error(runtimeLogs.join(''));

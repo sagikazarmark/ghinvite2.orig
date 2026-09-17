@@ -1097,6 +1097,42 @@ impl Storage for D1Storage {
 
     // -------- audit --------
 
+    async fn member_invitation_candidates(
+        &self,
+        account_id: u64,
+        repo_id: u64,
+        requester_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        wasm_send(async {
+            let rows = self.db.prepare(ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES)
+                .bind(&[JsValue::from_f64(account_id as f64), JsValue::from_f64(repo_id as f64), JsValue::from_f64(requester_id as f64)])
+                .map_err(bind_err)?
+                .all().await.map_err(classify_d1_error)?
+                .results::<GithubInvitationRow>()
+                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            rows.into_iter().map(|r| r.try_into_domain()).collect()
+        }).await
+    }
+
+    async fn bind_member_webhook(
+        &self,
+        payload_sha256: &str,
+        invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>> {
+        wasm_send(async {
+            self.db.prepare("INSERT INTO member_webhook_receipts(payload_sha256, invitation_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING")
+                .bind(&[JsValue::from_str(payload_sha256), invitation_id.map(|id| JsValue::from_str(&id.to_string())).unwrap_or(JsValue::NULL)])
+                .map_err(bind_err)?.run().await.map_err(classify_d1_error)?;
+            #[derive(serde::Deserialize)]
+            struct Binding { invitation_id: Option<String> }
+            let row = self.db.prepare("SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1")
+                .bind(&[JsValue::from_str(payload_sha256)]).map_err(bind_err)?
+                .first::<Binding>(None).await.map_err(classify_d1_error)?
+                .ok_or(ghinvite_core::storage::Error::NotFound)?;
+            row.invitation_id.map(|id| id.parse().map_err(|_| ghinvite_core::storage::Error::Corrupt("member webhook invitation ID".into()))).transpose()
+        }).await
+    }
+
     async fn invitation_link_belongs_to_account(
         &self,
         account_id: u64,

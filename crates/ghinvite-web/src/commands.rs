@@ -562,6 +562,20 @@ struct RepositoryInvitationPayload {
 }
 
 #[derive(Deserialize, Payload)]
+#[payload(EventKind::Member)]
+struct MemberPayload {
+    installation: WebhookId,
+    repository: MemberRepository,
+    member: WebhookId,
+}
+
+#[derive(Deserialize)]
+struct MemberRepository {
+    id: u64,
+    owner: WebhookId,
+}
+
+#[derive(Deserialize, Payload)]
 #[payload(EventKind::Installation)]
 struct InstallationPayload {
     installation: WebhookId,
@@ -595,8 +609,42 @@ pub fn github_webhook_dispatcher(
     let invitation_storage = storage.clone();
     let invitation_commands = commands.clone();
     let installation_commands = commands.clone();
+    let member_commands = commands.clone();
 
     Dispatcher::builder()
+        .on((EventKind::Member, Action::Added), move |envelope: octoevents::Envelope| {
+            let storage = storage.clone();
+            let commands = member_commands.clone();
+            async move {
+                use sha2::Digest;
+                let payload: MemberPayload = envelope.decode()
+                    .map_err(|_| crate::WebError::BadRequest("Invalid member payload".into()))?;
+                let digest = hex::encode(sha2::Sha256::digest(&envelope.raw_payload));
+                let account = storage.get_installation(payload.installation.id).await?;
+                // Links keep their original installation provenance after reinstall.
+                // Match immutable account/repository/requester IDs, never logins or sender.
+                let rows = if let Some(account) = account
+                    && account.account_id == payload.repository.owner.id
+                {
+                    storage.member_invitation_candidates(
+                        account.account_id, payload.repository.id, payload.member.id,
+                    ).await?
+                } else { vec![] };
+                // Include terminal history so redelivery cannot match a later request.
+                let candidate = if let [row] = rows.as_slice()
+                    && row.state == ghinvite_core::InvitationState::Sent
+                    && row.github_invitation_id.is_some()
+                { Some(row.id) } else { None };
+                if let Some(invitation_id) = storage.bind_member_webhook(&digest, candidate).await? {
+                    commands.route_github_invitation_webhook(RouteGithubInvitationWebhook {
+                        invitation_id,
+                        action: GithubInvitationWebhookAction::Accepted,
+                        at: received_at,
+                    }).await?;
+                }
+                Result::Ok(())
+            }
+        })
         .on(
             [
                 Action::from_static("accepted"),
@@ -1210,6 +1258,188 @@ mod tests {
                 uninstalled_at: at("2026-05-20T14:00:00Z"),
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn signed_member_added_matches_numeric_identities() {
+        use axum::{body::Body, http::{Request, StatusCode}};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use tower::ServiceExt;
+
+        let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory().await.unwrap();
+        let invitation_id = seed_github_invitation(&storage, 99001).await;
+        let (base, calls) = spawn_restate_recorder(Value::Null).await;
+        let secret = b"test-webhook-secret";
+        let state = crate::AppState::new(
+            Arc::new(storage),
+            Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+            Arc::new(RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()))),
+            crate::WebConfig {
+                webhook_secret: secret.to_vec(),
+                ..crate::WebConfig::for_local_dev_with_secret([7; 32])
+            },
+        );
+        let app = crate::build_app(state, tower_sessions::MemoryStore::default());
+        // Names and sender deliberately differ from stored profiles. Only member.id
+        // identifies the requester; the event contains no upstream invitation ID.
+        let payload = r#"{"action":"added","installation":{"id":1},"repository":{"id":10,"full_name":"renamed/project","owner":{"id":9001}},"member":{"id":99,"login":"renamed-user"},"sender":{"id":42}}"#;
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(payload.as_bytes());
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri("/webhooks/github")
+            .header("content-type", "application/json")
+            .header("x-github-event", "member")
+            .header("x-github-delivery", "member-added-1")
+            .header("x-hub-signature-256", format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+            .body(Body::from(payload)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].service, "GithubInvitation");
+        assert_eq!(calls[0].key, invitation_id.to_string());
+        assert_eq!(calls[0].method, "on_webhook_v1");
+        assert!(calls[0].send);
+        assert_eq!(calls[0].body["action"], "accepted");
+    }
+
+    #[tokio::test]
+    async fn signed_member_events_cannot_route_unrelated_or_unconfirmed_invitations() {
+        use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use tower::ServiceExt;
+
+        let storage = Arc::new(ghinvite_storage_sqlx::SqlxStorage::in_memory().await.unwrap());
+        let id = seed_github_invitation(&storage, 99001).await;
+        let (base, calls) = spawn_restate_recorder(Value::Null).await;
+        let secret = b"test-webhook-secret";
+        let state = crate::AppState::new(
+            storage.clone(),
+            Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+            Arc::new(RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()))),
+            crate::WebConfig {
+                webhook_secret: secret.to_vec(),
+                ..crate::WebConfig::for_local_dev_with_secret([7; 32])
+            },
+        );
+        let app = crate::build_app(state, tower_sessions::MemoryStore::default());
+        let valid = serde_json::json!({"action":"added","installation":{"id":1},
+            "repository":{"id":10,"owner":{"id":9001}},"member":{"id":99},"sender":{"id":99}});
+        let mut cases = vec![];
+        for pointer in ["/installation/id", "/repository/id", "/repository/owner/id", "/member/id"] {
+            let mut payload = valid.clone();
+            *payload.pointer_mut(pointer).unwrap() = serde_json::json!(123456);
+            cases.push(("member", payload, false, StatusCode::NO_CONTENT));
+        }
+        for action in ["removed", "edited", "future_action"] {
+            cases.push(("member", serde_json::json!({"action":action}), false, StatusCode::NO_CONTENT));
+        }
+        cases.push(("membership", valid.clone(), false, StatusCode::NO_CONTENT));
+        for value in [Value::Null, serde_json::json!({}), serde_json::json!({"id":"99"}), serde_json::json!({"id":-1})] {
+            let mut payload = valid.clone();
+            payload["member"] = value;
+            // octoevents maps typed payload decode failures to a generic 500.
+            cases.push(("member", payload, false, StatusCode::INTERNAL_SERVER_ERROR));
+        }
+        cases.push(("member", valid.clone(), true, StatusCode::UNAUTHORIZED));
+        for (event, payload, tampered, status) in cases {
+            let body = payload.to_string();
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+            mac.update(if tampered { b"different body" } else { body.as_bytes() });
+            let response = app.clone().oneshot(Request::builder()
+                .method("POST").uri("/webhooks/github")
+                .header("content-type", "application/json")
+                .header("x-github-event", event)
+                .header("x-github-delivery", "negative-member-event")
+                .header("x-hub-signature-256", format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+                .body(Body::from(body)).unwrap()).await.unwrap();
+            assert_eq!(response.status(), status, "{payload}");
+            let body = String::from_utf8(to_bytes(response.into_body(), 4096).await.unwrap().to_vec()).unwrap();
+            assert!(!body.contains(&id.to_string()));
+            assert!(!body.contains("AI coding workshop"));
+            assert!(calls.lock().unwrap().is_empty(), "{payload}");
+        }
+        // Uncertain create placeholders belong to the retained create owner.
+        storage.update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
+            id, state: ghinvite_core::InvitationState::Sending, github_invitation_id: None,
+            error_message: None, updated_at: Utc::now(),
+        }).await.unwrap();
+        let body = valid.to_string();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(body.as_bytes());
+        let response = app.oneshot(Request::builder().method("POST").uri("/webhooks/github")
+            .header("content-type", "application/json").header("x-github-event", "member")
+            .header("x-github-delivery", "unconfirmed-create")
+            .header("x-hub-signature-256", format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+            .body(Body::from(body)).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(calls.lock().unwrap().is_empty());
+        // An initially untracked/uncertain delivery cannot bind to a later Sent row,
+        // even if its unsigned delivery header changes on replay.
+        storage.update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
+            id, state: ghinvite_core::InvitationState::Sent, github_invitation_id:Some(99001),
+            error_message:None, updated_at:Utc::now(),
+        }).await.unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        mac.update(valid.to_string().as_bytes());
+        let response = crate::routes::webhook::router().with_state(crate::AppState::new(
+            storage.clone(), Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+            Arc::new(RestateCommands::new(Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()))),
+            crate::WebConfig { webhook_secret:secret.to_vec(), ..crate::WebConfig::for_local_dev_with_secret([7;32]) },
+        )).oneshot(Request::builder().method("POST").uri("/webhooks/github")
+            .header("content-type", "application/json").header("x-github-event", "member")
+            .header("x-github-delivery", "changed-unsigned-header")
+            .header("x-hub-signature-256", format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+            .body(Body::from(valid.to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT, "replay must retain no-match instead of dispatching");
+    }
+
+    #[tokio::test]
+    async fn signed_member_added_never_reassigns_historical_acceptance_to_another_request() {
+        use axum::{body::Body, http::{Request, StatusCode}};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        use tower::ServiceExt;
+
+        let storage = Arc::new(ghinvite_storage_sqlx::SqlxStorage::in_memory().await.unwrap());
+        let old_id = seed_github_invitation(&storage, 99001).await;
+        let old = storage.get_github_invitation(old_id).await.unwrap().unwrap();
+        let mut request = storage.get_invitation_request(old.invitation_request_id).await.unwrap().unwrap();
+        let mut link = storage.get_invitation_link_by_id(request.invitation_link_id).await.unwrap().unwrap();
+        link.id = ghinvite_core::InvitationLinkId::new();
+        link.slug = ghinvite_core::Slug::from_string("FEDCBA9876543210".into()).unwrap();
+        storage.insert_invitation_link(&link).await.unwrap();
+        request.id = ghinvite_core::RequestId::new();
+        request.invitation_link_id = link.id;
+        storage.insert_invitation_request_and_increment_uses(&request).await.unwrap();
+        let mut newer = old.clone();
+        newer.id = ghinvite_core::GithubInvitationId::new();
+        newer.invitation_request_id = request.id;
+        newer.github_invitation_id = Some(99002);
+        storage.insert_github_invitation(&newer).await.unwrap();
+        let (base, calls) = spawn_restate_recorder(Value::Null).await;
+        let secret = b"test-webhook-secret";
+        let state = crate::AppState::new(storage.clone(),
+            Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+            Arc::new(RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()))),
+            crate::WebConfig { webhook_secret: secret.to_vec(), ..crate::WebConfig::for_local_dev_with_secret([7; 32]) });
+        let app = crate::build_app(state, tower_sessions::MemoryStore::default());
+        let payload = r#"{"action":"added","installation":{"id":1},"repository":{"id":10,"owner":{"id":9001}},"member":{"id":99}}"#;
+        for state in [ghinvite_core::InvitationState::Sent, ghinvite_core::InvitationState::Accepted] {
+            storage.update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
+                id:old_id, state, github_invitation_id:Some(99001), error_message:None, updated_at:Utc::now(),
+            }).await.unwrap();
+            let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+            mac.update(payload.as_bytes());
+            let response = app.clone().oneshot(Request::builder().method("POST").uri("/webhooks/github")
+                .header("content-type", "application/json").header("x-github-event", "member")
+                .header("x-github-delivery", "historical-member-event")
+                .header("x-hub-signature-256", format!("sha256={}", hex::encode(mac.finalize().into_bytes())))
+                .body(Body::from(payload)).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            assert!(calls.lock().unwrap().is_empty(), "must not guess between historical requests");
+        }
     }
 
     #[tokio::test]

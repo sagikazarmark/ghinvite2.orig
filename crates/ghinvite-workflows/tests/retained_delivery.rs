@@ -5,6 +5,79 @@ use restate_sdk::{endpoint::Endpoint, http_server::HttpServer};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
+const MEMBER_WEBHOOK_SECRET: &[u8] = b"member-webhook-runtime-fixture";
+
+async fn send_signed_member(
+    client: &reqwest::Client,
+    web_url: &str,
+    delivery: &str,
+    payload: &Value,
+) -> reqwest::Response {
+    use hmac::{Hmac, Mac};
+    let body = payload.to_string();
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(MEMBER_WEBHOOK_SECRET).unwrap();
+    mac.update(body.as_bytes());
+    let digest: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
+    client.post(format!("{web_url}/webhooks/github"))
+        .header("content-type", "application/json")
+        .header("x-github-event", "member")
+        .header("x-github-delivery", delivery)
+        .header("x-hub-signature-256", format!("sha256={digest}"))
+        .body(body).send().await.unwrap()
+}
+
+/// Real web route and Restate adapter, with an HTTP proxy that loses one send ack.
+async fn member_webhook_ingress(
+    storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
+    ingress: &str,
+    client: reqwest::Client,
+) -> (String, Arc<std::sync::Mutex<Vec<String>>>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+    use axum::{body::Body, extract::{Path, Json}, response::{IntoResponse, Response}, routing::post};
+    let invocations = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorded = invocations.clone();
+    let ingress = ingress.to_owned();
+    let proxy = axum::Router::new().route("/GithubInvitation/{id}/on_webhook_v1/send", post(
+        move |Path(id): Path<String>, Json(input): Json<Value>| {
+            let client = client.clone();
+            let ingress = ingress.clone();
+            let recorded = recorded.clone();
+            async move {
+                let response = client.post(format!("{ingress}/GithubInvitation/{id}/on_webhook_v1/send"))
+                    .json(&input).send().await.unwrap();
+                assert!(response.status().is_success());
+                let ack: Value = response.json().await.unwrap();
+                let lose_ack = {
+                    let mut recorded = recorded.lock().unwrap();
+                    recorded.push(ack["invocationId"].as_str().unwrap().to_owned());
+                    recorded.len() == 1
+                };
+                if lose_ack {
+                    Response::builder().status(502).body(Body::empty()).unwrap()
+                } else {
+                    Json(ack).into_response()
+                }
+            }
+        }
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", listener.local_addr().unwrap());
+    let proxy_server = tokio::spawn(async move { axum::serve(listener, proxy).await.unwrap(); });
+    let state = ghinvite_web::AppState::new(
+        storage,
+        Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+        Arc::new(ghinvite_web::RestateCommands::new(Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()))),
+        ghinvite_web::WebConfig {
+            webhook_secret: MEMBER_WEBHOOK_SECRET.to_vec(),
+            ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
+        },
+    );
+    let app = ghinvite_web::routes::webhook::router().with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let web_url = format!("http://{}", listener.local_addr().unwrap());
+    let web_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    (web_url, invocations, web_server, proxy_server)
+}
+
 #[tokio::test]
 async fn retained_create_survives_sent_replay_and_conflicts() {
     let client = reqwest::Client::builder()
@@ -880,21 +953,24 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     assert_eq!(calls["count"], 0);
     // Explicit 403 proves rejection, so restoration may safely try again.
+    client.post(format!("{base}/identity"))
+        .json(&json!({"login":"user-84","addressed_id":84})).send().await.unwrap();
     workflow_faults
         .pause_before_dispatch
         .store(true, std::sync::atomic::Ordering::SeqCst);
     client
         .post(format!("{base}/outcomes"))
-        .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"access_lost_once"}))
+        .json(&json!({"owner":"acme","repo":"api","user":"user-84","outcome":"access_lost_once"}))
         .send()
         .await
         .unwrap();
     let rejected_link = ghinvite_core::InvitationLinkId::new();
     call("InvitationLinkV1",rejected_link.to_string(),"create",json!({"version":1,"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Access rejection","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
-    let admitted: Value = call("InvitationLinkV1",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":8,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
+    storage.upsert_user(&ghinvite_core::User { user_id:84, login:"user-84".into(), avatar_url:None, last_seen_at:now }).await.unwrap();
+    let admitted: Value = call("InvitationLinkV1",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
     let rejected_request = admitted["result"]["request_id"].as_str().unwrap();
-    let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":8});
+    let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":84});
     let progress: Value = call(
         "InvitationLinkV1",
         rejected_link.to_string(),
@@ -944,6 +1020,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     assert_eq!(rejected["outcome"]["kind"], "blocked");
     assert_create_audit(&*storage, &rejected).await;
+    // The stub exposes one addressed identity at a time. This sweep observes
+    // older Alice invitations; the blocked user-84 create is ineligible.
+    client.post(format!("{base}/identity"))
+        .json(&json!({"login":"alice","addressed_id":8})).send().await.unwrap();
     let sweep = client
         .post(format!("{ingress}/Reconcile/daily_run_v1"))
         .json(&json!({"at":chrono::Utc::now()}))
@@ -964,6 +1044,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .state,
         ghinvite_core::InvitationState::Sending
     );
+    client.post(format!("{base}/identity"))
+        .json(&json!({"login":"user-84","addressed_id":84})).send().await.unwrap();
     let resumed: Value = call("GithubCreateV1", id.into(), "create", command.clone())
         .send()
         .await
@@ -985,17 +1067,17 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // Retained delayed evidence arrives after webhook settlement. Real SQL audit
     // failure keeps the public command retrying; the eventual commit is atomic.
     storage.debug_set_audit_failure(true).await.unwrap();
-    let response = call(
-        "GithubInvitation",
-        id.into(),
-        "on_webhook_v1/send",
-        json!({"invitation_id":id,"action":"accepted","at":chrono::Utc::now()}),
-    )
-    .send()
-    .await
-    .unwrap();
-    assert!(response.status().is_success());
-    let invocation: Value = response.json().await.unwrap();
+    let (web_url, invocations, web_server, proxy_server) =
+        member_webhook_ingress(storage.clone(), &ingress, client.clone()).await;
+    let payload = json!({"action":"added","installation":{"id":9},
+        "repository":{"id":10,"owner":{"id":100}},"member":{"id":84},"sender":{"id":7}});
+    // The proxy durably submits to real Restate, then loses the first acknowledgement.
+    let first = send_signed_member(&client, &web_url, "member-1", &payload).await;
+    assert_eq!(first.status(), 500);
+    assert_eq!(invocations.lock().unwrap().len(), 1);
+    let retry = send_signed_member(&client, &web_url, "member-1", &payload).await;
+    assert_eq!(retry.status(), 204);
+    assert_eq!(invocations.lock().unwrap().len(), 2);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         storage
@@ -1007,10 +1089,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         ghinvite_core::InvitationState::Sent
     );
     storage.debug_set_audit_failure(false).await.unwrap();
+    let invocation_id = invocations.lock().unwrap()[0].clone();
     let attached = client
         .get(format!(
-            "{ingress}/restate/invocation/{}/attach",
-            invocation["invocationId"].as_str().unwrap()
+            "{ingress}/restate/invocation/{invocation_id}/attach"
         ))
         .send()
         .await
@@ -1021,7 +1103,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         attached.text().await.unwrap()
     );
     let evidence = json!({"expected":sent,"accepted":false,"at":chrono::Utc::now()});
-    let (a, b) = tokio::join!(
+    let (a, b, duplicate) = tokio::join!(
         call(
             "GithubInvitation",
             id.into(),
@@ -1029,10 +1111,16 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             evidence.clone()
         )
         .send(),
-        call("GithubInvitation", id.into(), "reconcile_v1", evidence).send()
+        call("GithubInvitation", id.into(), "reconcile_v1", evidence).send(),
+        send_signed_member(&client, &web_url, "member-2", &payload)
     );
     assert!(a.unwrap().status().is_success());
     assert!(b.unwrap().status().is_success());
+    assert_eq!(duplicate.status(), 204);
+    // Unsupported reordered removal is not contradictory settlement evidence.
+    let mut removed = payload.clone();
+    removed["action"] = json!("removed");
+    assert_eq!(send_signed_member(&client, &web_url, "member-3", &removed).await.status(), 204);
     assert_eq!(
         storage
             .get_github_invitation(sent.id)
@@ -1055,6 +1143,16 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         events.iter().filter(|event| event.target_id == id).count(),
         1
     );
+    let event = events.iter().find(|event| event.target_id == id).unwrap();
+    assert_eq!(event.actor_kind, ghinvite_core::audit::ActorKind::Github);
+    assert_eq!(event.metadata, json!({"action":"accepted"}));
+    let completed_invocations = invocations.lock().unwrap().clone();
+    for invocation in completed_invocations {
+        assert!(client.get(format!("{ingress}/restate/invocation/{invocation}/attach"))
+            .send().await.unwrap().status().is_success());
+    }
+    web_server.abort();
+    proxy_server.abort();
     assert_eq!(
         storage
             .get_github_invitation(id.parse().unwrap())

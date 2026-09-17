@@ -881,6 +881,37 @@ impl Storage for SqlxStorage {
         .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
+    async fn member_invitation_candidates(
+        &self,
+        account_id: u64,
+        repo_id: u64,
+        requester_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
+            ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES,
+        )
+        .bind(u64_to_i64(account_id))
+        .bind(u64_to_i64(repo_id))
+        .bind(u64_to_i64(requester_id))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        rows.into_iter().map(|r| r.try_into_domain()).collect()
+    }
+
+    async fn bind_member_webhook(
+        &self,
+        payload_sha256: &str,
+        invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>> {
+        sqlx::query("INSERT INTO member_webhook_receipts(payload_sha256, invitation_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING")
+            .bind(payload_sha256).bind(invitation_id.map(|id| id.to_string()))
+            .execute(&self.pool).await.map_err(crate::to_db_err)?;
+        let id: Option<String> = sqlx::query_scalar("SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1")
+            .bind(payload_sha256).fetch_one(&self.pool).await.map_err(crate::to_db_err)?;
+        id.map(|id| id.parse().map_err(|_| Error::Corrupt("member webhook invitation ID".into()))).transpose()
+    }
+
     async fn list_pending_github_invitations_for_account(
         &self,
         account_id: u64,

@@ -77,6 +77,82 @@ acknowledgement before retry, and exercises historical Sent rows, cancellation,
 and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
 late legacy writer rejection.
 
+## Member-added webhooks
+
+Issue [#84](https://github.com/sagikazarmark/ghinvite2.orig/issues/84) supports
+`POST /webhooks/github` with `X-GitHub-Event: member`, action `added`, JSON content,
+`X-GitHub-Delivery`, and a valid `X-Hub-Signature-256` over the exact request body
+using `GHINVITE_WEBHOOK_SECRET`. Only authenticated deliveries reach matching.
+
+The supported GitHub App payload requires numeric `installation.id`,
+`repository.id`, `repository.owner.id`, and `member.id`. The installation's stored
+account must equal the repository owner. Matching uses immutable account,
+repository, and requester IDs, including links from historical installations;
+repository names, user logins, and `sender` do not select a request. The lookup
+returns at most two historical candidates. Exactly one candidate in `Sent` with
+an upstream invitation ID is dispatched as acceptance through
+`GithubInvitation/<id>/on_webhook_v1`. Web ingress retains routing receipts in SQL;
+only the lifecycle owner settles invitation state and publishes its audit.
+
+Before dispatch, `member_webhook_receipts` retains the first match or no-match
+under the SHA-256 of the exact authenticated body. The delivery header is not
+signed and cannot replace this identity. Concurrent retries recover the retained
+target, including after dispatch acknowledgement loss; a no-match cannot later
+bind to a new invitation. Receipts have no automatic expiry and must be backed up
+with invitation history. Byte-identical subsequent provider events conservatively
+reuse the receipt; invitation-specific reconciliation remains the fallback.
+
+Member events contain neither an invitation ID nor an acceptance timestamp.
+Multiple historical candidates are therefore ambiguous, even when only one is
+still pending: acknowledging an old event must not accept a newer request. These
+cases remain for invitation-specific reconciliation. Untracked events, unknown
+installations, account mismatches, unsupported actions (`edited`/`removed`), and
+team `membership` events receive an empty acknowledgement without settlement.
+Malformed identity payloads fail with the receiver's generic error response;
+tampered signatures receive 401. No private invitation/request state is returned.
+`Sending`/unknown creates remain with the retained create owner. A delivery before
+the Sent projection exists retains no-match and needs reconciliation.
+
+### GitHub configuration and evidence
+
+GitHub's [event documentation](https://docs.github.com/en/webhooks/webhook-events-and-payloads#member)
+(consulted 2026-09-17) describes `member.added` as a GitHub user accepting a
+repository invitation. It requires at least **organization Members: read** for
+a GitHub App subscription. Enable that permission, obtain installation approval
+for changed permissions, subscribe to **Member**, and ensure the repository is
+available to the installation. Keep repository **Administration: write** and
+**Metadata: read** for invitation delivery. The subscription is `member`, not
+team `membership` or `organization.member_added`.
+
+Organization permissions are not applicable to personal-account installations;
+do not assume the App can subscribe to or receive Member there without checking
+the provider's current configuration and actual delivery. Reconciliation remains
+the fallback. The legacy `repository_invitation` accepted/declined adapter remains
+for compatibility, but the current GitHub event catalog does not document it as
+a subscribable event; deployment must not depend on that checkbox existing.
+
+The signed HTTP tests use synthetic, schema-shaped payloads and a Restate HTTP
+recorder. The native `retained_delivery` gate uses the actual web route, production
+command adapter, real Restate, and SQLx invitation/audit reads. A proxy forwards
+the durable send then loses its acknowledgement; redelivery, an audit write
+outage, and concurrent delayed reconciliation leave one accepted transition and
+one GitHub-actor audit. The Worker gate also exercises the new identity lookup and
+retained match/no-match bindings against actual D1. These are local runtime proofs, **not captured live GitHub
+deliveries or proof of GitHub subscription availability**. Existing #63 D1
+settlement verification applies to the unchanged atomic lifecycle boundary.
+
+```sh
+cargo test --locked -p ghinvite-web --lib signed_member
+bash scripts/test-restate.sh retained_delivery
+WASM_BINDGEN=/path/to/wasm-bindgen npm run test:settlement --prefix tests/worker
+```
+
+Apply `0007_member_webhook_receipts.sql` before deploying the new web/storage code
+against the #63 lifecycle cutover. Retain both routing and settlement receipts.
+No lifecycle handler journal sequence is changed. The routing receipt guarantees
+replay association from this deployment onward; it cannot establish when a never
+previously observed delayed provider event occurred.
+
 ## Recovery after reinstall
 
 Issue [#65](https://github.com/sagikazarmark/ghinvite2.orig/issues/65) makes

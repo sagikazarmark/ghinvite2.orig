@@ -5,6 +5,16 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const at = new Date().toISOString();
   const lifecycle = (key, handler, body) => http(`${ingress}/GithubInvitation/${key}/${handler}`, body);
   const sent = await eventually(() => storage('invitation', invitationId), row => row?.state === 'sent');
+  const requester = (await storage('request', requestId)).requester_id;
+  const candidates = await storage('member-candidates', [100, sent.repo_id, requester]);
+  assert.ok(candidates.some(row => row.id === sent.id));
+  assert.deepEqual(await storage('member-candidates', [200, sent.repo_id, requester]), []);
+  assert.deepEqual(await storage('member-candidates', [100, 999999, requester]), []);
+  assert.deepEqual(await storage('member-candidates', [100, sent.repo_id, 999999]), []);
+  assert.equal(await storage('member-binding', ['a'.repeat(64), null]), null);
+  assert.equal(await storage('member-binding', ['a'.repeat(64), sent.id]), null, 'no-match stays bound on redelivery');
+  assert.equal(await storage('member-binding', ['b'.repeat(64), sent.id]), sent.id);
+  assert.equal(await storage('member-binding', ['b'.repeat(64), null]), sent.id, 'lost acknowledgement retry retains its original target');
   await db.prepare("CREATE TRIGGER settlement_audit_failure BEFORE INSERT ON audit_events WHEN NEW.target_kind = 'github_invitation' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END").run();
   const invocation = await lifecycle(sent.id, 'on_webhook_v1/send', { invitation_id: sent.id, action: 'accepted', at });
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -19,6 +29,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.equal(events.filter(event => event.event_type === 'invitation.sent').length, 1);
   assert.equal(events.filter(event => event.event_type === 'invitation.accepted').length, 1);
   assert.equal((await storage('invitation', sent.id)).github_invitation_id, sent.github_invitation_id);
+  assert.ok((await storage('member-candidates', [100, sent.repo_id, requester])).some(row => row.id === sent.id && row.state === 'accepted'), 'terminal history must remain a candidate');
 
   // D1 really commits, then the JS binding loses the batch acknowledgement.
   const row = { ...sent, id: id(), invitation_request_id: requestId, github_invitation_id: 987654 };
@@ -36,6 +47,9 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   // Existing Sent rows need no create receipt or backfill before settlement.
   const cancelled = { ...row, id: id(), github_invitation_id: 987655 };
   await storage('insert_invitation', cancelled);
+  assert.equal((await storage('member-candidates', [100, sent.repo_id, requester])).length, 2, 'ambiguous lookup returns at most two rows');
+  assert.equal(await storage('member-binding', ['b'.repeat(64), cancelled.id]), sent.id, 'another request cannot replace the binding');
+  console.log('PASS #84 actual D1 immutable-identity lookup, bounded historical ambiguity and retained webhook bindings');
   await lifecycle(cancelled.id, 'cancel_v1', { invitation_id: cancelled.id, installation_id: 1, by_user: 7, at });
   assert.equal((await storage('invitation', cancelled.id)).state, 'cancelled');
   const expiring = { ...sent, id: id() };
