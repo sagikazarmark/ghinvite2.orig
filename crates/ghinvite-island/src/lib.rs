@@ -39,6 +39,8 @@
 //! `dioxus-web` appear. The component compiles natively so the parity test
 //! can render it with `dioxus_ssr`; the browser entrypoint is `main.rs`.
 
+pub mod takeover;
+
 use dioform::prelude::*;
 use dioxus::prelude::*;
 use ghinvite_ui::field::ControlHandlers;

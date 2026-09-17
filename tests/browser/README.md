@@ -35,6 +35,7 @@ Run one project, repeat for flakes, or inspect a failure:
 npm test --prefix tests/browser -- --project=desktop-light
 npm test --prefix tests/browser -- --project=desktop-light --grep 'numeric max_uses' --workers=2
 npm test --prefix tests/browser -- --project=desktop-light --grep 'browser rejection' --workers=2
+npm test --prefix tests/browser -- --project=desktop-light --grep 'delayed bundle' --workers=2
 npm test --prefix tests/browser -- --grep 'numeric' --workers=2
 npm test --prefix tests/browser -- --project=mobile-light --project=mobile-dark
 npm test --prefix tests/browser -- --repeat-each=3 --workers=2
@@ -145,6 +146,21 @@ tests; rebuilding SSR at server startup does not rebuild Wasm.
 - A server-only form rejection permits an unchanged, native-valid retry as a
   document-navigation POST in all three modes. Field edits alone retain that
   form-level message until fresh preflight retires it.
+- A delayed bundle (every `/assets/**` request held until the form is filled in)
+  keeps the description, internal note, permission level, approval checkbox,
+  both numeric guardrails, and the repository scope that were changed before
+  mounting, and POSTs exactly those values natively. The approval policy holds
+  in both directions: checked before mounting stays checked, unchecked stays
+  unchecked. Focus and the caret survive, so typing continues mid-word. On a
+  rejected form, only the error belonging to a control the admin edited is
+  dropped — with the summary alert when nothing else is highlighted — while raw
+  `owner` and raw `abc`, which the DOM cannot show, are not repaired and still
+  block progressive submission. `expires_in_days="0"` is rejected by the domain
+  but displayable, so clearing it before mounting is kept: the takeover reads
+  browser sanitizing from HTML's number rules, not from the domain parser.
+- When a control the snapshot needs is missing, the island declines to mount
+  (logging `ghinvite-island: not mounting`) and the server-rendered form is left
+  in place with the admin's work, rather than replaced from a partial read.
 - JavaScript-disabled and bundle-blocked forms remain usable and submit natively.
 - Label clicks, keyboard Space, repeated repository keys, checked approval and
   unchecked omission, and empty optional numbers keep native behavior.

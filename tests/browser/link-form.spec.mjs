@@ -104,6 +104,18 @@ test.beforeEach(async ({ page }, testInfo) => {
     testInfo.project.use.colorScheme === 'dark' ? 'ghinvite-dark' : 'ghinvite');
 });
 
+// One usable form, addressed to the real route, carrying the page's own token.
+// True of the server's markup and of the island's, so every entry point checks it.
+async function expectUsableForm(page) {
+  await expect(form(page)).toHaveCount(1);
+  await expect(submit(page)).toBeVisible();
+  await expect(form(page)).toHaveAttribute('method', 'post');
+  await expect(form(page)).toHaveAttribute('action', action);
+  const props = JSON.parse(await page.locator('#link-form-props').textContent());
+  expect(props.csrf_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  await expect(form(page).locator('input[name="csrf_token"]')).toHaveValue(props.csrf_token);
+}
+
 async function open(page, path = '/', mounted = true) {
   const response = await page.goto(path);
   expect(response.status()).toBe(200);
@@ -113,13 +125,7 @@ async function open(page, path = '/', mounted = true) {
   } else {
     await expect(page.locator('#link-form-island')).not.toHaveAttribute('data-island', 'mounted');
   }
-  await expect(form(page)).toHaveCount(1);
-  await expect(submit(page)).toBeVisible();
-  await expect(form(page)).toHaveAttribute('method', 'post');
-  await expect(form(page)).toHaveAttribute('action', action);
-  const props = JSON.parse(await page.locator('#link-form-props').textContent());
-  expect(props.csrf_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  await expect(form(page).locator('input[name="csrf_token"]')).toHaveValue(props.csrf_token);
+  await expectUsableForm(page);
 }
 
 async function post(page) {
@@ -685,6 +691,212 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
     });
   });
 }
+
+// The bundle can land long after the page does: cold cache, slow network, a
+// Worker cold start. These tests hold every island asset while the form is
+// filled in, so what the admin changed exists only in the DOM — never in the
+// props blob the server serialized before the page was shown.
+async function openDelayed(page, path = '/') {
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  await page.route('**/assets/**', async (route) => {
+    await held;
+    await route.continue();
+  });
+  // Module scripts are deferred, so a held bundle also holds DOMContentLoaded
+  // and load; the form itself is parsed and usable well before either.
+  const response = await page.goto(path, { waitUntil: 'commit' });
+  expect(response.status()).toBe(200);
+  await expectUsableForm(page);
+  await expect(page.locator('#link-form-island')).not.toHaveAttribute('data-island', 'mounted');
+  // Lets the held assets through; the island mounts (or declines to) from there.
+  return release;
+}
+
+const expectMounted = (page) =>
+  expect(page.locator('#link-form-island')).toHaveAttribute('data-island', 'mounted');
+
+test('delayed bundle keeps every guardrail changed before the island mounts', async ({ page }) => {
+  const release = await openDelayed(page);
+  await page.locator('#description').fill('Cold cache workshop');
+  await page.locator('#internal_note').fill('Typed before the bundle landed');
+  await page.locator('#permission').selectOption('maintain');
+  await approval(page).check();
+  await page.locator('#max_uses').fill('7');
+  await page.locator('#expires_in_days').fill('45');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  await page.getByRole('checkbox', { name: 'acme/docs', exact: true }).check();
+  release();
+  await expectMounted(page);
+
+  // The props blob still describes the empty form the server rendered, so
+  // every value below can only have come from the live DOM.
+  const props = JSON.parse(await page.locator('#link-form-props').textContent());
+  expect(props.values.description).toBe('');
+  expect(props.values.approval_required).toBe(false);
+  expect(props.values.selected_repo_ids).toEqual([]);
+
+  await expect(form(page)).toHaveCount(1);
+  await expect(page.locator('#description')).toHaveValue('Cold cache workshop');
+  await expect(page.locator('#internal_note')).toHaveValue('Typed before the bundle landed');
+  await expectPermission(page, 'maintain', false);
+  await expect(approval(page)).toBeChecked();
+  await expectNumeric(page, numericFields[0], '7');
+  await expectNumeric(page, numericFields[1], '45');
+  await expect(page.getByRole('checkbox', { name: 'acme/api', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'acme/web', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'acme/docs', exact: true })).toBeChecked();
+  await expect(page.locator('#link-form-errors')).toHaveCount(0);
+
+  const data = await post(page);
+  expect(Object.fromEntries([...data].filter(([key]) => key !== 'repo_ids'))).toEqual({
+    description: 'Cold cache workshop', internal_note: 'Typed before the bundle landed',
+    permission: 'maintain', approval_required: 'true', max_uses: '7', expires_in_days: '45',
+  });
+  expect(data.getAll('repo_ids')).toEqual(['10', '12']);
+});
+
+test('delayed bundle keeps approval required when it was checked before mounting', async ({ page }) => {
+  const release = await openDelayed(page);
+  await page.locator('#description').fill('Approval workshop');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  await approval(page).check();
+  release();
+  await expectMounted(page);
+
+  await expect(approval(page)).toBeChecked();
+  expect((await post(page)).get('approval_required')).toBe('true');
+});
+
+test('delayed bundle keeps approval cleared when it was unchecked before mounting', async ({ page }) => {
+  const release = await openDelayed(page, '/preserved');
+  await expect(approval(page)).toBeChecked();
+  await approval(page).uncheck();
+  await page.locator('#description').fill('Auto-approve workshop');
+  release();
+  await expectMounted(page);
+
+  await expect(approval(page)).not.toBeChecked();
+  expect((await post(page)).has('approval_required')).toBe(false);
+});
+
+test('delayed bundle keeps focus and the caret where the admin left them', async ({ page }) => {
+  const release = await openDelayed(page);
+  await page.locator('#description').fill('Workshop');
+  await page.locator('#description').evaluate((input) => input.setSelectionRange(4, 4));
+  release();
+  await expectMounted(page);
+
+  await expect(page.locator('#description')).toBeFocused();
+  expect(await page.locator('#description')
+    .evaluate((input) => [input.selectionStart, input.selectionEnd])).toEqual([4, 4]);
+  // Typing continues mid-word rather than at the end of the restored value.
+  await page.keyboard.type('shop ');
+  await expect(page.locator('#description')).toHaveValue('Workshop shop');
+});
+
+test('delayed bundle on a rejected form drops only the error the admin fixed', async ({ page }) => {
+  const release = await openDelayed(page, '/preserved');
+  await expect(page.locator('#description-error')).toContainText('Description is required.');
+  await page.locator('#description').fill('Corrected workshop');
+  await page.locator('#max_uses').fill('9');
+  release();
+  await expectMounted(page);
+
+  await expect(page.locator('#description')).toHaveValue('Corrected workshop');
+  await expect(page.locator('#description')).toHaveAttribute('aria-invalid', 'false');
+  await expect(page.locator('#description-error')).toBeEmpty();
+  // That was the only diagnostic, so the summary alert goes with it rather
+  // than pointing at highlighted fields that no longer exist.
+  await expect(page.locator('#link-form-errors')).toHaveCount(0);
+  await expect(page.locator('#internal_note')).toHaveValue('Keep this note & its <literal> markup');
+  await expectPermission(page, 'push', false);
+  await expect(approval(page)).toBeChecked();
+  await expectNumeric(page, numericFields[0], '9');
+  await expectNumeric(page, numericFields[1], '45');
+
+  const data = await post(page);
+  expect(data.get('description')).toBe('Corrected workshop');
+  expect(data.get('max_uses')).toBe('9');
+  expect(data.get('expires_in_days')).toBe('45');
+  expect(data.getAll('repo_ids')).toEqual(['11', '12']);
+});
+
+test('delayed bundle does not repair values the DOM cannot show while adopting edits', async ({ page }) => {
+  const release = await openDelayed(page, '/failed');
+  await page.locator('#description').fill('Corrected workshop');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  release();
+  await expectMounted(page);
+
+  await expect(page.locator('#description')).toHaveValue('Corrected workshop');
+  await expect(page.locator('#description-error')).toBeEmpty();
+  await expect(page.locator('#repo_ids-error')).toHaveCount(0);
+  // Neither raw `owner` nor raw `abc` can round-trip through the DOM, so the
+  // props keep them — adopting the displayed `pull` and empty max use would
+  // silently repair a model the server rejected.
+  await expectPermission(page, 'pull', true);
+  await expectNumeric(page, numericFields[0], '', numericFields[0].invalid);
+  await expectNumeric(page, numericFields[1], '0', numericFields[1].invalid);
+
+  const posts = [];
+  page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+  // Expiration is the only control the browser rejects natively; once it is
+  // corrected, the raw permission and max use are all that stand in the way.
+  await page.locator('#expires_in_days').fill('45');
+  expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+  await submit(page).click();
+  await expect(page.locator('#max_uses-error')).toHaveText(numericFields[0].invalid);
+  await expect(page.locator('#permission-error')).toHaveText(permissionError);
+  expect(posts).toEqual([]);
+  await expect(page).toHaveURL('/failed');
+});
+
+test('delayed bundle keeps a numeric guardrail cleared when the browser could display it', async ({ page }) => {
+  // `/failed` renders expires_in_days="0": the server rejected it but the
+  // browser shows it, so clearing it before mount is a real edit. Deciding
+  // "the browser emptied this" from the domain parser rather than from what
+  // the browser can display would hand the admin `0` back.
+  const release = await openDelayed(page, '/failed');
+  await expect(page.locator('#expires_in_days')).toHaveValue('0');
+  await page.locator('#expires_in_days').fill('');
+  // The rest of this fixture's rejections corrected too, so the POST that
+  // proves the cleared value survived is not blocked by something else.
+  await page.locator('#description').fill('Cleared workshop');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  await page.locator('#permission').selectOption('push');
+  await page.locator('#max_uses').fill('7');
+  release();
+  await expectMounted(page);
+
+  await expectNumeric(page, numericFields[1], '');
+  await expect(page.locator('#link-form-errors')).toHaveCount(0);
+  const data = await post(page);
+  expect(data.get('expires_in_days')).toBe('');
+  expect(data.get('max_uses')).toBe('7');
+});
+
+test('a form the island does not recognize is left in place rather than replaced', async ({ page }) => {
+  const errors = [];
+  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+  const release = await openDelayed(page);
+  await page.locator('#description').fill('Unrecognized markup workshop');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  // A control the snapshot cannot read means this is not the form the island
+  // renders, so a half-read takeover must not replace the admin's work.
+  await page.locator('#permission').evaluate((select) => select.remove());
+  release();
+
+  // The island declines out loud, which is also how the test knows it ran.
+  await expect.poll(() => errors.join('\n')).toContain('ghinvite-island: not mounting');
+  await expect(page.locator('#link-form-island')).not.toHaveAttribute('data-island', 'mounted');
+  await expectUsableForm(page);
+  await expect(page.locator('#description')).toHaveValue('Unrecognized markup workshop');
+  await expect(page.getByRole('checkbox', { name: 'acme/api', exact: true })).toBeChecked();
+  const data = await post(page);
+  expect(data.get('description')).toBe('Unrecognized markup workshop');
+  expect(data.getAll('repo_ids')).toEqual(['10']);
+});
 
 test('responsive themed form keeps controls reachable and accessibility wiring intact', async ({ page }, testInfo) => {
   await open(page, '/preserved');

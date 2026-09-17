@@ -2024,6 +2024,7 @@ dependencies = [
  "dioxus-ssr",
  "ghinvite-ui",
  "serde_json",
+ "wasm-bindgen",
  "web-sys",
 ]
 
