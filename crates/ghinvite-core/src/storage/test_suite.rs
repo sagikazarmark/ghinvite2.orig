@@ -82,6 +82,7 @@ fn sample_request(link: InvitationLinkId, requester: u64) -> InvitationRequest {
         decided_by: None,
         decided_at: None,
         decline_reason: None,
+        decision_deadline: None,
         created_at: dt("2026-05-04T12:30:00Z"),
     }
 }
@@ -102,11 +103,60 @@ where
     scenario_invitation_link_metadata(make_storage().await).await;
     scenario_request_uses_and_uniqueness(make_storage().await).await;
     scenario_request_decision(make_storage().await).await;
+    scenario_recorded_request_deadlines(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
     scenario_audit_appends(make_storage().await).await;
     scenario_audit_pages(make_storage().await).await;
     scenario_timestamp_precision(make_storage().await).await;
     scenario_delivery_audit(make_storage().await).await;
+}
+
+/// Historical deadlines survive every request read, including after a decision.
+pub async fn scenario_recorded_request_deadlines<S: Storage>(s: S) {
+    s.insert_installation(&sample_account(1, 9008, "acme8"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(708, "admin")).await.unwrap();
+    let link = sample_link(9008, 1, 708, 800);
+    s.insert_invitation_link(&link).await.unwrap();
+    for deadline in [Some(dt("2026-05-06T14:15:16.123456789Z")), None] {
+        let mut request = sample_request(link.id, 708);
+        request.decision_deadline = deadline;
+        s.insert_invitation_request_and_increment_uses(&request)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.get_invitation_request(request.id).await.unwrap(),
+            Some(request.clone())
+        );
+        assert_eq!(
+            s.list_pending_requests_for_account(9008).await.unwrap(),
+            vec![request.clone()]
+        );
+        assert!(
+            s.list_requests_for_link(link.id)
+                .await
+                .unwrap()
+                .contains(&request)
+        );
+        s.record_request_decision(&RequestDecision {
+            request_id: request.id,
+            state: RequestState::Declined,
+            decided_by: Some(708),
+            decided_at: dt("2026-05-05T12:00:00Z"),
+            decline_reason: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            s.get_invitation_request(request.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .decision_deadline,
+            deadline
+        );
+    }
 }
 
 /// Confirmed create facts are account history, even after lifecycle advances.

@@ -179,6 +179,25 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
         .unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].justification.as_deref(), Some("Access please"));
+    for request in [
+        requests[0].clone(),
+        storage
+            .get_invitation_request(requests[0].id)
+            .await
+            .unwrap()
+            .unwrap(),
+        storage
+            .list_requests_for_link(link.id)
+            .await
+            .unwrap()
+            .remove(0),
+    ] {
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["decision_deadline"],
+            json!("2026-09-21T01:00:00Z"),
+            "all request reads must expose the persisted decision deadline"
+        );
+    }
     assert_eq!(
         storage
             .get_projected_request(requests[0].id)

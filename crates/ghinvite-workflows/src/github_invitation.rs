@@ -775,6 +775,7 @@ mod tests {
             decided_by: Some(7),
             decided_at: Some(dt("2026-05-04T13:00:00Z")),
             decline_reason: None,
+            decision_deadline: None,
             created_at: dt("2026-05-04T12:30:00Z"),
         };
         state
@@ -1566,6 +1567,7 @@ mod tests {
             decided_by: Some(7),
             decided_at: Some(dt("2026-05-04T13:00:00Z")),
             decline_reason: None,
+            decision_deadline: None,
             created_at: dt("2026-05-04T12:30:00Z"),
         };
         state

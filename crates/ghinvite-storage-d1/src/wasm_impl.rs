@@ -749,6 +749,10 @@ impl Storage for D1Storage {
             .map(JsValue::from_str)
             .unwrap_or(JsValue::null());
         let created_at_str = request.created_at.to_rfc3339();
+        let decision_deadline = request
+            .decision_deadline
+            .map(|d| JsValue::from_str(&d.to_rfc3339()))
+            .unwrap_or(JsValue::null());
 
         wasm_send(async {
             let stmt1 = self
@@ -756,8 +760,8 @@ impl Storage for D1Storage {
                 .prepare(
                     "INSERT INTO invitation_requests
                        (id, invitation_link_id, requester_id, justification, state,
-                        decided_by, decided_at, decline_reason, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        decided_by, decided_at, decline_reason, created_at, decision_deadline)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )
                 .bind(&[
                     JsValue::from_str(&id_str),
@@ -769,6 +773,7 @@ impl Storage for D1Storage {
                     decided_at,
                     decline_reason,
                     JsValue::from_str(&created_at_str),
+                    decision_deadline,
                 ])
                 .map_err(bind_err)?;
 
@@ -842,7 +847,7 @@ impl Storage for D1Storage {
                 .db
                 .prepare(
                     "SELECT id, invitation_link_id, requester_id, justification, state,
-                            decided_by, decided_at, decline_reason, created_at
+                            decided_by, decided_at, decline_reason, created_at, decision_deadline
                      FROM invitation_requests WHERE id = ?1",
                 )
                 .bind(&[JsValue::from_str(&id_str)])
@@ -864,7 +869,7 @@ impl Storage for D1Storage {
                 .db
                 .prepare(
                     "SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
-                            r.decided_by, r.decided_at, r.decline_reason, r.created_at
+                            r.decided_by, r.decided_at, r.decline_reason, r.created_at, r.decision_deadline
                      FROM invitation_requests r
                      JOIN invitation_links l ON l.id = r.invitation_link_id
                      WHERE l.account_id = ?1 AND r.state = 'pending'
@@ -892,7 +897,7 @@ impl Storage for D1Storage {
                 .db
                 .prepare(
                     "SELECT id, invitation_link_id, requester_id, justification, state,
-                            decided_by, decided_at, decline_reason, created_at
+                            decided_by, decided_at, decline_reason, created_at, decision_deadline
                      FROM invitation_requests WHERE invitation_link_id = ?1
                      ORDER BY created_at DESC",
                 )

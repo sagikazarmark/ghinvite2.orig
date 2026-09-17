@@ -1040,6 +1040,7 @@ mod tests {
                 decided_by: None,
                 decided_at: None,
                 decline_reason: None,
+                decision_deadline: None,
                 created_at: at("2026-05-20T13:35:00Z"),
             })
             .await

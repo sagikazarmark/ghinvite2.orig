@@ -1,5 +1,13 @@
 # Worker Runtime Smoke Test
 
+For the authenticated decision queue, run
+`npm run test:queue --prefix tests/worker`. This exercises the actual web Worker
+and D1 adapter with non-expiring links, earlier/later link expiration, persisted
+historical deadlines, missing deadlines, auto-approved requests, and overdue
+pending projections. Controlled lifecycle responses verify truthful expired and
+already-decided HTTP results for stale queue actions; lifecycle arbitration
+itself is covered by the real Restate admission gate.
+
 For stalled upstream headers/bodies, run
 `npm run test:deadlines --prefix tests/worker`. The admission gate also verifies
 durable timeout recovery and released account exclusivity. See the

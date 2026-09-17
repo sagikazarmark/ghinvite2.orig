@@ -93,6 +93,7 @@ impl Browser {
                 decided_by: None,
                 decided_at: None,
                 decline_reason: None,
+                decision_deadline: None,
                 created_at: Utc::now(),
             })
             .await

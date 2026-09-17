@@ -287,6 +287,7 @@ pub async fn pre_decision_logic(
         decided_by: None,
         decided_at: None,
         decline_reason: None,
+        decision_deadline: None,
         created_at: input.created_at,
     };
     state

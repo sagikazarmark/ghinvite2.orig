@@ -207,6 +207,7 @@ pub struct InvitationRequestRow {
     pub decided_at: Option<DateTime<Utc>>,
     pub decline_reason: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub decision_deadline: Option<DateTime<Utc>>,
 }
 
 impl InvitationRequestRow {
@@ -227,6 +228,7 @@ impl InvitationRequestRow {
             decided_at: self.decided_at,
             decline_reason: self.decline_reason,
             created_at: self.created_at,
+            decision_deadline: self.decision_deadline,
         })
     }
 }
