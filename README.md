@@ -34,7 +34,7 @@ You need a GitHub App before the service can authenticate users or send invitati
    - **Webhook URL**: `http://<public-url>/webhooks/github` (use [ngrok](https://ngrok.com) for local dev)
    - **Webhook secret**: any random string — set it as `GHINVITE_WEBHOOK_SECRET`
 3. **Repository permissions**: Administration → Read & write, Metadata → Read-only
-4. **Subscribe to events**: `Member` and `Repository invitation` if available for your selected permissions. GitHub sends `installation` and `installation_repositories` to GitHub Apps by default; they are app-level events and may not appear as repository-level checkboxes.
+4. For webhook acceptance, enable **Organization permissions: Members → Read-only** and subscribe to **Member** (`member`, action `added`). GitHub sends `installation` and `installation_repositories` to GitHub Apps by default. See [supported webhook evidence and subscription requirements](docs/invitation-settlement.md#member-added-webhooks), including personal-account availability and legacy compatibility.
 5. After creating: note the **App ID** (`GHINVITE_GITHUB_APP_ID`) and generate a **private key** (`.pem` file, `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE`)
 6. Under **OAuth** in the app settings: note the **Client ID** and generate a **Client secret** (`GHINVITE_GITHUB_CLIENT_ID` / `GHINVITE_GITHUB_CLIENT_SECRET`)
 7. Install the app on your org or personal account and note the install URL: `https://github.com/apps/<your-app-name>/installations/new`

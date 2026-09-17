@@ -353,7 +353,7 @@ wrangler rollback --config wrangler/restate-svc.toml
 5. Enable **Redirect on update**
 6. Set **Webhook URL** to `{GHINVITE_BASE_URL}/webhooks/github`
 7. Set repository permissions: **Administration** → **Read & write**, **Metadata** → **Read-only**
-8. Subscribe to `Member` and `Repository invitation` if GitHub shows them for the selected permissions. `installation` and `installation_repositories` are app-level GitHub App events that GitHub sends by default.
+8. Enable organization permission **Members → Read-only** and subscribe to **Member** for repository invitation acceptance (`member.added`). `installation` and `installation_repositories` are sent to GitHub Apps by default. See [webhook evidence and subscription requirements](invitation-settlement.md#member-added-webhooks) before enabling acceptance in a deployment.
 9. Generate and download a private key (used for `GHINVITE_GITHUB_APP_PRIVATE_KEY`)
 10. Note the **App ID** (used for `GHINVITE_GITHUB_APP_ID`)
 11. Note the **Client ID** and generate a **Client Secret** (used for OAuth vars)

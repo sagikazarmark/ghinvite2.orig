@@ -30,6 +30,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// and leaves the stored event intact. Shared SQLite/D1 statement semantics.
 pub const INSTALLATION_AUDIT_REPLAY: &str = " ON CONFLICT(id) DO UPDATE SET account_id = CASE WHEN audit_events.account_id IS excluded.account_id AND audit_events.occurred_at IS excluded.occurred_at AND audit_events.event_type IS excluded.event_type AND audit_events.actor_kind IS excluded.actor_kind AND audit_events.actor_id IS excluded.actor_id AND audit_events.target_kind IS excluded.target_kind AND audit_events.target_id IS excluded.target_id AND audit_events.metadata IS excluded.metadata AND audit_events.request_id IS excluded.request_id THEN audit_events.account_id ELSE NULL END";
 
+/// Include terminal history: member events carry no invitation ID or event time,
+/// so a historical duplicate must not be reassigned to a later request. Two rows
+/// suffice to detect ambiguity without loading an account's invitation history.
+pub const MEMBER_INVITATION_CANDIDATES: &str = "SELECT g.id, g.invitation_request_id,
+    g.repo_id, g.github_invitation_id, g.state, g.error_message, g.created_at, g.updated_at
+    FROM github_invitations g
+    JOIN invitation_requests r ON r.id = g.invitation_request_id
+    JOIN invitation_links l ON l.id = r.invitation_link_id
+    WHERE l.account_id = ?1 AND g.repo_id = ?2 AND r.requester_id = ?3 LIMIT 2";
+
 /// Reasons a write may fail with [`Error::Conflict`]. Each variant pinpoints a
 /// specific unique-constraint or invariant the storage layer enforced.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -391,6 +401,29 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         github_id: u64,
     ) -> Result<Option<GithubInvitation>>;
+
+    /// At most two historical matches for verified member-event identities.
+    /// Exactly one Sent row with an upstream ID permits webhook settlement;
+    /// ambiguity requires invitation-specific reconciliation instead.
+    async fn member_invitation_candidates(
+        &self,
+        _account_id: u64,
+        _repo_id: u64,
+        _requester_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        Err(Error::Database("member invitation lookup unavailable".into()))
+    }
+
+    /// Retain the first matching result (including None) for a verified body hash.
+    /// Returns the retained binding on replay/concurrency, never a new match.
+    /// This is ingress routing identity; lifecycle settlement remains owner-only.
+    async fn bind_member_webhook(
+        &self,
+        _payload_sha256: &str,
+        _invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>> {
+        Err(Error::Database("member webhook binding unavailable".into()))
+    }
 
     /// List github_invitations rows for a given installation that are still
     /// in flight (state `sending` or `sent`). Used by the daily reconcile sweep.
