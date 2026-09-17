@@ -58,8 +58,9 @@ pub struct GhCollaboratorInvite {
     pub id: u64,
 }
 
-/// `GET /repos/{owner}/{repo}/invitations` (list, pagination ignored — v1 link
-/// repo sets stay tiny).
+/// One entry of `GET /repos/{owner}/{repo}/invitations`. The listing is
+/// paginated; [`crate::InstallationClient::list_invitations`] follows every
+/// page, because callers read absence from it as evidence.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GhInvitationListItem {
     pub id: u64,

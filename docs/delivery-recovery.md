@@ -80,7 +80,9 @@ Blocked creates schedule a one-hour dependency recheck; explicit recovery may
 check sooner. Unknown outcomes only perform read-only reconciliation on recovery.
 Pending invitations are matched on numeric requester identity and permission;
 membership evidence must likewise include numeric identity and permission.
-Absence or failed reads retain unknown. Current collaborator evidence confirms
+The pending-invitation read follows every GitHub page, so absence means absence
+from the whole listing; a failed, malformed, or unfollowable later page is a
+failed read, not absence. Absence or failed reads retain unknown. Current collaborator evidence confirms
 current access, not the historical provenance of an invitation. No distributed
 exactly-once HTTP transaction is claimed.
 

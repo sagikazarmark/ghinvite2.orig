@@ -574,3 +574,140 @@ async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), Handle
     state.storage.project_delivery(receipt).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page,
+        seed_pending_invitation, token_mint,
+    };
+    use ghinvite_core::GithubInvitationId;
+    use ghinvite_core::delivery::CreateCommand;
+    use ghinvite_github::mocks::{Expectation, MockTransport};
+    use ghinvite_github::transport::Method;
+    use std::sync::Arc;
+
+    /// A pending invitation on the same repository for somebody else, so page
+    /// one carries no evidence about this command's requester.
+    fn other_requester_item(id: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "invitee": {"id": 41, "login": "bob"},
+            "permissions": "write",
+            "created_at": "2026-05-04T13:00:00Z"
+        })
+    }
+
+    /// GitHub calls `attempt` makes before it reaches the pending-invitation
+    /// listing: repository identity, then requester identity and its address.
+    fn identity_expectations() -> Vec<Expectation> {
+        vec![
+            token_mint(9),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api",
+                serde_json::json!({"id": 10, "full_name": "acme/api", "private": true}),
+            ),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/user/8",
+                serde_json::json!({"id": 8, "login": "alice"}),
+            ),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/users/alice",
+                serde_json::json!({"id": 8, "login": "alice"}),
+            ),
+        ]
+    }
+
+    /// Seed the projections `attempt` reads, then burn the delivery claim the
+    /// way a create whose GitHub response was never journaled does. The retry
+    /// can no longer write, so it has to recover the outcome by observation.
+    async fn state_with_retained_create(mock: MockTransport) -> (AppState, CreateCommand) {
+        let state = AppState::new(
+            fixture_storage().await,
+            fixture_github_client(Arc::new(mock)),
+        );
+        let seeded = seed_pending_invitation(&state, "acme/api").await;
+        let command = CreateCommand {
+            version: 1,
+            // A create whose invitation row was never projected: the recovery
+            // path has no stored upstream ID to short-circuit on.
+            invitation_id: GithubInvitationId::new(),
+            link_id: seeded.link_id,
+            request_id: seeded.request_id,
+            approval_id: "approval-1".into(),
+            account_id: 100,
+            installation_id: 9,
+            requester_id: 8,
+            repo_id: 10,
+            repo_full_name: "acme/api".into(),
+            permission: ghinvite_core::Permission::Push,
+            approved_at: dt("2026-05-04T13:00:00Z"),
+        };
+        assert!(
+            state
+                .storage
+                .claim_delivery_attempt(&command)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        (state, command)
+    }
+
+    #[tokio::test]
+    async fn retained_create_is_recovered_from_a_later_page() {
+        let mut script = identity_expectations();
+        script.extend([
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([other_requester_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_item(9977)]),
+                None,
+            ),
+        ]);
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_retained_create(mock.clone()).await;
+
+        let receipt = attempt(&state, &command, false).await.unwrap();
+
+        assert_eq!(
+            receipt.outcome,
+            CreateOutcome::Created { upstream_id: 9977 }
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn retained_create_stays_unknown_when_a_later_page_fails() {
+        let mut script = identity_expectations();
+        script.extend([
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([other_requester_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                502,
+            ),
+        ]);
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_retained_create(mock.clone()).await;
+
+        let receipt = attempt(&state, &command, false).await.unwrap();
+
+        // Half a listing is not evidence of absence, so the collaborator probe
+        // never runs and the create stays unknown.
+        assert_eq!(receipt.outcome, CreateOutcome::OutcomeUnknown);
+        mock.assert_exhausted();
+    }
+}

@@ -301,3 +301,82 @@ async fn cancel_or_expire(
     }
     settle(state, row, if expire { InvitationState::Expired } else { InvitationState::Cancelled }, at, if by_user.is_some() { ActorKind::User } else { ActorKind::System }, by_user, serde_json::json!({"reason": if expire { "tick_expire" } else { "cancel" }, "by_user": by_user})).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page,
+        seed_pending_invitation, token_mint,
+    };
+    use ghinvite_github::mocks::{Expectation, MockTransport};
+    use ghinvite_github::transport::Method;
+    use std::sync::Arc;
+
+    async fn seeded_state(mock: MockTransport) -> (AppState, GithubInvitation) {
+        let state = AppState::new(
+            fixture_storage().await,
+            fixture_github_client(Arc::new(mock)),
+        );
+        let seeded = seed_pending_invitation(&state, "acme/api").await;
+        let row = state
+            .storage
+            .get_github_invitation(seeded.invitation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (state, row)
+    }
+
+    #[tokio::test]
+    async fn observe_finds_no_settlement_when_still_pending_on_a_later_page() {
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_item(9988)]),
+                None,
+            ),
+        ]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        let evidence = observe(&state, &row, dt("2026-05-05T13:00:00Z"))
+            .await
+            .unwrap();
+
+        assert!(evidence.is_none(), "got {evidence:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn observe_fails_rather_than_settling_when_a_later_page_fails() {
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                502,
+            ),
+        ]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        // Transient, so the sweep retries later. The truncated list never
+        // reaches the collaborator probe that would settle the invitation.
+        let err = observe(&state, &row, dt("2026-05-05T13:00:00Z"))
+            .await
+            .unwrap_err();
+
+        assert!(!err.is_terminal(), "got {err:?}");
+        mock.assert_exhausted();
+    }
+}

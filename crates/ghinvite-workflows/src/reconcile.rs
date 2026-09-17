@@ -250,131 +250,23 @@ async fn cancel_reconciled_invitation_transition(
 mod tests {
     use super::*;
     use crate::test_support::{
-        dt, fixture_github_client, fixture_state_with_storage, fixture_storage,
+        dt, fixture_github_client, fixture_state_with_storage, fixture_storage, invitation_item,
+        invitation_page, seed_pending_invitation, token_mint,
     };
+    use ghinvite_core::GithubInvitationId;
     use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
-    use ghinvite_core::{
-        AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
-        Permission, RequestId, RequestState, SelectedRepos, Slug,
-    };
     use ghinvite_github::mocks::{Expectation, MockTransport};
     use ghinvite_github::transport::{Method, Response};
-    use rand::SeedableRng;
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    fn token_mint(installation_id: u64) -> Expectation {
-        Expectation {
-            method: Method::Post,
-            url: format!(
-                "https://api.github.test/app/installations/{}/access_tokens",
-                installation_id
-            ),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 201,
-                headers: BTreeMap::new(),
-                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
-            },
-        }
-    }
-
-    /// Seed: one installation, two users, one invitation_link with one repo, one
-    /// invitation_request, one github_invitation row in `Sent` state.
-    /// Returns the inserted invitation id.
     async fn seed_one_pending_with_repo_full_name(
         state: &AppState,
         repo_full_name: &str,
     ) -> GithubInvitationId {
-        state
-            .storage
-            .insert_installation(&ghinvite_core::Account {
-                installation_id: 9,
-                account_id: 100,
-                account_login: "acme".into(),
-                account_type: AccountType::Organization,
-                installed_at: dt("2026-05-04T12:00:00Z"),
-                uninstalled_at: None,
-                selected_repos: SelectedRepos::All,
-            })
+        seed_pending_invitation(state, repo_full_name)
             .await
-            .unwrap();
-        state
-            .storage
-            .upsert_user(&ghinvite_core::User {
-                user_id: 7,
-                login: "creator".into(),
-                avatar_url: None,
-                last_seen_at: dt("2026-05-04T12:00:00Z"),
-            })
-            .await
-            .unwrap();
-        state
-            .storage
-            .upsert_user(&ghinvite_core::User {
-                user_id: 8,
-                login: "alice".into(),
-                avatar_url: None,
-                last_seen_at: dt("2026-05-04T12:00:00Z"),
-            })
-            .await
-            .unwrap();
-        let link = InvitationLink {
-            id: InvitationLinkId::new(),
-            slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
-            installation_id: 9,
-            account_id: 100,
-            created_by: 7,
-            created_at: dt("2026-05-04T12:00:00Z"),
-            expires_at: None,
-            max_uses: None,
-            uses_count: 0,
-            permission: Permission::Push,
-            approval_required: false,
-            description: "AI coding workshop".into(),
-            internal_note: None,
-            revoked_at: None,
-            revoked_by: None,
-            repos: vec![InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: repo_full_name.into(),
-            }],
-        };
-        state.storage.insert_invitation_link(&link).await.unwrap();
-        let req_id = RequestId::new();
-        let req = ghinvite_core::InvitationRequest {
-            id: req_id,
-            invitation_link_id: link.id,
-            requester_id: 8,
-            justification: None,
-            state: RequestState::Approved,
-            decided_by: Some(7),
-            decided_at: Some(dt("2026-05-04T13:00:00Z")),
-            decline_reason: None,
-            created_at: dt("2026-05-04T12:30:00Z"),
-        };
-        state
-            .storage
-            .insert_invitation_request_and_increment_uses(&req)
-            .await
-            .unwrap();
-        let inv_id = GithubInvitationId::new();
-        state
-            .storage
-            .insert_github_invitation(&ghinvite_core::GithubInvitation {
-                id: inv_id,
-                invitation_request_id: req_id,
-                repo_id: 10,
-                github_invitation_id: Some(9988),
-                state: InvitationState::Sent,
-                error_message: None,
-                created_at: dt("2026-05-04T13:00:00Z"),
-                updated_at: dt("2026-05-04T13:00:00Z"),
-            })
-            .await
-            .unwrap();
-        inv_id
+            .invitation_id
     }
 
     async fn seed_one_pending(state: &AppState) -> GithubInvitationId {
@@ -644,5 +536,89 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.state, InvitationState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn daily_run_no_change_when_still_pending_on_a_later_page() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                serde_json::json!([invitation_item(9988)]),
+                None,
+            ),
+        ]);
+        let github = fixture_github_client(Arc::new(mock.clone()));
+        let state = AppState::new(storage, github);
+        let inv_id = seed_one_pending(&state).await;
+
+        daily_run_logic(
+            &state,
+            &DailyRunInput {
+                at: dt("2026-05-05T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Sent);
+        assert_eq!(row.github_invitation_id, Some(9988));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn daily_run_leaves_the_row_alone_when_a_later_page_fails() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([invitation_item(7001)]),
+                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
+            ),
+            Expectation::status(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
+                500,
+            ),
+        ]);
+        let github = fixture_github_client(Arc::new(mock.clone()));
+        let state = AppState::new(storage, github);
+        let inv_id = seed_one_pending(&state).await;
+
+        // Transient: the sweep fails so Restate retries it. The half-seen list
+        // must never reach the collaborator probe or a cancellation.
+        let err = daily_run_logic(
+            &state,
+            &DailyRunInput {
+                at: dt("2026-05-05T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.is_terminal(), "got {err:?}");
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Sent);
+        mock.assert_exhausted();
     }
 }

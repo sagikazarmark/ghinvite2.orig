@@ -1,0 +1,231 @@
+//! GitHub pagination semantics: the `Link` response header.
+//!
+//! A listing that stops at the first page is not a shorter listing — it is an
+//! incomplete observation. Callers that read absence as evidence (an invitation
+//! that is no longer pending) must be able to tell "walked every page" from
+//! "stopped early", so this module only ever reports a next page or nothing,
+//! and refuses to follow a link that leaves the configured API base.
+
+use crate::error::{Error, Result};
+use crate::transport::Response;
+
+/// The `rel="next"` target of a `Link` header, as a path under `base_url`.
+///
+/// Returns `Ok(None)` on the last page: no `Link` header, or one that parses
+/// and carries no `next` relation. Errors when the header cannot be trusted to
+/// mean "no next page" — unparseable, an off-base host, or a target equal to
+/// `current` (which would loop forever) — because silently stopping there would
+/// fabricate absence.
+pub(crate) fn next_page_path(
+    response: &Response,
+    base_url: &str,
+    current: &str,
+) -> Result<Option<String>> {
+    let Some(link) = response.headers.get("link") else {
+        return Ok(None);
+    };
+    let Some(next) = next_relation(link)? else {
+        return Ok(None);
+    };
+    let Some(path) = next.strip_prefix(base_url).filter(|p| p.starts_with('/')) else {
+        return Err(Error::InvalidInput(format!(
+            "pagination link outside {base_url}: {next}"
+        )));
+    };
+    if path == current {
+        return Err(Error::InvalidInput(format!(
+            "pagination link does not advance past {current}"
+        )));
+    }
+    Ok(Some(path.to_owned()))
+}
+
+/// Pull the `rel="next"` URL out of an RFC 8288 `Link` field value, e.g.
+/// `<https://api.github.com/…&page=2>; rel="next", <…&page=9>; rel="last"`.
+/// Splitting on the angle brackets rather than on commas keeps URLs that
+/// themselves contain commas intact.
+///
+/// A header that carries no parseable link at all — no brackets, or one left
+/// unclosed — is an error rather than `None`: it may well have announced a next
+/// page we could not read, and reading it as the last page would turn a
+/// truncated walk into confirmed absence.
+fn next_relation(header: &str) -> Result<Option<&str>> {
+    let malformed = || Error::InvalidInput(format!("unparseable pagination link: {header}"));
+    let mut rest = header;
+    let mut seen_link = false;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        let close = after.find('>').ok_or_else(malformed)?;
+        seen_link = true;
+        let url = &after[..close];
+        let params = &after[close + 1..];
+        let params_end = params.find('<').unwrap_or(params.len());
+        if is_next(&params[..params_end]) {
+            return Ok(Some(url));
+        }
+        rest = &params[params_end..];
+    }
+    if seen_link {
+        Ok(None)
+    } else {
+        Err(malformed())
+    }
+}
+
+fn is_next(params: &str) -> bool {
+    params.split(';').any(|param| {
+        // The trailing `,` belongs to the comma separating this link from the
+        // next one in the header, not to the parameter value.
+        param
+            .trim()
+            .strip_prefix("rel")
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .is_some_and(|value| {
+                value.trim().trim_end_matches(',').trim().trim_matches('"') == "next"
+            })
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn response(link: Option<&str>) -> Response {
+        let mut headers = BTreeMap::new();
+        if let Some(link) = link {
+            headers.insert("link".into(), link.into());
+        }
+        Response {
+            status: 200,
+            headers,
+            body: b"[]".to_vec(),
+        }
+    }
+
+    #[test]
+    fn no_link_header_is_the_last_page() {
+        assert_eq!(
+            next_page_path(&response(None), "https://api.github.test", "/x").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn link_without_a_next_relation_is_the_last_page() {
+        let link = "<https://api.github.test/x?page=1>; rel=\"prev\", \
+                    <https://api.github.test/x?page=1>; rel=\"first\"";
+        assert_eq!(
+            next_page_path(
+                &response(Some(link)),
+                "https://api.github.test",
+                "/x?page=2"
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn next_relation_wins_over_other_relations() {
+        let link = "<https://api.github.test/x?page=1>; rel=\"prev\", \
+                    <https://api.github.test/x?page=3>; rel=\"next\", \
+                    <https://api.github.test/x?page=9>; rel=\"last\"";
+        assert_eq!(
+            next_page_path(
+                &response(Some(link)),
+                "https://api.github.test",
+                "/x?page=2"
+            )
+            .unwrap(),
+            Some("/x?page=3".into())
+        );
+    }
+
+    #[test]
+    fn unquoted_rel_is_accepted() {
+        let link = "<https://api.github.test/x?page=3>; rel=next";
+        assert_eq!(
+            next_page_path(
+                &response(Some(link)),
+                "https://api.github.test",
+                "/x?page=2"
+            )
+            .unwrap(),
+            Some("/x?page=3".into())
+        );
+    }
+
+    #[test]
+    fn a_url_containing_a_comma_survives_parsing() {
+        let link = "<https://api.github.test/x?ids=1,2&page=3>; rel=\"next\"";
+        assert_eq!(
+            next_page_path(
+                &response(Some(link)),
+                "https://api.github.test",
+                "/x?page=2"
+            )
+            .unwrap(),
+            Some("/x?ids=1,2&page=3".into())
+        );
+    }
+
+    #[test]
+    fn off_base_next_link_is_an_error() {
+        let link = "<https://evil.test/x?page=3>; rel=\"next\"";
+        let err =
+            next_page_path(&response(Some(link)), "https://api.github.test", "/x").unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn host_prefix_alone_does_not_make_a_link_on_base() {
+        let link = "<https://api.github.test.evil.test/x?page=3>; rel=\"next\"";
+        let err =
+            next_page_path(&response(Some(link)), "https://api.github.test", "/x").unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_next_link_back_to_the_current_page_is_an_error() {
+        let link = "<https://api.github.test/x?page=2>; rel=\"next\"";
+        let err = next_page_path(
+            &response(Some(link)),
+            "https://api.github.test",
+            "/x?page=2",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn an_unclosed_link_header_is_an_error_not_the_last_page() {
+        let link = "<https://api.github.test/x?page=3; rel=\"next\"";
+        let err = next_page_path(
+            &response(Some(link)),
+            "https://api.github.test",
+            "/x?page=2",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn a_link_header_carrying_no_link_at_all_is_an_error() {
+        let err = next_page_path(&response(Some("rel=next")), "https://api.github.test", "/x")
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn an_unclosed_link_after_a_complete_one_is_an_error() {
+        let link = "<https://api.github.test/x?page=1>; rel=\"prev\", <https://api.github.test/x";
+        let err = next_page_path(
+            &response(Some(link)),
+            "https://api.github.test",
+            "/x?page=2",
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+}
