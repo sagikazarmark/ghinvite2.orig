@@ -401,6 +401,15 @@ pub trait Storage: Send + Sync + 'static {
         installation_id: u64,
     ) -> Result<Vec<GithubInvitation>>;
 
+    /// In-flight GitHub invitations across all historical installations of an
+    /// immutable account. Installation IDs on links remain original provenance.
+    async fn list_pending_github_invitations_for_account(
+        &self,
+        _account_id: u64,
+    ) -> Result<Vec<GithubInvitation>> {
+        Err(Error::Database("account invitation history read unavailable".into()))
+    }
+
     // -------- audit --------
 
     /// Read at most 25 account events in (occurred_at DESC, id DESC) order.

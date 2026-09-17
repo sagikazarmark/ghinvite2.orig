@@ -39,9 +39,7 @@ impl Reconcile for ReconcileImpl {
                     rows.extend(
                         self.state
                             .storage
-                            .list_pending_github_invitations_for_installation(
-                                account.installation_id,
-                            )
+                            .list_pending_github_invitations_for_account(account.account_id)
                             .await?
                             .into_iter()
                             .filter(crate::settlement_v1::eligible),
