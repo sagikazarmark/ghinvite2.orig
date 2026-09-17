@@ -22,6 +22,10 @@ The HTTP client tests exercise Bearer calls, authoritative calls and sends,
 explicit credential-free local mode, missing/invalid credentials, redacted Debug,
 and upstream/decoding/transport error sanitization. The signed-in browser-route
 test verifies that ingress credentials stay out of HTML and error responses.
+`npm run test:admission --prefix tests/worker` additionally exercises the actual
+Worker secret-binding → Wasm client → Fetch Authorization header path using a
+synthetic Bearer key and real local Restate; the session-only smoke retains
+explicit credential-free local mode.
 Remote deployment/binding verification belongs to the
 [operator-owned ingress gate](restate-ingress-gate.md), not these mock tests.
 
