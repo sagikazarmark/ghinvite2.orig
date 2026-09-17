@@ -14,32 +14,121 @@
 
 use crate::error::{Result, WebError};
 use reqwest::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 
-/// Cloneable. The inner `Client` is itself cheap to clone (Arc internally).
+/// Server-only ingress authentication. Deliberately not serializable.
 #[derive(Clone, Debug)]
+pub struct RestateAuth {
+    authorization: Option<HeaderValue>,
+}
+
+impl RestateAuth {
+    /// Both native environment and Worker bindings use these exact rules.
+    /// An omitted mode means `bearer`; missing secrets never disable auth.
+    pub fn from_config(mode: Option<&str>, api_key: Option<&str>) -> Result<Self> {
+        match mode.unwrap_or("bearer") {
+            "local-unauthenticated" if api_key.is_none() => {
+                return Ok(Self::local_unauthenticated());
+            }
+            "bearer" => (),
+            _ => {
+                return Err(WebError::Restate(
+                    "Invalid GHINVITE_RESTATE_AUTH configuration.".into(),
+                ));
+            }
+        }
+        let api_key = api_key
+            .filter(|key| !key.is_empty() && key.bytes().all(|b| b.is_ascii_graphic()))
+            .ok_or_else(|| {
+                WebError::Restate(
+                    "GHINVITE_RESTATE_API_KEY is required and must be a non-empty token.".into(),
+                )
+            })?;
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| WebError::Restate("Invalid ingress API key.".into()))?;
+        authorization.set_sensitive(true);
+        Ok(Self {
+            authorization: Some(authorization),
+        })
+    }
+
+    pub fn local_unauthenticated() -> Self {
+        Self {
+            authorization: None,
+        }
+    }
+}
+
+/// Cloneable. The inner `Client` is itself cheap to clone (Arc internally).
+#[derive(Clone)]
 pub struct RestateClient {
     client: Client,
     ingress_base: String,
 }
 
+impl std::fmt::Debug for RestateClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RestateClient").finish_non_exhaustive()
+    }
+}
+
 impl RestateClient {
+    /// Credential-free client for local runtimes and tests. Deployment entry
+    /// points use `with_auth` with explicit runtime configuration instead.
     pub fn new(ingress_base: impl Into<String>) -> Result<Self> {
+        Self::with_auth(ingress_base, RestateAuth::local_unauthenticated())
+    }
+
+    pub fn with_auth(ingress_base: impl Into<String>, auth: RestateAuth) -> Result<Self> {
+        let ingress_base = ingress_base.into();
+        let invalid_url = || {
+            WebError::Restate(
+                "Ingress must be an HTTP(S) URL without credentials, query, or fragment.".into(),
+            )
+        };
+        let url = url::Url::parse(&ingress_base).map_err(|_| invalid_url())?;
+        if !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid_url());
+        }
+        let loopback = match url.host() {
+            Some(url::Host::Domain("localhost")) => true,
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            _ => false,
+        };
+        if auth.authorization.is_some() && url.scheme() != "https" && !loopback {
+            return Err(WebError::Restate(
+                "Authenticated ingress requires HTTPS (except loopback development).".into(),
+            ));
+        }
         // `reqwest::ClientBuilder::timeout` is not available on the wasm32 target
         // (Cloudflare Workers): on wasm reqwest dispatches to fetch, which has
         // no timeout knob. The Workers runtime applies its own per-request
         // limits, so skipping the builder option is correct.
-        let builder = Client::builder();
+        let mut headers = HeaderMap::new();
+        if let Some(authorization) = auth.authorization {
+            headers.insert(AUTHORIZATION, authorization);
+        }
+        let builder = Client::builder().default_headers(headers);
         #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.timeout(std::time::Duration::from_secs(15));
+        let builder = builder
+            .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none());
         let client = builder
             .build()
-            .map_err(|e| WebError::Restate(format!("building reqwest client: {e}")))?;
+            .map_err(|_| WebError::Restate("Could not build ingress client.".into()))?;
         Ok(Self {
             client,
-            ingress_base: ingress_base.into(),
+            ingress_base: ingress_base.trim_end_matches('/').into(),
         })
     }
 
@@ -71,13 +160,14 @@ impl RestateClient {
                 .json(input)
                 .send()
                 .await
-                .map_err(|e| WebError::Restate(format!("send {service}/{method}: {e}")))?;
+                .map_err(|_| {
+                    WebError::Restate("Ingress send unavailable. Outcome unknown.".into())
+                })?;
 
             if !resp.status().is_success() {
                 let status = resp.status().as_u16();
-                let body = resp.text().await.unwrap_or_default();
                 return Err(WebError::Restate(format!(
-                    "send {service}/{method} -> {status}: {body}"
+                    "Ingress send failed (HTTP {status})."
                 )));
             }
             Ok(())
@@ -130,7 +220,9 @@ impl RestateClient {
                 .json(input)
                 .send()
                 .await
-                .map_err(|e| WebError::Restate(format!("call {service}/{method}: {e}")))?;
+                .map_err(|_| {
+                    WebError::Restate("Outcome unknown. Retry the same attempt.".into())
+                })?;
             let status = resp.status();
             if !status.is_success() {
                 if authoritative {
@@ -141,20 +233,20 @@ impl RestateClient {
                         _ => WebError::Restate("Outcome unknown. Retry the same attempt.".into()),
                     });
                 }
-                let body = resp.text().await.unwrap_or_default();
                 return Err(WebError::Restate(format!(
-                    "call {service}/{method} -> {}: {body}",
+                    "Ingress call failed (HTTP {}).",
                     status.as_u16()
                 )));
             }
-            let body = resp.bytes().await.map_err(|e| {
-                WebError::Restate(format!("reading {service}/{method} response: {e}"))
+            let body = resp.bytes().await.map_err(|_| {
+                WebError::Restate("Could not read ingress response. Outcome unknown.".into())
             })?;
             // Restate may return an empty body for unit-returning handlers.
             let body: &[u8] = if body.is_empty() { b"null" } else { &body };
-            serde_json::from_slice::<O>(body).map_err(|e| {
-                WebError::Restate(format!("decoding {service}/{method} response: {e}"))
-            })
+            // Deserializer errors can quote untrusted response values, including
+            // reflected credentials. Never pass them to logs or browser errors.
+            serde_json::from_slice::<O>(body)
+                .map_err(|_| WebError::Restate("Invalid ingress response. Outcome unknown.".into()))
         })
         .await
     }

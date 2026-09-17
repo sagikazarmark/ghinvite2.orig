@@ -5,6 +5,13 @@ For authoritative admission, recovery, D1 projection and cutover execution, run
 [separate gate/results](../../docs/worker-admission-gate.md), including its explicit
 blocked production rollout verdict. The session smoke below remains independent.
 
+The admission gate's browser fixture uses a synthetic ingress API-key binding in
+Bearer mode. Its `outboundService` checks the actual Wasm Fetch Authorization
+header before forwarding each ingress request to local Restate. The authenticated
+status page must succeed without leaking the key in its body or headers. This
+exercises Worker secret loading and header emission; remote Cloud credential
+validation remains in the operator-owned #61 gate.
+
 Runs the actual `ghinvite-web-worker` Wasm in Miniflare/workerd with local KV and
 D1 bindings. This catches runtime failures that a successful Wasm build misses,
 including unsupported clocks and tracing APIs. There are no clock, crypto,

@@ -15,6 +15,8 @@ pub struct WebConfig {
     pub session_secret: [u8; 32],
     /// Restate ingress URL (e.g. `http://127.0.0.1:8080` for local dev).
     pub restate_ingress: String,
+    /// Server-only web-to-Restate credentials; never part of UI props.
+    pub restate_auth: crate::restate_client::RestateAuth,
     /// OAuth credentials (client_id, client_secret, redirect_uri).
     pub oauth: OAuthConfig,
     /// GitHub App install URL — `https://github.com/apps/<app-name>/installations/new`.
@@ -39,11 +41,14 @@ impl WebConfig {
     /// Build native local configuration from environment variables. The session
     /// key is mandatory; other fields have local defaults that do not authenticate
     /// against real GitHub without explicit OAuth credentials.
-    pub fn for_local_dev() -> Result<Self, SessionKeyError> {
+    pub fn for_local_dev() -> Result<Self, ConfigError> {
         let secret = std::env::var("GHINVITE_SESSION_SECRET").map_err(|_| SessionKeyError)?;
-        Ok(Self::for_local_dev_with_secret(parse_session_secret(
-            &secret,
-        )?))
+        let mut config = Self::for_local_dev_with_secret(parse_session_secret(&secret)?);
+        let mode = optional_env("GHINVITE_RESTATE_AUTH")?;
+        let api_key = optional_env("GHINVITE_RESTATE_API_KEY")?;
+        config.restate_auth =
+            crate::restate_client::RestateAuth::from_config(mode.as_deref(), api_key.as_deref())?;
+        Ok(config)
     }
 
     /// Local defaults with an explicitly supplied key (also used by tests).
@@ -54,6 +59,7 @@ impl WebConfig {
             session_secret: secret,
             restate_ingress: std::env::var("GHINVITE_RESTATE_INGRESS")
                 .unwrap_or_else(|_| "http://127.0.0.1:8080".into()),
+            restate_auth: crate::restate_client::RestateAuth::local_unauthenticated(),
             oauth: OAuthConfig {
                 client_id: std::env::var("GHINVITE_GITHUB_CLIENT_ID")
                     .unwrap_or_else(|_| "Iv1.local-dev-client-id".into()),
@@ -79,6 +85,24 @@ impl WebConfig {
                     .unwrap_or_else(|_| "dist/public/assets".into()),
             )),
         }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error(transparent)]
+    SessionKey(#[from] SessionKeyError),
+    #[error(transparent)]
+    Restate(#[from] crate::WebError),
+    #[error("Invalid encoding in server configuration: {0}")]
+    Encoding(&'static str),
+}
+
+fn optional_env(name: &'static str) -> Result<Option<String>, ConfigError> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::Encoding(name)),
     }
 }
 

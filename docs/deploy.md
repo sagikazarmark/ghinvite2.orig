@@ -16,6 +16,18 @@ Two Cloudflare Workers share one D1 database:
 - **ghinvite-web** (`crates/ghinvite-web-worker`) — handles HTTP requests, SSR, OAuth, webhooks
 - **ghinvite-restate-svc** (`crates/ghinvite-workflows`) — Restate durable workflow handlers
 
+Production requires protected HTTPS Restate ingress. The web server authenticates
+every ingress call/send with `Authorization: Bearer <API key>`, including setup,
+authoritative reads and mutations. This is separate from endpoint identity signing:
+
+| Credential | Secret binding | Direction / purpose |
+|---|---|---|
+| Restate Cloud environment ingress API key | `GHINVITE_RESTATE_API_KEY` on **web** | Web → Restate; authorizes invoking services |
+| Restate endpoint identity key | `RESTATE_IDENTITY_KEY` on **restate-svc** | Restate → workflow Worker; verifies signed runtime requests |
+
+Neither replaces the other. Do not expose ingress API keys to browsers or put them
+in URLs, UI props, assets, `[vars]`, tracked configuration, or diagnostic logs.
+
 ## First-time Setup
 
 ### 1. Authenticate with Cloudflare
@@ -55,6 +67,7 @@ Complete [GitHub App Setup](#github-app-setup) first, then return here with the 
 In `wrangler/web.toml`, update `[vars]`:
 - `GHINVITE_BASE_URL` — your public domain (e.g. `https://ghinvite.example.com`)
 - `GHINVITE_RESTATE_INGRESS` — your Restate Cloud ingress URL
+- `GHINVITE_RESTATE_AUTH` — keep `bearer` in production (also the default if omitted)
 - `GHINVITE_GITHUB_INSTALL_URL` — GitHub App installation URL
 
 ### 6. Set secrets
@@ -69,6 +82,10 @@ wrangler secret put GHINVITE_GITHUB_CLIENT_SECRET --config wrangler/web.toml
 
 # GitHub webhook secret:
 wrangler secret put GHINVITE_WEBHOOK_SECRET --config wrangler/web.toml
+
+# Web -> Restate: provision an ingress API key for the target environment in
+# Restate Cloud, then paste it at Wrangler's secret prompt (no Bearer prefix):
+wrangler secret put GHINVITE_RESTATE_API_KEY --config wrangler/web.toml
 
 # Restate service — GitHub App private key PEM as downloaded (base64-encoded for safe storage):
 # Linux:
@@ -122,6 +139,14 @@ restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers
 
 Re-register after any service interface changes.
 
+Provision the ingress key in the same Restate Cloud environment as
+`GHINVITE_RESTATE_INGRESS`, with permission to invoke the web application's services.
+For self-hosted production, provide an HTTPS ingress gateway that enforces the same
+Bearer contract and prevents direct access to the unprotected runtime ports.
+Use the exact ingress URL; do not rely on redirecting gateways for authentication.
+Authenticated remote URLs must use HTTPS; HTTP is accepted only for loopback
+development (`localhost`, loopback IPv4/IPv6).
+
 ### 10. Smoke test
 
 ```bash
@@ -134,6 +159,10 @@ curl -s -o /dev/null -w "%{http_code}" \
   https://ghinvite.workers.dev/assets/ghinvite-island.js  # → 200 (island loader)
 ```
 
+Health and HTML alone do not exercise ingress credentials. Complete the
+[authenticated production-binding verification](restate-ingress-gate.md) under
+the operator-owned remote gate (#61) before authorizing rollout.
+
 ## Local Development
 
 ### 1. Set up `.dev.vars`
@@ -145,6 +174,22 @@ GitHub OAuth app credentials when testing OAuth. Keep this file out of version c
 `GHINVITE_SESSION_SECRET` must be exactly 64 hexadecimal characters (32 bytes when
 decoded). Native development reads the same format from the environment. Missing,
 invalid, short, and oversized values are rejected; there is no default key.
+
+For a credential-free **local runtime**, explicitly set these non-secret values
+in your ignored `.dev.vars` beside the Wrangler config (native: environment):
+
+```dotenv
+GHINVITE_RESTATE_INGRESS=http://127.0.0.1:8080
+GHINVITE_RESTATE_AUTH=local-unauthenticated
+```
+
+Leave `GHINVITE_RESTATE_API_KEY` absent in this mode; supplying both local mode
+and a key is an error. Never use local mode with production ingress. For local
+testing against Restate Cloud, use `bearer` and supply the API key as a secret.
+Native boot and Worker configuration use the same parser: omitted auth mode
+requires a key; missing/empty/malformed keys and unknown modes fail configuration.
+Native reads `GHINVITE_RESTATE_API_KEY` from its server process environment;
+Workers read it with `env.secret`, never from serialized application data.
 
 ### 2. Apply migrations to local D1 simulation
 
@@ -180,6 +225,25 @@ restate deployments register http://localhost:8788
 Requires a local Restate server running at `http://localhost:8080` (see `compose.yaml`).
 
 ## Secrets Rotation
+
+### Restate ingress API key
+
+1. Create a replacement environment ingress API key in Restate Cloud (or the
+   self-hosted ingress gateway). Keep the current key active during normal rotation.
+2. Update the web secret using `wrangler secret put GHINVITE_RESTATE_API_KEY
+   --config wrangler/web.toml`; for native, update the secret-manager-injected
+   environment and restart every serving process. Do not pass keys in CLI arguments.
+3. Verify all serving versions/bindings use the replacement, including alternate
+   Worker routes. Run the call, authoritative read/mutation and send checks in the
+   [remote gate](restate-ingress-gate.md) with the replacement.
+4. Revoke the old key at Restate/the gateway, confirm it now receives 401/403,
+   and repeat a web operation successfully. Retain only redacted evidence.
+5. A rollback must use the **current** key; do not restore a revoked secret binding.
+
+If compromised, revoke first and accept temporary ingress unavailability while
+replacing the key. A denied/failed ingress operation must not be reported as
+successful; recover uncertain mutations using the original operation identity.
+Rotate `RESTATE_IDENTITY_KEY` separately using Restate's endpoint-signing procedure.
 
 ### Session secret
 
@@ -300,6 +364,6 @@ wrangler rollback --config wrangler/restate-svc.toml
 - **No redirect after install**: confirm the GitHub App **Setup URL** is `{GHINVITE_BASE_URL}/setup/github` and **Redirect on update** is enabled.
 - **`missing installation_id`**: GitHub did not return through the Setup URL. Recheck the Setup URL and install the app from the app installation URL again.
 - **`installation is not visible to signed-in user`**: sign out of ghinvite, sign in with the GitHub user that installed or can administer the app installation, then retry the GitHub App install/update.
-- **`Restate error` or setup returns 502**: make sure Restate is running, the `Installation` service is registered, and `GHINVITE_RESTATE_INGRESS` points at the active Restate ingress.
+- **`Restate error` or setup returns 502**: check registration/routing and the target environment's `GHINVITE_RESTATE_API_KEY`. HTTP 401/403 indicates rejected ingress access, not a browser login problem. Confirm `GHINVITE_RESTATE_AUTH=bearer`; `RESTATE_IDENTITY_KEY` cannot authorize web-to-ingress traffic. Errors deliberately omit upstream bodies and transport details; use redacted runtime invocation metadata for diagnosis.
 - **Repository picker is empty after a selected-repository install**: reopen the GitHub App installation settings, verify repository access, and use **Update** so GitHub redirects back to ghinvite with `setup_action=update`.
 - **Permission failures when inviting collaborators**: confirm repository permissions are **Administration: Read & write** and **Metadata: Read-only**.

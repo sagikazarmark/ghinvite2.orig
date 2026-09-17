@@ -37,7 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Restate client: ingress at config.restate_ingress (defaults to
     // 127.0.0.1:8080 from `docker compose up -d restate`).
-    let restate = Arc::new(RestateClient::new(&config.restate_ingress)?);
+    let restate = Arc::new(RestateClient::with_auth(
+        &config.restate_ingress,
+        config.restate_auth.clone(),
+    )?);
     let commands = Arc::new(RestateCommands::new(restate.clone()));
 
     // Session store: a local sqlite database.

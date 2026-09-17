@@ -16,6 +16,7 @@ const mf = new Miniflare({
     GHINVITE_BASE_URL: 'https://session.test',
     GHINVITE_SESSION_SECRET: '07'.repeat(32),
     GHINVITE_RESTATE_INGRESS: 'https://restate.invalid',
+    GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
     GHINVITE_GITHUB_CLIENT_ID: 'dummy-client-id',
     GHINVITE_GITHUB_CLIENT_SECRET: 'dummy-client-secret',

@@ -10,6 +10,25 @@ This excludes the feature-gated real Restate acceptance gate, the opt-in ignored
 and browser tests. A passing workspace suite does **not** verify Restate runtime
 compatibility or container networking.
 
+### Restate ingress authentication
+
+```bash
+cargo test -p ghinvite-web --test restate_ingress --locked
+cargo test -p ghinvite-web --test invitation_resolution --locked
+cargo check -p ghinvite-web-worker --target wasm32-unknown-unknown --locked
+```
+
+The HTTP client tests exercise Bearer calls, authoritative calls and sends,
+explicit credential-free local mode, missing/invalid credentials, redacted Debug,
+and upstream/decoding/transport error sanitization. The signed-in browser-route
+test verifies that ingress credentials stay out of HTML and error responses.
+`npm run test:admission --prefix tests/worker` additionally exercises the actual
+Worker secret-binding → Wasm client → Fetch Authorization header path using a
+synthetic Bearer key and real local Restate; the session-only smoke retains
+explicit credential-free local mode.
+Remote deployment/binding verification belongs to the
+[operator-owned ingress gate](restate-ingress-gate.md), not these mock tests.
+
 ### GitHub webhooks
 
 `POST /webhooks/github` uses `octoevents` for signature verification, header

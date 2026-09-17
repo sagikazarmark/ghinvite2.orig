@@ -140,11 +140,22 @@ fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
     let secret_str = env.secret("GHINVITE_SESSION_SECRET")?.to_string();
     let session_secret =
         ghinvite_web::config::parse_session_secret(&secret_str).map_err(worker_err)?;
+    let restate_mode = env.var("GHINVITE_RESTATE_AUTH").ok().map(|v| v.to_string());
+    let restate_api_key = env
+        .secret("GHINVITE_RESTATE_API_KEY")
+        .ok()
+        .map(|v| v.to_string());
+    let restate_auth = ghinvite_web::restate_client::RestateAuth::from_config(
+        restate_mode.as_deref(),
+        restate_api_key.as_deref(),
+    )
+    .map_err(worker_err)?;
 
     Ok(ghinvite_web::WebConfig {
         base_url: base_url.clone(),
         session_secret,
         restate_ingress: env.var("GHINVITE_RESTATE_INGRESS")?.to_string(),
+        restate_auth,
         oauth: OAuthConfig {
             client_id: env.secret("GHINVITE_GITHUB_CLIENT_ID")?.to_string(),
             client_secret: env.secret("GHINVITE_GITHUB_CLIENT_SECRET")?.to_string(),
@@ -203,8 +214,13 @@ async fn fetch(
         Arc::new(ghinvite_storage_d1::D1Storage::new(db));
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);
-    let restate =
-        Arc::new(ghinvite_web::RestateClient::new(&config.restate_ingress).map_err(worker_err)?);
+    let restate = Arc::new(
+        ghinvite_web::RestateClient::with_auth(
+            &config.restate_ingress,
+            config.restate_auth.clone(),
+        )
+        .map_err(worker_err)?,
+    );
     let commands = Arc::new(ghinvite_web::RestateCommands::new(restate.clone()));
     let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
     let state = ghinvite_web::AppState::new(storage, transport, commands, config);

@@ -49,10 +49,12 @@ id = "REPLACE_WITH_WRANGLER_KV_CREATE_OUTPUT"
 GHINVITE_ADMISSION_MODE = "legacy" # maintenance / authoritative after cutover gates
 GHINVITE_BASE_URL           = "https://ghinvite.workers.dev"
 GHINVITE_RESTATE_INGRESS    = "https://ACCOUNT_ID.restate.cloud"
+GHINVITE_RESTATE_AUTH       = "bearer" # production requires protected ingress
 GHINVITE_GITHUB_INSTALL_URL = "https://github.com/apps/YOUR_APP_NAME/installations/new"
 
 # Secrets (set via `wrangler secret put`; never commit these values):
 # GHINVITE_SESSION_SECRET       - generate: openssl rand -hex 32
+# GHINVITE_RESTATE_API_KEY      - Restate Cloud ingress API key (web -> Restate)
 # GHINVITE_GITHUB_CLIENT_ID     - from GitHub App settings
 # GHINVITE_GITHUB_CLIENT_SECRET - from GitHub App settings
 # GHINVITE_WEBHOOK_SECRET       - from GitHub App settings
