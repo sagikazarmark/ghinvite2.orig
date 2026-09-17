@@ -900,6 +900,33 @@ test('delayed bundle keeps a typed numeric guardrail the typed model cannot hold
   expect(data.get('max_uses')).toBe('7');
 });
 
+test('delayed bundle does not repair a multiline description the browser shortened', async ({ page }) => {
+  // A `type="text"` input strips the newline out of its value, so the control
+  // reads back shortened without the admin touching it. Adopting that would
+  // submit a description they never wrote and drop the message saying why the
+  // server refused theirs.
+  const release = await openDelayed(page, '/multiline-description');
+  const props = JSON.parse(await page.locator('#link-form-props').textContent());
+  expect(props.values.description).toBe('Workshop\nsecond line');
+  await expect(page.locator('#description')).toHaveValue('Workshopsecond line');
+  release();
+  await expectMounted(page);
+
+  await expect(page.locator('#description')).toHaveValue('Workshopsecond line');
+  await expect(page.locator('#description')).toHaveAttribute('aria-invalid', 'true');
+  await expect(page.locator('#description-error > div')).toHaveText(['Description must be a single line.']);
+  const posts = [];
+  page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+  expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
+  await submit(page).click();
+  await expect(page.locator('#description-error > div')).toHaveText(['Description must be a single line.']);
+  expect(posts).toEqual([]);
+
+  // Actually rewriting it is an edit, and then the POST goes through.
+  await page.locator('#description').fill('Workshop, one line');
+  expect((await post(page)).get('description')).toBe('Workshop, one line');
+});
+
 for (const [name, mutate] of [
   ['a missing control', (page) => page.locator('#permission').evaluate((select) => select.remove())],
   ['a repository checkbox the island did not render',

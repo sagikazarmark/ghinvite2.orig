@@ -43,6 +43,7 @@ for (const [path, args] of [
   ['/rejection-max_uses', ['--browser-rejection', '--parse-blocked']],
   ['/rejection-expires_in_days', ['--browser-rejection', '--parse-blocked', '--expiration']],
   ['/rejection-form', ['--browser-rejection', '--form-only']],
+  ['/multiline-description', ['--multiline-description']],
 ]) {
   pages.set(path, execFileSync('cargo', [
     'run', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture', '--', ...args,

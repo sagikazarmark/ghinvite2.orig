@@ -18,26 +18,31 @@
 //! `selected` option) — so nothing has to observe the form before the bundle
 //! loads for this to work.
 //!
-//! Keeping the props value for unchanged controls is not a micro-optimisation:
-//! two controls cannot round-trip their server value through the DOM at all,
-//! and adopting what the DOM shows would silently repair an invalid model the
-//! server rejected.
+//! Keeping the props value for unchanged controls is not a micro-optimisation.
+//! A control applies its own *value sanitisation* before anyone touches it, so
+//! "the DOM differs from the markup" is not the same as "the admin changed
+//! it", and adopting the difference would silently repair a model the server
+//! rejected. Every control kind is therefore compared against what the browser
+//! **shows** for the server's value, not against the markup that carried it:
 //!
 //! - A `<select>` whose server value is not one of the five permission levels
 //!   renders with `pull` explicitly selected (see `PermissionSelect`), so the
 //!   DOM shows `pull` while dioform must keep the raw `owner`.
-//! - A browser empties a `type="number"` input whose server value is not a
-//!   number, so `value="abc"` reads back as `""` while the parse blocker must
-//!   survive.
+//! - A `type="number"` input shows nothing at all for a value that is not a
+//!   number it can display, so `value="abc"` reads back as `""` while the
+//!   parse blocker must survive.
+//! - A `type="text"` input strips CR and LF out of its value, so a multiline
+//!   description the server preserved and rejected reads back shortened.
+//! - A `<textarea>` keeps its newlines but normalises them to LF.
 //!
-//! Both gaps have a floor the DOM cannot lift. An admin who *deliberately*
-//! picks `pull` over an unsupported `owner`, or who clears a numeric field the
-//! browser had already emptied, leaves the control identical to how the server
-//! rendered it, so the takeover reads it as untouched and keeps the raw value
-//! and its blocker. That is the safe direction — the form stays visibly
-//! rejected until a distinguishable input corrects it, rather than silently
-//! submitting a value the admin never chose — and the same edit made after the
-//! island mounts is picked up normally.
+//! Each of those gaps has a floor the DOM cannot lift. An admin who
+//! *deliberately* picks `pull` over an unsupported `owner`, or clears a numeric
+//! field the browser had already emptied, leaves the control identical to how
+//! the server rendered it, so the takeover reads it as untouched and keeps the
+//! raw value and its blocker. That is the safe direction — the form stays
+//! visibly rejected until a distinguishable input corrects it, rather than
+//! silently submitting a value the admin never chose — and the same edit made
+//! after the island mounts is picked up normally.
 //!
 //! Everything here is pure and compiles natively, so it is unit-tested beside
 //! the shared form model; `main.rs` owns the `web-sys` reading and writing.
@@ -66,14 +71,35 @@ impl ControlText {
         }
     }
 
-    /// The admin changed this control before the island mounted.
+    /// The admin changed this `<select>` before the island mounted. Its
+    /// options carry their values verbatim, so nothing rewrites them.
     fn edited(&self) -> bool {
         self.value != self.default
     }
 
-    /// The admin changed this numeric control before the island mounted.
+    /// The admin changed this `<input type="text">` before the island mounted.
+    ///
+    /// Compared against the *shown* default, because such an input strips CR
+    /// and LF out of its value before anyone touches it. The server preserves a
+    /// multiline description and rejects it
+    /// ([`ghinvite_ui::link_form::DESCRIPTION_SINGLE_LINE`]), so reading that
+    /// shortening as an edit would submit a description the admin never wrote
+    /// and retire the message explaining what was wrong with theirs.
+    fn edited_line(&self) -> bool {
+        self.value != self.default.replace(['\n', '\r'], "")
+    }
+
+    /// The admin changed this `<textarea>` before the island mounted. A
+    /// textarea keeps its newlines but normalises them to LF, which is again
+    /// the browser rewriting the server's value rather than an edit.
+    fn edited_text(&self) -> bool {
+        self.value != self.default.replace("\r\n", "\n").replace('\r', "\n")
+    }
+
+    /// The admin changed this `<input type="number">` before the island
+    /// mounted.
     fn edited_number(&self) -> bool {
-        self.edited() && !self.browser_emptied()
+        self.value != self.default && !self.browser_emptied()
     }
 
     /// The browser, not the admin, emptied this numeric control: it shows
@@ -89,12 +115,17 @@ impl ControlText {
 
 /// Whether a browser will show `text` in a `type="number"` input.
 ///
-/// This is HTML's *valid floating-point number*: an optional `-`, then a whole
-/// part, a `.` fraction, or both in that order, then an optional `e` exponent.
-/// So `.5` is displayed (the whole part may be omitted when a fraction
-/// follows) while `5.` is not, and neither is a leading `+` or any surrounding
-/// whitespace. Verified against Chromium, which is what actually empties these
-/// inputs.
+/// Two conditions, both of which Chromium was checked against, since it is the
+/// thing that actually empties these inputs:
+///
+/// 1. HTML's *valid floating-point number* grammar — an optional `-`, then a
+///    whole part, a `.` fraction, or both in that order, then an optional `e`
+///    exponent. So `.5` is shown (the whole part may be omitted when a
+///    fraction follows) while `5.` is not, and neither is a leading `+` nor any
+///    surrounding whitespace.
+/// 2. The number it denotes is finite. `1e999` and a four-hundred-digit
+///    integer are both good grammar and both overflow to infinity, and a
+///    browser empties them as readily as it empties `abc`.
 ///
 /// Deliberately **not** [`ghinvite_ui::link_form::parse_max_uses`]: the server
 /// renders plenty of numbers the browser displays happily and the domain still
@@ -116,9 +147,12 @@ fn displayable_number(text: &str) -> bool {
         Some((whole, fraction)) => (whole.is_empty() || digits(whole)) && digits(fraction),
         None => digits(mantissa),
     };
-    mantissa
+    let grammar = mantissa
         && exponent
-            .is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)))
+            .is_none_or(|exponent| digits(exponent.strip_prefix(['+', '-']).unwrap_or(exponent)));
+    // Only well-formed text reaches the parser, so Rust's extra spellings
+    // (`inf`, `NaN`, `+5`) cannot slip through here.
+    grammar && text.parse::<f64>().is_ok_and(f64::is_finite)
 }
 
 /// Every control of the server-rendered form, read from the live DOM just
@@ -153,11 +187,11 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     let fields = CreateLinkForm::fields();
     let mut adopted = values.clone();
 
-    if dom.description.edited() {
+    if dom.description.edited_line() {
         adopted.description = dom.description.value.clone();
         adopted.errors.retire(&fields.description().identity());
     }
-    if dom.internal_note.edited() {
+    if dom.internal_note.edited_text() {
         adopted.internal_note = dom.internal_note.value.clone();
     }
     if dom.permission.edited() {
@@ -283,8 +317,8 @@ pub struct FocusRestore {
 mod tests {
     use super::*;
     use ghinvite_ui::link_form::{
-        DESCRIPTION_REQUIRED, EXPIRES_IN_DAYS_NOT_POSITIVE, LinkFormErrors, MAX_USES_NOT_POSITIVE,
-        REPO_SCOPE_REQUIRED, SUMMARY_MESSAGE,
+        DESCRIPTION_REQUIRED, DESCRIPTION_SINGLE_LINE, EXPIRES_IN_DAYS_NOT_POSITIVE,
+        LinkFormErrors, MAX_USES_NOT_POSITIVE, REPO_SCOPE_REQUIRED, SUMMARY_MESSAGE,
     };
 
     /// A snapshot of the form as the server rendered it: nothing edited.
@@ -487,7 +521,7 @@ mod tests {
     /// The two lists were checked against Chromium: each string was set as a
     /// number input's `value` attribute, and the ones below kept it.
     #[test]
-    fn displayable_numbers_are_htmls_valid_floating_point_numbers() {
+    fn displayable_numbers_are_htmls_finite_valid_floating_point_numbers() {
         for text in [
             "0",
             "00",
@@ -500,15 +534,115 @@ mod tests {
             ".5",
             "-.5",
             ".0",
+            // Enormous and minuscule, but finite as an `f64`.
+            "1e308",
+            "1e-999",
         ] {
             assert!(displayable_number(text), "{text:?} is displayable");
         }
-        // Everything a browser empties out of a number input on its own.
+        // Everything a browser empties out of a number input on its own: bad
+        // grammar, or good grammar denoting a number it cannot hold.
         for text in [
-            "", "abc", " 7 ", "5.", "1.", ".", "+5", "1e", "e5", "7px", "1.2.3",
+            "", "abc", " 7 ", "5.", "1.", ".", "+5", "1e", "e5", "7px", "1.2.3", "1e999", "1E999",
+            "1e309", "-1e999",
         ] {
             assert!(!displayable_number(text), "{text:?} is not displayable");
         }
+        assert!(!displayable_number(&"9".repeat(400)), "overflowing integer");
+    }
+
+    /// Chromium shows `a\nb` as `ab` in a `type="text"` input while
+    /// `defaultValue` keeps the newline, so an untouched multiline description
+    /// must not read as an edit — the server rejected it for that newline.
+    #[test]
+    fn a_multiline_description_the_browser_shortened_is_not_an_edit() {
+        let values = LinkFormValues {
+            description: "one\ntwo".into(),
+            errors: LinkFormErrors {
+                summary: vec![SUMMARY_MESSAGE.into()],
+                description: Some(DESCRIPTION_SINGLE_LINE.into()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+        let adopted = adopt(
+            &values,
+            &FormSnapshot {
+                description: ControlText::new("onetwo", "one\ntwo"),
+                ..untouched(&values)
+            },
+        );
+
+        assert_eq!(adopted.description, "one\ntwo");
+        assert_eq!(
+            adopted.errors.description.as_deref(),
+            Some(DESCRIPTION_SINGLE_LINE)
+        );
+    }
+
+    #[test]
+    fn actually_retyping_a_shortened_description_is_an_edit() {
+        let values = LinkFormValues {
+            description: "one\ntwo".into(),
+            errors: LinkFormErrors {
+                summary: vec![SUMMARY_MESSAGE.into()],
+                description: Some(DESCRIPTION_SINGLE_LINE.into()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+        let adopted = adopt(
+            &values,
+            &FormSnapshot {
+                description: ControlText::new("one two", "one\ntwo"),
+                ..untouched(&values)
+            },
+        );
+
+        assert_eq!(adopted.description, "one two");
+        assert!(adopted.errors.is_empty());
+    }
+
+    #[test]
+    fn a_textarea_whose_line_endings_the_browser_normalised_is_not_an_edit() {
+        let values = LinkFormValues {
+            internal_note: "one\r\ntwo".into(),
+            ..LinkFormValues::default()
+        };
+        let adopted = adopt(
+            &values,
+            &FormSnapshot {
+                internal_note: ControlText::new("one\ntwo", "one\r\ntwo"),
+                ..untouched(&values)
+            },
+        );
+        assert_eq!(adopted.internal_note, "one\r\ntwo");
+    }
+
+    #[test]
+    fn an_overflowing_numeric_guardrail_the_browser_emptied_keeps_its_blocker() {
+        let values = LinkFormValues {
+            max_uses: "1e999".into(),
+            errors: LinkFormErrors {
+                summary: vec![SUMMARY_MESSAGE.into()],
+                max_uses: Some(MAX_USES_NOT_POSITIVE.into()),
+                ..LinkFormErrors::default()
+            },
+            ..LinkFormValues::default()
+        };
+        let adopted = adopt(
+            &values,
+            &FormSnapshot {
+                max_uses: ControlText::new("", "1e999"),
+                ..untouched(&values)
+            },
+        );
+
+        assert_eq!(adopted.max_uses, "1e999");
+        assert_eq!(
+            adopted.errors.max_uses.as_deref(),
+            Some(MAX_USES_NOT_POSITIVE)
+        );
     }
 
     #[test]

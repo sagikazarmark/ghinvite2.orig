@@ -73,6 +73,10 @@ if accidentally deployed.
   with raw `abc` and its parse error on the named numeric field.
 - `/rejection-form`: `--browser-rejection --form-only`, valid values with only
   a synthetic form-level rejection, for an unchanged native POST retry.
+- `/multiline-description`: `--multiline-description`, a description carrying a
+  newline with its single-line error. Only a crafted POST reaches the server
+  that way, but the server preserves and rejects what it got; a `type="text"`
+  input then shows the value without the newline.
 - `/assets/*`: real JS/Wasm staged by `scripts/build-island.sh`, with Wasm MIME.
 - `/static/styles.css` and `/static/app.js`: production CSS and theme script.
 - `POST /console/accounts/acme/links`: JSON echo of ordered form entries,
@@ -161,6 +165,10 @@ tests; rebuilding SSR at server startup does not rebuild Wasm.
   A `0` typed into a fresh form the server never rejected survives mounting too,
   showing its parse error and blocking the POST until it is corrected, rather
   than being blanked into "unlimited".
+- A multiline description the server rejected is not repaired by mounting, even
+  though a `type="text"` input shows it without its newline: the raw value and
+  its single-line error survive, the POST stays blocked, and only actually
+  rewriting the field counts as an edit.
 - When the markup is not the form the island renders — a missing control, or a
   repository scope group offering anything other than the available
   repositories — the island declines to mount (logging

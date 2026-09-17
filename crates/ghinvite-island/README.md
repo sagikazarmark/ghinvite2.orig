@@ -42,15 +42,19 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    (`defaultValue`, `defaultChecked`, the `selected` option) keeps its props
    value; every control that differs is taken from the DOM, and the server
    error attached to it is dropped, since it described the value that is gone.
-   Unchanged controls keep the props value because two of them cannot
-   round-trip: an unsupported permission displays as `pull`, and Chromium
-   empties a `type="number"` input holding text that is not a number —
-   adopting the display would silently repair a model the server rejected.
-   "Not a number" here is HTML's *valid floating-point number* rule (checked
-   against Chromium, which is what does the emptying — `.5` is displayed, `5.`
-   is not), never the shared parsers': the server renders plenty of numbers the
-   browser shows and the domain rejects (`0`, `4294967296`), and clearing one
-   of those before mounting is a real edit that must survive.
+   "Differs" is measured against what the browser **shows** for the server's
+   value, not against the markup: every control applies its own value
+   sanitisation before anyone touches it, and adopting a rewrite the browser
+   performed would silently repair a model the server rejected. An unsupported
+   permission displays as `pull`; a `type="number"` input shows nothing for
+   text that is not a number it can hold; a `type="text"` input strips CR and
+   LF, so a rejected multiline description reads back shortened; a `<textarea>`
+   normalises its newlines to LF. "A number it can hold" is HTML's *valid
+   floating-point number* rule plus finiteness — checked against Chromium,
+   which is what does the emptying: `.5` is shown, `5.` and `1e999` are not —
+   and never the shared parsers', since the server renders plenty of numbers
+   the browser shows and the domain rejects (`0`, `4294967296`), and clearing
+   one of those before mounting is a real edit that must survive.
    Each of those two gaps has a floor. An admin who *deliberately* picks `pull`
    over a raw `owner`, or clears a numeric field the browser had already
    emptied, leaves the control exactly as the server rendered it, so the
