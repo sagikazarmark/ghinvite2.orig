@@ -27,16 +27,39 @@ pub async fn page(
         Ok(page) => page,
         Err(error) => {
             if let Some(local) = local {
-                if fresh {
+                // The exact attempt may never have reached ingress. Recover
+                // current eligibility independently, without submitting it.
+                if matches!(error, WebError::NotFound)
+                    && let Ok(summary) = admission.lookup(code, session.user_id, None).await
+                {
+                    let original = attempt_url(code, &String::from(local.operation_id.clone()));
+                    let fresh = fresh && summary.can_start_fresh;
+                    let id = if fresh {
+                        ghinvite_core::RequestId::new().to_string()
+                    } else {
+                        String::from(local.operation_id.clone())
+                    };
                     return render(
                         session,
                         code,
-                        &ghinvite_core::RequestId::new().to_string(),
-                        None,
-                        None,
-                        "This is a fresh attempt. The original attempt remains recoverable below.",
-                        Some(&attempt_url(code, &String::from(local.operation_id))),
-                        FormMode::Fresh,
+                        &id,
+                        if fresh {
+                            None
+                        } else {
+                            local.justification.as_deref()
+                        },
+                        Some(&summary),
+                        if fresh {
+                            "This is a fresh attempt. The original attempt remains recoverable below."
+                        } else {
+                            "Outcome unknown. Retry this same attempt to confirm whether your request was accepted."
+                        },
+                        Some(&original),
+                        if fresh {
+                            FormMode::Fresh
+                        } else {
+                            FormMode::Retry
+                        },
                         StatusCode::OK,
                         vec![],
                     );
@@ -45,7 +68,7 @@ pub async fn page(
                     return failed(session, code, &local, WebError::Restate("unknown".into()));
                 }
             }
-            return safe_error(error);
+            return page_error(session, error);
         }
     };
     if operation.is_none()
@@ -57,6 +80,10 @@ pub async fn page(
             return Redirect::to(&attempt_url(code, &local_id)).into_response();
         }
     }
+    if !page.can_start_fresh && page.attempt.is_none() && page.request.is_none() {
+        return super::invitation::invitation_not_found_response(session);
+    }
+    let fresh = fresh && page.can_start_fresh;
     let original = page
         .attempt
         .as_ref()
@@ -75,6 +102,8 @@ pub async fn page(
                 .into()
         } else if fresh {
             "This is a fresh attempt. The original attempt remains recoverable below.".into()
+        } else if page.request.is_some() {
+            "Your existing request is shown below.".into()
         } else {
             "Review the repositories and submit your request.".into()
         }
@@ -115,7 +144,7 @@ pub async fn page(
             delivery.push(format!("{}: {label}", repo.repo_full_name));
         }
     }
-    let mode = if receipt.is_some() {
+    let mode = if receipt.is_some() || (!page.can_start_fresh && page.attempt.is_none()) {
         FormMode::Closed
     } else if page.attempt.is_some() && !fresh {
         FormMode::Retry
@@ -149,13 +178,44 @@ pub async fn submit(
         return WebError::NotFound.into_response();
     }
     // Validate identity and normalize input before any network call.
+    let invalid_justification = ghinvite_ui::request_form::justification_error(
+        justification.as_deref().unwrap_or_default(),
+    )
+    .is_some();
     let mut command = match admission.command(
         ghinvite_core::InvitationLinkId::new(),
         operation,
         session.user_id,
-        justification,
+        justification.clone(),
     ) {
         Ok(command) => command,
+        Err(WebError::BadRequest(_))
+            if invalid_justification
+                && ghinvite_core::admission::AdmissionOperationId::try_from(
+                    operation.to_owned(),
+                )
+                .is_ok() =>
+        {
+            let page = match admission.lookup(code, session.user_id, None).await {
+                Ok(page) => page,
+                Err(error) => return page_error(session, error),
+            };
+            if !page.can_start_fresh {
+                return self::page(state, tower, admission, session, code, None, false).await;
+            }
+            return render(
+                session,
+                code,
+                operation,
+                justification.as_deref(),
+                Some(&page),
+                "Your request has not been submitted. Correct the justification below.",
+                None,
+                FormMode::Validation,
+                StatusCode::BAD_REQUEST,
+                vec![],
+            );
+        }
         Err(error) => return safe_error(error),
     };
     // Save a separate protected record before ingress. Each attempt has its own
@@ -217,7 +277,7 @@ fn failed(session: &Session, code: &str, command: &Admit, error: WebError) -> Re
                 command.justification.as_deref(),
                 None,
                 if conflict {
-                    "Operation conflict. This ID is bound to different input. Recover the original attempt, or explicitly start a fresh attempt to edit your input."
+                    "Operation conflict. This ID is bound to different input. Recover the original attempt to check its result and whether a fresh attempt is available."
                 } else {
                     "Outcome unknown. Your request may have been accepted. Retry this same attempt or check its status."
                 },
@@ -336,6 +396,7 @@ async fn load_local(
 #[derive(Clone, Copy, PartialEq)]
 enum FormMode {
     Fresh,
+    Validation,
     Retry,
     Closed,
 }
@@ -348,6 +409,14 @@ pub(crate) fn safe_error(error: WebError) -> Response {
         )
             .into_response(),
         _ => error.into_response(),
+    }
+}
+
+fn page_error(session: &Session, error: WebError) -> Response {
+    if matches!(error, WebError::NotFound) {
+        super::invitation::invitation_not_found_response(session)
+    } else {
+        safe_error(error)
     }
 }
 
@@ -399,36 +468,75 @@ fn render(
     let message = message.to_owned();
     let original = original.map(str::to_owned);
     let login = session.login.clone();
+    let refresh_seconds = page
+        .as_ref()
+        .and_then(|p| p.request.as_ref())
+        .filter(|r| r.state == ghinvite_core::RequestState::Pending)
+        .map(|_| ghinvite_ui::invitation::PENDING_REFRESH_SECONDS);
     let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
         rsx! {
             ghinvite_ui::layouts::InvitationLayout {
                 signed_in_login: Some(login.clone()), title: "Request repository access · ghinvite".to_owned(),
                 account_login: None, active_nav: None, flash: None,
-                h1 { "Request repository access" }
-                p { role: "status", "{message}" }
+                refresh_seconds,
+                div { class: "space-y-5",
+                h1 { class: "text-2xl font-semibold tracking-tight", "Request repository access" }
+                ghinvite_ui::invitation::IdentityConfirmation {
+                    login: login.clone(),
+                    return_to: format!("/i/{code}"),
+                }
                 if let Some(page) = &page {
-                    p { "Permission: {page.permission}" }
-                    ul { for repo in &page.repos { li { "{repo.repo_full_name}" } } }
+                    ghinvite_ui::invitation::AccessSummary {
+                        permission: page.permission, repos: page.repos.clone(), approval_required: page.approval_required,
+                    }
+                }
+                p { class: "alert alert-info", role: "status", "{message}" }
+                if let Some(page) = &page {
                     if let Some(request) = &page.request {
                         p { "Current request status: {request.state}" }
+                        if request.state == ghinvite_core::RequestState::Pending {
+                            h2 { class: "text-xl font-semibold", "Awaiting review" }
+                            p { class: "text-sm leading-6 text-base-content/70", "The account admins have your request. This page checks for updates every 20 seconds." }
+                        }
+                        if request.state == ghinvite_core::RequestState::Approved {
+                            div { class: "alert alert-success",
+                                div {
+                                    h2 { class: "text-xl font-semibold", "Approved" }
+                                    p { "Check your GitHub notifications and email to accept any GitHub invitations once they are sent. Repository delivery is tracked separately below." }
+                                }
+                            }
+                        }
                         p { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." }
+                        if original.is_none() {
+                            a { class: "btn btn-outline", href: "/i/{code}", "Check again" }
+                        }
                     }
                 }
                 ul { for row in &delivery { li { "{row}" } } }
                 if mode != FormMode::Closed {
-                    form { method: "post", action: "/i/{code}?operation_id={id}",
+                    form { method: "post", action: "/i/{code}?operation_id={id}", class: "space-y-4",
                         ghinvite_ui::csrf::CsrfField {}
                         input { r#type: "hidden", name: "operation_id", value: "{id}" }
-                        label { r#for: "justification", "Justification" }
-                        textarea { id: "justification", name: "justification", readonly: mode == FormMode::Retry, "{justification}" }
-                        button { r#type: "submit", if mode == FormMode::Retry { "Retry same attempt" } else { "Submit request" } }
+                        ghinvite_ui::invitation::JustificationField {
+                            value: justification.clone(), readonly: mode == FormMode::Retry,
+                            max_bytes: Some(ghinvite_core::admission::MAX_JUSTIFICATION_BYTES),
+                            error: if mode == FormMode::Validation { ghinvite_ui::request_form::justification_error(&justification) } else { None },
+                        }
+                        div { class: "card-actions justify-end",
+                            button { r#type: "submit", class: "btn btn-primary", if mode == FormMode::Retry { "Retry same attempt" } else { "Submit request" } }
+                        }
                     }
                 }
                 if let Some(original) = &original {
-                    a { href: "{original}", "Recover original attempt / Check again" }
-                    a { href: "{original}&fresh=true", "Start a fresh attempt with edited input" }
+                    div { class: "flex flex-wrap gap-3",
+                        a { class: "btn btn-outline", href: "{original}", "Recover original attempt / Check again" }
+                        if page.as_ref().is_some_and(|page| page.can_start_fresh) {
+                            a { class: "link", href: "{original}&fresh=true", "Start a fresh attempt with edited input" }
+                        }
+                    }
                 }
-                p { "Keep the attempt URL to recover it after signing in again. Opening this invitation link also recovers your latest attempt." }
+                p { class: "text-sm leading-6 text-base-content/70", "Keep the attempt URL to recover it after signing in again. Opening this invitation link also recovers your latest attempt." }
+                }
             }
         }
     });

@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub const MAX_JUSTIFICATION_BYTES: usize = 16_384;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 pub struct AdmissionOperationId(RequestId);
@@ -91,6 +93,10 @@ pub struct RequesterPage {
     pub repos: Vec<InvitationLinkRepo>,
     pub permission: Permission,
     pub approval_required: bool,
+    /// Advisory only: current link guardrails and requester suppression permit
+    /// a fresh attempt. Missing on older responses means do not offer a form.
+    #[serde(default)]
+    pub can_start_fresh: bool,
     pub attempt: Option<Attempt>,
     pub request: Option<crate::storage::projection::RequestSnapshot>,
 }

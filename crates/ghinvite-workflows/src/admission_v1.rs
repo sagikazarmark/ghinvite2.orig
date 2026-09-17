@@ -731,7 +731,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             || input
                 .justification
                 .as_ref()
-                .is_some_and(|s| s.len() > 16_384)
+                .is_some_and(|s| s.len() > ghinvite_core::admission::MAX_JUSTIFICATION_BYTES)
         {
             return Err(invalid());
         }
@@ -820,16 +820,17 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                 return Err(missing());
             }
         }
+        let blocker_id = ctx
+            .get::<Json<RequestId>>(&format!("v1/blocker/{}", query.requester_id))
+            .await?
+            .map(|v| v.0);
         let request_id = match attempt
             .as_ref()
             .and_then(|a| a.receipt.as_ref())
             .map(|r| &r.result)
         {
             Some(AdmissionResult::Accepted { request_id, .. }) => Some(*request_id),
-            _ => ctx
-                .get::<Json<RequestId>>(&format!("v1/blocker/{}", query.requester_id))
-                .await?
-                .map(|v| v.0),
+            _ => blocker_id,
         };
         let request = if let Some(id) = request_id {
             let Json(request) = ctx
@@ -847,12 +848,30 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         } else {
             None
         };
+        // An old receipt can name a terminal request while a newer request
+        // blocks admission. Keep receipt recovery separate from fresh eligibility.
+        let blocker = if blocker_id == request_id {
+            request.clone()
+        } else if let Some(id) = blocker_id {
+            let Json(blocker) = ctx
+                .get::<Json<RequestSnapshot>>(&format!("v1/request/{id}"))
+                .await?
+                .ok_or_else(missing)?;
+            Some(self.transition(&ctx, blocker, None).await?)
+        } else {
+            None
+        };
+        let can_start_fresh = local_rejection(&link, blocker.as_ref(), self.now()).is_none();
+        if !can_start_fresh && attempt.is_none() && request.is_none() {
+            return Err(missing());
+        }
         Ok(Json(RequesterPage {
             link_id: link.link_id,
             invitation_code: link.invitation_code,
             repos: link.creation.repos,
             permission: link.creation.permission,
             approval_required: link.creation.approval_required,
+            can_start_fresh,
             attempt,
             request,
         }))
@@ -1102,7 +1121,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         if input
             .justification
             .as_ref()
-            .is_some_and(|s| s.len() > 16_384)
+            .is_some_and(|s| s.len() > ghinvite_core::admission::MAX_JUSTIFICATION_BYTES)
         {
             return Err(invalid());
         }

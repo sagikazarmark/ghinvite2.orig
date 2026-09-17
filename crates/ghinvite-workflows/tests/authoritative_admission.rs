@@ -632,6 +632,7 @@ async fn authoritative_admission_contract() {
         let page = browser.lookup(code, 501, None).await.unwrap();
         assert_eq!(page.link_id.to_string(), id);
         assert!(page.attempt.is_none());
+        assert!(page.can_start_fresh);
         let operation = ghinvite_core::RequestId::new().to_string();
         let command = browser
             .command(page.link_id, &operation, 501, Some("  access  ".into()))
@@ -675,6 +676,13 @@ async fn authoritative_admission_contract() {
         browser.prepare(retry.clone()).await.unwrap();
         // Discard the first acknowledgement, then navigate back after revoke.
         let accepted = browser.admit(retry.clone()).await.unwrap();
+        assert!(
+            !browser
+                .lookup(&retry_link.invitation_code, 601, None)
+                .await
+                .unwrap()
+                .can_start_fresh
+        );
         browser
             .revoke(ghinvite_core::admission::AdminLinkCommand {
                 link_id: retry_link.link_id,
@@ -689,7 +697,12 @@ async fn authoritative_admission_contract() {
             .lookup(&retry_link.invitation_code, 601, None)
             .await
             .unwrap();
+        assert!(!recovered.can_start_fresh);
         assert_eq!(recovered.attempt.unwrap().receipt.unwrap(), accepted);
+        assert!(matches!(
+            browser.lookup(&retry_link.invitation_code, 602, None).await,
+            Err(ghinvite_web::WebError::NotFound)
+        ));
         let changed = browser
             .command(
                 retry_link.link_id,

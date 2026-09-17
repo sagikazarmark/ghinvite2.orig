@@ -25,6 +25,7 @@ pub mod link_form;
 pub mod link_list;
 pub mod links;
 pub mod not_found;
+pub mod request_form;
 pub mod requests;
 pub mod settings;
 

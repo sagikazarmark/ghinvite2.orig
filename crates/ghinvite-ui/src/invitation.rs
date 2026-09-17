@@ -20,7 +20,84 @@ fn permission_label(p: Permission) -> &'static str {
 
 /// How often the pending invitation request page reloads itself while waiting
 /// for an account-admin decision. Manual "Check again" remains as fallback.
-const PENDING_REFRESH_SECONDS: u32 = 20;
+pub const PENDING_REFRESH_SECONDS: u32 = 20;
+
+#[component]
+pub fn IdentityConfirmation(login: String, return_to: String) -> Element {
+    rsx! {
+        div { class: "alert alert-info",
+            div {
+                "Signed in as "
+                strong { "@{login}" }
+                ". Not you? "
+                form { method: "post", action: "/logout",
+                    crate::csrf::CsrfField {}
+                    input { r#type: "hidden", name: "return_to", value: "{return_to}" }
+                    button { r#type: "submit", class: "link", "Sign out and sign in again." }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn AccessSummary(
+    permission: Permission,
+    repos: Vec<ghinvite_core::InvitationLinkRepo>,
+    approval_required: bool,
+) -> Element {
+    let label = permission_label(permission);
+    rsx! {
+        div { class: "space-y-3",
+            span { class: "badge badge-neutral", "Permission: {label}" }
+            ul { class: "space-y-2",
+                for repo in &repos {
+                    li { class: "rounded-box bg-base-200 px-3 py-2 break-all",
+                        span { class: "font-mono text-sm", "{repo.repo_full_name}" }
+                    }
+                }
+            }
+            p { class: "text-sm leading-6 text-base-content/70",
+                if approval_required {
+                    "Account admins review your request before access is approved."
+                } else {
+                    "Requests are automatically approved by this invitation link's policy. Approval does not guarantee GitHub invitation delivery."
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn JustificationField(
+    value: String,
+    #[props(default)] readonly: bool,
+    error: Option<String>,
+    max_bytes: Option<usize>,
+) -> Element {
+    rsx! {
+        div { class: "form-control gap-2",
+            label { class: "label", r#for: "justification", span { class: "label-text font-medium", "Justification" } }
+            textarea {
+                id: "justification", name: "justification",
+                class: "textarea textarea-bordered min-h-28 w-full",
+                placeholder: "Share useful context for the account admins.", rows: "4",
+                readonly, aria_invalid: if error.is_some() { "true" } else { "false" },
+                aria_describedby: if error.is_some() { "justification-help justification-error" } else { "justification-help" },
+                "{value}"
+            }
+            p { id: "justification-help", class: "text-sm text-base-content/70",
+                "Optional, visible to account admins."
+                if let Some(limit) = max_bytes {
+                    " Maximum {limit} UTF-8 bytes; non-ASCII characters may use multiple bytes."
+                }
+            }
+            if let Some(error) = &error {
+                p { id: "justification-error", class: "text-sm text-error", "{error}" }
+            }
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestPageProps {
@@ -60,7 +137,6 @@ fn retry_notice_copy(state: RequestState) -> Option<&'static str> {
 pub fn RequestPage(props: RequestPageProps) -> Element {
     let slug = props.slug.clone();
     let login = props.signed_in_login.clone();
-    let perm_label = permission_label(props.link.permission);
     let action = format!("/i/{slug}");
     let check_href = format!("/i/{slug}");
     let request_id = props.request_id.clone();
@@ -91,15 +167,6 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
             }
         },
     };
-
-    let repos_view = props.link.repos.iter().map(|r| {
-        let name = r.repo_full_name.clone();
-        rsx! {
-            li { class: "flex items-center justify-between gap-3 rounded-box bg-base-200 px-3 py-2",
-                span { class: "font-mono text-sm", "{name}" }
-            }
-        }
-    });
 
     let content = match props.current_status {
         Some(RequestState::Pending) => rsx! {
@@ -147,22 +214,9 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                 }
                 {flash_view}
                 {retry_notice_view}
-                div { class: "alert alert-info",
-                    span {
-                        "Signed in as "
-                        strong { "@{login}" }
-                        ". Not you? "
-                        form { method: "post", action: "/logout",
-                            crate::csrf::CsrfField {}
-                            button { r#type: "submit", class: "link", "Sign out and sign in again." }
-                        }
-                    }
-                }
-                div { class: "space-y-3",
-                    div { class: "flex flex-wrap items-center gap-2",
-                        span { class: "badge badge-neutral", "Permission: {perm_label}" }
-                    }
-                    ul { class: "space-y-2", {repos_view} }
+                IdentityConfirmation { login: login.clone(), return_to: action.clone() }
+                AccessSummary {
+                    permission: props.link.permission, repos: props.link.repos.clone(), approval_required: props.link.approval_required,
                 }
                 form {
                     method: "post",
@@ -174,18 +228,7 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                         name: "request_id",
                         value: "{request_id}",
                     }
-                    div { class: "form-control gap-2",
-                        label { class: "label", r#for: "justification", span { class: "label-text font-medium", "Justification" } }
-                        textarea {
-                            id: "justification",
-                            name: "justification",
-                            class: "textarea textarea-bordered min-h-28 w-full",
-                            placeholder: "Share useful context for the account admins.",
-                            rows: "4",
-                            "{props.justification}"
-                        }
-                        p { class: "text-sm text-base-content/70", "Optional, visible to account admins." }
-                    }
+                    JustificationField { value: props.justification.clone(), error: None }
                     div { class: "card-actions justify-end",
                         button {
                             r#type: "submit",

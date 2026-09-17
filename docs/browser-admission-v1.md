@@ -35,7 +35,12 @@ attempt URL. No SQL link/request row is needed.
 
 Unknown-result forms retain normalized input and ID, make the original text
 read-only, and offer **Retry same attempt**, **Recover original attempt**, and
-**Start a fresh attempt with edited input**. The fresh form explicitly allocates a
+**Start a fresh attempt with edited input** when an authoritative page read
+confirms fresh eligibility. Pending/approved suppression and inactive links hide
+that action, including direct `fresh=true` navigation. During an outage only
+same-attempt recovery is offered. If preparation never reached ingress, a separate
+current-page lookup restores the fresh action once authority is available again.
+The fresh form explicitly allocates a
 new ID and retains a link to the exact original, including across tabs. Before
 contacting ingress, the web caller explicitly saves normalized input in a separate
 protected session-backend record keyed by session, user, code and operation. These
@@ -60,6 +65,21 @@ No acceptance is claimed for locally saved or prepared input.
 No v1 browser mutation uses a queued-send acknowledgement as success. Accepted
 admission is not proof of approval or GitHub delivery. Lists/audit remain eventual.
 All pages retain session authentication, CSRF, private/no-store and native forms.
+
+The shared confirmation components show GitHub identity, repository scope,
+permission, approval policy and optional justification guidance. Wrong-account
+sign-out returns to the account-neutral invitation URL; receipt URLs remain
+available for their owning requester. Oversized justification is redisplayed with
+an associated editable field error without allocating a replacement operation.
+Pending current status reloads every 20 seconds through native meta refresh and
+provides manual recovery; terminal status stops automatic refresh.
+
+`requester_page.can_start_fresh` is advisory, derived from authoritative link
+guardrails and the requester's current blocker (even when recovering an older
+receipt). Older responses missing this field default to false. Fresh inactive
+visits return the generic invitation-flow 404; existing authorized attempts and
+requests remain recoverable. Submission still reaches the replay lookup before
+admission eligibility, independently of page-time hints.
 
 ## Link routing and account admins
 

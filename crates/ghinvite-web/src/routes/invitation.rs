@@ -33,7 +33,9 @@ pub fn router() -> Router<AppState> {
         .route("/i/{slug}/{*rest}", any(unknown_nested))
 }
 
-fn invitation_not_found_response(session: &session::Session) -> axum::response::Response {
+pub(super) fn invitation_not_found_response(
+    session: &session::Session,
+) -> axum::response::Response {
     let signed_in_login = Some(session.login.clone());
     let html = render(session.csrf_token.clone(), move || {
         rsx! {
