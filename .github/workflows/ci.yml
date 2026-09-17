@@ -132,6 +132,9 @@ jobs:
       - name: Authoritative admission browser regressions
         working-directory: tests/browser
         run: npx playwright test --config admission.config.mjs
+      - name: Document shell browser regressions
+        working-directory: tests/browser
+        run: npx playwright test --config document.config.mjs
       - name: Browser failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

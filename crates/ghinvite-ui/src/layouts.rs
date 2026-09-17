@@ -23,14 +23,29 @@ pub struct LayoutProps {
     pub children: Element,
 }
 
+/// The `<head>` every layout renders: the page title, the mobile viewport (so
+/// phones lay out at the device width rather than the 980px desktop default),
+/// the built stylesheet, and the shared `/static/app.js` bundle — loaded
+/// synchronously so theme sync runs before first paint.
 #[component]
-pub fn HomeLayout(props: LayoutProps) -> Element {
+fn DocumentHead(title: String, refresh_seconds: Option<u32>) -> Element {
     rsx! {
         head {
-            title { "{props.title}" }
+            title { "{title}" }
+            meta { name: "viewport", content: "width=device-width, initial-scale=1" }
+            if let Some(seconds) = refresh_seconds {
+                meta { http_equiv: "refresh", content: "{seconds}" }
+            }
             link { rel: "stylesheet", href: "/static/styles.css" }
             AppScript {}
         }
+    }
+}
+
+#[component]
+pub fn HomeLayout(props: LayoutProps) -> Element {
+    rsx! {
+        DocumentHead { title: props.title.clone() }
         body {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
@@ -72,12 +87,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
     };
 
     rsx! {
-        head {
-            title { "{props.title}" }
-            meta { name: "viewport", content: "width=device-width, initial-scale=1" }
-            link { rel: "stylesheet", href: "/static/styles.css" }
-            AppScript {}
-        }
+        DocumentHead { title: props.title.clone() }
         body {
             class: "console-page min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
@@ -133,14 +143,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
 #[component]
 pub fn InvitationLayout(props: LayoutProps) -> Element {
     rsx! {
-        head {
-            title { "{props.title}" }
-            if let Some(seconds) = props.refresh_seconds {
-                meta { http_equiv: "refresh", content: "{seconds}" }
-            }
-            link { rel: "stylesheet", href: "/static/styles.css" }
-            AppScript {}
-        }
+        DocumentHead { title: props.title.clone(), refresh_seconds: props.refresh_seconds }
         body {
             class: "min-h-screen bg-base-200 text-base-content antialiased",
             "data-theme": "ghinvite",
@@ -166,6 +169,19 @@ mod tests {
     use super::*;
 
     const APP_SCRIPT_TAG: &str = "<script src=\"/static/app.js\"></script>";
+    const VIEWPORT_TAG: &str =
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/>";
+
+    /// Phones must lay the page out at the device width instead of the 980px
+    /// desktop viewport browsers assume when the meta is missing.
+    fn assert_head_declares_the_mobile_viewport(html: &str) {
+        let head = html
+            .split_once("</head>")
+            .expect("layout renders a <head>")
+            .0;
+        assert!(head.contains(VIEWPORT_TAG), "missing {VIEWPORT_TAG}");
+        assert_eq!(html.matches("name=\"viewport\"").count(), 1);
+    }
 
     /// The shared bundle is loaded once, synchronously, from `<head>` (so theme
     /// sync runs before first paint) and no inline `<script>` body is rendered.
@@ -201,6 +217,7 @@ mod tests {
         });
 
         assert_head_loads_app_script_only(&html);
+        assert_head_declares_the_mobile_viewport(&html);
         assert!(html.contains("theme-toggle"));
     }
 
@@ -220,13 +237,7 @@ mod tests {
         });
 
         assert_head_loads_app_script_only(&html);
-        let head = html.split_once("</head>").unwrap().0;
-        assert_eq!(html.matches("name=\"viewport\"").count(), 1);
-        assert!(
-            head.contains(
-                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\""
-            )
-        );
+        assert_head_declares_the_mobile_viewport(&html);
     }
 
     #[test]
@@ -245,6 +256,7 @@ mod tests {
         });
 
         assert_head_loads_app_script_only(&html);
+        assert_head_declares_the_mobile_viewport(&html);
     }
 
     #[test]

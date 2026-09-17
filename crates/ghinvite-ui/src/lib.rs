@@ -15,6 +15,7 @@
 pub mod audit;
 pub mod components;
 pub mod console;
+pub mod document;
 pub mod field;
 pub mod flash;
 pub mod home;

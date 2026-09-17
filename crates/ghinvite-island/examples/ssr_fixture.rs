@@ -113,7 +113,10 @@ fn main() {
         std::env::var("GHINVITE_FIXTURE_CSRF").ok(),
     ));
     vdom.rebuild_in_place();
-    println!("{}", dioxus_ssr::render(&vdom));
+    println!(
+        "{}",
+        ghinvite_ui::document::document_shell(&dioxus_ssr::render(&vdom))
+    );
 }
 
 /// Synthetic response payloads exercise rejection transport, not domain rules.

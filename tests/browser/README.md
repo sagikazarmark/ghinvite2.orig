@@ -8,6 +8,11 @@ and FieldErrors for max use and expiration; and the real browser island.
 There is no substitute UI, mock island, or test-only CSS.
 The local Node server requires no GitHub login, database, Worker, or Restate.
 
+Two further suites run against their own configs and servers: authoritative
+admission (`admission.config.mjs`, see `docs/browser-admission-v1.md`) and the
+document shell (`document.config.mjs`, described at the end of this file).
+Everything between here and **Document Shell** is about the invitation link form.
+
 ## Run
 
 Requirements: Node.js 20+, the repo's Rust toolchain with the
@@ -219,9 +224,50 @@ Important boundaries:
   not a full WCAG/contrast audit. Layout uses geometric assertions rather than
   platform-dependent pixel snapshots. Failure screenshots/traces support review.
 
+## Document Shell
+
+`document.spec.mjs` (`--config document.config.mjs`) covers a separate question:
+whether each page is a single standards-mode document that a phone lays out at
+the device width. Quirks mode and the layout viewport are decided by the engine,
+not by the markup, so they cannot be asserted in Rust. The markup itself is
+pinned by `crates/ghinvite-web/tests/document_shell.rs`, which drives the same
+pages through the router in-process.
+
+```bash
+npm exec --prefix tests/browser -- playwright test --config document.config.mjs
+npm exec --prefix tests/browser -- playwright test --config document.config.mjs --project=mobile
+```
+
+The server is the production axum router, served by the `#[ignore]`d
+`document_browser_server` test on `127.0.0.1:4175` over in-memory storage — real
+routes, sessions, CSP, CSS, and `/static/app.js`, no island bundle, GitHub
+account, Worker, or Restate. `/fixture-login` sets the signed-in session cookie
+and redirects to `/`; a context that never visits it stays signed out. GitHub
+reads are answered by a stub transport rather than a one-response-per-call
+script, because a browsing session repeats them.
+
+Covered documents: signed-out and signed-in home, the account picker, the
+invitation request form, its status and its not-found page, and the Console
+overview, link list, link detail, link edit, pending requests, audit log,
+settings, and not-found pages. Each is checked for standards mode
+(`document.compatMode`), `lang`, exactly one `html`/`head`/`body` and one
+viewport meta, a layout viewport matching the device width rather than the 980px
+desktop default, and no horizontal overflow — at 390 x 844 (mobile Chromium with
+`isMobile`/`hasTouch`) and 1440 x 1000. The two invitation request documents are
+the same route, so one test separates them: the form offers **Submit request**,
+and the pending status page shows **Awaiting review** and keeps the meta refresh
+that reloads it.
+
+Two documents are deliberately not repeated here, because both render through a
+layout this suite already covers: the new invitation link page, which has its own
+suite above, and the requester pages under authoritative admission, which the
+admission suite drives in a browser (including their meta refresh).
+
 ## CI
 
 The existing **Island bundle** job builds the real island once, builds production
 CSS, installs the lockfile-pinned Playwright/Chromium version, and runs all four
 projects. It uploads HTML reports, screenshots, and traces on failure. Two workers
 and one CI retry limit resource contention while retaining failure diagnostics.
+The same job then runs the admission and document-shell suites, which need no
+island bundle.
