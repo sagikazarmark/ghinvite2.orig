@@ -77,6 +77,20 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     faults
         .lose_projection_ack
         .store(true, std::sync::atomic::Ordering::SeqCst);
+    use ghinvite_workflows::{github_invitation::GithubInvitation as _, reconcile::Reconcile as _};
+    let builder = builder
+        .bind(
+            ghinvite_workflows::github_invitation::GithubInvitationImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        )
+        .bind(
+            ghinvite_workflows::reconcile::ReconcileImpl {
+                state: state.clone(),
+            }
+            .serve(),
+        );
     let endpoint =
         ghinvite_workflows::delivery_v1::bind_with_faults(builder, state, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -845,6 +859,26 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(rejected["outcome"]["kind"], "blocked");
+    let sweep = client
+        .post(format!("{ingress}/Reconcile/daily_run_v1"))
+        .json(&json!({"at":chrono::Utc::now()}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        sweep.status().is_success(),
+        "{}",
+        sweep.text().await.unwrap()
+    );
+    assert_eq!(
+        storage
+            .get_github_invitation(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Sending
+    );
     let resumed: Value = call("GithubCreateV1", id.into(), "create", command.clone())
         .send()
         .await
@@ -853,6 +887,88 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(resumed["outcome"]["kind"], "created");
+    let sent = storage
+        .get_github_invitation(id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sent.github_invitation_id,
+        resumed["outcome"]["upstream_id"].as_u64()
+    );
+    // Retained delayed evidence arrives after webhook settlement. Real SQL audit
+    // failure keeps the public command retrying; the eventual commit is atomic.
+    storage.debug_set_audit_failure(true).await.unwrap();
+    let response = call(
+        "GithubInvitation",
+        id.into(),
+        "on_webhook_v1/send",
+        json!({"invitation_id":id,"action":"accepted","at":chrono::Utc::now()}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
+    let invocation: Value = response.json().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        storage
+            .get_github_invitation(sent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Sent
+    );
+    storage.debug_set_audit_failure(false).await.unwrap();
+    let attached = client
+        .get(format!(
+            "{ingress}/restate/invocation/{}/attach",
+            invocation["invocationId"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        attached.status().is_success(),
+        "{}",
+        attached.text().await.unwrap()
+    );
+    let evidence = json!({"expected":sent,"accepted":false,"at":chrono::Utc::now()});
+    let (a, b) = tokio::join!(
+        call(
+            "GithubInvitation",
+            id.into(),
+            "reconcile_v1",
+            evidence.clone()
+        )
+        .send(),
+        call("GithubInvitation", id.into(), "reconcile_v1", evidence).send()
+    );
+    assert!(a.unwrap().status().is_success());
+    assert!(b.unwrap().status().is_success());
+    assert_eq!(
+        storage
+            .get_github_invitation(sent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Accepted
+    );
+    let events = storage
+        .list_audit_events(
+            100,
+            Some(ghinvite_core::audit::EventType::InvitationAccepted),
+            ghinvite_core::storage::AuditPosition::Latest,
+        )
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        events.iter().filter(|event| event.target_id == id).count(),
+        1
+    );
     assert_eq!(
         storage
             .get_github_invitation(id.parse().unwrap())
@@ -860,7 +976,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap()
             .unwrap()
             .state,
-        ghinvite_core::InvitationState::Sent
+        ghinvite_core::InvitationState::Accepted
     );
     let calls: Value = client
         .get(format!("{base}/calls"))

@@ -145,9 +145,13 @@ an initialized link. Reconcile unresolved links **before** beginning their impor
 Start the **new native** workflows binary with
 `GHINVITE_ADMISSION_MODE=authoritative` at a new URL and register it. This binds
 the v1 authority/projector/lifecycle/delivery services and legacy contract tombstones.
-New legacy link commands, request submit/decision, and GitHub create return 410.
-Existing GitHub webhook/cancel/expiry and installation ownership remain available
-through their current contracts once the maintenance gate is lifted.
+New legacy link commands, request submit/decision, GitHub create, and unversioned
+GitHub settlement/sweep calls return 410. Before lifting maintenance, complete
+the [GitHub invitation settlement cutover](invitation-settlement.md#deployment-and-pinned-invocations):
+drain pinned legacy work on its original deployment or isolate and reconcile it,
+apply migration 0006, deploy the `on_webhook_v1` caller, and move cancellation,
+expiration, and scheduled reconciliation to their versioned handlers. Installation
+ownership remains available through its current contracts.
 
 ```sh
 python3 scripts/admission-cutover.py adopt-projections --database legacy.db --manifest prepared.json

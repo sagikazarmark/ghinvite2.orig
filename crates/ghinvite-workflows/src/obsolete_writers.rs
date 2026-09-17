@@ -65,6 +65,34 @@ impl InvitationRequest for Obsolete {
 pub struct GithubLifecycle(pub crate::AppState);
 use crate::github_invitation::*;
 impl GithubInvitation for GithubLifecycle {
+    async fn reconcile_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::settlement_v1::ReconcileEvidence>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement_v1::reconcile(&self.0, ctx, input).await
+    }
+    async fn on_webhook_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<OnWebhookInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement_v1::webhook(&self.0, ctx, input).await
+    }
+    async fn cancel_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<CancelInvitationInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement_v1::cancel(&self.0, ctx, input).await
+    }
+    async fn tick_expire_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<TickExpireInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement_v1::expire(&self.0, ctx, input).await
+    }
     async fn create(
         &self,
         _: ObjectContext<'_>,
@@ -74,35 +102,45 @@ impl GithubInvitation for GithubLifecycle {
     }
     async fn on_webhook(
         &self,
-        ctx: ObjectContext<'_>,
-        input: Json<OnWebhookInput>,
+        _: ObjectContext<'_>,
+        _: Json<OnWebhookInput>,
     ) -> Result<(), TerminalError> {
-        GithubInvitationImpl {
-            state: self.0.clone(),
-        }
-        .on_webhook(ctx, input)
-        .await
+        Err(TerminalError::new_with_code(410, "use on_webhook_v1"))
     }
     async fn cancel(
         &self,
-        ctx: ObjectContext<'_>,
-        input: Json<CancelInvitationInput>,
+        _: ObjectContext<'_>,
+        _: Json<CancelInvitationInput>,
     ) -> Result<(), TerminalError> {
-        GithubInvitationImpl {
-            state: self.0.clone(),
-        }
-        .cancel(ctx, input)
-        .await
+        Err(TerminalError::new_with_code(410, "use cancel_v1"))
     }
     async fn tick_expire(
         &self,
-        ctx: ObjectContext<'_>,
-        input: Json<TickExpireInput>,
+        _: ObjectContext<'_>,
+        _: Json<TickExpireInput>,
     ) -> Result<(), TerminalError> {
-        GithubInvitationImpl {
+        Err(TerminalError::new_with_code(410, "use tick_expire_v1"))
+    }
+}
+
+pub struct ReconcileLifecycle(pub crate::AppState);
+impl crate::reconcile::Reconcile for ReconcileLifecycle {
+    async fn daily_run(
+        &self,
+        _: restate_sdk::context::Context<'_>,
+        _: Json<crate::reconcile::DailyRunInput>,
+    ) -> Result<(), TerminalError> {
+        Err(TerminalError::new_with_code(410, "use daily_run_v1"))
+    }
+    async fn daily_run_v1(
+        &self,
+        ctx: restate_sdk::context::Context<'_>,
+        input: Json<crate::reconcile::DailyRunInput>,
+    ) -> Result<(), TerminalError> {
+        crate::reconcile::ReconcileImpl {
             state: self.0.clone(),
         }
-        .tick_expire(ctx, input)
+        .daily_run_v1(ctx, input)
         .await
     }
 }

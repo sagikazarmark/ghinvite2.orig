@@ -241,7 +241,7 @@ where
             .send(
                 "GithubInvitation",
                 &command.invitation_id.to_string(),
-                "on_webhook",
+                "on_webhook_v1",
                 &command,
             )
             .await
@@ -2055,7 +2055,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].service, "GithubInvitation");
         assert_eq!(calls[0].key, accepted_id.to_string());
-        assert_eq!(calls[0].method, "on_webhook");
+        assert_eq!(calls[0].method, "on_webhook_v1");
         assert!(calls[0].send);
         assert_eq!(calls[0].body["action"], "accepted");
         assert_eq!(calls[1].body["action"], "declined");

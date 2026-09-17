@@ -65,6 +65,15 @@ fn repository_identity(full_name: &str) -> crate::error::Result<RepositoryIdenti
 
 #[restate_sdk::object]
 pub trait GithubInvitation {
+    async fn reconcile_v1(
+        input: Json<crate::settlement_v1::ReconcileEvidence>,
+    ) -> std::result::Result<(), TerminalError>;
+    async fn on_webhook_v1(input: Json<OnWebhookInput>) -> std::result::Result<(), TerminalError>;
+    async fn cancel_v1(
+        input: Json<CancelInvitationInput>,
+    ) -> std::result::Result<(), TerminalError>;
+    async fn tick_expire_v1(input: Json<TickExpireInput>)
+    -> std::result::Result<(), TerminalError>;
     async fn create(input: Json<CreateInvitationInput>) -> std::result::Result<(), TerminalError>;
     async fn on_webhook(input: Json<OnWebhookInput>) -> std::result::Result<(), TerminalError>;
     async fn cancel(input: Json<CancelInvitationInput>) -> std::result::Result<(), TerminalError>;
@@ -76,6 +85,34 @@ pub struct GithubInvitationImpl {
 }
 
 impl GithubInvitation for GithubInvitationImpl {
+    async fn reconcile_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::settlement_v1::ReconcileEvidence>,
+    ) -> std::result::Result<(), TerminalError> {
+        crate::settlement_v1::reconcile(&self.state, ctx, input).await
+    }
+    async fn on_webhook_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<OnWebhookInput>,
+    ) -> std::result::Result<(), TerminalError> {
+        crate::settlement_v1::webhook(&self.state, ctx, input).await
+    }
+    async fn cancel_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<CancelInvitationInput>,
+    ) -> std::result::Result<(), TerminalError> {
+        crate::settlement_v1::cancel(&self.state, ctx, input).await
+    }
+    async fn tick_expire_v1(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<TickExpireInput>,
+    ) -> std::result::Result<(), TerminalError> {
+        crate::settlement_v1::expire(&self.state, ctx, input).await
+    }
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
