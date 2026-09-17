@@ -3,7 +3,9 @@ import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: '.',
   testMatch: '*.spec.mjs',
-  testIgnore: 'admission.spec.mjs',
+  // Specs with their own config and fixture server. They would fail here:
+  // `server.mjs` serves the invitation link form, not the routers they drive.
+  testIgnore: ['admission.spec.mjs', 'document.spec.mjs'],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
