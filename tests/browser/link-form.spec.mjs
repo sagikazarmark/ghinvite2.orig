@@ -876,27 +876,57 @@ test('delayed bundle keeps a numeric guardrail cleared when the browser could di
   expect(data.get('max_uses')).toBe('7');
 });
 
-test('a form the island does not recognize is left in place rather than replaced', async ({ page }) => {
-  const errors = [];
-  page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+test('delayed bundle keeps a typed numeric guardrail the typed model cannot hold', async ({ page }) => {
+  // A fresh form the server never rejected: `0` only exists in the DOM, and
+  // the typed model maps it to None, so without raw restoration the island
+  // would blank it into "unlimited" — a guardrail nobody chose.
   const release = await openDelayed(page);
-  await page.locator('#description').fill('Unrecognized markup workshop');
+  await page.locator('#description').fill('Zero workshop');
   await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
-  // A control the snapshot cannot read means this is not the form the island
-  // renders, so a half-read takeover must not replace the admin's work.
-  await page.locator('#permission').evaluate((select) => select.remove());
+  await page.locator('#max_uses').fill('0');
   release();
+  await expectMounted(page);
 
-  // The island declines out loud, which is also how the test knows it ran.
-  await expect.poll(() => errors.join('\n')).toContain('ghinvite-island: not mounting');
-  await expect(page.locator('#link-form-island')).not.toHaveAttribute('data-island', 'mounted');
-  await expectUsableForm(page);
-  await expect(page.locator('#description')).toHaveValue('Unrecognized markup workshop');
-  await expect(page.getByRole('checkbox', { name: 'acme/api', exact: true })).toBeChecked();
+  await expectNumeric(page, numericFields[0], '0', numericFields[0].invalid);
+  const posts = [];
+  page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
+  await submit(page).click();
+  await expect(page.locator('#max_uses-error')).toHaveText(numericFields[0].invalid);
+  expect(posts).toEqual([]);
+
+  // And it is still correctable, submitting what the admin actually chose.
+  await page.locator('#max_uses').fill('7');
   const data = await post(page);
-  expect(data.get('description')).toBe('Unrecognized markup workshop');
-  expect(data.getAll('repo_ids')).toEqual(['10']);
+  expect(data.get('max_uses')).toBe('7');
 });
+
+for (const [name, mutate] of [
+  ['a missing control', (page) => page.locator('#permission').evaluate((select) => select.remove())],
+  ['a repository checkbox the island did not render',
+    (page) => page.locator('[name="repo_ids"][value="11"]').evaluate((box) => box.remove())],
+]) {
+  test(`a form the island does not recognize (${name}) is left in place rather than replaced`, async ({ page }) => {
+    const errors = [];
+    page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
+    const release = await openDelayed(page);
+    await page.locator('#description').fill('Unrecognized markup workshop');
+    await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+    // Markup the snapshot cannot read whole means this is not the form the
+    // island renders, so a half-read takeover must not replace the admin's work.
+    await mutate(page);
+    release();
+
+    // The island declines out loud, which is also how the test knows it ran.
+    await expect.poll(() => errors.join('\n')).toContain('ghinvite-island: not mounting');
+    await expect(page.locator('#link-form-island')).not.toHaveAttribute('data-island', 'mounted');
+    await expectUsableForm(page);
+    await expect(page.locator('#description')).toHaveValue('Unrecognized markup workshop');
+    await expect(page.getByRole('checkbox', { name: 'acme/api', exact: true })).toBeChecked();
+    const data = await post(page);
+    expect(data.get('description')).toBe('Unrecognized markup workshop');
+    expect(data.getAll('repo_ids')).toEqual(['10']);
+  });
+}
 
 test('responsive themed form keeps controls reachable and accessibility wiring intact', async ({ page }, testInfo) => {
   await open(page, '/preserved');

@@ -16,11 +16,11 @@
 //!   POST is cancelled only while a known blocker exists (a validation error
 //!   or a numeric field whose text does not parse); otherwise the browser
 //!   POSTs to the existing route exactly as it does without JavaScript;
-//! - failed responses with non-empty errors configure
-//!   `FormConfig::browser_rejection((), …)`: supplied typed values become the
-//!   draft and baseline, and errors show as a prior rejected attempt without
-//!   marking fields touched or starting a fake submission. Mixed client and
-//!   server-only diagnostics survive together; rerenders do not replay them;
+//! - values carrying errors, or numeric text the typed model cannot hold,
+//!   configure `FormConfig::browser_rejection((), …)`: supplied typed values
+//!   become the draft and baseline, and errors show as a prior rejected attempt
+//!   without marking fields touched or starting a fake submission. Mixed client
+//!   and server-only diagnostics survive together; rerenders do not replay them;
 //! - parsed numeric bindings consume invalid raw input from that rejection on
 //!   mount, without simulating input. Related edits clear restored field errors.
 //!   A fresh core preflight retires the rejection and allows an unchanged retry
@@ -28,7 +28,11 @@
 //!   returns before core preflight and retains the rejection until a later
 //!   submit can reach it.
 //!
-//! Invalid numeric raw input is restored only with failed-response errors.
+//! Raw restoration is not gated on the server having rejected anything: the
+//! takeover adopts what the admin typed before the island mounted, so a `0` on
+//! a form the server never saw has to survive too, and `initial_model` would
+//! otherwise blank it into "unlimited". Its parse error is then visible from
+//! the first frame rather than on leaving the field.
 //! Valid noncanonical text such as `"007"` or `" 7 "` still formats as `"7"`
 //! from the typed model; preserving that spelling or first-frame byte parity
 //! for it is not promised. Chromium may display restored `"abc"` as empty,
@@ -182,11 +186,24 @@ fn form_config(props: &LinkFormIslandProps) -> FormConfig<CreateLinkForm> {
     let mut config = FormConfig::new(initial_model(&props.values))
         .validation_mode(ValidationMode::on_commit())
         .register_core(move |core| register_validators(core, &repos, now));
-    if !props.values.errors.is_empty() {
+    if !props.values.errors.is_empty() || has_raw_numeric(&props.values) {
         let values = props.values.clone();
         config = config.browser_rejection((), move |_| browser_rejection(&values));
     }
     config
+}
+
+/// A numeric guardrail whose text the typed model cannot hold.
+///
+/// `initial_model` maps an unparseable guardrail to `None`, so without
+/// restoration the first frame renders it blank — turning "0" into unlimited
+/// and losing the blocker that should stop the POST. That matters even with no
+/// server errors at all, because the takeover adopts what the admin typed
+/// before the island mounted: they may have entered `0` on a form the server
+/// never rejected.
+fn has_raw_numeric(values: &LinkFormValues) -> bool {
+    parse_max_uses(&values.max_uses).is_err()
+        || parse_expires_in_days(&values.expires_in_days).is_err()
 }
 
 /// Preserve commit-on-blur for registry controls, including unchanged fields.
@@ -412,6 +429,36 @@ mod tests {
                         .iter()
                         .any(|error| error.error() == server_error)
                 );
+            },
+        );
+    }
+
+    /// An admin who types `0` before the island mounts must not have it blanked
+    /// into "unlimited". The typed model cannot hold that text, so the raw
+    /// restoration has to run even though the server never rejected anything.
+    #[test]
+    fn raw_numeric_text_survives_mounting_without_any_server_errors() {
+        check_mounted_config(
+            LinkFormValues {
+                description: "Workshop".into(),
+                selected_repo_ids: vec![10],
+                max_uses: "0".into(),
+                ..LinkFormValues::default()
+            },
+            |form, numbers| {
+                assert_eq!(
+                    numbers,
+                    [
+                        ("0".into(), Some(MAX_USES_NOT_POSITIVE.into())),
+                        ("30".into(), None),
+                    ]
+                );
+                assert!(
+                    form.submit_availability()
+                        .contains(SubmitBlocker::ParseErrors)
+                );
+                // No server said anything, so nothing is restored as a message.
+                assert!(form.visible_validation_errors().is_empty());
             },
         );
     }

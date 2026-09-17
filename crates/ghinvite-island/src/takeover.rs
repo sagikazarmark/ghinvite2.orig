@@ -89,13 +89,18 @@ impl ControlText {
 
 /// Whether a browser will show `text` in a `type="number"` input.
 ///
-/// This is HTML's *valid floating-point number* — an optional `-`, one or more
-/// digits, an optional `.` fraction, an optional `e` exponent; no leading `+`,
-/// no surrounding whitespace, no bare `.5` — and deliberately **not**
-/// [`ghinvite_ui::link_form::parse_max_uses`]. The server renders plenty of
-/// numbers the browser displays happily and the domain still rejects (`0`,
-/// `4294967296`); reading those as "the browser emptied this" would silently
-/// undo an admin who cleared the field before the island mounted.
+/// This is HTML's *valid floating-point number*: an optional `-`, then a whole
+/// part, a `.` fraction, or both in that order, then an optional `e` exponent.
+/// So `.5` is displayed (the whole part may be omitted when a fraction
+/// follows) while `5.` is not, and neither is a leading `+` or any surrounding
+/// whitespace. Verified against Chromium, which is what actually empties these
+/// inputs.
+///
+/// Deliberately **not** [`ghinvite_ui::link_form::parse_max_uses`]: the server
+/// renders plenty of numbers the browser displays happily and the domain still
+/// rejects (`0`, `4294967296`), and reading one of those as "the browser
+/// emptied this" would silently undo an admin who cleared the field before the
+/// island mounted.
 fn displayable_number(text: &str) -> bool {
     fn digits(text: &str) -> bool {
         !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
@@ -107,7 +112,8 @@ fn displayable_number(text: &str) -> bool {
         None => (body, None),
     };
     let mantissa = match mantissa.split_once('.') {
-        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        // A fraction needs digits; the whole part before it may be empty.
+        Some((whole, fraction)) => (whole.is_empty() || digits(whole)) && digits(fraction),
         None => digits(mantissa),
     };
     mantissa
@@ -478,14 +484,30 @@ mod tests {
         assert!(adopted.errors.is_empty());
     }
 
+    /// The two lists were checked against Chromium: each string was set as a
+    /// number input's `value` attribute, and the ones below kept it.
     #[test]
     fn displayable_numbers_are_htmls_valid_floating_point_numbers() {
-        for text in ["0", "00", "7", "-5", "1.0", "1e2", "1E+2", "4294967296"] {
-            assert!(displayable_number(text), "{text} is displayable");
+        for text in [
+            "0",
+            "00",
+            "7",
+            "-5",
+            "1.0",
+            "1e2",
+            "1E+2",
+            "4294967296",
+            ".5",
+            "-.5",
+            ".0",
+        ] {
+            assert!(displayable_number(text), "{text:?} is displayable");
         }
         // Everything a browser empties out of a number input on its own.
-        for text in ["", "abc", " 7 ", ".5", "5.", "+5", "1e", "e5", "7px"] {
-            assert!(!displayable_number(text), "{text} is not displayable");
+        for text in [
+            "", "abc", " 7 ", "5.", "1.", ".", "+5", "1e", "e5", "7px", "1.2.3",
+        ] {
+            assert!(!displayable_number(text), "{text:?} is not displayable");
         }
     }
 

@@ -158,9 +158,14 @@ tests; rebuilding SSR at server startup does not rebuild Wasm.
   block progressive submission. `expires_in_days="0"` is rejected by the domain
   but displayable, so clearing it before mounting is kept: the takeover reads
   browser sanitizing from HTML's number rules, not from the domain parser.
-- When a control the snapshot needs is missing, the island declines to mount
-  (logging `ghinvite-island: not mounting`) and the server-rendered form is left
-  in place with the admin's work, rather than replaced from a partial read.
+  A `0` typed into a fresh form the server never rejected survives mounting too,
+  showing its parse error and blocking the POST until it is corrected, rather
+  than being blanked into "unlimited".
+- When the markup is not the form the island renders — a missing control, or a
+  repository scope group offering anything other than the available
+  repositories — the island declines to mount (logging
+  `ghinvite-island: not mounting`) and the server-rendered form is left in place
+  with the admin's work, rather than replaced from a partial read.
 - JavaScript-disabled and bundle-blocked forms remain usable and submit natively.
 - Label clicks, keyboard Space, repeated repository keys, checked approval and
   unchecked omission, and empty optional numbers keep native behavior.

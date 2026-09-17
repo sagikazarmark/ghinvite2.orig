@@ -46,18 +46,22 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    round-trip: an unsupported permission displays as `pull`, and Chromium
    empties a `type="number"` input holding text that is not a number —
    adopting the display would silently repair a model the server rejected.
-   "Not a number" here is HTML's *valid floating-point number* rule, not the
-   shared parsers': the server renders plenty of numbers the browser shows and
-   the domain rejects (`0`, `4294967296`), and clearing one of those before
-   mounting is a real edit that must survive.
+   "Not a number" here is HTML's *valid floating-point number* rule (checked
+   against Chromium, which is what does the emptying — `.5` is displayed, `5.`
+   is not), never the shared parsers': the server renders plenty of numbers the
+   browser shows and the domain rejects (`0`, `4294967296`), and clearing one
+   of those before mounting is a real edit that must survive.
    Each of those two gaps has a floor. An admin who *deliberately* picks `pull`
    over a raw `owner`, or clears a numeric field the browser had already
    emptied, leaves the control exactly as the server rendered it, so the
    takeover reads it as untouched and keeps the raw value and its blocker. The
    form then stays visibly rejected until a distinguishable input corrects it,
    which is the safe direction; the same edit made after mounting is picked up
-   normally. If any control is missing the takeover is abandoned and the usable
-   server-rendered form is left in place.
+   normally. If any control is missing — or the repository scope group offers
+   anything other than exactly the available repositories, in order — the
+   takeover is abandoned and the usable server-rendered form is left in place,
+   because reading part of a form this island did not render would quietly
+   narrow the scope the admin had in front of them.
 3. `dioxus-web`'s non-hydrating mount *appends* to its root, so the entrypoint
    records where focus and the caret sat, empties the container (otherwise two
    forms end up in the DOM — spike finding, #33), then launches and puts focus
@@ -87,10 +91,16 @@ on `dioxus-web`. `ghinvite-ui` owns the markup and the shared form model
    `expires_in_days: "0"`) is attached to that rejection with `raw_field`.
    The parsed bindings consume the restored input when they mount, preserving
    the raw text and parse error without simulating `on_input` or marking the
-   field touched. This restoration is configured only for failed responses
-   with non-empty errors. Chromium sanitises non-numeric text out of a
-   `type="number"` input, so there the field shows empty with the error;
-   the binding still holds the parse blocker.
+   field touched. This is **not** gated on the response having failed: the
+   takeover adopts what the admin typed before the island mounted, so a `0`
+   typed into a form the server never rejected reaches the same code path, and
+   `initial_model` would otherwise blank it into "unlimited" — losing both the
+   guardrail and the blocker that should stop the POST. `browser_rejection` is
+   dioform's only public way to seed raw text, so such a page records one
+   rejected attempt with no errors; the parse error is then visible from the
+   first frame rather than on leaving the field. Chromium sanitises
+   non-numeric text out of a `type="number"` input, so there the field shows
+   empty with the error; the binding still holds the parse blocker.
 7. Errors are folded back into `LinkFormErrors` with the same `attach` the
    server uses (parse errors first, then visible validation errors; summary
    line added on the first attach; form-level messages appended), so the

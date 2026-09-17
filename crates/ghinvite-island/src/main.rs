@@ -55,6 +55,7 @@ mod browser {
     };
     use ghinvite_ui::link_form::{
         CreateLinkForm, LINK_FORM_ISLAND_PROPS_ID, LINK_FORM_ISLAND_ROOT_ID, LinkFormIslandProps,
+        RepositoryChoice,
     };
     use std::cell::Cell;
     use std::rc::Rc;
@@ -96,7 +97,7 @@ mod browser {
         // Read the admin's work before anything is destroyed. A control the
         // takeover cannot find means the markup is not the form this island
         // knows, so the usable server-rendered form is kept as it is.
-        let Some(live) = read_form(&root) else {
+        let Some(live) = read_form(&root, &props.repos) else {
             web_sys::console::error_1(
                 &"ghinvite-island: not mounting, the server-rendered form is not the one this island renders; it stays in place".into(),
             );
@@ -128,13 +129,25 @@ mod browser {
         serde_json::from_str(&text).map_err(|error| format!("props blob is not valid: {error}"))
     }
 
-    /// The form as it stands right now, or `None` if any control is missing.
+    /// The form as it stands right now, or `None` if it is not the form this
+    /// island renders.
     ///
     /// The controls are addressed by the `name`s the shared model derives, so
-    /// the snapshot and the POST keys cannot drift apart.
-    fn read_form(root: &web_sys::Element) -> Option<FormSnapshot> {
+    /// the snapshot and the POST keys cannot drift apart. Every control has to
+    /// be there, the repository checkboxes included: a scope group offering
+    /// anything other than exactly the available repositories, in order, is
+    /// markup this island did not render, and reading a subset of it would
+    /// quietly narrow the scope the admin had in front of them.
+    fn read_form(root: &web_sys::Element, repos: &[RepositoryChoice]) -> Option<FormSnapshot> {
         let fields = CreateLinkForm::fields();
         let checkboxes = query_all(root, &checkbox_selector(fields.repo_ids().field_name()));
+        let offered: Option<Vec<u64>> = checkboxes
+            .iter()
+            .map(|choice| choice.value().parse().ok())
+            .collect();
+        if offered? != repos.iter().map(|repo| repo.id).collect::<Vec<_>>() {
+            return None;
+        }
         Some(FormSnapshot {
             description: input(root, fields.description().field_name())?,
             internal_note: textarea(root, fields.internal_note().field_name())?,
@@ -198,8 +211,8 @@ mod browser {
     }
 
     /// The repository ids of the checkboxes `include` accepts, in DOM order.
-    /// A checkbox whose value is not an id is not one of ours, so it is skipped
-    /// rather than guessed at.
+    /// Every value has already been parsed by [`read_form`], which refuses the
+    /// whole snapshot if one of them is not a repository id.
     fn repo_ids_where(
         checkboxes: &[web_sys::HtmlInputElement],
         include: impl Fn(&web_sys::HtmlInputElement) -> bool,
