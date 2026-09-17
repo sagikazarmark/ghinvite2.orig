@@ -42,6 +42,7 @@ struct LostAdmissionResponse {
     link_id: InvitationLinkId,
     attempts: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
     latest: Arc<Mutex<Option<String>>>,
+    control: Arc<Mutex<(bool, String)>>,
 }
 impl wiremock::Respond for LostAdmissionResponse {
     fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
@@ -77,18 +78,33 @@ impl wiremock::Respond for LostAdmissionResponse {
                 }
             }
             "requester_page" => {
+                let (revoked, status) = self.control.lock().unwrap().clone();
                 let id = body["operation_id"]
                     .as_str()
                     .map(str::to_owned)
                     .or_else(|| self.latest.lock().unwrap().clone());
-                let attempt = id.as_ref().and_then(|id| attempts.get(id));
+                let mut attempt = id.as_ref().and_then(|id| attempts.get(id));
                 if attempt.is_some_and(|a| a["input"]["requester_id"] != body["requester_id"]) {
-                    return ResponseTemplate::new(404);
+                    if !body["operation_id"].is_null() {
+                        return ResponseTemplate::new(404);
+                    }
+                    attempt = None;
                 }
+                let accepted = attempt.is_some_and(|a| !a["receipt"].is_null());
+                let can_start =
+                    !revoked && !(accepted && matches!(status.as_str(), "pending" | "approved"));
+                let current = if accepted {
+                    json!({"request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "link_id": self.link_id, "account_id": 1, "requester_id": body["requester_id"],
+                    "justification": null, "state": status, "admitted_at": "2026-09-14T12:00:00Z",
+                    "decision_deadline": "2026-09-21T12:00:00Z", "revision": 1})
+                } else {
+                    Value::Null
+                };
                 ResponseTemplate::new(200).set_body_json(
                     json!({"link_id": self.link_id, "invitation_code": ACTIVE_SLUG,
                     "repos": [{"repo_id": 1, "repo_full_name": "acme/api"}], "permission": "pull",
-                    "approval_required": true, "attempt": attempt, "request": null}),
+                    "approval_required": true, "can_start_fresh": can_start, "attempt": attempt, "request": current}),
                 )
             }
             _ => ResponseTemplate::new(404),
@@ -97,12 +113,19 @@ impl wiremock::Respond for LostAdmissionResponse {
 }
 
 async fn lost_response_app() -> (axum::Router, wiremock::MockServer) {
+    lost_response_app_with_control(Arc::new(Mutex::new((false, "declined".into())))).await
+}
+
+async fn lost_response_app_with_control(
+    control: Arc<Mutex<(bool, String)>>,
+) -> (axum::Router, wiremock::MockServer) {
     let ingress = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .respond_with(LostAdmissionResponse {
             link_id: InvitationLinkId::new(),
             attempts: Default::default(),
             latest: Default::default(),
+            control,
         })
         .mount(&ingress)
         .await;
@@ -111,10 +134,12 @@ async fn lost_response_app() -> (axum::Router, wiremock::MockServer) {
         .unwrap();
     let state = AppState::new(
         Arc::new(storage),
-        Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
-        ))),
+        Arc::new(MockTransport::scripted(
+            oauth_expectations("octocat", REQUESTER_ID)
+                .into_iter()
+                .chain(oauth_expectations("othercat", REQUESTER_ID + 1))
+                .collect(),
+        )),
         Arc::new(RecordingCommands::default()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     )
@@ -125,6 +150,278 @@ async fn lost_response_app() -> (axum::Router, wiremock::MockServer) {
         build_app(state, tower_sessions::MemoryStore::default()),
         ingress,
     )
+}
+
+#[tokio::test]
+async fn authoritative_form_confirms_identity_and_wrong_account_return_destination() {
+    let (app, _ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = body_text(response).await;
+    assert!(html.contains("Signed in as"));
+    assert!(html.contains("@octocat"));
+    assert!(html.contains("Not you?"));
+    assert!(html.contains("Permission: Read (pull)"));
+    assert!(html.contains("acme/api"));
+    assert!(html.contains("Account admins review your request before access is approved."));
+    assert!(html.contains("Optional, visible to account admins."));
+    assert!(html.contains(&format!("name=\"return_to\" value=\"/i/{ACTIVE_SLUG}\"")));
+    let csrf = common::csrf_token(&app, &cookie).await;
+    for (token, expected) in [
+        ("wrong", StatusCode::FORBIDDEN),
+        (csrf.as_str(), StatusCode::SEE_OTHER),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/logout")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={token}&return_to=%2Fi%2F{ACTIVE_SLUG}"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        if expected == StatusCode::SEE_OTHER {
+            assert_eq!(response.headers()["location"], format!("/i/{ACTIVE_SLUG}"));
+        }
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.headers()["location"],
+        format!(
+            "/login?return_to={}",
+            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
+        )
+    );
+}
+
+#[tokio::test]
+async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
+    use wiremock::{Mock, ResponseTemplate, matchers::path_regex};
+    let (app, ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let id = RequestId::new().to_string();
+    Mock::given(path_regex("/prepare_attempt$"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&ingress)
+        .await;
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={id}&justification=original"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    Mock::given(path_regex("/requester_page$"))
+        .and(wiremock::matchers::body_partial_json(
+            serde_json::json!({"operation_id": id}),
+        ))
+        .respond_with(ResponseTemplate::new(404))
+        .with_priority(1)
+        .mount(&ingress)
+        .await;
+    for fresh in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}&fresh={fresh}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_text(response).await;
+        assert!(html.contains("Start a fresh attempt"));
+        assert!(html.contains(&format!("operation_id={id}")));
+        assert_eq!(html.contains(&format!("value=\"{id}\"")), !fresh);
+        assert_eq!(html.contains("This is a fresh attempt"), fresh);
+    }
+    assert!(
+        ingress
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.path().ends_with("/admit"))
+    );
+}
+
+#[tokio::test]
+async fn pending_authoritative_status_refreshes_until_terminal_without_projection() {
+    let (app, ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    for status in ["pending", "approved", "declined", "expired", "cancelled"] {
+        wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_id": RequestId::new(), "invitation_code": ACTIVE_SLUG, "repos": [], "permission": "pull",
+                "approval_required": true, "can_start_fresh": false, "attempt": null,
+                "request": {"link_id": RequestId::new(), "request_id": RequestId::new(), "account_id": 1,
+                    "requester_id": REQUESTER_ID, "justification": null, "state": status,
+                    "admitted_at": "2026-09-14T12:00:00Z", "decision_deadline": "2026-09-21T12:00:00Z", "revision": 1}
+            }))).with_priority(1).up_to_n_times(1).mount(&ingress).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_text(response).await;
+        assert_eq!(
+            html.contains("http-equiv=\"refresh\" content=\"20\""),
+            status == "pending"
+        );
+        assert!(html.contains("Check again"));
+        assert!(html.contains(&format!("Current request status: {status}")));
+        assert!(!html.contains("Submit request"));
+    }
+}
+
+#[tokio::test]
+async fn oversized_justification_is_editable_without_replacing_the_operation() {
+    let (app, ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let id = RequestId::new().to_string();
+    let text = "é".repeat(8193);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={id}&justification={}",
+                    encoded_return_to(&text)
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let html = body_text(response).await;
+    assert!(html.contains(&text));
+    assert!(html.contains("aria-invalid=\"true\""));
+    assert!(html.contains("justification-help justification-error"));
+    assert!(html.contains("Shorten your justification"));
+    assert!(html.contains(&format!("value=\"{id}\"")));
+    assert!(!html.contains("readonly=\"true\""));
+    assert!(
+        ingress
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| !r.url.path().ends_with("prepare_attempt"))
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={id}&justification=shortened"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(body_text(response).await.contains("Outcome unknown"));
+}
+
+#[tokio::test]
+async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppressed() {
+    let (app, ingress) = lost_response_app().await;
+    let cookie = sign_in(app.clone()).await;
+    for (attempt, can_start, expected) in [
+        (false, false, StatusCode::NOT_FOUND),
+        (false, true, StatusCode::OK),
+        (true, false, StatusCode::OK),
+    ] {
+        wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_id": RequestId::new(), "invitation_code": ACTIVE_SLUG,
+                "repos": [{"repo_id": 1, "repo_full_name": "acme/private"}], "permission": "pull",
+                "approval_required": true, "can_start_fresh": can_start,
+                "attempt": if attempt { serde_json::json!({"input": {
+                    "version": 1, "link_id": RequestId::new(), "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+                    "requester_id": REQUESTER_ID, "justification": null },
+                    "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
+                    "request_id": RequestId::new(), "state": "pending", "decision_deadline": "2026-09-21T12:00:00Z"}}
+                }) } else { serde_json::Value::Null }, "request": null
+            }))).with_priority(1).up_to_n_times(1).mount(&ingress).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}?fresh=true"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let html = body_text(response).await;
+        assert_eq!(html.contains("Submit request"), can_start);
+        if !can_start && !attempt {
+            assert!(!html.contains("acme/private"));
+            assert!(html.contains("The link may be incorrect or no longer available."));
+        }
+        if attempt {
+            assert!(html.contains("Request accepted at"));
+            assert!(!html.contains("Start a fresh attempt"));
+        }
+    }
 }
 
 #[tokio::test]
@@ -224,24 +521,57 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
 #[ignore = "long-running Playwright fixture"]
 async fn admission_browser_server() {
     use axum::response::IntoResponse;
-    let (app, _ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
-    let app = app.route(
-        "/fixture-login",
-        axum::routing::get(move || {
-            let cookie = cookie.clone();
-            async move {
-                (
-                    [(
-                        "set-cookie",
-                        format!("{cookie}; Path=/; HttpOnly; SameSite=Lax"),
-                    )],
-                    axum::response::Redirect::to(&format!("/i/{ACTIVE_SLUG}")),
-                )
-                    .into_response()
-            }
-        }),
-    );
+    let current = Arc::new(Mutex::new(None::<(axum::Router, wiremock::MockServer)>));
+    let control = Arc::new(Mutex::new((false, "pending".into())));
+    let login_current = current.clone();
+    let login_control = control.clone();
+    let app = axum::Router::new()
+        .route(
+            "/fixture-login",
+            axum::routing::get(move || {
+                let current = login_current.clone();
+                let control = login_control.clone();
+                async move {
+                    *control.lock().unwrap() = (false, "pending".into());
+                    let (app, ingress) = lost_response_app_with_control(control).await;
+                    let cookie = sign_in(app.clone()).await;
+                    *current.lock().unwrap() = Some((app, ingress));
+                    (
+                        [(
+                            "set-cookie",
+                            format!("{cookie}; Path=/; HttpOnly; SameSite=Lax"),
+                        )],
+                        axum::response::Redirect::to(&format!("/i/{ACTIVE_SLUG}")),
+                    )
+                        .into_response()
+                }
+            }),
+        )
+        .route(
+            "/fixture-state",
+            axum::routing::post(
+                move |axum::extract::Query(query): axum::extract::Query<
+                    BTreeMap<String, String>,
+                >| {
+                    let control = control.clone();
+                    async move {
+                        let mut state = control.lock().unwrap();
+                        if let Some(revoked) = query.get("revoked") {
+                            state.0 = revoked == "true";
+                        }
+                        if let Some(status) = query.get("status") {
+                            state.1 = status.clone();
+                        }
+                        StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        )
+        .route("/health", axum::routing::get(|| async { StatusCode::OK }))
+        .fallback(move |request: Request<Body>| {
+            let app = current.lock().unwrap().as_ref().unwrap().0.clone();
+            async move { app.oneshot(request).await.unwrap() }
+        });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4174")
         .await
         .unwrap();
@@ -265,7 +595,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     Mock::given(path(format!("/InvitationLinkV1/{link_id}/requester_page")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "link_id": link_id, "invitation_code": ACTIVE_SLUG, "repos": [], "permission": "pull",
-            "approval_required": true, "attempt": null, "request": null
+            "approval_required": true, "can_start_fresh": true, "attempt": null, "request": null
         })))
         .mount(&ingress)
         .await;
@@ -343,7 +673,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
             assert!(html.contains("Outcome unknown"));
             assert!(html.contains(&format!("value=\"{operation}\"")));
             assert!(html.contains("original"));
-            assert!(html.contains("Start a fresh attempt"));
+            assert!(!html.contains("Start a fresh attempt"));
         } else {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
@@ -379,7 +709,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     assert!(html.contains("original"));
     assert!(html.contains(&format!("value=\"{operation}\"")));
     assert!(
-        html.contains(&format!("operation_id={operation}")) && html.contains("fresh=true"),
+        html.contains(&format!("operation_id={operation}")) && !html.contains("fresh=true"),
         "{html}"
     );
     let post = |id: String, text: &str| {

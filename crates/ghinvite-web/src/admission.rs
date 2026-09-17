@@ -83,7 +83,7 @@ impl RestateAdmission {
         if command
             .justification
             .as_ref()
-            .is_some_and(|s| s.len() > 16_384)
+            .is_some_and(|s| s.len() > MAX_JUSTIFICATION_BYTES)
         {
             return Err(WebError::BadRequest("Justification is too long.".into()));
         }

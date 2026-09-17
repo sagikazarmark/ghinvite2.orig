@@ -64,16 +64,19 @@ async fn logout(
     if session::load(&tower).await.is_err() {
         return unconfirmed_signout(state.config.cookie_secure);
     }
-    if let Err(response) =
-        crate::middleware::csrf::CsrfForm::<crate::middleware::csrf::EmptyForm>::from_request(
-            request, &state,
-        )
+    let form = match crate::middleware::csrf::CsrfForm::<LoginQuery>::from_request(request, &state)
         .await
     {
-        return response;
-    }
+        Ok(form) => form.0,
+        Err(response) => return response,
+    };
+    let destination = form
+        .return_to
+        .as_deref()
+        .and_then(session::validate_return_to)
+        .unwrap_or_else(|| "/".to_owned());
     match tower.flush().await {
-        Ok(()) => Redirect::to("/").into_response(),
+        Ok(()) => Redirect::to(&destination).into_response(),
         Err(_) => unconfirmed_signout(state.config.cookie_secure),
     }
 }

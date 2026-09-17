@@ -72,7 +72,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
             || request
                 .justification
                 .as_ref()
-                .is_some_and(|s| s.len() > 16_384)
+                .is_some_and(|s| s.len() > crate::admission::MAX_JUSTIFICATION_BYTES)
             || (request.state == RequestState::Pending && request.decision_deadline.is_none())
             || request.decision.as_ref().is_some_and(|d| {
                 d.decided_by.is_some_and(|id| !valid_id(id))
