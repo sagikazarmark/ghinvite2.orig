@@ -90,6 +90,10 @@ host failure may need manual cleanup of the printed unique Compose project.
   Worker outbound HTTP to the controlled GitHub stub.
 - Real web Worker OAuth/session and authorized invitation status while D1 has no
   link/request projections; admin-only note remains private.
+- #66 acknowledged repository webhook across a real D1 installation-read outage:
+  duplicate and never-adopted events are retained, synchronous observation still
+  fails promptly, and restoration alone converges the projected scope. The
+  pre-existing command state is seeded through Restate's admin state API.
 - #58 checkpoint preparation, projection adoption archive loaded into D1,
   actual Worker import/verification/activation and identical resume, historical
   pending/approved/cancelled/expired records, confirmed Sent identity, late old SQL

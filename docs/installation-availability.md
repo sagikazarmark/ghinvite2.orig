@@ -35,6 +35,16 @@ Unavailable/unknown observations schedule a durable 60-second recheck until
 restoration or uninstall. A successful observation also projects restored scope,
 including when triggered by admission, so blocked delivery can recover.
 
+Refresh work is acknowledged by its durable send before it runs, so an account
+object whose first adoption cannot read installation storage retains that work
+as a durable continuation with bounded backoff (one second, doubling up to the
+recheck cadence) instead of failing it away (#66). This is reachable for an
+installation command that already retains its numeric account binding while the
+account object has never adopted. One continuation is retained per identity:
+duplicate events join the scheduled one and only it retires its own slot, and a
+continuation for an identity the account does not adopt — superseded or retired
+— observes nothing. The periodic recheck keeps its own slot across the outage.
+
 ## Admission and approval
 
 The link command compares retained operation input/outcome **before** consulting
@@ -53,6 +63,8 @@ exclusive handler, allowing queued status to proceed and durable recheck to run.
 Admission observations retain Restate state and durably arrange projection without
 waiting for SQL. Initial adoption requires installation storage to be readable;
 an adoption failure returns 503 rather than indefinitely holding exclusivity.
+Synchronous observation keeps that prompt failure — `status`, `eligibility`, and
+`onboard` never wait out an outage; only acknowledged refresh work is retained.
 Subsequent link admission and
 receipt replay do not depend on SQL projection completion. Revocation, decisions,
 and request status do not call availability. Original deadlines, uses, revocation,
@@ -83,6 +95,13 @@ absence, partial scope, unknown observations, replay, original pending deadlines
 approval and blocked delivery, replacement before uninstall, duplicate/late old
 events, uninstall before onboard, pagination, identity mismatch, scope/use/history
 retention, and restored eligibility without overriding exhaustion or revocation.
+It also covers #66: an acknowledged repository webhook for an installation whose
+command predates its account object, an adoption outage that admission and the
+public `status` still fail promptly through, duplicate and never-adopted events,
+convergence on restoration with no further event, and a delayed event for a
+retired identity. That scenario seeds the pre-existing command state through
+Restate's admin state API, since a first adoption is otherwise unreachable.
 The Worker gate uses the production account availability integration with actual
 D1 bindings; missing user parents keep admission projections unavailable until
-restoration. Protocol-only tests explicitly opt out of installation integration.
+restoration, and it repeats #66's outage on those bindings. Protocol-only tests
+explicitly opt out of installation integration.
