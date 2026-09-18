@@ -982,14 +982,7 @@ mod tests {
                 url: "https://api.github.test/repos/acme/api/collaborators/alice".into(),
                 required_headers: BTreeMap::new(),
                 expected_body: None,
-                response: Response {
-                    status,
-                    headers: headers
-                        .iter()
-                        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                        .collect(),
-                    body: serde_json::json!({ "message": message }).to_string().into(),
-                },
+                response: crate::test_support::refusal(status, headers, message),
             },
         ]
     }

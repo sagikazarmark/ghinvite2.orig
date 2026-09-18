@@ -120,8 +120,18 @@ another invitation.
 
 ### Blocked Delivery
 A repository delivery waiting for an unavailable prerequisite before an external
-effect can safely proceed. Approval and the original repository scope remain in
-force while delivery is blocked.
+effect can safely proceed. The prerequisite may be an installation, a repository,
+a verified identity, or GitHub's own willingness to answer. Approval and the
+original repository scope remain in force while delivery is blocked.
+
+### Throttled Delivery
+A repository delivery GitHub answered with a rate limit instead of a decision.
+It is a form of blocked delivery: nothing was created and nothing was refused on
+the merits, so it is neither a delivery failure nor a delivery outcome unknown,
+and it is retried once the limit GitHub named has had time to clear.
+
+A rate limit is never evidence that an invitation cannot be sent, so it is never
+presented to an account admin or a requester as a definitive failure.
 
 ### Permission Level
 The GitHub repository collaborator permission requested through an invitation link and used when sending GitHub invitations.

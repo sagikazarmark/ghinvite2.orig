@@ -387,11 +387,8 @@ mod tests {
 
     #[tokio::test]
     async fn observe_retries_a_throttled_listing_rather_than_skipping_it() {
-        let throttled = ghinvite_github::transport::Response {
-            status: 403,
-            headers: [("retry-after".to_owned(), "60".to_owned())].into_iter().collect(),
-            body: serde_json::json!({"message":"You have exceeded a secondary rate limit"}).to_string().into(),
-        };
+        let throttled = crate::test_support::refusal(403, &[("retry-after", "60")],
+            "You have exceeded a secondary rate limit");
         let mock = MockTransport::scripted(vec![
             Expectation::ok_json(Method::Get, "https://api.github.test/app/installations/9",
                 serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null})),

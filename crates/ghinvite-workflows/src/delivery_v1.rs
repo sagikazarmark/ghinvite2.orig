@@ -316,14 +316,17 @@ impl GithubCreateV1 for GithubCreateV1Impl {
         })
         .name("project_create_receipt")
         .await?;
-        if matches!(receipt.outcome, CreateOutcome::Blocked { .. })
+        // A throttle clears on GitHub's own schedule, usually long before a
+        // missing dependency does, so it rechecks on the bounded wait GitHub
+        // asked for. It earns that recheck even where the outcome stayed
+        // unknown: rereading is safe, and it is the only way a delivery GitHub
+        // would not let us read ever resolves on its own. Either way the object
+        // lock is released first — the wait is a continuation, not a held retry.
+        if (matches!(receipt.outcome, CreateOutcome::Blocked { .. })
+            || throttled_for_secs.is_some())
             && ctx.get::<bool>("v1/recheck_scheduled").await?.is_none()
         {
             ctx.set("v1/recheck_scheduled", true);
-            // A throttle clears on GitHub's own schedule, usually long before a
-            // missing dependency does, so it rechecks on the bounded wait
-            // GitHub asked for. Either way the object lock is released first:
-            // the wait is a durable continuation, not a held retry.
             let wait =
                 throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
             ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
@@ -358,9 +361,24 @@ impl From<CreateReceipt> for Attempt {
     }
 }
 
-/// How long a blocked create waits before rechecking the dependency that
-/// blocked it. Throttling overrides this with GitHub's own guidance.
-const BLOCKED_RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+impl Attempt {
+    /// Pair a receipt with the bounded wait GitHub's throttling guidance
+    /// allows. Only a receipt reporting no confirmed outcome carries one, so a
+    /// wait can never shorten the life of a settled delivery.
+    fn throttled_by(receipt: CreateReceipt, error: &ghinvite_github::Error) -> Self {
+        let retry_after = error.rate_limit().and_then(|limit| limit.retry_after);
+        Self {
+            throttled_for_secs: (!receipt.outcome.confirmed())
+                .then(|| crate::throttle::backoff(retry_after).as_secs()),
+            receipt,
+        }
+    }
+}
+
+/// How long a create waits before rechecking the dependency that blocked it.
+/// Throttling replaces this with GitHub's own guidance, which the same bound
+/// caps, so an unexplained block never rechecks more slowly than a named one.
+const BLOCKED_RECHECK_INTERVAL: std::time::Duration = crate::throttle::MAXIMUM;
 
 async fn attempt(
     state: &AppState,
@@ -455,19 +473,29 @@ async fn attempt(
     {
         return Ok(blocked("repository unavailable").into());
     }
+    // A prerequisite GitHub would not answer for is not a prerequisite that went
+    // away: it blocks on GitHub's wait rather than on the unavailability cadence.
+    let unread = |error: &ghinvite_github::Error, unavailable: &str| match error.rate_limit() {
+        Some(_) => {
+            Attempt::throttled_by(blocked("GitHub throttled a delivery prerequisite"), error)
+        }
+        None => blocked(unavailable).into(),
+    };
     match state
         .github
         .get_repo(account.installation_id, repo.owner(), repo.name())
         .await
     {
         Ok(r) if r.id == command.repo_id => (),
-        Err(error) if error.rate_limit().is_some() => {
-            return Ok(throttled(
-                blocked("GitHub throttled the repository check"),
+        Err(error) => {
+            return Ok(unread(
                 &error,
+                "repository unavailable or identity unverified",
             ));
         }
-        _ => return Ok(blocked("repository unavailable or identity unverified").into()),
+        // A repository that answered with a different identity is verified as
+        // the wrong one, not unread.
+        Ok(_) => return Ok(blocked("repository unavailable or identity unverified").into()),
     };
     let user = match state
         .github
@@ -475,13 +503,7 @@ async fn attempt(
         .await
     {
         Ok(user) => user,
-        Err(error) if error.rate_limit().is_some() => {
-            return Ok(throttled(
-                blocked("GitHub throttled the requester identity check"),
-                &error,
-            ));
-        }
-        Err(_) => return Ok(blocked("requester identity unverified").into()),
+        Err(error) => return Ok(unread(&error, "requester identity unverified")),
     };
     // A database write fence protects retries of this run closure even when
     // GitHub succeeded but Restate never journaled its response. It never expires.
@@ -517,8 +539,10 @@ async fn attempt(
                     reason: "GitHub throttled delivery".into(),
                 }
             }
+            // The remaining authorization rejections. A 429 never lands here:
+            // the status is throttling evidence, so it arrives above.
             Err(ghinvite_github::Error::Status {
-                status: 401 | 403 | 404 | 429,
+                status: 401 | 403 | 404,
                 ..
             }) => {
                 state
@@ -569,7 +593,15 @@ async fn attempt(
                     _ => CreateOutcome::OutcomeUnknown,
                 },
             },
-            Err(_) => CreateOutcome::OutcomeUnknown,
+            // Reading is safe to repeat, so a throttled listing earns the same
+            // bounded recheck a throttled write does. The outcome stays unknown
+            // either way: a limit is not evidence about the original PUT.
+            Err(error) => {
+                if error.rate_limit().is_some() {
+                    throttled_by = Some(error);
+                }
+                CreateOutcome::OutcomeUnknown
+            }
         }
     };
     let receipt = CreateReceipt {
@@ -580,21 +612,9 @@ async fn attempt(
         revision: 1,
     };
     Ok(match &throttled_by {
-        Some(error) => throttled(receipt, error),
+        Some(error) => Attempt::throttled_by(receipt, error),
         None => receipt.into(),
     })
-}
-
-/// Pair a receipt with the bounded wait GitHub's throttling guidance allows.
-/// Only a receipt that reports no confirmed outcome ever carries one, so the
-/// wait can never shorten the life of a settled delivery.
-fn throttled(receipt: CreateReceipt, error: &ghinvite_github::Error) -> Attempt {
-    let retry_after = error.rate_limit().and_then(|limit| limit.retry_after);
-    Attempt {
-        throttled_for_secs: (!receipt.outcome.confirmed())
-            .then(|| crate::throttle::backoff(retry_after).as_secs()),
-        receipt,
-    }
 }
 
 fn permission_matches(value: &str, permission: ghinvite_core::Permission) -> bool {
@@ -661,7 +681,7 @@ async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), Handle
 mod tests {
     use super::*;
     use crate::test_support::{
-        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page,
+        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page, refusal,
         seed_pending_invitation, token_mint,
     };
     use ghinvite_core::GithubInvitationId;
@@ -738,14 +758,7 @@ mod tests {
             url: "https://api.github.test/repos/acme/api/collaborators/alice".into(),
             required_headers: Default::default(),
             expected_body: None,
-            response: ghinvite_github::transport::Response {
-                status,
-                headers: headers
-                    .iter()
-                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                    .collect(),
-                body: serde_json::json!({ "message": message }).to_string().into(),
-            },
+            response: refusal(status, headers, message),
         });
         script
     }
@@ -761,7 +774,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_throttled_put_blocks_on_githubs_own_schedule() {
+    async fn throttled_put_blocks_on_githubs_own_schedule() {
         let mock = MockTransport::scripted(put_collaborator(
             403,
             &[("retry-after", "45")],
@@ -785,7 +798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_permission_denied_put_blocks_without_throttle_guidance() {
+    async fn permission_denied_put_blocks_without_throttle_guidance() {
         let mock = MockTransport::scripted(put_collaborator(
             403,
             &[("x-ratelimit-remaining", "4998")],
@@ -808,7 +821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_ambiguous_put_is_never_read_as_throttling() {
+    async fn ambiguous_put_is_never_read_as_throttling() {
         // 502 carries no rate-limit evidence, so it stays uncertain: the PUT may
         // have been applied, and neither the fence nor a throttled retry may
         // assume otherwise.
@@ -824,7 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_throttled_identity_check_blocks_before_the_fence_is_claimed() {
+    async fn throttled_prerequisite_blocks_before_the_fence_is_claimed() {
         let mock = MockTransport::scripted(vec![
             token_mint(9),
             Expectation {
@@ -832,15 +845,7 @@ mod tests {
                 url: "https://api.github.test/repos/acme/api".into(),
                 required_headers: Default::default(),
                 expected_body: None,
-                response: ghinvite_github::transport::Response {
-                    status: 403,
-                    headers: [("retry-after".to_owned(), "30".to_owned())]
-                        .into_iter()
-                        .collect(),
-                    body: serde_json::json!({"message": "API rate limit exceeded"})
-                        .to_string()
-                        .into(),
-                },
+                response: refusal(403, &[("retry-after", "30")], "API rate limit exceeded"),
             },
         ]);
         let (state, command) = state_with_pending_create(mock.clone()).await;
@@ -850,7 +855,7 @@ mod tests {
         assert_eq!(
             attempted.receipt.outcome,
             CreateOutcome::Blocked {
-                reason: "GitHub throttled the repository check".into()
+                reason: "GitHub throttled a delivery prerequisite".into()
             }
         );
         assert_eq!(attempted.throttled_for_secs, Some(30));
@@ -861,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receipt_journaled_before_throttling_reads_back_with_no_wait() {
+    fn receipt_journaled_before_throttling_reads_back_with_no_wait() {
         let receipt = serde_json::json!({
             "command": {
                 "version": 1,
@@ -977,6 +982,33 @@ mod tests {
         // Half a listing is not evidence of absence, so the collaborator probe
         // never runs and the create stays unknown.
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
+        // A 502 says nothing about when reading might work, so nothing is
+        // scheduled: recovery reconciles this one.
+        assert_eq!(attempted.throttled_for_secs, None);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn retained_create_rechecks_a_throttled_reconciliation() {
+        let mut script = identity_expectations();
+        script.push(Expectation {
+            method: Method::Get,
+            url: "https://api.github.test/repos/acme/api/invitations?per_page=100".into(),
+            required_headers: Default::default(),
+            expected_body: None,
+            response: refusal(403, &[("retry-after", "90")], "API rate limit exceeded"),
+        });
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_retained_create(mock.clone()).await;
+
+        let attempted = attempt(&state, &command, false).await.unwrap();
+
+        // The fence stays burned and the outcome stays unknown — a limit is no
+        // evidence about the original PUT — but rereading is safe, so this one
+        // is worth rechecking once GitHub says the limit has cleared.
+        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
+        assert_eq!(attempted.throttled_for_secs, Some(90));
+        assert!(!fence_is_open(&state, &command).await);
         mock.assert_exhausted();
     }
 }

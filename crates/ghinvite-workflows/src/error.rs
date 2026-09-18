@@ -33,9 +33,11 @@ impl HandlerError {
                 | ghinvite_core::storage::Error::Corrupt(_) => true, // terminal
             },
             HandlerError::Github(e) => match e {
+                // Every throttled response, 429 included, arrives as
+                // `RateLimited`, so a `Status` 4xx is GitHub's decision.
                 ghinvite_github::Error::Status { status, .. } => match *status {
-                    429 | 500..=599 => false, // transient
-                    _ => true,                // terminal (4xx)
+                    500..=599 => false, // transient
+                    _ => true,          // terminal (4xx)
                 },
                 // GitHub declining to answer for now, not a decision about the
                 // request: a throttled 403 must never settle as a failure.
@@ -60,6 +62,16 @@ impl HandlerError {
     /// after a `match self.is_terminal()`.
     pub fn to_terminal(&self) -> TerminalError {
         TerminalError::new(self.to_string())
+    }
+
+    /// GitHub's throttling evidence when this failure is a rate limit. Callers
+    /// use it to defer by [`crate::throttle::backoff`] instead of leaving the
+    /// transient classification to retry on a cadence of its own.
+    pub fn rate_limit(&self) -> Option<ghinvite_github::RateLimit> {
+        match self {
+            HandlerError::Github(e) => e.rate_limit(),
+            _ => None,
+        }
     }
 }
 
@@ -126,35 +138,39 @@ mod tests {
         assert!(!e.is_terminal());
     }
 
+    /// The error a GitHub response of this shape actually produces, so these
+    /// cases stay pinned to the boundary's classification rather than to a
+    /// variant hand-built here.
+    fn github_response(status: u16, headers: &[(&str, &str)], message: &str) -> HandlerError {
+        HandlerError::Github(crate::test_support::refusal(status, headers, message).status_error())
+    }
+
     #[test]
     fn github_429_is_transient() {
-        let e = HandlerError::Github(ghinvite_github::Error::Status {
-            status: 429,
-            body: "rate limited".into(),
-        });
+        let e = github_response(429, &[("retry-after", "60")], "Too Many Requests");
         assert!(!e.is_terminal());
+        assert!(e.rate_limit().is_some());
     }
 
     #[test]
     fn github_throttled_403_is_transient() {
-        let e = HandlerError::Github(ghinvite_github::Error::RateLimited {
-            status: 403,
-            body: "You have exceeded a secondary rate limit".into(),
-            rate_limit: ghinvite_github::RateLimit {
-                scope: ghinvite_github::RateLimitScope::Secondary,
-                retry_after: Some(std::time::Duration::from_secs(60)),
-            },
-        });
+        let e = github_response(
+            403,
+            &[("retry-after", "60")],
+            "You have exceeded a secondary rate limit",
+        );
         assert!(!e.is_terminal());
+        assert_eq!(
+            e.rate_limit().and_then(|limit| limit.retry_after),
+            Some(std::time::Duration::from_secs(60))
+        );
     }
 
     #[test]
     fn github_permission_denied_403_is_terminal() {
-        let e = HandlerError::Github(ghinvite_github::Error::Status {
-            status: 403,
-            body: "Resource not accessible by integration".into(),
-        });
+        let e = github_response(403, &[], "Resource not accessible by integration");
         assert!(e.is_terminal());
+        assert!(e.rate_limit().is_none());
     }
 
     #[test]

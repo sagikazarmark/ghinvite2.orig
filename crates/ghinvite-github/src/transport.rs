@@ -155,10 +155,15 @@ impl Response {
     /// is none and the status is therefore GitHub's answer to the request.
     ///
     /// GitHub reports throttling as 403 or 429 and names the limit one of three
-    /// documented ways: `x-ratelimit-remaining: 0` for the exhausted primary
-    /// quota, `retry-after` for a secondary limit, and the rate-limit wording in
-    /// the response body for either. A 403 with none of those is a permission
-    /// refusal; a 429 is a secondary limit by the definition of the status.
+    /// documented ways: `retry-after` for a secondary limit, the rate-limit
+    /// wording in the response body for either limit, and
+    /// `x-ratelimit-remaining: 0` for the exhausted primary quota. The first two
+    /// address this request. The quota headers do not — they ride along on every
+    /// response, so a permission refusal served as the hour's last request also
+    /// reports a remaining quota of zero. An exhausted quota therefore only
+    /// counts where GitHub named no other reason, and a 403 with no evidence at
+    /// all is a permission refusal. A 429 is a secondary limit by the definition
+    /// of the status.
     ///
     /// Only a response classifies. A transport failure never reaches here, so a
     /// request whose effect is unknown is never mistaken for a refused one.
@@ -168,32 +173,33 @@ impl Response {
         }
         let retry_after = self.retry_after();
         let quota_exhausted = self.rate_limit_remaining() == Some(0);
-        let scope = if quota_exhausted {
-            RateLimitScope::Primary
-        } else if retry_after.is_some() || self.status == 429 || self.body_reports_rate_limit() {
-            RateLimitScope::Secondary
-        } else {
+        let named_limit = self.body_names_rate_limit();
+        if !(retry_after.is_some()
+            || self.status == 429
+            || named_limit == Some(true)
+            || (quota_exhausted && named_limit.is_none()))
+        {
             return None;
-        };
+        }
         Some(RateLimit {
-            scope,
+            scope: if quota_exhausted {
+                RateLimitScope::Primary
+            } else {
+                RateLimitScope::Secondary
+            },
             // `retry-after` is the more specific instruction when GitHub sends
             // both; the reset stands in for an exhausted quota that sent none.
             retry_after: retry_after.or_else(|| self.rate_limit_reset_after()),
         })
     }
 
-    /// Whether the body carries GitHub's documented rate-limit wording — the
-    /// only evidence a secondary limit leaves when it sends no headers.
-    fn body_reports_rate_limit(&self) -> bool {
-        serde_json::from_slice::<serde_json::Value>(&self.body)
-            .ok()
-            .as_ref()
-            .and_then(|body| body.get("message")?.as_str())
-            .is_some_and(|message| {
-                let message = message.to_ascii_lowercase();
-                message.contains("rate limit") || message.contains("abuse detection")
-            })
+    /// Whether the reason named in the body is a rate limit — the only evidence
+    /// a secondary limit leaves when it sends no headers. `None` when the body
+    /// names no reason at all, so it neither confirms nor contradicts them.
+    fn body_names_rate_limit(&self) -> Option<bool> {
+        let body: serde_json::Value = serde_json::from_slice(&self.body).ok()?;
+        let message = body.get("message")?.as_str()?.to_ascii_lowercase();
+        Some(message.contains("rate limit") || message.contains("abuse detection"))
     }
 }
 
@@ -539,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn a_genuine_forbidden_response_is_not_throttling() {
+    fn genuine_forbidden_response_is_not_throttling() {
         let response = refusal(
             403,
             &[
@@ -560,7 +566,41 @@ mod tests {
     }
 
     #[test]
-    fn a_non_throttling_status_never_classifies_as_a_limit() {
+    fn genuine_forbidden_response_is_not_throttling_on_the_hours_last_request() {
+        // The quota headers report the hour, not this answer: a refusal served
+        // as the last permitted request carries `remaining: 0` too. GitHub named
+        // a different reason, so the exhausted quota cannot overrule it — a
+        // permission refusal must still settle rather than retry.
+        let response = refusal(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "Resource not accessible by integration",
+        );
+        assert_eq!(response.rate_limit(), None);
+        assert!(matches!(response.status_error(), Error::Status { .. }));
+    }
+
+    #[test]
+    fn exhausted_quota_is_evidence_when_github_names_no_other_reason() {
+        // No readable reason in the body, so the headers stand: retrying an
+        // unexplained refusal costs one request, settling it costs the invitation.
+        let response = Response {
+            status: 403,
+            headers: [("x-ratelimit-remaining".to_owned(), "0".to_owned())]
+                .into_iter()
+                .collect(),
+            body: b"<html>upstream error</html>".to_vec(),
+        };
+        let limit = response.rate_limit().expect("headers are the only evidence");
+        assert_eq!(limit.scope, RateLimitScope::Primary);
+    }
+
+    #[test]
+    fn non_throttling_status_never_classifies_as_a_limit() {
         // Quota headers ride along on every response; only 403/429 report a limit.
         assert_eq!(
             refusal(

@@ -21,10 +21,11 @@ to the controlled cutover in ADR 0003 and #58.
   acknowledgement or the subsequent HTTP result is lost, recovery reads GitHub
   evidence and never repeats that PUT. This deliberately permits conservative
   outcome-unknown results even when a crash occurred before the HTTP send.
-  An explicit 401/403/404/429 rejection — a throttled refusal included — releases
-  only that exact generation for a later availability/rate-limit retry. A stale
-  rejection cannot release a newer attempt. Transport errors and uncertain
-  responses never release the fence.
+  An explicit rejection releases only that exact generation for a later
+  availability/rate-limit retry: a 401/403/404 refusing access, or any throttled
+  refusal (see **GitHub throttling**), which a 429 always is. A stale rejection
+  cannot release a newer attempt. Transport errors and uncertain responses never
+  release the fence.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
 
@@ -96,21 +97,31 @@ reconciliation. Never infer a successful original create from decline/expiry alo
 
 ## GitHub throttling
 
-A 403 or 429 carrying documented rate-limit evidence — `x-ratelimit-remaining: 0`,
-`retry-after`, or GitHub's rate-limit wording in the body — is classified at the
-transport boundary as throttling rather than as an answer about the request. A 403
-without that evidence remains a permission refusal and still settles a legacy
-invitation as failed. The primary-limit wait is read as `x-ratelimit-reset` minus
-the response's own `date`, so a skewed local clock cannot shorten it, and GitHub's
-guidance is clamped to between one second and one hour.
+A 403 or 429 carrying documented rate-limit evidence is classified at the
+transport boundary as throttling rather than as an answer about the request.
+`retry-after` and the 429 status address the request itself; the rate-limit
+wording in the body names the limit. `x-ratelimit-remaining: 0` is weaker: the
+quota headers ride along on every response, so a permission refusal served as the
+hour's last request reports an exhausted quota too. An exhausted quota therefore
+only counts where GitHub named no other reason, and a 403 with no evidence at all
+remains a permission refusal that still settles a legacy invitation as failed.
+
+The primary-limit wait is read as `x-ratelimit-reset` minus the response's own
+`date`, so a skewed local clock cannot shorten it, and GitHub's guidance is
+clamped to between one second and one hour. Each wait is bounded; the retries are
+not. Giving up would settle an invitation on a limit never shown to be permanent,
+which is the failure this policy exists to prevent.
 
 Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
 and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
 records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
-the same wait instead of the one-hour dependency cadence. Either way the wait is a
-durable continuation, not a held retry: no handler keeps an invitation object's
-lock across an external rate-limit window, and a bounded wait keeps one absurd
-`retry-after` from parking an invitation.
+the same wait instead of the hourly dependency cadence; a throttled *read* during
+reconciliation earns that recheck too, because rereading is safe and is the only
+way a delivery GitHub would not let us observe resolves on its own. The settlement
+sweep defers one row by the same wait rather than retrying on a cadence of its
+own. Either way the wait is a durable continuation or a service-side timer, never
+a held retry: no handler keeps an invitation object's lock across a rate-limit
+window.
 
 Only a response classifies. Transport errors, timeouts, and every other uncertain
 result stay outcome-unknown and keep the write fence, so throttling handling can

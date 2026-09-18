@@ -15,9 +15,14 @@ const MINIMUM: Duration = Duration::from_secs(1);
 /// documented advice for an unguided secondary limit is at least one minute.
 const UNGUIDED: Duration = Duration::from_secs(60);
 
-/// Longest wait a throttled retry defers by. The primary quota resets within
-/// the hour, so waiting past the blocked recheck this bounds buys nothing —
-/// and a single absurd `retry-after` cannot park an invitation indefinitely.
+/// Longest wait a throttled retry defers by, and the cadence a delivery
+/// rechecks on when nothing throttled it. The primary quota resets within the
+/// hour, so waiting longer buys nothing, and a single absurd `retry-after`
+/// cannot park an invitation for a day.
+///
+/// Each wait is bounded; the retries are not. Giving up would settle the
+/// invitation on a limit that has not been shown to be permanent, which is the
+/// failure this policy exists to prevent.
 pub const MAXIMUM: Duration = Duration::from_secs(3600);
 
 /// Clamp GitHub's retry guidance into the bounded wait a delivery path defers

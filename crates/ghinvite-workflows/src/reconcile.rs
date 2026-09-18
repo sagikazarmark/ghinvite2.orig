@@ -5,7 +5,7 @@ use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use ghinvite_core::InvitationState;
 use ghinvite_core::audit::EventType;
-use restate_sdk::context::{Context, ContextClient, ContextSideEffects, RunFuture};
+use restate_sdk::context::{Context, ContextClient, ContextSideEffects, ContextTimers, RunFuture};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
 use schemars::JsonSchema;
@@ -14,6 +14,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
 pub struct DailyRunInput {
     pub at: DateTime<Utc>,
+}
+
+/// What one sweep step learned about an invitation: the settlement evidence, or
+/// the bounded wait GitHub asked for before it would answer at all.
+///
+/// Untagged so a journal written before throttling was classified still reads:
+/// its `observe_invitation_v1` value is the bare evidence, or `null`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+enum Observed {
+    Throttled { throttled_for_secs: u64 },
+    Evidence(Option<crate::settlement_v1::ReconcileEvidence>),
 }
 
 #[restate_sdk::service]
@@ -50,16 +62,37 @@ impl Reconcile for ReconcileImpl {
             .name("settlement_candidates_v1")
             .await?;
         for row in rows {
-            let Json(evidence) = ctx.run(|| async {
-                match crate::settlement_v1::observe(&self.state, &row, input.at).await {
-                    Ok(evidence) => Ok(Json(evidence)),
-                    Err(e) if e.is_terminal() => {
-                        tracing::warn!(invitation_id = %row.id, err = %e, "settlement observation failed");
-                        Ok(Json(None))
-                    },
-                    Err(e) => Err(crate::error::to_sdk_handler_error(e)),
+            // One deferral per row. A wait that clears the limit clears it for
+            // every row after this one, and a limit outlasting GitHub's own
+            // guidance is tomorrow's sweep to observe rather than this one's to
+            // hold open. The sweep is a service, so the wait holds no invitation.
+            let mut deferred = false;
+            let evidence = loop {
+                let Json(observed) = ctx.run(|| async {
+                    match crate::settlement_v1::observe(&self.state, &row, input.at).await {
+                        Ok(evidence) => Ok(Json(Observed::Evidence(evidence))),
+                        Err(e) => match e.rate_limit() {
+                            Some(limit) => Ok(Json(Observed::Throttled {
+                                throttled_for_secs: crate::throttle::backoff(limit.retry_after).as_secs(),
+                            })),
+                            None if e.is_terminal() => {
+                                tracing::warn!(invitation_id = %row.id, err = %e, "settlement observation failed");
+                                Ok(Json(Observed::Evidence(None)))
+                            },
+                            None => Err(crate::error::to_sdk_handler_error(e)),
+                        },
+                    }
+                }).name("observe_invitation_v1").await?;
+                match observed {
+                    Observed::Evidence(evidence) => break evidence,
+                    Observed::Throttled { throttled_for_secs } if !deferred => {
+                        deferred = true;
+                        ctx.sleep(std::time::Duration::from_secs(throttled_for_secs))
+                            .await?;
+                    }
+                    Observed::Throttled { .. } => break None,
                 }
-            }).name("observe_invitation_v1").await?;
+            };
             if let Some(evidence) = evidence {
                 ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
                     row.id.to_string(),
@@ -599,6 +632,51 @@ mod tests {
 
         // Transient: the sweep fails so Restate retries it. The half-seen list
         // must never reach the collaborator probe or a cancellation.
+        let err = daily_run_logic(
+            &state,
+            &DailyRunInput {
+                at: dt("2026-05-05T13:00:00Z"),
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(!err.is_terminal(), "got {err:?}");
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Sent);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn daily_run_retries_a_throttled_listing_rather_than_skipping_the_row() {
+        let storage = fixture_storage().await;
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation {
+                method: Method::Get,
+                url: "https://api.github.test/repos/acme/api/invitations?per_page=100".into(),
+                required_headers: Default::default(),
+                expected_body: None,
+                response: crate::test_support::refusal(
+                    403,
+                    &[("retry-after", "60")],
+                    "API rate limit exceeded",
+                ),
+            },
+        ]);
+        let github = fixture_github_client(Arc::new(mock.clone()));
+        let state = AppState::new(storage, github);
+        let inv_id = seed_one_pending(&state).await;
+
+        // A throttled 403 used to read as terminal, which logged the row as a
+        // failed reconciliation and moved on. It is an unread observation, so
+        // the sweep retries and the row keeps its state meanwhile.
         let err = daily_run_logic(
             &state,
             &DailyRunInput {

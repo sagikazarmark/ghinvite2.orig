@@ -680,13 +680,16 @@ mod write_tests {
 
     #[tokio::test]
     async fn add_collaborator_separates_a_throttled_403_from_a_denied_one() {
-        for (headers, message, throttled) in [
+        for (headers, message, expected_limit) in [
             (
                 vec![("retry-after", "42")],
                 "You have exceeded a secondary rate limit",
-                true,
+                Some(crate::RateLimit {
+                    scope: crate::RateLimitScope::Secondary,
+                    retry_after: Some(std::time::Duration::from_secs(42)),
+                }),
             ),
-            (vec![], "Resource not accessible by integration", false),
+            (vec![], "Resource not accessible by integration", None),
         ] {
             let mock = MockTransport::scripted(vec![
                 token_mint_expectation(),
@@ -711,12 +714,11 @@ mod write_tests {
                 .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
                 .await
                 .unwrap_err();
+            // Same status either way; the classification is what separates them.
             assert_eq!(err.status(), Some(403));
             assert_eq!(
-                err.rate_limit()
-                    .map(|limit| limit.retry_after)
-                    .map(|after| after == Some(std::time::Duration::from_secs(42))),
-                throttled.then_some(true),
+                err.rate_limit(),
+                expected_limit,
                 "unexpected classification of {message:?}: {err:?}"
             );
         }
