@@ -201,9 +201,9 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 span { class: "badge badge-ghost badge-sm", "Invitation link expiration: {expires}" }
                                                 span { class: "badge badge-ghost badge-sm", "{approval}" }
                                             }
-                                            p { class: "text-xs text-base-content/65", "Link expiration only stops new requests." }
+                                            p { class: "text-xs text-base-content/65", "The decision deadline shown is the recorded deadline for this request." }
                                             if r.decision_deadline.is_some_and(|deadline| deadline <= props.now) {
-                                                p { class: "text-xs text-warning", "Decision deadline passed. Queue updates may be delayed; decisions are checked against the authoritative request state." }
+                                                p { class: "text-xs text-warning", "Decision deadline passed. Queue updates may be delayed." }
                                             }
                                             div {
                                                 p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Repositories" }

@@ -86,7 +86,8 @@ async fn queue_shows_recorded_decision_deadline_for_non_expiring_link() {
     let html = response_html(response).await;
     assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
     assert!(html.contains("Invitation link expiration: No expiration"));
-    assert!(html.contains("Link expiration only stops new requests."));
+    assert!(html.contains("The decision deadline shown is the recorded deadline for this request."));
+    assert!(!html.contains("Link expiration only stops new requests."));
     assert!(!html.contains("Expires:"));
 }
 
@@ -166,7 +167,8 @@ async fn overdue_queue_row_warns_about_projection_lag_without_claiming_a_decisio
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
     let html = response_html(response).await;
-    assert!(html.contains("Decision deadline passed. Queue updates may be delayed; decisions are checked against the authoritative request state."));
+    assert!(html.contains("Decision deadline passed. Queue updates may be delayed."));
+    assert!(!html.contains("decisions are checked against the authoritative request state"));
     assert!(html.contains("Approve request"));
     assert!(html.contains("Decline request"));
 }
