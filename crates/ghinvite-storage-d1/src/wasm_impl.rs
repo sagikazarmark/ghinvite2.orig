@@ -127,6 +127,13 @@ impl Storage for D1Storage {
         use ghinvite_core::storage::admin_attempts::*;
         wasm_send(async {
             self.db
+                .prepare(CLEANUP)
+                .bind(&[(now as f64).into()])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            self.db
                 .prepare(INSERT)
                 .bind(&[
                     scope.into(),

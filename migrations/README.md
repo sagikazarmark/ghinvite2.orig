@@ -54,8 +54,10 @@ authentication sessions. A unique session/account scope plus logical binding
 atomically retains the first submitted input, including on D1. These are
 recovery records, not authoritative business receipts. Their `expires_at`
 integer is a Unix-second browser-session deadline (like session storage), not a
-domain timestamp. Reads exclude expired records; expired rows can be deleted
-without affecting authoritative Restate receipts or granting fresh authority.
+domain timestamp. Reads exclude expired records. Each retention call deletes at
+most 100 expired continuations across all sessions, using the expiry index from
+migration 0009, in both SQLite and D1. Cleanup runs with mutation traffic and
+does not affect authoritative Restate receipts or extend live session deadlines.
 
 Migration 0004 adds v1 projection revisions, content/identity checks, deadlines,
 and audit identities. Its `projection_assertions` table is transient within each

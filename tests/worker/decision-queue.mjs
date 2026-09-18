@@ -133,12 +133,24 @@ try {
   assert.ok((await list.text()).includes(recovery));
   const status = await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } });
   assert.ok((await status.text()).includes('Request approved.'));
-  const retry = await mf.dispatchFetch(`https://queue.test${recovery}`, {
+  // Expired records from other sessions are physically reclaimed in bounded
+  // batches by retention, while the live original input remains recoverable.
+  await db.batch(Array.from({ length: 205 }, (_, i) => db.prepare(
+    'INSERT INTO admin_attempts(scope,id,binding,payload,expires_at) VALUES (?,?,?,?,?)'
+  ).bind('expired-session', `expired-${i}`, `expired-${i}`, 'expired-ciphertext', 1)));
+  const retryOriginal = () => mf.dispatchFetch(`https://queue.test${recovery}`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, redirect: 'manual',
     body: new URLSearchParams({ csrf_token: field('csrf_token') }).toString(),
   });
+  const retry = await retryOriginal();
   assert.equal(retry.status, 303);
   assert.deepEqual(decisions.at(-1), original);
+  for (const remaining of [105, 5, 0]) {
+    assert.equal(await db.prepare("SELECT count(*) AS count FROM admin_attempts WHERE scope='expired-session'").first('count'), remaining);
+    if (remaining > 0) assert.equal((await retryOriginal()).status, 303);
+  }
+  assert.deepEqual(decisions.at(-1), original);
+  assert.ok((await (await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } })).text()).includes('Request approved.'));
   console.log('PASS Worker/D1 decision queue: independent historical deadlines, missing data, auto-approval, overdue projection and authoritative late actions');
 } finally {
   await mf.dispose();

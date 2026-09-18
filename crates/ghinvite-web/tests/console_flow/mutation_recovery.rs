@@ -98,6 +98,93 @@ async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retr
 }
 
 #[tokio::test]
+async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_live_input() {
+    let ingress = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&ingress)
+        .await;
+    let database = std::env::temp_dir().join(format!(
+        "ghinvite-cleanup-{}.sqlite",
+        ghinvite_core::RequestId::new()
+    ));
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::at_path(&database)
+            .await
+            .unwrap(),
+    );
+    storage
+        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .await
+        .unwrap();
+    let pool = sqlx::SqlitePool::connect_with(
+        sqlx::sqlite::SqliteConnectOptions::new().filename(&database),
+    )
+    .await
+    .unwrap();
+    let state = AppState::new(
+        storage,
+        Arc::new(BrowserGithub),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    )
+    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    let (app, cookie) = sign_in(build_app(state, protected_store().await)).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let link = ghinvite_core::InvitationLinkId::new();
+    post(
+        &app,
+        &cookie,
+        &format!("/console/accounts/octocat/links/{link}/revoke"),
+        &format!("csrf_token={csrf}"),
+    )
+    .await;
+    let original = ingress.received_requests().await.unwrap()[0].body.clone();
+    // Seed expired records after the initial submission so the retry drives cleanup.
+    for i in 0..205 {
+        sqlx::query("INSERT INTO admin_attempts VALUES ('expired-session',?1,?1,'ciphertext',1)")
+            .bind(format!("expired-{i}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for remaining in [105_i64, 5, 0] {
+        let response = post(
+            &app,
+            &cookie,
+            &format!("/console/accounts/octocat/attempts/revoke-{link}"),
+            &format!("csrf_token={csrf}"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM admin_attempts WHERE scope='expired-session'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, remaining);
+        assert_eq!(
+            ingress
+                .received_requests()
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .body,
+            original
+        );
+    }
+    let html = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
+    )
+    .await;
+    assert!(html.contains(&format!("revoke-{link}")));
+    drop(app);
+    pool.close().await;
+    std::fs::remove_file(database).unwrap();
+}
+
+#[tokio::test]
 async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_success() {
     let ingress = MockServer::start().await;
     Mock::given(wiremock::matchers::method("POST"))

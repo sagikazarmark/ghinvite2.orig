@@ -201,6 +201,11 @@ impl Storage for SqlxStorage {
         now: i64,
     ) -> Result<ghinvite_core::storage::admin_attempts::StoredAttempt> {
         use ghinvite_core::storage::admin_attempts::*;
+        sqlx::query(CLEANUP)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
         sqlx::query(INSERT)
             .bind(scope)
             .bind(id)
