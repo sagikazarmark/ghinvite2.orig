@@ -98,8 +98,12 @@ jobs:
     name: Production-feature Worker packaging
     runs-on: ubuntu-24.04
     timeout-minutes: 35
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.92.0
         with:
           targets: wasm32-unknown-unknown

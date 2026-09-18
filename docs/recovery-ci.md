@@ -47,6 +47,10 @@ job. Ordinary exits dispose workerd; process termination owns ephemeral resource
 SIGKILL/host failure may require manual Compose cleanup using the printed project
 name. Generated production artifacts live under each crate's ignored `build/`
 directory, separately from the fixture bundles.
+Custom build commands run from the repository root, matching the documented
+`wrangler deploy --config wrangler/web.toml` and `restate-svc.toml` invocations.
+The packaging gate uses that same working directory; entrypoint paths remain
+relative to the Wrangler configuration files.
 
 ## Evidence limits and ownership
 

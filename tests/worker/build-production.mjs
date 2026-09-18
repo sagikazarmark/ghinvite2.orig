@@ -21,11 +21,12 @@ for (const config of ['web.toml', 'restate-svc.toml']) {
   ], { encoding: 'utf8', timeout: 10_000 }));
   assert.equal(data.compatibility_date, '2024-09-23');
   assert.deepEqual(data.compatibility_flags, ['nodejs_compat']);
+  assert.equal(data.build.cwd, undefined, 'This gate mirrors root-level Wrangler deployment without build.cwd');
   assert.ok(!data.build.command.includes('runtime-tests'), 'Deployment must not enable fixture features');
   // The exact deployment build command, production features and worker-build's
   // generated shim. No custom runtime-test packaging or JS fault wrappers.
   execFileSync('timeout', ['--kill-after=5s', '900s', 'bash', '-eu', '-c', data.build.command], {
-    cwd: resolve(root, 'wrangler'), stdio: 'inherit', timeout: 915_000, killSignal: 'SIGKILL',
+    cwd: root, stdio: 'inherit', timeout: 915_000, killSignal: 'SIGKILL',
     env: { ...process.env, WASM_BINDGEN_BIN: bindgen },
   });
   configurations.push({ name: data.name, scriptPath: resolve(root, 'wrangler', data.main) });

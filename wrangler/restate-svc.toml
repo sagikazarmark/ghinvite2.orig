@@ -1,6 +1,6 @@
 # Cloudflare Worker — Restate Service
 # Deploy: wrangler deploy --config wrangler/restate-svc.toml
-# Build: run [build].command from this directory with worker-build 0.8.1.
+# Build: run [build].command from the repository root with worker-build 0.8.1.
 
 name = "ghinvite-restate-svc"
 main = "../crates/ghinvite-workflows-worker/build/worker/shim.mjs"
@@ -8,7 +8,7 @@ compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
 [build]
-command = "worker-build ../crates/ghinvite-workflows-worker --release -- --locked"
+command = "worker-build crates/ghinvite-workflows-worker --release -- --locked"
 
 [[d1_databases]]
 binding = "DB"
