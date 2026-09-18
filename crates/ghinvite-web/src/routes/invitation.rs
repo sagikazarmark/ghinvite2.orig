@@ -2,7 +2,7 @@
 
 use crate::commands::SubmitInvitationRequest;
 use crate::invitation_link_resolution::{
-    resolve_public_invitation_link_context, select_requester_request_state,
+    ResolutionError, resolve_public_invitation_link_context, select_requester_request_state,
 };
 use crate::session;
 use crate::state::AppState;
@@ -56,6 +56,28 @@ fn canonical_invitation_path(slug: &str) -> String {
     format!("/i/{slug}")
 }
 
+fn resolution_error_response(
+    error: ResolutionError,
+    session: &session::Session,
+    slug: &str,
+) -> axum::response::Response {
+    if !matches!(error, ResolutionError::Storage(_)) {
+        return invitation_not_found_response(session);
+    }
+    tracing::warn!("invitation resolution storage read failed");
+    let retry_href = canonical_invitation_path(slug);
+    let signed_in_login = Some(session.login.clone());
+    let html = render(session.csrf_token.clone(), move || {
+        rsx! {
+            crate::views::invitation::InvitationUnavailablePage {
+                signed_in_login: signed_in_login.clone(),
+                retry_href: retry_href.clone(),
+            }
+        }
+    });
+    (axum::http::StatusCode::SERVICE_UNAVAILABLE, Html(html)).into_response()
+}
+
 async fn invitation_page(
     State(state): State<AppState>,
     tower: TowerSession,
@@ -92,7 +114,7 @@ async fn invitation_page(
     let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
     {
         Ok(context) => context,
-        Err(_) => return invitation_not_found_response(&session),
+        Err(error) => return resolution_error_response(error, &session, &slug),
     };
     let mut selection = select_requester_request_state(&context.requests, session.user_id);
     let mut delivery_request_id = None;
@@ -253,7 +275,7 @@ async fn submit_request(
     let context = match resolve_public_invitation_link_context(state.storage.as_ref(), &slug).await
     {
         Ok(context) => context,
-        Err(_) => return invitation_not_found_response(&session),
+        Err(error) => return resolution_error_response(error, &session, &slug),
     };
     let selection = select_requester_request_state(&context.requests, session.user_id);
     if !context.link.is_active(now) && selection.current_status.is_none() {

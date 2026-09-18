@@ -879,6 +879,119 @@ const UNKNOWN_SLUG: &str = "ZZZZZZZZZZZZZZZZ";
 const CREATOR_ID: u64 = 701;
 const REQUESTER_ID: u64 = 802;
 
+#[tokio::test]
+async fn legacy_resolution_storage_outages_are_retryable_without_disclosing_resources() {
+    for table in ["invitation_link_repos", "invitation_requests"] {
+        let path = std::env::temp_dir().join(format!(
+            "ghinvite-resolution-{}.sqlite",
+            InvitationLinkId::new()
+        ));
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+                .await
+                .unwrap(),
+        );
+        storage
+            .insert_installation(&sample_account())
+            .await
+            .unwrap();
+        storage
+            .upsert_user(&sample_user(CREATOR_ID, "admin"))
+            .await
+            .unwrap();
+        storage
+            .insert_invitation_link(&active_link(ACTIVE_SLUG))
+            .await
+            .unwrap();
+        let commands = Arc::new(RecordingCommands::default());
+        let app = build_app(
+            AppState::new(
+                storage.clone(),
+                Arc::new(MockTransport::scripted(oauth_expectations(
+                    "octocat",
+                    REQUESTER_ID,
+                ))),
+                commands.clone(),
+                WebConfig::for_local_dev_with_secret([7; 32]),
+            ),
+            tower_sessions::MemoryStore::default(),
+        );
+        let cookie = sign_in(app.clone()).await;
+        let csrf = common::csrf_token(&app, &cookie).await;
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{UNKNOWN_SLUG}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(&path),
+        )
+        .await
+        .unwrap();
+        sqlx::query(&format!("DROP TABLE {table}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        for method in ["GET", "POST"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(format!("/i/{ACTIVE_SLUG}"))
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/x-www-form-urlencoded")
+                        .body(Body::from(format!("csrf_token={csrf}")))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let html = body_text(response).await;
+            assert!(html.contains("Invitation request flow is temporarily unavailable"));
+            assert!(html.contains(&format!("href=\"/i/{ACTIVE_SLUG}\">Try again</a>")));
+            for private in [table, "acme/api", "AI coding workshop"] {
+                assert!(!html.contains(private));
+            }
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/i/invalid")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(commands.calls.lock().unwrap().is_empty());
+        pool.close().await;
+        drop(app);
+        drop(storage);
+        std::fs::remove_file(path).unwrap();
+    }
+}
+
 fn encoded_return_to(path: &str) -> String {
     url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
 }

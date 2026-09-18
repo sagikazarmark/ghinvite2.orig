@@ -20,6 +20,14 @@ The fixture updates lifecycle through the storage port; webhook processing and
 live GitHub settlement are covered separately, not simulated by browser clicks.
 CI runs this alongside the admission and form suites.
 
+## Read failure recovery
+
+Run `npx --prefix tests/browser playwright test --config tests/browser/read-recovery.config.mjs`
+from the repository root. This separate no-JavaScript suite runs the real HTTP
+routes on port 4175 with SQLite and an injected GitHub transport. It verifies
+preserved form values/selections, a native repository reload before creation,
+and Settings recovery. It needs Chromium and Rust, but no island bundle or external services.
+
 ## Invitation link form
 
 Playwright tests the registry integration through the production new invitation

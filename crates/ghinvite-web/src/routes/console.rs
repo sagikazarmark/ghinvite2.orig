@@ -13,7 +13,7 @@ use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::session;
 use crate::state::AppState;
 use crate::views::link_edit::{self, LinkEditValues};
-use crate::views::link_form::RepositoryChoice;
+use crate::views::link_form::{RepositoryChoice, missing_repository_notice};
 use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
@@ -207,15 +207,24 @@ async fn overview(
         .list_pending_requests_for_account(admin.account.account_id)
         .await
         .map(|v| v.len() as u64)
-        .unwrap_or(0);
+        .map_err(|_| tracing::warn!("overview pending requests read failed"))
+        .ok();
     let all_links = state
         .storage
         .list_invitation_links_for_account(admin.account.account_id)
         .await
-        .unwrap_or_default();
-    let active_links = all_links.iter().filter(|l| l.is_active(now)).count() as u64;
+        .map_err(|_| tracing::warn!("overview invitation links read failed"))
+        .ok();
+    let status = if pending.is_none() || all_links.is_none() {
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        axum::http::StatusCode::OK
+    };
+    let active_links = all_links
+        .as_ref()
+        .map(|links| links.iter().filter(|l| l.is_active(now)).count() as u64);
     let recent_links = {
-        let mut v = all_links.clone();
+        let mut v = all_links.unwrap_or_default();
         v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         v.truncate(5);
         v
@@ -240,7 +249,7 @@ async fn overview(
             }
         }
     });
-    Html(html).into_response()
+    (status, Html(html)).into_response()
 }
 
 async fn links_list(
@@ -314,7 +323,7 @@ async fn new_link_form(
 fn link_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
-    repos: Vec<RepositoryChoice>,
+    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
     form: crate::views::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
 ) -> axum::response::Response {
@@ -324,13 +333,28 @@ fn link_form_response(
 fn creation_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
-    repos: Vec<RepositoryChoice>,
-    form: crate::views::links::LinkFormValues,
+    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
+    mut form: crate::views::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
     link_id: Option<ghinvite_core::InvitationLinkId>,
 ) -> axum::response::Response {
+    if let Ok(available) = &repos
+        && let Some(message) = missing_repository_notice(&form.selected_repo_ids, available)
+    {
+        if !form.errors.summary.contains(&message) {
+            form.errors.summary.push(message);
+        }
+        // The warning makes the reduction explicit. The next submit confirms
+        // the displayed scope; island props must match those native controls.
+        form.selected_repo_ids
+            .retain(|id| available.iter().any(|repo| repo.id == *id));
+    }
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
+    let (status, repos, repository_error) = match repos {
+        Ok(repos) => (axum::http::StatusCode::OK, repos, None),
+        Err(error) => (error.status, vec![], Some(error.message.to_string())),
+    };
     let action = link_id.map(|id| {
         format!(
             "/console/accounts/{account_login}/links?link_id={id}&anchor={}",
@@ -346,12 +370,18 @@ fn creation_form_response(
                 flash: flash.clone(),
                 account_login: account_login.clone(),
                 repos: repos.clone(),
+                repository_error: repository_error.clone(),
                 form: form.clone(),
                 now,
             }
         }
     });
-    Html(html).into_response()
+    (status, Html(html)).into_response()
+}
+
+struct RepositoryLoadError {
+    status: axum::http::StatusCode,
+    message: &'static str,
 }
 
 /// The installation's available repositories as the form offers them. This is
@@ -360,7 +390,7 @@ fn creation_form_response(
 async fn load_installation_repos_for_form(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
-) -> Vec<RepositoryChoice> {
+) -> Result<Vec<RepositoryChoice>, RepositoryLoadError> {
     let user_api = ghinvite_github::oauth::UserApiClient::new(
         state.github_transport.clone(),
         admin.session.access_token.clone(),
@@ -369,27 +399,86 @@ async fn load_installation_repos_for_form(
         .list_user_installation_repos(admin.account.installation_id)
         .await
     {
-        Ok(r) => r
+        Ok(r) => Ok(r
             .repositories
             .into_iter()
             .map(|repo| RepositoryChoice {
                 id: repo.id,
                 full_name: repo.full_name,
             })
-            .collect(),
+            .collect()),
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to list installation repos; rendering form with empty list");
-            vec![]
+            use axum::http::StatusCode;
+            // Never log transport URLs, credentials, or upstream response bodies.
+            tracing::warn!(
+                upstream_status = e.status(),
+                "installation repository read failed"
+            );
+            let (status, message) = match e {
+                ghinvite_github::Error::Transport(_)
+                | ghinvite_github::Error::Status { status: 504, .. } => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "GitHub did not respond in time. Try again in a moment.",
+                ),
+                ghinvite_github::Error::Status { status: 429, .. } => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "GitHub is limiting requests. Wait a moment, then try again.",
+                ),
+                ghinvite_github::Error::Status { status: 401, .. } => (
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub authorization needs attention. Sign out and sign in again, then retry.",
+                ),
+                ghinvite_github::Error::Status { status: 403, .. } => (
+                    StatusCode::BAD_GATEWAY,
+                    "GitHub denied repository access or is limiting requests. Retry later or review GitHub App settings.",
+                ),
+                _ => (
+                    StatusCode::BAD_GATEWAY,
+                    "Repositories could not be loaded. Try again in a moment.",
+                ),
+            };
+            Err(RepositoryLoadError { status, message })
         }
     }
 }
 
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: RequireConsoleAdminOf,
+    admin: Result<RequireConsoleAdminOf, axum::response::Response>,
+    tower: tower_sessions::Session,
+    uri: Uri,
     axum::extract::Query(identity): axum::extract::Query<CreationIdentity>,
-    CsrfForm(form): CsrfForm<CreateLinkSubmission>,
+    form: Result<CsrfForm<CreateLinkSubmission>, axum::response::Response>,
 ) -> impl IntoResponse {
+    let admin = match admin {
+        Ok(admin) => admin,
+        Err(response) if response.status().is_server_error() => {
+            let Ok(CsrfForm(form)) = form else {
+                return response;
+            };
+            let session = match session::load(&tower).await {
+                Ok(session) => session,
+                Err(_) => return response,
+            };
+            let action = uri.to_string();
+            let values = form.into_view_values(Default::default());
+            let html = render(session.csrf_token, move || {
+                rsx! {
+                    crate::views::links::AccessVerificationRetryPage {
+                        signed_in_login: Some(session.login.clone()),
+                        action: action.clone(),
+                        values: values.clone(),
+                    }
+                }
+            });
+            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Html(html)).into_response();
+        }
+        Err(response) => return response,
+    };
+    let form = match form {
+        Ok(CsrfForm(form)) => form,
+        Err(response) => return response,
+    };
     let (now, link_id) = if state.admission.is_some() {
         let (Some(id), Some(anchor)) = (identity.link_id, identity.anchor) else {
             return crate::WebError::BadRequest(
@@ -410,13 +499,36 @@ async fn create_link(
     // the same list to re-render the form. Validation itself is synchronous
     // (the dioform `FormCore` holds `Rc` and must not cross an `.await`).
     let repos = load_installation_repos_for_form(&state, &admin).await;
+    let repos = match repos {
+        Ok(repos) => repos,
+        Err(error) => {
+            return creation_form_response(
+                &admin,
+                None,
+                Err(error),
+                form.into_view_values(Default::default()),
+                now,
+                link_id,
+            );
+        }
+    };
+    if form.reload_repos {
+        return creation_form_response(
+            &admin,
+            None,
+            Ok(repos),
+            form.into_view_values(Default::default()),
+            now,
+            link_id,
+        );
+    }
     let validated = match create_link_form::validate(&form, &repos, now) {
         Ok(validated) => validated,
         Err(errors) => {
             return creation_form_response(
                 &admin,
                 None,
-                repos,
+                Ok(repos),
                 form.into_view_values(*errors),
                 now,
                 link_id,
@@ -454,7 +566,7 @@ async fn create_link(
                     creation_form_response(
                         &admin,
                         None,
-                        repos,
+                        Ok(repos),
                         form.into_view_values(errors),
                         now,
                         Some(id),
@@ -492,7 +604,7 @@ async fn create_link(
                 .push("Failed to create invitation link. Please try again.".into());
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
-                link_form_response(&admin, None, repos, form.into_view_values(errors), now),
+                link_form_response(&admin, None, Ok(repos), form.into_view_values(errors), now),
             )
                 .into_response();
         }
@@ -1073,7 +1185,19 @@ async fn authoritative_or_projected_link(
     }
 }
 
-async fn settings_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
+async fn settings_page(
+    State(state): State<AppState>,
+    admin: RequireConsoleAdminOf,
+) -> impl IntoResponse {
+    let error = if admin.account.uninstalled_at.is_none() {
+        load_installation_repos_for_form(&state, &admin).await.err()
+    } else {
+        None
+    };
+    let status = error
+        .as_ref()
+        .map_or(axum::http::StatusCode::OK, |error| error.status);
+    let availability_error = error.map(|error| error.message.to_string());
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
     let account = admin.account.clone();
@@ -1084,10 +1208,11 @@ async fn settings_page(admin: RequireConsoleAdminOf) -> impl IntoResponse {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account: account.clone(),
+                availability_error: availability_error.clone(),
             }
         }
     });
-    Html(html).into_response()
+    (status, Html(html)).into_response()
 }
 
 async fn not_found(admin: RequireConsoleAdminOf) -> impl IntoResponse {

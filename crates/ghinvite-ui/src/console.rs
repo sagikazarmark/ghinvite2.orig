@@ -92,8 +92,8 @@ pub struct OverviewProps {
     pub flash: Option<Flash>,
     pub account_login: String,
     pub account_type: AccountType,
-    pub pending_requests: u64,
-    pub active_links: u64,
+    pub pending_requests: Option<u64>,
+    pub active_links: Option<u64>,
     pub recent_links: Vec<InvitationLink>,
     pub now: DateTime<Utc>,
 }
@@ -355,20 +355,33 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                     div { class: "grid divide-y divide-base-300 md:grid-cols-2 md:divide-x md:divide-y-0",
                         a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/requests",
                             p { class: "text-sm font-medium", "Review queue" }
-                            p { class: "mt-1 text-sm text-base-content/65", "{props.pending_requests} pending invitation requests need an account admin decision." }
+                            if let Some(count) = props.pending_requests {
+                                p { class: "mt-1 text-sm text-base-content/65", "{count} pending invitation requests need an account admin decision." }
+                            } else {
+                                p { role: "alert", "Pending invitation requests are unavailable." }
+                            }
                         }
                         a { class: "block p-4 transition-colors hover:bg-base-200/60", href: "/console/accounts/{login}/links?filter=active",
                             p { class: "text-sm font-medium", "Active invitation links" }
-                            p { class: "mt-1 text-sm text-base-content/65", "{props.active_links} active invitation links can accept invitation requests." }
+                            if let Some(count) = props.active_links {
+                                p { class: "mt-1 text-sm text-base-content/65", "{count} active invitation links can accept invitation requests." }
+                            } else {
+                                p { role: "alert", "Invitation links are unavailable." }
+                            }
                         }
                     }
                 }
                 section { class: "mac-panel compact-table overflow-hidden",
+                    if props.pending_requests.is_none() || props.active_links.is_none() {
+                        a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}", "Try again" }
+                    }
                     div { class: "flex items-center justify-between border-b border-base-300 px-4 py-3",
                         h2 { class: "text-sm font-semibold", "Recent invitation links" }
                         a { class: "btn btn-ghost btn-xs h-7 min-h-0", href: "/console/accounts/{login}/links?filter=all", "View all" }
                     }
-                    {if props.recent_links.is_empty() {
+                    {if props.active_links.is_none() {
+                        rsx! { p { class: "p-5", "Recent invitation links could not be loaded. Try again." } }
+                    } else if props.recent_links.is_empty() {
                         rsx! {
                             div { class: "p-5 text-sm text-base-content/70",
                                 h3 { class: "font-medium text-base-content", "No invitation links yet" }

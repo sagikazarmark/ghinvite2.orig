@@ -225,6 +225,12 @@ impl HttpTransport for FixtureGithub {
             (Method::Get, "https://api.github.com/user") => {
                 serde_json::json!({"id": USER_ID, "login": USER_LOGIN})
             }
+            (
+                Method::Get,
+                "https://api.github.com/user/installations/77/repositories?per_page=100",
+            ) => {
+                serde_json::json!({"total_count": 0, "repositories": []})
+            }
             (Method::Get, "https://api.github.com/user/installations?per_page=100") => {
                 serde_json::json!({"total_count": 2, "installations": [
                     {"id": 77, "account": {"id": USER_ID, "login": USER_LOGIN, "type": "User"},

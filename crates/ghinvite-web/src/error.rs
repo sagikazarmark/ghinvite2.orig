@@ -67,7 +67,11 @@ impl IntoResponse for WebError {
                 "Session temporarily unavailable. Please try again later.".into(),
             ),
             WebError::Restate(msg) => (StatusCode::BAD_GATEWAY, format!("Restate error: {msg}")),
-            WebError::Storage(_) | WebError::Github(_) | WebError::Internal(_) => {
+            WebError::Github(error) => {
+                tracing::warn!(upstream_status = error.status(), "GitHub read failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "GitHub is temporarily unavailable. Please try again.".to_string())
+            }
+            WebError::Storage(_) | WebError::Internal(_) => {
                 tracing::error!(error = ?self, "internal error rendering response");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
