@@ -105,6 +105,22 @@ pub struct RequireConsoleAdminOf {
     pub tower: tower_sessions::Session,
 }
 
+/// Read-only Settings may describe an uninstalled account in legacy mode.
+/// This does not grant historical-account access to mutation routes.
+pub struct RequireSettingsAdminOf(pub RequireConsoleAdminOf);
+
+impl<S> FromRequestParts<S> for RequireSettingsAdminOf
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        resolve_console_admin(parts, state, true).await.map(Self)
+    }
+}
+
 impl<S> FromRequestParts<S> for RequireConsoleAdminOf
 where
     AppState: FromRef<S>,
@@ -116,75 +132,83 @@ where
         parts: &mut Parts,
         outer_state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let state = AppState::from_ref(outer_state);
-
-        let tower: tower_sessions::Session = parts
-            .extensions
-            .get::<tower_sessions::Session>()
-            .cloned()
-            .ok_or_else(|| {
-                WebError::Session("no tower session in request extensions".into()).into_response()
-            })?;
-
-        let mut session = crate::session::load(&tower)
-            .await
-            .map_err(|e| WebError::Session(e.to_string()).into_response())?;
-
-        if !session.is_authenticated() {
-            let return_to = parts
-                .uri
-                .path_and_query()
-                .map(|value| value.as_str())
-                .unwrap_or("/console");
-            let encoded: String =
-                url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
-            return Err(
-                axum::response::Redirect::to(&format!("/login?return_to={encoded}"))
-                    .into_response(),
-            );
-        }
-
-        let axum::extract::Path(params): axum::extract::Path<
-            std::collections::HashMap<String, String>,
-        > = axum::extract::Path::from_request_parts(parts, outer_state)
-            .await
-            .map_err(|e| WebError::BadRequest(format!("path: {e}")).into_response())?;
-        let login = params
-            .get("login")
-            .ok_or_else(|| {
-                WebError::BadRequest("missing :login path param".into()).into_response()
-            })?
-            .clone();
-
-        let account = match state.storage.get_active_installation_by_login(&login).await {
-            Ok(Some(account)) => account,
-            Ok(None) if state.request_lifecycle.is_some() => {
-                match state.storage.get_latest_installation_by_login(&login).await {
-                    Ok(Some(account)) => account,
-                    Ok(None) => return Err(generic_not_found_response(&session)),
-                    Err(error) => return Err(WebError::Storage(error).into_response()),
-                }
-            }
-            Ok(None) => return Err(generic_not_found_response(&session)),
-            Err(error) => return Err(WebError::Storage(error).into_response()),
-        };
-
-        let is_admin = match check_admin(&state, &mut session, &account).await {
-            Ok(is_admin) => is_admin,
-            Err(error) => return Err(error.into_response()),
-        };
-        if !is_admin {
-            return Err(generic_not_found_response(&session));
-        }
-
-        crate::session::save(&tower, &session)
-            .await
-            .map_err(|e| WebError::Session(e.to_string()).into_response())?;
-
-        Ok(RequireConsoleAdminOf {
-            session,
-            account,
-            tower,
-        })
+        resolve_console_admin(parts, outer_state, false).await
     }
+}
+
+async fn resolve_console_admin<S>(
+    parts: &mut Parts,
+    outer_state: &S,
+    allow_historical_settings: bool,
+) -> Result<RequireConsoleAdminOf, axum::response::Response>
+where
+    AppState: FromRef<S>,
+    S: Send + Sync,
+{
+    let state = AppState::from_ref(outer_state);
+
+    let tower: tower_sessions::Session = parts
+        .extensions
+        .get::<tower_sessions::Session>()
+        .cloned()
+        .ok_or_else(|| {
+            WebError::Session("no tower session in request extensions".into()).into_response()
+        })?;
+
+    let mut session = crate::session::load(&tower)
+        .await
+        .map_err(|e| WebError::Session(e.to_string()).into_response())?;
+
+    if !session.is_authenticated() {
+        let return_to = parts
+            .uri
+            .path_and_query()
+            .map(|value| value.as_str())
+            .unwrap_or("/console");
+        let encoded: String = url::form_urlencoded::byte_serialize(return_to.as_bytes()).collect();
+        return Err(
+            axum::response::Redirect::to(&format!("/login?return_to={encoded}")).into_response(),
+        );
+    }
+
+    let axum::extract::Path(params): axum::extract::Path<
+        std::collections::HashMap<String, String>,
+    > = axum::extract::Path::from_request_parts(parts, outer_state)
+        .await
+        .map_err(|e| WebError::BadRequest(format!("path: {e}")).into_response())?;
+    let login = params
+        .get("login")
+        .ok_or_else(|| WebError::BadRequest("missing :login path param".into()).into_response())?
+        .clone();
+
+    let account = match state.storage.get_active_installation_by_login(&login).await {
+        Ok(Some(account)) => account,
+        Ok(None) if allow_historical_settings || state.request_lifecycle.is_some() => {
+            match state.storage.get_latest_installation_by_login(&login).await {
+                Ok(Some(account)) => account,
+                Ok(None) => return Err(generic_not_found_response(&session)),
+                Err(error) => return Err(WebError::Storage(error).into_response()),
+            }
+        }
+        Ok(None) => return Err(generic_not_found_response(&session)),
+        Err(error) => return Err(WebError::Storage(error).into_response()),
+    };
+
+    let is_admin = match check_admin(&state, &mut session, &account).await {
+        Ok(is_admin) => is_admin,
+        Err(error) => return Err(error.into_response()),
+    };
+    if !is_admin {
+        return Err(generic_not_found_response(&session));
+    }
+
+    crate::session::save(&tower, &session)
+        .await
+        .map_err(|e| WebError::Session(e.to_string()).into_response())?;
+
+    Ok(RequireConsoleAdminOf {
+        session,
+        account,
+        tower,
+    })
 }

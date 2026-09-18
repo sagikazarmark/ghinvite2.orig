@@ -779,7 +779,7 @@ async fn github_failure_consumes_state_without_authenticating_or_rotating() {
         let (cookie, state) = begin_login(&app, "/login").await;
         let callback = format!("/oauth/callback?code=test-code&state={state}");
         let response = get(&app, &callback, &cookie).await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         assert!(!response.headers().contains_key("set-cookie"));
         assert!(!response.headers().contains_key("location"));
         let protected = get(&app, "/console/accounts/octocat", &cookie).await;

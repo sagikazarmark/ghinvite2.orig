@@ -1,6 +1,144 @@
 use super::*;
 use std::sync::atomic::{AtomicU16, Ordering};
 
+struct MembershipFailureTransport {
+    oauth: MockTransport,
+    status: u16,
+}
+
+#[async_trait::async_trait]
+impl ghinvite_github::HttpTransport for MembershipFailureTransport {
+    async fn send(
+        &self,
+        request: ghinvite_github::transport::Request,
+    ) -> ghinvite_github::Result<Response> {
+        if request.url.contains("/memberships/") {
+            if self.status == 0 {
+                return Err(ghinvite_github::Error::Transport(
+                    "private transport diagnostic".into(),
+                ));
+            }
+            return Ok(Response {
+                status: self.status,
+                headers: Default::default(),
+                body: b"private upstream diagnostic".to_vec(),
+            });
+        }
+        self.oauth.send(request).await
+    }
+}
+
+#[tokio::test]
+async fn github_authorization_failures_use_dependency_statuses_without_disclosing_diagnostics() {
+    for (upstream, expected) in [
+        (0, StatusCode::BAD_GATEWAY),
+        (500, StatusCode::BAD_GATEWAY),
+        (401, StatusCode::BAD_GATEWAY),
+        (429, StatusCode::SERVICE_UNAVAILABLE),
+        (504, StatusCode::GATEWAY_TIMEOUT),
+        (404, StatusCode::NOT_FOUND),
+    ] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        storage
+            .insert_installation(&identity_account(9001, "acme", AccountType::Organization))
+            .await
+            .unwrap();
+        let state = AppState::new(
+            storage,
+            Arc::new(MembershipFailureTransport {
+                oauth: MockTransport::scripted(oauth_sign_in_expectations()),
+                status: upstream,
+            }),
+            Arc::new(RecordingCommands::default()),
+            WebConfig::for_local_dev_with_secret([7; 32]),
+        );
+        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
+        assert_eq!(response.status(), expected, "upstream {upstream}");
+        let html = response_html(response).await;
+        assert!(!html.contains("private"));
+        assert!(!html.contains("Console overview"));
+    }
+}
+
+#[tokio::test]
+async fn legacy_historical_settings_requires_current_authority_and_does_not_enable_writes() {
+    for (account_id, kind, authorized) in [
+        (42, AccountType::User, true),
+        (999, AccountType::User, false),
+        (9001, AccountType::Organization, true),
+        (9001, AccountType::Organization, false),
+    ] {
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let account = identity_account(account_id, "historical", kind);
+        storage.insert_installation(&account).await.unwrap();
+        storage
+            .mark_installation_uninstalled(account.installation_id, Utc::now())
+            .await
+            .unwrap();
+        let mut expectations = oauth_sign_in_expectations();
+        if kind == AccountType::Organization {
+            expectations.push(Expectation::ok_json(Method::Get,
+                "https://api.github.com/user/memberships/orgs/historical",
+                serde_json::json!({"role": if authorized { "admin" } else { "member" }, "state":"active", "organization":{"id":9001}})));
+        }
+        let commands = Arc::new(RecordingCommands::default());
+        let state = AppState::new(
+            storage,
+            Arc::new(MockTransport::scripted(expectations)),
+            commands.clone(),
+            WebConfig::for_local_dev_with_secret([7; 32]),
+        );
+        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let response = identity_request(
+            &app,
+            &cookie,
+            "GET",
+            "/console/accounts/historical/settings",
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            if authorized {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        );
+        let html = response_html(response).await;
+        assert_eq!(html.contains("Uninstalled."), authorized);
+        if authorized {
+            assert!(html.contains("href=\"/install\""));
+        }
+        for (method, path) in [
+            ("GET", "/console/accounts/historical/links/new"),
+            ("POST", "/console/accounts/historical/links"),
+            (
+                "POST",
+                "/console/accounts/historical/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/revoke",
+            ),
+            (
+                "POST",
+                "/console/accounts/historical/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve",
+            ),
+        ] {
+            assert_eq!(
+                identity_request(&app, &cookie, method, path).await.status(),
+                StatusCode::NOT_FOUND
+            );
+        }
+        assert!(commands.calls.lock().unwrap().is_empty());
+    }
+}
+
 #[tokio::test]
 async fn authorization_read_failure_preserves_submission_without_account_disclosure() {
     let mut expectations = oauth_expectations_without_membership();

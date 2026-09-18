@@ -789,11 +789,11 @@ async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
     for (membership, denied_status) in [
         (
             serde_json::json!({"role": "admin", "state": "active"}),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
         ),
         (
             serde_json::json!({"role": "admin", "state": "active", "organization": {"id": "9001"}}),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
         ),
         (
             serde_json::json!({"role": "admin", "state": "pending", "organization": {"id": 9001}}),
@@ -871,7 +871,7 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
         );
         let app = build_app(state, store);
         let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let response =
             identity_request(&app, &cookie, "POST", "/console/accounts/acme/links").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

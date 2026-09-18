@@ -8,7 +8,7 @@ use crate::commands::{
     UpdateInvitationLinkMetadata,
 };
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
-use crate::middleware::auth::RequireConsoleAdminOf;
+use crate::middleware::auth::{RequireConsoleAdminOf, RequireSettingsAdminOf};
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::session;
 use crate::state::AppState;
@@ -1187,7 +1187,7 @@ async fn authoritative_or_projected_link(
 
 async fn settings_page(
     State(state): State<AppState>,
-    admin: RequireConsoleAdminOf,
+    RequireSettingsAdminOf(admin): RequireSettingsAdminOf,
 ) -> impl IntoResponse {
     let error = if admin.account.uninstalled_at.is_none() {
         load_installation_repos_for_form(&state, &admin).await.err()
