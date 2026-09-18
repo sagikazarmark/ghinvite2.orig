@@ -7,6 +7,9 @@ The maintainer resumed #59 and approved local workerd, real Restate ingress,
 the Rust D1 adapter, browser HTTP, and disposable cutover fixtures as test seams.
 Local execution is not evidence of Cloudflare regional behavior, deployment
 credentials/routing, remote D1 backup/restore, or live GitHub guarantees.
+The [continuous recovery gates](recovery-ci.md) add native durable-projection CI,
+the actual-binding installation failure matrix, and separate production-feature
+worker-build packaging checks. The remote rollout obligations remain in #61.
 
 ## Reproduce
 
@@ -61,7 +64,7 @@ use request-local AsyncLocalStorage. Ordinary cases exercise unmodified JS clock
 The HTTP observer parses real protocol frame boundaries and can truncate a
 response after its first actual state write. It never synthesizes an SDK result.
 
-HTTP calls and convergence are bounded at 25 seconds, runtime execution at three
+HTTP calls and convergence are bounded at 25 seconds, runtime execution at five
 minutes, CLI import at one minute. Cleanup removes the runner's runtime and local
 fixtures. Failure/missing tools is a failed/unrun gate, never a pass. SIGKILL or
 host failure may need manual cleanup of the printed unique Compose project.

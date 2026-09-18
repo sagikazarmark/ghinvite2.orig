@@ -4,7 +4,10 @@
 
 - Cloudflare account with Workers paid plan (or free tier for testing)
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed: `npm install -g wrangler`
-- [`worker-build`](https://crates.io/crates/worker-build) installed: `cargo install worker-build`
+- [`worker-build`](https://crates.io/crates/worker-build) **0.8.1** installed: `cargo install worker-build --version 0.8.1 --locked`
+- wasm-bindgen CLI **0.2.120**, matching `Cargo.lock`: `cargo install wasm-bindgen-cli --version 0.2.120 --locked`.
+  Export `WASM_BINDGEN_BIN=$(command -v wasm-bindgen)` when invoking Wrangler so
+  worker-build uses the matching CLI. The CI packaging gate sets this explicitly.
 - [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) 0.7.x installed (`cargo binstall dioxus-cli@0.7.9`) and the `wasm32-unknown-unknown` target (`rustup target add wasm32-unknown-unknown`), for the island bundle
 - GitHub App created and configured (see GitHub App Setup below)
 - Restate Cloud account (or self-hosted Restate server)

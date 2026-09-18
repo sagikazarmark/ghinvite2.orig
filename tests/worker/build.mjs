@@ -18,8 +18,8 @@ assert.ok(version, 'wasm-bindgen version missing from Cargo.lock');
 const actual = execFileSync(cli, ['--version'], { encoding: 'utf8' }).trim();
 assert.equal(actual, `wasm-bindgen ${version}`, 'Install the wasm-bindgen CLI matching Cargo.lock');
 
-execFileSync('cargo', ['build', '--locked', '-p', crate, '--target', 'wasm32-unknown-unknown', '--features', 'runtime-tests'], {
-  cwd: root, stdio: 'inherit',
+execFileSync('timeout', ['--kill-after=5s', '600s', 'cargo', 'build', '--locked', '-p', crate, '--target', 'wasm32-unknown-unknown', '--features', 'runtime-tests'], {
+  cwd: root, stdio: 'inherit', timeout: 615_000, killSignal: 'SIGKILL',
 });
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], {
   cwd: root, encoding: 'utf8',
@@ -30,7 +30,7 @@ mkdirSync(generated);
 execFileSync(cli, [
   join(metadata.target_directory, `wasm32-unknown-unknown/debug/${crate.replaceAll('-', '_')}.wasm`),
   '--target', 'web', '--no-typescript', '--out-dir', generated, '--out-name', 'index',
-], { stdio: 'inherit' });
+], { stdio: 'inherit', timeout: 120_000, killSignal: 'SIGKILL' });
 // The web target's initSync accepts workerd's precompiled WebAssembly.Module.
 // esbuild follows generated JS snippets, so their hashed paths aren't hard-coded.
 await build({

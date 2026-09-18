@@ -1,5 +1,14 @@
 # Worker Runtime Smoke Test
 
+For the installation failure/replacement matrix on real Restate and Worker/D1,
+run `npm run test:installation --prefix tests/worker`. For the independent release
+packaging gate, install worker-build **0.8.1** and run
+`npm run test:production --prefix tests/worker` (also requires Python 3.11+ and GNU
+`timeout`). This uses the Wrangler build commands and generated production shims,
+checks entrypoints and rejects fixture-only routes. See
+[continuous recovery checks](../../docs/recovery-ci.md) for pins, evidence, and
+the remaining #61 live rollout obligations.
+
 For the authenticated decision queue, run
 `npm run test:queue --prefix tests/worker`. This exercises the actual web Worker
 and D1 adapter with non-expiring links, earlier/later link expiration, persisted
@@ -34,7 +43,7 @@ logging, or Wasm-import bypasses.
 
 ## Run
 
-Requirements: Node.js 20+, the repo's Rust toolchain with
+Requirements: Node.js 20+, GNU `timeout` (coreutils), the repo's Rust toolchain with
 `wasm32-unknown-unknown`, and the **wasm-bindgen CLI matching `Cargo.lock`**
 (currently 0.2.120). The build script checks the CLI version before building.
 Use the matching platform binary from the
@@ -58,7 +67,7 @@ installs Miniflare 4.20260302.0 (workerd 2026-03-02) and esbuild 0.27.3.
 `npm test` rebuilds the actual web Worker with:
 
 ```bash
-cargo build --locked -p ghinvite-web-worker --target wasm32-unknown-unknown
+cargo build --locked -p ghinvite-web-worker --target wasm32-unknown-unknown --features runtime-tests
 ```
 
 It then runs `wasm-bindgen --target web --no-typescript`, bundles the generated

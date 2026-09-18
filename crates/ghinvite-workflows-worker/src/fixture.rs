@@ -14,6 +14,10 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             "DB"
         })?);
     let result = match path.as_str() {
+        "/__fixture/installation" => storage
+            .get_installation(serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/member-binding" => {
             let (digest, invitation): (String, Option<ghinvite_core::GithubInvitationId>) = serde_json::from_value(input).map_err(super::worker_err)?;
             storage.bind_member_webhook(&digest, invitation).await
