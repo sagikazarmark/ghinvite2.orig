@@ -415,8 +415,7 @@ async fn load_installation_repos_for_form(
                 "installation repository read failed"
             );
             let (status, message) = match e {
-                ghinvite_github::Error::Transport(_)
-                | ghinvite_github::Error::Status { status: 504, .. } => (
+                ghinvite_github::Error::Status { status: 504, .. } => (
                     StatusCode::GATEWAY_TIMEOUT,
                     "GitHub did not respond in time. Try again in a moment.",
                 ),
@@ -452,7 +451,14 @@ async fn create_link(
 ) -> impl IntoResponse {
     let admin = match admin {
         Ok(admin) => admin,
-        Err(response) if response.status().is_server_error() => {
+        Err(response)
+            if matches!(
+                response.status(),
+                axum::http::StatusCode::BAD_GATEWAY
+                    | axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    | axum::http::StatusCode::GATEWAY_TIMEOUT
+            ) =>
+        {
             let Ok(CsrfForm(form)) = form else {
                 return response;
             };
@@ -471,7 +477,7 @@ async fn create_link(
                     }
                 }
             });
-            return (axum::http::StatusCode::SERVICE_UNAVAILABLE, Html(html)).into_response();
+            return (response.status(), Html(html)).into_response();
         }
         Err(response) => return response,
     };

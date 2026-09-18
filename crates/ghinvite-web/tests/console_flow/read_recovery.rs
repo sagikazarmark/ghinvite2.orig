@@ -141,22 +141,73 @@ async fn legacy_historical_settings_requires_current_authority_and_does_not_enab
 
 #[tokio::test]
 async fn authorization_read_failure_preserves_submission_without_account_disclosure() {
-    let mut expectations = oauth_expectations_without_membership();
-    expectations.push(Expectation::status(
-        Method::Get,
-        "https://api.github.com/user/memberships/orgs/acme",
-        503,
+    for (upstream, expected) in [
+        (503, StatusCode::BAD_GATEWAY),
+        (429, StatusCode::SERVICE_UNAVAILABLE),
+        (504, StatusCode::GATEWAY_TIMEOUT),
+    ] {
+        let mut expectations = oauth_expectations_without_membership();
+        expectations.push(Expectation::status(
+            Method::Get,
+            "https://api.github.com/user/memberships/orgs/acme",
+            upstream,
+        ));
+        expectations.extend([
+            oauth_expectations().pop().unwrap(),
+            installation_repos_expectation(),
+        ]);
+        let (app, cookie, calls) =
+            build_signed_in_admin_app_with_recording_commands(expectations).await;
+        let csrf = common::csrf_token(&app, &cookie).await;
+        let body = format!(
+            "csrf_token={csrf}&description=Preserve+me&permission=push&repo_ids=10&repo_ids=11"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/console/accounts/acme/links")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        let html = response_html(response).await;
+        assert!(html.contains("Access verification is temporarily unavailable"));
+        assert!(html.contains("Preserve me"));
+        assert!(html.contains("name=\"repo_ids\" value=\"10\""));
+        assert!(html.contains("name=\"repo_ids\" value=\"11\""));
+        assert!(!html.contains("acme/api"));
+        assert!(html.contains("Retry access verification"));
+        assert!(calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn creation_storage_failure_remains_internal_error_instead_of_access_recovery() {
+    let path = std::env::temp_dir().join(format!(
+        "ghinvite-auth-failure-{}.sqlite",
+        ghinvite_core::InvitationLinkId::new()
     ));
-    expectations.extend([
-        oauth_expectations().pop().unwrap(),
-        installation_repos_expectation(),
-    ]);
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
-    let csrf = common::csrf_token(&app, &cookie).await;
-    let body = format!(
-        "csrf_token={csrf}&description=Preserve+me&permission=push&repo_ids=10&repo_ids=11"
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+            .await
+            .unwrap(),
     );
+    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let pool =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+    sqlx::query("ALTER TABLE installations RENAME TO unavailable_installations")
+        .execute(&pool)
+        .await
+        .unwrap();
     let response = app
         .clone()
         .oneshot(
@@ -165,20 +216,19 @@ async fn authorization_read_failure_preserves_submission_without_account_disclos
                 .uri("/console/accounts/acme/links")
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&description=Workshop&permission=pull&repo_ids=10"
+                )))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert!(response.status().is_server_error());
-    let html = response_html(response).await;
-    assert!(html.contains("Access verification is temporarily unavailable"));
-    assert!(html.contains("Preserve me"));
-    assert!(html.contains("name=\"repo_ids\" value=\"10\""));
-    assert!(html.contains("name=\"repo_ids\" value=\"11\""));
-    assert!(!html.contains("acme/api"));
-    assert!(html.contains("Retry access verification"));
-    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response_html(response).await, "Internal Server Error");
+    pool.close().await;
+    drop(app);
+    drop(storage);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[tokio::test]
@@ -400,7 +450,7 @@ impl ghinvite_github::HttpTransport for RepositoryFailureTransport {
             let status = self.status.load(Ordering::SeqCst);
             if status == 0 {
                 return Err(ghinvite_github::Error::Transport(
-                    "timeout: private credential".into(),
+                    "connection failure: private credential".into(),
                 ));
             }
             let mut response = installation_repos_expectation().response;
@@ -436,13 +486,14 @@ async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
 }
 
 #[tokio::test]
-async fn repository_transport_timeout_is_not_an_empty_installation() {
+async fn repository_transport_failure_is_not_reported_as_timeout_or_empty_installation() {
     let (app, cookie) = sign_in(repository_recovery_app(Arc::new(AtomicU16::new(0))).await).await;
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/links/new").await;
-    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let html = response_html(response).await;
-    assert!(html.contains("GitHub did not respond in time"));
+    assert!(html.contains("Repositories could not be loaded"));
+    assert!(!html.contains("GitHub did not respond in time"));
     assert!(!html.contains("private credential"));
     assert!(!html.contains("No repositories are available"));
 }
