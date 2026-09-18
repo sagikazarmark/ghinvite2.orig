@@ -985,7 +985,11 @@ async fn callback_csrf_mismatch_rejects() {
     assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
     let body = resp2.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("CSRF"));
+    // The visitor is told the link is stale and sent back to sign in; naming
+    // the CSRF check is an internal detail they cannot act on.
+    assert!(text.contains("no longer valid"), "{text}");
+    assert!(text.contains("href=\"/login\""), "{text}");
+    assert!(!text.contains("CSRF"), "{text}");
 }
 
 #[tokio::test]

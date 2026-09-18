@@ -959,7 +959,7 @@ impl GhinviteCommands for RecordingCommands {
     ) -> ghinvite_web::Result<()> {
         if self.fail_edits {
             return Err(ghinvite_web::WebError::Restate(
-                "service unavailable".into(),
+                ghinvite_web::IngressFailure::Rejected { status: 503 },
             ));
         }
         assert_eq!(command.by_user, 42);

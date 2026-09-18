@@ -103,15 +103,20 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
     // sniff for `error`, and only then attempt the success-shape decode.
     let value: serde_json::Value = resp.json()?;
     if let Some(error_code) = value.get("error").and_then(|v| v.as_str()) {
-        let desc = value
-            .get("error_description")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        tracing::warn!(error_code, "oauth token exchange returned error payload");
-        return Err(Error::OAuth(format!("{error_code}: {desc}")));
+        // The code is the actionable distinction and is bounded to a documented
+        // shape. `error_description` is upstream prose that ends up in logs and
+        // in the browser's failure page, so it stops here.
+        let error_code = crate::redact::oauth_error_code(error_code);
+        tracing::warn!(
+            error_code = %error_code,
+            "oauth token exchange returned error payload"
+        );
+        return Err(Error::OAuth(error_code));
     }
-    let token: GhTokenResponse = serde_json::from_value(value)
-        .map_err(|e| Error::Decode(format!("oauth token response: {e}")))?;
+    // A shape mismatch here has the token payload in hand; `serde_json`'s
+    // message would quote it.
+    let token: GhTokenResponse =
+        serde_json::from_value(value).map_err(|_| Error::decode_shape("oauth token response"))?;
     tracing::info!(scope = %token.scope, "oauth token exchange succeeded");
     Ok(token)
 }
@@ -337,13 +342,58 @@ mod exchange_tests {
             },
         }]);
         let err = exchange_code(&mock, &cfg(), "expired").await.unwrap_err();
-        match err {
-            Error::OAuth(msg) => {
-                assert!(msg.contains("bad_verification_code"));
-                assert!(msg.contains("expired"));
-            }
+        match &err {
+            // The code survives so callers can still tell an expired code from
+            // a declined authorization; the prose does not.
+            Error::OAuth(code) => assert_eq!(code, "bad_verification_code"),
             other => panic!("expected OAuth error, got {other:?}"),
         }
+        assert!(!format!("{err} {err:?}").contains("incorrect or expired"));
+        mock.assert_exhausted();
+    }
+
+    /// An error payload whose `error` is prose rather than a documented code —
+    /// or that smuggles a credential into that slot — must not be carried.
+    #[tokio::test]
+    async fn unrecognized_error_payload_is_reduced_to_a_placeholder() {
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: br#"{"error":"token ghs_16C7e42F292c6912E7710c838347Ae178B4a rejected"}"#
+                    .to_vec(),
+            },
+        }]);
+        let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains("ghs_"), "{rendered}");
+        assert!(rendered.contains("unrecognized_error"), "{rendered}");
+        mock.assert_exhausted();
+    }
+
+    /// The success-shape decode runs with the token payload in hand.
+    #[tokio::test]
+    async fn token_shape_mismatch_never_quotes_the_payload() {
+        let token = "gho_16C7e42F292c6912E7710c838347Ae178B4a";
+        let mock = MockTransport::scripted(vec![Expectation {
+            method: Method::Post,
+            url: "https://github.com/login/oauth/access_token".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers: BTreeMap::new(),
+                body: format!(r#"{{"access_token":"{token}","scope":42}}"#).into_bytes(),
+            },
+        }]);
+        let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
+        let rendered = format!("{err} {err:?}");
+        assert!(matches!(err, Error::Decode(_)), "{rendered}");
+        assert!(!rendered.contains(token), "{rendered}");
         mock.assert_exhausted();
     }
 

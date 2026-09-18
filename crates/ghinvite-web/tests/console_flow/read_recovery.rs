@@ -224,7 +224,17 @@ async fn creation_storage_failure_remains_internal_error_instead_of_access_recov
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(response_html(response).await, "Internal Server Error");
+    let html = response_html(response).await;
+    // A storage outage is not an access-verification problem, so the form must
+    // not come back offering to retry verification.
+    assert!(
+        !html.contains("Access verification is temporarily unavailable"),
+        "{html}"
+    );
+    assert!(!html.contains("Retry access verification"), "{html}");
+    // And the page says nothing about the database beyond that it failed.
+    assert!(html.contains("Something went wrong"), "{html}");
+    assert!(!html.contains("installations"), "{html}");
     pool.close().await;
     drop(app);
     drop(storage);

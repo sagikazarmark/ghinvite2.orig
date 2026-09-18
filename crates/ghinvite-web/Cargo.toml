@@ -75,5 +75,8 @@ sqlx.workspace = true
 tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }
 hmac.workspace = true
 sha2.workspace = true
+# Captures `tracing` output so the disclosure tests can assert on what an
+# operator would actually see.
+tracing-subscriber.workspace = true
 hex = "0.4"
 wiremock.workspace = true

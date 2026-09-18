@@ -416,7 +416,16 @@ pub(super) fn failed(
             "Operation conflict. This identity is bound to different input. Check the original attempt status; no replacement attempt was submitted.",
             false,
         ),
-        e => super::super::invitation_v1::safe_error(e),
+        // Anything else is not about this attempt's outcome, so it renders the
+        // shared failure page pointing back at the link it was acting on.
+        e => e.into_response_with_recovery(
+            format!(
+                "/console/accounts/{}/links/{}",
+                admin.account.account_login,
+                command.link_id()
+            ),
+            "Back to link details",
+        ),
     }
 }
 

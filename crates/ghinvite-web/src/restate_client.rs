@@ -12,7 +12,7 @@
 //! `call` is reserved for the rare cases where the web wants the handler's
 //! return value before responding to the user.
 
-use crate::error::{Result, WebError};
+use crate::error::{IngressFailure, Result, WebError};
 use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::Serialize;
@@ -35,20 +35,18 @@ impl RestateAuth {
             }
             "bearer" => (),
             _ => {
-                return Err(WebError::Restate(
-                    "Invalid GHINVITE_RESTATE_AUTH configuration.".into(),
-                ));
+                return Err(WebError::Restate(IngressFailure::Config(
+                    "Invalid GHINVITE_RESTATE_AUTH configuration.",
+                )));
             }
         }
         let api_key = api_key
             .filter(|key| !key.is_empty() && key.bytes().all(|b| b.is_ascii_graphic()))
-            .ok_or_else(|| {
-                WebError::Restate(
-                    "GHINVITE_RESTATE_API_KEY is required and must be a non-empty token.".into(),
-                )
-            })?;
+            .ok_or(WebError::Restate(IngressFailure::Config(
+                "GHINVITE_RESTATE_API_KEY is required and must be a non-empty token.",
+            )))?;
         let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| WebError::Restate("Invalid ingress API key.".into()))?;
+            .map_err(|_| WebError::Restate(IngressFailure::Config("Invalid ingress API key.")))?;
         authorization.set_sensitive(true);
         Ok(Self {
             authorization: Some(authorization),
@@ -85,9 +83,9 @@ impl RestateClient {
     pub fn with_auth(ingress_base: impl Into<String>, auth: RestateAuth) -> Result<Self> {
         let ingress_base = ingress_base.into();
         let invalid_url = || {
-            WebError::Restate(
-                "Ingress must be an HTTP(S) URL without credentials, query, or fragment.".into(),
-            )
+            WebError::Restate(IngressFailure::Config(
+                "Ingress must be an HTTP(S) URL without credentials, query, or fragment.",
+            ))
         };
         let url = url::Url::parse(&ingress_base).map_err(|_| invalid_url())?;
         if !matches!(url.scheme(), "http" | "https")
@@ -106,9 +104,9 @@ impl RestateClient {
             _ => false,
         };
         if auth.authorization.is_some() && url.scheme() != "https" && !loopback {
-            return Err(WebError::Restate(
-                "Authenticated ingress requires HTTPS (except loopback development).".into(),
-            ));
+            return Err(WebError::Restate(IngressFailure::Config(
+                "Authenticated ingress requires HTTPS (except loopback development).",
+            )));
         }
         // Wasm uses RequestBuilder::timeout below: Worker execution limits
         // do not impose a wall-clock deadline on upstream fetches.
@@ -121,9 +119,9 @@ impl RestateClient {
         let builder = builder
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none());
-        let client = builder
-            .build()
-            .map_err(|_| WebError::Restate("Could not build ingress client.".into()))?;
+        let client = builder.build().map_err(|_| {
+            WebError::Restate(IngressFailure::Config("Could not build ingress client."))
+        })?;
         Ok(Self {
             client,
             ingress_base: ingress_base.trim_end_matches('/').into(),
@@ -160,14 +158,17 @@ impl RestateClient {
                 .send()
                 .await
                 .map_err(|_| {
-                    WebError::Restate("Ingress send unavailable. Outcome unknown.".into())
+                    WebError::Restate(IngressFailure::unreachable("ingress send unreachable"))
                 })?;
 
             if !resp.status().is_success() {
-                let status = resp.status().as_u16();
-                return Err(WebError::Restate(format!(
-                    "Ingress send failed (HTTP {status})."
-                )));
+                // A send the ingress refused may still have been persisted
+                // before the response went wrong, so the command's effect is
+                // not ruled out.
+                return Err(WebError::Restate(IngressFailure::OutcomeUnknown {
+                    detail: "ingress send rejected",
+                    status: Some(resp.status().as_u16()),
+                }));
             }
             Ok(())
         })
@@ -223,7 +224,7 @@ impl RestateClient {
                 .send()
                 .await
                 .map_err(|_| {
-                    WebError::Restate("Outcome unknown. Retry the same attempt.".into())
+                    WebError::Restate(IngressFailure::unreachable("ingress unreachable"))
                 })?;
             let status = resp.status();
             if !status.is_success() {
@@ -232,23 +233,30 @@ impl RestateClient {
                         400 => WebError::BadRequest("Invalid command.".into()),
                         404 => WebError::NotFound,
                         409 => WebError::Conflict,
-                        _ => WebError::Restate("Outcome unknown. Retry the same attempt.".into()),
+                        other => WebError::Restate(IngressFailure::OutcomeUnknown {
+                            detail: "ingress returned an unhandled status",
+                            status: Some(other),
+                        }),
                     });
                 }
-                return Err(WebError::Restate(format!(
-                    "Ingress call failed (HTTP {}).",
-                    status.as_u16()
-                )));
+                return Err(WebError::Restate(IngressFailure::Rejected {
+                    status: status.as_u16(),
+                }));
             }
             let body = resp.bytes().await.map_err(|_| {
-                WebError::Restate("Could not read ingress response. Outcome unknown.".into())
+                WebError::Restate(IngressFailure::unreachable(
+                    "ingress response body unreadable",
+                ))
             })?;
             // Restate may return an empty body for unit-returning handlers.
             let body: &[u8] = if body.is_empty() { b"null" } else { &body };
             // Deserializer errors can quote untrusted response values, including
             // reflected credentials. Never pass them to logs or browser errors.
-            serde_json::from_slice::<O>(body)
-                .map_err(|_| WebError::Restate("Invalid ingress response. Outcome unknown.".into()))
+            serde_json::from_slice::<O>(body).map_err(|_| {
+                WebError::Restate(IngressFailure::unreachable(
+                    "ingress response could not be decoded",
+                ))
+            })
         })
         .await
     }

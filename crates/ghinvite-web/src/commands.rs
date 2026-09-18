@@ -775,8 +775,11 @@ mod tests {
                 send: false,
                 body: serde_json::to_value(input).unwrap(),
             });
-            serde_json::from_value(self.response.clone())
-                .map_err(|e| WebError::Restate(format!("decoding fake response: {e}")))
+            serde_json::from_value(self.response.clone()).map_err(|_| {
+                WebError::Restate(crate::error::IngressFailure::unreachable(
+                    "fake response could not be decoded",
+                ))
+            })
         }
     }
 

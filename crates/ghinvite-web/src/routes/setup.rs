@@ -1,7 +1,7 @@
 //! GitHub App Setup URL return handling.
 
 use crate::commands::{SetupReturn, SetupReturnAction, handle_setup_return};
-use crate::error::{Result, WebError};
+use crate::error::{OAuthFailure, Result, WebError};
 use crate::session;
 use crate::state::AppState;
 use axum::Router;
@@ -75,7 +75,7 @@ async fn handle_github_setup(
         .installations
         .into_iter()
         .find(|candidate| candidate.id == installation_id)
-        .ok_or_else(|| WebError::OAuth("installation is not visible to signed-in user".into()))?;
+        .ok_or(WebError::OAuth(OAuthFailure::InstallationNotVisible))?;
 
     let account_type = account_type_for(&installation)?;
     let selected_repos = selected_repos_for(&user_api, &installation).await?;

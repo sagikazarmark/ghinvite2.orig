@@ -187,7 +187,15 @@ impl InstallationClient {
         match self.transport.send(req).await?.ensure_success() {
             Ok(resp) => resp.json(),
             Err(err) => {
-                tracing::warn!(?err, "installation token mint failed");
+                // This request carries the App JWT, so whatever answered it may
+                // be quoting our own credential back at us. Log the same safe
+                // shape as every other call site: status and kind, never the
+                // error itself.
+                tracing::warn!(
+                    status = ?err.status(),
+                    kind = err.kind(),
+                    "installation token mint failed"
+                );
                 Err(err)
             }
         }
@@ -280,9 +288,10 @@ impl InstallationClient {
     ///
     /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
     /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
-    /// already-declined invitations, etc. Callers wanting to distinguish these
-    /// must currently parse `Error::Status::body` themselves; v1 just surfaces
-    /// the raw body. See spec §16 for the agreed error-handling discipline.
+    /// already-declined invitations, etc. `Error::Status::body` carries those
+    /// sub-codes through as a sanitized summary (see [`crate::redact`]), so
+    /// callers can still tell them apart; the response body itself does not
+    /// survive. See spec §16 for the agreed error-handling discipline.
     #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn add_collaborator(
         &self,

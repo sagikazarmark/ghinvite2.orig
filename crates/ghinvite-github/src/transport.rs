@@ -52,8 +52,11 @@ impl Request {
     }
 
     pub fn json_body<T: serde::Serialize>(mut self, value: &T) -> Result<Self> {
-        let body = serde_json::to_vec(value)
-            .map_err(|e| Error::Decode(format!("encoding request body: {e}")))?;
+        // serde's message renders the value it choked on, and request bodies
+        // carry the caller's input (justifications, logins). Only the fact of
+        // the failure is safe to keep.
+        let body =
+            serde_json::to_vec(value).map_err(|_| Error::decode_shape("encoding request body"))?;
         self.body = Some(body);
         self.headers
             .insert("content-type".into(), "application/json".into());
@@ -71,12 +74,11 @@ pub struct Response {
 
 impl Response {
     /// Decode the body as JSON of `T`. Errors with [`Error::Decode`] on parse
-    /// failure (the raw body is included in the error message).
+    /// failure, describing where decoding stopped without quoting the body —
+    /// the token endpoints decode through here and their payloads *are*
+    /// credentials.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T> {
-        serde_json::from_slice(&self.body).map_err(|e| {
-            let preview = String::from_utf8_lossy(&self.body);
-            Error::Decode(format!("{e}: body={preview}"))
-        })
+        serde_json::from_slice(&self.body).map_err(|e| Error::decode(&e, self.body.len()))
     }
 
     /// Returns `Ok(self)` if `status` is 2xx, otherwise the error
@@ -90,32 +92,32 @@ impl Response {
         }
     }
 
-    /// Build the error for a non-2xx response, applying the same body
-    /// truncation as [`ensure_success`]. Callers that match on status manually
-    /// (e.g. to special-case 201 vs 204) use this for the unexpected-status arm
-    /// so error logs stay consistent across the crate.
+    /// Build the error for a non-2xx response, summarising the body the same
+    /// way [`ensure_success`] does. Callers that match on status manually (e.g.
+    /// to special-case 201 vs 204) use this for the unexpected-status arm so
+    /// error logs stay consistent across the crate.
     ///
     /// A response carrying [rate-limit evidence](Response::rate_limit) becomes
     /// [`Error::RateLimited`], so throttling is classified once here and no
     /// caller has to re-read headers to tell a throttled 403 from a
     /// permission-denied one.
+    ///
+    /// Either way the summary keeps GitHub's documented `message` and
+    /// validation sub-codes and nothing else; see [`crate::redact`] for why the
+    /// body itself never survives. Classification reads the *raw* body first —
+    /// [`rate_limit`](Response::rate_limit) looks for GitHub's rate-limit
+    /// wording — so sanitizing never costs us the evidence.
     pub fn status_error(&self) -> Error {
-        // Truncate to keep error logs sane. Slicing bytes (not the lossy String)
-        // avoids any chance of mid-codepoint panic.
-        let truncated = if self.body.len() > 4096 {
-            format!("{}…", String::from_utf8_lossy(&self.body[..4096]))
-        } else {
-            String::from_utf8_lossy(&self.body).to_string()
-        };
+        let body = crate::redact::upstream_diagnostic(&self.body);
         match self.rate_limit() {
             Some(rate_limit) => Error::RateLimited {
                 status: self.status,
-                body: truncated,
+                body,
                 rate_limit,
             },
             None => Error::Status {
                 status: self.status,
-                body: truncated,
+                body,
             },
         }
     }
@@ -392,16 +394,16 @@ mod tests {
     }
 
     #[test]
-    fn response_ensure_success_fails_4xx_with_body() {
+    fn response_ensure_success_fails_4xx_with_a_body_summary() {
         let r = Response {
             status: 422,
             headers: BTreeMap::new(),
-            body: b"validation failed".to_vec(),
+            body: br#"{"message":"Validation Failed"}"#.to_vec(),
         };
         match r.ensure_success().unwrap_err() {
             Error::Status { status, body } => {
                 assert_eq!(status, 422);
-                assert!(body.contains("validation failed"));
+                assert!(body.contains("Validation Failed"), "{body}");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -427,6 +429,67 @@ mod tests {
         };
         let err = r.json::<serde_json::Value>().unwrap_err();
         assert!(matches!(err, Error::Decode(_)));
+    }
+
+    /// The token endpoints return credentials in the body. A decode failure
+    /// there used to embed the whole payload in the error, which then reached
+    /// logs and Restate terminal errors.
+    #[test]
+    fn response_json_decode_error_never_quotes_the_payload() {
+        let token = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
+        let body = format!(r#"{{"token":"{token}","expires_at":1234}}"#);
+        let r = Response {
+            status: 200,
+            headers: BTreeMap::new(),
+            body: body.clone().into_bytes(),
+        };
+        // `expires_at` is an integer where the payload type wants a timestamp
+        // string, so serde reports a shape error and names the value it saw.
+        let err = r
+            .json::<crate::payloads::GhInstallationToken>()
+            .unwrap_err();
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains(token), "{rendered}");
+        assert!(!rendered.contains("body="), "{rendered}");
+        assert!(
+            rendered.contains(&format!("{}-byte body", body.len())),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn status_error_summarises_a_github_error_envelope() {
+        let r = Response {
+            status: 422,
+            headers: BTreeMap::new(),
+            body: br#"{"message":"Validation Failed","errors":[{"resource":"RepositoryInvitation","code":"already_exists"}]}"#.to_vec(),
+        };
+        match r.status_error() {
+            Error::Status { status, body } => {
+                assert_eq!(status, 422);
+                // The 422 sub-code is what tells "already a collaborator" apart
+                // from "permission not valid"; it has to survive.
+                assert!(body.contains("already_exists"), "{body}");
+                assert!(body.contains("Validation Failed"), "{body}");
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_error_drops_a_gateway_body_that_echoes_our_credentials() {
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl";
+        let r = Response {
+            status: 502,
+            headers: BTreeMap::new(),
+            body: format!("<html>proxy error, upstream sent: Authorization: Bearer {jwt}</html>")
+                .into_bytes(),
+        };
+        let err = r.status_error();
+        let rendered = format!("{err} {err:?}");
+        assert!(!rendered.contains(jwt), "{rendered}");
+        assert!(!rendered.contains("proxy error"), "{rendered}");
+        assert_eq!(err.status(), Some(502));
     }
 
     #[test]
@@ -772,29 +835,23 @@ mod tests {
     }
 
     #[test]
-    fn response_ensure_success_truncates_safely_across_utf8_boundary() {
-        // Construct a body where byte 4096 sits in the middle of a multi-byte UTF-8 codepoint.
-        // 'a' is 1 byte; '€' (U+20AC) encodes as 3 bytes (E2 82 AC).
-        // 4095 'a's + '€' puts byte indexes 4095, 4096, 4097 inside the euro sign;
-        // the byte slice [..4096] therefore lands mid-codepoint and the OLD code panicked.
-        let mut body = vec![b'a'; 4095];
-        body.extend_from_slice("€".as_bytes()); // bytes 4095..4098
-        body.extend_from_slice(b"trailing"); // bytes 4098..
+    fn response_ensure_success_bounds_a_huge_body_without_splitting_a_codepoint() {
+        // A long `message` whose bound lands mid-codepoint: '€' (U+20AC) is
+        // three bytes, so a naive byte slice through it would panic.
+        let body = format!(r#"{{"message":"{}€ tail"}}"#, "a".repeat(4096));
         let r = Response {
             status: 500,
             headers: BTreeMap::new(),
-            body,
+            body: body.clone().into_bytes(),
         };
-        // Must NOT panic. Must produce an Error::Status with body length <= 4096 chars
-        // of input plus the ellipsis marker.
-        let err = r.ensure_success().unwrap_err();
-        match err {
-            Error::Status { status, body } => {
+        match r.ensure_success().unwrap_err() {
+            Error::Status {
+                status,
+                body: summary,
+            } => {
                 assert_eq!(status, 500);
-                assert!(
-                    body.ends_with('…'),
-                    "expected ellipsis suffix, got {body:?}"
-                );
+                assert!(summary.len() < body.len() / 4, "{}", summary.len());
+                assert!(summary.contains('…'), "{summary}");
             }
             other => panic!("expected Status, got {other:?}"),
         }

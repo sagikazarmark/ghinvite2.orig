@@ -28,14 +28,21 @@ pub struct RateLimit {
 /// All failure modes a GitHub-side call can produce. Callers in Plan 3 / Plan 4
 /// will branch on these variants; in particular `Error::Status(404)` on a
 /// `get_repo` is *not* fatal — it just means the App lost access.
+///
+/// Every string in here is a diagnostic, not a payload. Error values are
+/// formatted into logs and into Restate terminal errors long after the request
+/// that produced them, so no variant may carry a raw upstream body or anything
+/// derived from one that has not been through [`crate::redact`].
 #[derive(Debug, Error)]
 pub enum Error {
     /// The HTTP transport itself failed (DNS, TLS, broken pipe, etc).
     #[error("transport error: {0}")]
     Transport(String),
 
-    /// The server returned a non-2xx status. Holds the numeric status and the
-    /// raw body (truncated to 4 KiB) for diagnostics.
+    /// The server returned a non-2xx status. Holds the numeric status and a
+    /// bounded, sanitized summary of the body — GitHub's documented `message`
+    /// and validation sub-codes when the body is an error envelope, its size
+    /// otherwise. Build it with [`crate::Response::status_error`].
     ///
     /// A 403 arriving as this variant carries no rate-limit evidence, so it is
     /// a genuine permission refusal rather than throttling; throttled responses
@@ -47,6 +54,10 @@ pub enum Error {
     /// carrying documented rate-limit evidence. The request was refused
     /// outright, so nothing was applied and it may be retried once the limit
     /// named in `rate_limit` clears.
+    ///
+    /// `body` is the same sanitized summary [`Error::Status`] carries — a
+    /// throttled response is still an upstream body, and the rate-limit wording
+    /// this variant was classified by lives in GitHub's documented `message`.
     #[error("github throttled the request with status {status}: {body}")]
     RateLimited {
         status: u16,
@@ -54,12 +65,15 @@ pub enum Error {
         rate_limit: RateLimit,
     },
 
-    /// The response body was not valid JSON or did not match the expected shape.
+    /// The response body was not valid JSON or did not match the expected
+    /// shape. Build it with [`Error::decode`] / [`Error::decode_shape`]: the
+    /// body is described, never quoted.
     #[error("response decode error: {0}")]
     Decode(String),
 
     /// The OAuth authorization-code exchange returned an error from GitHub
-    /// (`error=...`/`error_description=...`).
+    /// (`error=...`). Carries the bounded error code only; GitHub's
+    /// `error_description` prose is upstream-controlled and is not kept.
     #[error("oauth error: {0}")]
     OAuth(String),
 
@@ -98,6 +112,39 @@ impl Error {
             Error::RateLimited { rate_limit, .. } => Some(*rate_limit),
             _ => None,
         }
+    }
+
+    /// A stable, payload-free label for logs and metrics.
+    ///
+    /// Log this plus [`Error::status`] instead of the error itself: a
+    /// `tracing` field holding the whole error drags its diagnostic string
+    /// into every sink that ever sees the event.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Error::Transport(_) => "transport",
+            Error::Status { .. } => "status",
+            Error::RateLimited { .. } => "rate_limited",
+            Error::Decode(_) => "decode",
+            Error::OAuth(_) => "oauth",
+            Error::InvalidInput(_) => "invalid_input",
+            Error::Jwt(_) => "jwt",
+        }
+    }
+
+    /// A decode failure described by category and position.
+    ///
+    /// `serde_json`'s own message quotes the offending value — on a token
+    /// endpoint that value is the credential — so only its classification
+    /// survives.
+    pub(crate) fn decode(error: &serde_json::Error, body_len: usize) -> Self {
+        Error::Decode(crate::redact::decode_diagnostic(error, body_len))
+    }
+
+    /// A decode failure for a value that was already parsed once and then
+    /// failed to match the expected shape. `context` names the call site and
+    /// must be a literal — never anything derived from the response.
+    pub(crate) fn decode_shape(context: &'static str) -> Self {
+        Error::Decode(format!("{context}: unexpected response shape"))
     }
 }
 
@@ -162,5 +209,47 @@ mod tests {
         .to_string();
         assert!(s.contains("401"));
         assert!(s.contains("bad creds"));
+    }
+
+    #[test]
+    fn kind_labels_every_variant_without_its_payload() {
+        let cases = [
+            (Error::Transport("dns: host.example".into()), "transport"),
+            (
+                Error::Status {
+                    status: 500,
+                    body: "secret".into(),
+                },
+                "status",
+            ),
+            (throttled(429, None), "rate_limited"),
+            (Error::Decode("secret".into()), "decode"),
+            (Error::OAuth("secret".into()), "oauth"),
+            (Error::InvalidInput("secret".into()), "invalid_input"),
+            (Error::Jwt("secret".into()), "jwt"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.kind(), expected);
+            assert!(!error.kind().contains("secret"));
+        }
+    }
+
+    #[test]
+    fn decode_never_quotes_the_body() {
+        let body = r#"{"access_token":"ghs_16C7e42F292c6912E7710c838347Ae178B4a"}"#;
+        let failure = serde_json::from_str::<u64>(body).unwrap_err();
+        let error = Error::decode(&failure, body.len());
+        let rendered = format!("{error} {error:?}");
+        assert!(!rendered.contains("ghs_"), "{rendered}");
+        assert!(rendered.contains("shape error"), "{rendered}");
+    }
+
+    #[test]
+    fn decode_shape_names_the_call_site_only() {
+        let error = Error::decode_shape("oauth token response");
+        assert_eq!(
+            error.to_string(),
+            "response decode error: oauth token response: unexpected response shape"
+        );
     }
 }
