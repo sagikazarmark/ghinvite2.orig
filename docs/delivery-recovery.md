@@ -110,11 +110,18 @@ The wait follows whichever evidence describes it. A `retry-after` — seconds or
 HTTP-date — names this request's wait and wins outright. Failing that, only an
 exhausted quota makes `x-ratelimit-reset` this request's wait; the reset rides
 along on a healthy quota too, and idling out an untouched hour is worse than the
-unguided backoff. Both are measured against the response's own `date`, so a
-skewed local clock cannot shorten them, and the result is clamped to between one
-second and one hour. Each wait is bounded; the retries are not. Giving up would
-settle an invitation on a limit never shown to be permanent, which is the failure
-this policy exists to prevent.
+unguided backoff. A numeric `retry-after` is already a duration; the HTTP-date
+form and the reset are read against the response's own `date`, so a skewed local
+clock cannot shorten them. The resulting wait is clamped to between one second
+and one hour. Each wait is bounded; the retries are not. Giving up would settle
+an invitation on a limit never shown to be permanent, which is the failure this
+policy exists to prevent.
+
+Sending `retry-after` at all cites a limit, even where the value yields no usable
+wait: discarding that evidence would leave a refusal looking permanent. The scope
+records which limit GitHub cited; the wait may still come from the quota reset,
+because which limit was cited and when the request can next succeed are different
+questions.
 
 Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
 and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
@@ -139,6 +146,15 @@ keeps an invitation object's lock across a rate-limit window.
 Only a response classifies. Transport errors, timeouts, and every other uncertain
 result stay outcome-unknown and keep the write fence, so throttling handling can
 never conclude that an ambiguous PUT was not applied.
+
+Settlement's `cancel_v1` and `tick_expire_v1` are not covered by the continuation
+policy above. A throttled DELETE or listing is transient there, so Restate
+retries it inside the invitation object's lock — the same way a 5xx or a 429
+already did before throttling was classified. That is deliberate: the alternative
+is settling a cancellation GitHub never performed, which is the failure this work
+exists to prevent, and the lock is one invitation's rather than the account's.
+Giving those handlers their own bounded continuations is follow-up work, not part
+of #80's delivery and observation scope.
 
 ## Notification retention and orphan promises
 

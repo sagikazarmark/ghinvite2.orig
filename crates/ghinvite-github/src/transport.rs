@@ -178,9 +178,10 @@ impl Response {
     /// all is a permission refusal. A 429 is a secondary limit by the definition
     /// of the status.
     ///
-    /// The scope names which limit the reported wait belongs to, so a response
-    /// that named a `retry-after` is secondary even where the hourly quota has
-    /// also run out — that wait is the one GitHub asked for.
+    /// The scope names the limit GitHub cited, so a `retry-after` or a 429 is
+    /// secondary even where the hourly quota has also run out. The reported
+    /// wait may still come from that quota's reset: which limit was cited and
+    /// when the request can next succeed are different questions.
     ///
     /// Only a response classifies. A transport failure never reaches here, so a
     /// request whose effect is unknown is never mistaken for a refused one.
@@ -188,26 +189,33 @@ impl Response {
         if self.status != 403 && self.status != 429 {
             return None;
         }
+        // Sending `retry-after` at all is GitHub citing a limit, whether or not
+        // the value yields a wait we can use: an unreadable date still says
+        // "this is a limit", and dropping that evidence would leave the refusal
+        // looking permanent.
+        let cited = self.headers.contains_key("retry-after") || self.status == 429;
         let retry_after = self.retry_after();
         let quota_exhausted = self.rate_limit_remaining() == Some(0);
         let named_limit = self.body_names_rate_limit();
-        if !(retry_after.is_some()
-            || self.status == 429
-            || named_limit == Some(true)
-            || (quota_exhausted && named_limit.is_none()))
-        {
+        if !(cited || named_limit == Some(true) || (quota_exhausted && named_limit.is_none())) {
             return None;
         }
-        // The wait follows whichever evidence actually describes it. A
-        // `retry-after` names this request's wait, so it wins outright. Failing
-        // that, only an exhausted quota makes the reset this request's wait:
-        // the reset rides along on a healthy quota too, and waiting out an
-        // unrelated hour is far worse than the caller's unguided backoff.
-        let (scope, retry_after) = match (retry_after, quota_exhausted) {
-            (Some(wait), _) => (RateLimitScope::Secondary, Some(wait)),
-            (None, true) => (RateLimitScope::Primary, self.rate_limit_reset_after()),
-            (None, false) => (RateLimitScope::Secondary, None),
+        // The scope names the limit GitHub cited; the wait follows whichever
+        // evidence describes it. A `retry-after` names this request's wait, so
+        // it wins outright. Failing that, only an exhausted quota makes the
+        // reset this request's wait — the reset rides along on a healthy quota
+        // too, and idling out an unrelated hour is far worse than the caller's
+        // unguided backoff.
+        let scope = if cited || !quota_exhausted {
+            RateLimitScope::Secondary
+        } else {
+            RateLimitScope::Primary
         };
+        let retry_after = retry_after.or_else(|| {
+            quota_exhausted
+                .then(|| self.rate_limit_reset_after())
+                .flatten()
+        });
         Some(RateLimit { scope, retry_after })
     }
 
@@ -631,6 +639,42 @@ mod tests {
             "You have exceeded a secondary rate limit",
         );
         assert_eq!(undated.retry_after(), None);
+    }
+
+    #[test]
+    fn an_unusable_retry_after_still_cites_a_limit() {
+        // GitHub sent a `retry-after` we cannot turn into a wait — an HTTP-date
+        // with no `date` to measure it against — and named no reason in the
+        // body. Discarding that evidence would leave this looking like a
+        // permanent refusal and settle the invitation on it.
+        let limit = refusal(
+            403,
+            &[("retry-after", "Tue, 01 Jan 2030 00:02:00 GMT")],
+            "Something went wrong",
+        )
+        .rate_limit()
+        .expect("a retry-after GitHub sent cites a limit even when unreadable");
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, None);
+    }
+
+    #[test]
+    fn a_cited_secondary_limit_stays_secondary_on_an_exhausted_quota() {
+        // 429 is a secondary citation however the quota reads; the reset is
+        // still the soonest this request can succeed, so it supplies the wait.
+        let limit = refusal(
+            429,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "Too Many Requests",
+        )
+        .rate_limit()
+        .unwrap();
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, Some(Duration::from_secs(1800)));
     }
 
     #[test]
