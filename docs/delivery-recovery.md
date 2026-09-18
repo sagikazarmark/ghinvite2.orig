@@ -106,22 +106,29 @@ hour's last request reports an exhausted quota too. An exhausted quota therefore
 only counts where GitHub named no other reason, and a 403 with no evidence at all
 remains a permission refusal that still settles a legacy invitation as failed.
 
-The primary-limit wait is read as `x-ratelimit-reset` minus the response's own
-`date`, so a skewed local clock cannot shorten it, and GitHub's guidance is
-clamped to between one second and one hour. Each wait is bounded; the retries are
-not. Giving up would settle an invitation on a limit never shown to be permanent,
-which is the failure this policy exists to prevent.
+The wait follows whichever evidence describes it. A `retry-after` — seconds or an
+HTTP-date — names this request's wait and wins outright. Failing that, only an
+exhausted quota makes `x-ratelimit-reset` this request's wait; the reset rides
+along on a healthy quota too, and idling out an untouched hour is worse than the
+unguided backoff. Both are measured against the response's own `date`, so a
+skewed local clock cannot shorten them, and the result is clamped to between one
+second and one hour. Each wait is bounded; the retries are not. Giving up would
+settle an invitation on a limit never shown to be permanent, which is the failure
+this policy exists to prevent.
 
 Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
 and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
 records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
 the same wait instead of the hourly dependency cadence; a throttled *read* during
 reconciliation earns that recheck too, because rereading is safe and is the only
-way a delivery GitHub would not let us observe resolves on its own. The settlement
-sweep defers one row by the same wait rather than retrying on a cadence of its
-own. Either way the wait is a durable continuation or a service-side timer, never
-a held retry: no handler keeps an invitation object's lock across a rate-limit
-window.
+way a delivery GitHub would not let us observe resolves on its own. One recheck
+stands per invitation, except that a sooner one supersedes a pending later one,
+so a throttle observed during an hourly blocked window does not wait that hour
+out. The settlement sweep defers once per sweep — the limit is account-wide, so
+one wait covers every remaining row and a limit outlasting it is the next sweep's
+to observe. Either way the wait is a durable continuation or a service-side
+timer, never a held retry: no handler keeps an invitation object's lock across a
+rate-limit window.
 
 Only a response classifies. Transport errors, timeouts, and every other uncertain
 result stay outcome-unknown and keep the write fence, so throttling handling can

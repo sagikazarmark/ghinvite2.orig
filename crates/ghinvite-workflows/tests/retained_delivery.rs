@@ -1342,36 +1342,59 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "admin":{"account_id":100,"user_id":7},"description":"Throttled delivery",
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
-    let admitted: Value = call("InvitationLinkV1", throttled_link.to_string(), "admit", json!({
-        "version":1,"link_id":throttled_link,"requester_id":8,"operation_id":RequestId::new()
-    })).send().await.unwrap().json().await.unwrap();
+    let key = throttled_link.to_string();
+    let admit = json!({"version":1,"link_id":throttled_link,"requester_id":8,"operation_id":RequestId::new()});
+    let admitted = call("InvitationLinkV1", key.clone(), "admit", admit);
+    let admitted: Value = admitted.send().await.unwrap().json().await.unwrap();
     let query = json!({"link_id":throttled_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
-    let plan: Value = call("InvitationLinkV1", throttled_link.to_string(), "prepare_dispatch", query)
-        .send().await.unwrap().json().await.unwrap();
+    let plan = call("InvitationLinkV1", key, "prepare_dispatch", query);
+    let plan: Value = plan.send().await.unwrap().json().await.unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
-    client.post(format!("{base}/outcomes"))
+    client
+        .post(format!("{base}/outcomes"))
         .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"throttled_once"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     let throttled: Value = call("GithubCreateV1", id.into(), "create", command.clone())
-        .send().await.unwrap().json().await.unwrap();
-    assert_eq!(throttled["outcome"], json!({"kind":"blocked","reason":"GitHub throttled delivery"}));
-    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
-        ghinvite_core::InvitationState::Sending, "a rate limit never settles an invitation");
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        throttled["outcome"],
+        json!({"kind":"blocked","reason":"GitHub throttled delivery"})
+    );
+    let sending = storage
+        .get_github_invitation(id.parse().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        sending.unwrap().state,
+        ghinvite_core::InvitationState::Sending,
+        "a rate limit never settles an invitation"
+    );
     // The stub asked for one second; the recheck that wait scheduled delivers
     // without any further command from us.
     let mut recovered = Value::Null;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        recovered = client.post(format!("{ingress}/GithubCreateV1/{id}/status"))
-            .send().await.unwrap().json().await.unwrap();
+        let status = client.post(format!("{ingress}/GithubCreateV1/{id}/status"));
+        recovered = status.send().await.unwrap().json().await.unwrap();
         if recovered["outcome"]["kind"] == "created" {
             break;
         }
     }
     assert_eq!(recovered["outcome"]["kind"], "created", "{recovered}");
-    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().github_invitation_id,
-        recovered["outcome"]["upstream_id"].as_u64());
+    let delivered = storage
+        .get_github_invitation(id.parse().unwrap())
+        .await
+        .unwrap();
+    let upstream = delivered.unwrap().github_invitation_id;
+    assert_eq!(upstream, recovered["outcome"]["upstream_id"].as_u64());
     assert_create_audit(&*storage, &recovered).await.unwrap();
     server.abort();
     stub_task.abort();

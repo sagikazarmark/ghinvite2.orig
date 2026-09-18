@@ -128,13 +128,17 @@ impl Response {
     }
 
     /// On 429 / 403-secondary-rate-limit responses, GitHub sends `Retry-After`
-    /// as a non-negative integer of seconds. We don't parse the HTTP-date form
-    /// (rare; GitHub sends seconds in practice).
+    /// as a non-negative integer of seconds. The header also permits an
+    /// HTTP-date, which we read against the response's own `date` so a skewed
+    /// local clock cannot shorten the wait. A date already past, an unreadable
+    /// value, or a missing `date` to measure it against is no guidance at all.
     pub fn retry_after(&self) -> Option<Duration> {
-        self.headers
-            .get("retry-after")
-            .and_then(|v| v.parse::<u64>().ok())
-            .map(Duration::from_secs)
+        let value = self.headers.get("retry-after")?;
+        if let Ok(seconds) = value.parse::<u64>() {
+            return Some(Duration::from_secs(seconds));
+        }
+        let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+        self.after_response_date(retry_at.timestamp())
     }
 
     /// How long until the primary quota resets, measured as `x-ratelimit-reset`
@@ -142,12 +146,19 @@ impl Response {
     /// keeps a skewed local one from shortening the wait. `None` if either
     /// header is absent or unparseable, or if the reset has already passed.
     pub fn rate_limit_reset_after(&self) -> Option<Duration> {
-        let reset: i64 = self.headers.get("x-ratelimit-reset")?.parse().ok()?;
+        self.after_response_date(self.headers.get("x-ratelimit-reset")?.parse().ok()?)
+    }
+
+    /// How far `instant` (a Unix timestamp) lies past the `date` this response
+    /// was sent at. `None` when there is no readable `date` to measure against,
+    /// or when the instant has already passed by GitHub's own reckoning.
+    fn after_response_date(&self, instant: i64) -> Option<Duration> {
         let sent = chrono::DateTime::parse_from_rfc2822(self.headers.get("date")?)
             .ok()?
             .timestamp();
-        u64::try_from(reset.checked_sub(sent)?)
+        u64::try_from(instant.checked_sub(sent)?)
             .ok()
+            .filter(|seconds| *seconds > 0)
             .map(Duration::from_secs)
     }
 
@@ -165,6 +176,10 @@ impl Response {
     /// all is a permission refusal. A 429 is a secondary limit by the definition
     /// of the status.
     ///
+    /// The scope names which limit the reported wait belongs to, so a response
+    /// that named a `retry-after` is secondary even where the hourly quota has
+    /// also run out — that wait is the one GitHub asked for.
+    ///
     /// Only a response classifies. A transport failure never reaches here, so a
     /// request whose effect is unknown is never mistaken for a refused one.
     pub fn rate_limit(&self) -> Option<RateLimit> {
@@ -181,16 +196,17 @@ impl Response {
         {
             return None;
         }
-        Some(RateLimit {
-            scope: if quota_exhausted {
-                RateLimitScope::Primary
-            } else {
-                RateLimitScope::Secondary
-            },
-            // `retry-after` is the more specific instruction when GitHub sends
-            // both; the reset stands in for an exhausted quota that sent none.
-            retry_after: retry_after.or_else(|| self.rate_limit_reset_after()),
-        })
+        // The wait follows whichever evidence actually describes it. A
+        // `retry-after` names this request's wait, so it wins outright. Failing
+        // that, only an exhausted quota makes the reset this request's wait:
+        // the reset rides along on a healthy quota too, and waiting out an
+        // unrelated hour is far worse than the caller's unguided backoff.
+        let (scope, retry_after) = match (retry_after, quota_exhausted) {
+            (Some(wait), _) => (RateLimitScope::Secondary, Some(wait)),
+            (None, true) => (RateLimitScope::Primary, self.rate_limit_reset_after()),
+            (None, false) => (RateLimitScope::Secondary, None),
+        };
+        Some(RateLimit { scope, retry_after })
     }
 
     /// Whether the reason named in the body is a rate limit — the only evidence
@@ -585,6 +601,77 @@ mod tests {
     }
 
     #[test]
+    fn retry_after_accepts_the_http_date_form() {
+        let response = refusal(
+            403,
+            &[
+                ("retry-after", "Tue, 01 Jan 2030 00:02:00 GMT"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "You have exceeded a secondary rate limit",
+        );
+        assert_eq!(response.retry_after(), Some(Duration::from_secs(120)));
+
+        // A date already past by GitHub's own clock is no guidance, and neither
+        // is one with no `date` to measure it against.
+        let past = refusal(
+            403,
+            &[
+                ("retry-after", "Mon, 31 Dec 2029 23:58:00 GMT"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "You have exceeded a secondary rate limit",
+        );
+        assert_eq!(past.retry_after(), None);
+        let undated = refusal(
+            403,
+            &[("retry-after", "Tue, 01 Jan 2030 00:02:00 GMT")],
+            "You have exceeded a secondary rate limit",
+        );
+        assert_eq!(undated.retry_after(), None);
+    }
+
+    #[test]
+    fn retry_after_names_the_wait_even_on_an_exhausted_quota() {
+        // GitHub asked for 30s. The hourly reset rides along on the same
+        // response and must not replace the wait it actually named.
+        let limit = refusal(
+            429,
+            &[
+                ("retry-after", "30"),
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "You have exceeded a secondary rate limit",
+        )
+        .rate_limit()
+        .unwrap();
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn a_healthy_quotas_reset_is_never_mistaken_for_a_secondary_wait() {
+        // A secondary limit with quota to spare: the reset half an hour out
+        // belongs to an untouched hourly window, so this reports no wait and
+        // the caller falls back to its unguided backoff instead of idling.
+        let limit = refusal(
+            403,
+            &[
+                ("x-ratelimit-remaining", "4998"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "You have exceeded a secondary rate limit",
+        )
+        .rate_limit()
+        .unwrap();
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, None);
+    }
+
+    #[test]
     fn exhausted_quota_is_evidence_when_github_names_no_other_reason() {
         // No readable reason in the body, so the headers stand: retrying an
         // unexplained refusal costs one request, settling it costs the invitation.
@@ -595,7 +682,9 @@ mod tests {
                 .collect(),
             body: b"<html>upstream error</html>".to_vec(),
         };
-        let limit = response.rate_limit().expect("headers are the only evidence");
+        let limit = response
+            .rate_limit()
+            .expect("headers are the only evidence");
         assert_eq!(limit.scope, RateLimitScope::Primary);
     }
 

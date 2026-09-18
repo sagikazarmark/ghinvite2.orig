@@ -199,6 +199,7 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             ));
         }
         ctx.clear("v1/recheck_scheduled");
+        ctx.clear(RECHECK_WAIT);
         ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
             .create(Json(command))
             .send()
@@ -322,17 +323,26 @@ impl GithubCreateV1 for GithubCreateV1Impl {
         // unknown: rereading is safe, and it is the only way a delivery GitHub
         // would not let us read ever resolves on its own. Either way the object
         // lock is released first — the wait is a continuation, not a held retry.
-        if (matches!(receipt.outcome, CreateOutcome::Blocked { .. })
-            || throttled_for_secs.is_some())
-            && ctx.get::<bool>("v1/recheck_scheduled").await?.is_none()
-        {
-            ctx.set("v1/recheck_scheduled", true);
+        let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
+        if blocked || throttled_for_secs.is_some() {
             let wait =
                 throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
-            ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
-                .recheck(Json(command))
-                .send_after(wait)
-                .await?;
+            // One recheck at a time, except when this one would arrive sooner:
+            // a throttle observed while an hourly dependency recheck is already
+            // pending must not have to wait that hour out. A superseded timer
+            // still fires, and the create it re-runs is idempotent.
+            if ctx
+                .get::<u64>(RECHECK_WAIT)
+                .await?
+                .is_none_or(|pending| wait.as_secs() < pending)
+            {
+                ctx.set("v1/recheck_scheduled", true);
+                ctx.set(RECHECK_WAIT, wait.as_secs());
+                ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
+                    .recheck(Json(command))
+                    .send_after(wait)
+                    .await?;
+            }
         }
         Ok(Json(receipt))
     }
@@ -379,6 +389,10 @@ impl Attempt {
 /// Throttling replaces this with GitHub's own guidance, which the same bound
 /// caps, so an unexplained block never rechecks more slowly than a named one.
 const BLOCKED_RECHECK_INTERVAL: std::time::Duration = crate::throttle::MAXIMUM;
+
+/// Seconds of the recheck currently scheduled, so a sooner one can supersede it
+/// rather than queue behind it. Cleared by the recheck it describes.
+const RECHECK_WAIT: &str = "v1/recheck_wait";
 
 async fn attempt(
     state: &AppState,
@@ -566,6 +580,16 @@ async fn attempt(
             .github
             .list_invitations(account.installation_id, repo.owner(), repo.name())
             .await;
+        // Reading is safe to repeat, so a throttled read earns the same bounded
+        // recheck a throttled write does — whichever of the two reads it was.
+        // The outcome stays unknown either way: a limit is not evidence about
+        // the original PUT.
+        let mut unread = |error: ghinvite_github::Error| {
+            if error.rate_limit().is_some() {
+                throttled_by = Some(error);
+            }
+            CreateOutcome::OutcomeUnknown
+        };
         match pending {
             Ok(items) => match items.iter().find(|i| {
                 i.invitee.id == command.requester_id
@@ -590,18 +614,13 @@ async fn attempt(
                     {
                         CreateOutcome::AlreadyCollaborator
                     }
-                    _ => CreateOutcome::OutcomeUnknown,
+                    // Membership evidence that named somebody else is read, not
+                    // unread: it reports no limit and schedules nothing.
+                    Ok(_) => CreateOutcome::OutcomeUnknown,
+                    Err(error) => unread(error),
                 },
             },
-            // Reading is safe to repeat, so a throttled listing earns the same
-            // bounded recheck a throttled write does. The outcome stays unknown
-            // either way: a limit is not evidence about the original PUT.
-            Err(error) => {
-                if error.rate_limit().is_some() {
-                    throttled_by = Some(error);
-                }
-                CreateOutcome::OutcomeUnknown
-            }
+            Err(error) => unread(error),
         }
     };
     let receipt = CreateReceipt {
@@ -1009,6 +1028,35 @@ mod tests {
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
         assert_eq!(attempted.throttled_for_secs, Some(90));
         assert!(!fence_is_open(&state, &command).await);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn retained_create_rechecks_a_throttled_membership_probe() {
+        // The listing is complete and shows no invitation, so absence is real
+        // and the membership probe follows — and that read is the throttled one.
+        let mut script = identity_expectations();
+        script.extend([
+            invitation_page(
+                "https://api.github.test/repos/acme/api/invitations?per_page=100",
+                serde_json::json!([other_requester_item(7001)]),
+                None,
+            ),
+            Expectation {
+                method: Method::Get,
+                url: "https://api.github.test/repos/acme/api/collaborators/alice/permission".into(),
+                required_headers: Default::default(),
+                expected_body: None,
+                response: refusal(403, &[("retry-after", "20")], "API rate limit exceeded"),
+            },
+        ]);
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_retained_create(mock.clone()).await;
+
+        let attempted = attempt(&state, &command, false).await.unwrap();
+
+        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
+        assert_eq!(attempted.throttled_for_secs, Some(20));
         mock.assert_exhausted();
     }
 }

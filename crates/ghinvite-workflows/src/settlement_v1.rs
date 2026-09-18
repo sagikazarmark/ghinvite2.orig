@@ -387,14 +387,23 @@ mod tests {
 
     #[tokio::test]
     async fn observe_retries_a_throttled_listing_rather_than_skipping_it() {
-        let throttled = crate::test_support::refusal(403, &[("retry-after", "60")],
-            "You have exceeded a secondary rate limit");
+        let throttled = crate::test_support::refusal(
+            403,
+            &[("retry-after", "60")],
+            "You have exceeded a secondary rate limit",
+        );
         let mock = MockTransport::scripted(vec![
-            Expectation::ok_json(Method::Get, "https://api.github.test/app/installations/9",
-                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/app/installations/9",
+                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null}),
+            ),
             token_mint(9),
-            Expectation::ok_json(Method::Get, "https://api.github.test/repos/acme/api",
-                serde_json::json!({"id":10,"full_name":"acme/api","private":true})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api",
+                serde_json::json!({"id":10,"full_name":"acme/api","private":true}),
+            ),
             Expectation {
                 method: Method::Get,
                 url: "https://api.github.test/repos/acme/api/invitations?per_page=100".into(),

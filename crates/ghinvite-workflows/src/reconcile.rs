@@ -61,12 +61,13 @@ impl Reconcile for ReconcileImpl {
             })
             .name("settlement_candidates_v1")
             .await?;
+        // One deferral for the whole sweep, not one per row: the limit is
+        // account-wide, so a wait that clears it clears it for every remaining
+        // row, and a limit outlasting GitHub's own guidance is tomorrow's sweep
+        // to observe rather than this one's to hold open for row after row. The
+        // sweep is a service, so the wait holds no invitation object.
+        let mut deferred = false;
         for row in rows {
-            // One deferral per row. A wait that clears the limit clears it for
-            // every row after this one, and a limit outlasting GitHub's own
-            // guidance is tomorrow's sweep to observe rather than this one's to
-            // hold open. The sweep is a service, so the wait holds no invitation.
-            let mut deferred = false;
             let evidence = loop {
                 let Json(observed) = ctx.run(|| async {
                     match crate::settlement_v1::observe(&self.state, &row, input.at).await {
