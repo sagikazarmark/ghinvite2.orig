@@ -40,6 +40,14 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     const unavailableAttempt = attempt(91);
     const rejected = await call('admit', unavailableAttempt);
     assert.deepEqual(rejected.result, { kind: 'rejected', reason: 'installation_unavailable' });
+    // Start the incomplete observation from confirmed full scope, independently
+    // of the preceding unavailable case's fail-closed projection.
+    const scope = Array.from({ length: 101 }, (_, n) => n + 10);
+    mode = 'available';
+    await http(`${ingress}/AccountInstallationV1/${account}/refresh`, current);
+    await eventually(() => storage('installation', current), row => row?.selected_repos?.length === 101);
+    assert.deepEqual((await storage('installation', current)).selected_repos, scope);
+    pages.length = 0;
     mode = 'incomplete';
     const retry = attempt(91);
     const response = await fetch(`${ingress}/InvitationLinkV1/${input.link_id}/admit`, {
@@ -48,11 +56,17 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     assert.equal(response.status, 503, await response.text());
     assert.ok(pages.includes(2), 'observation must traverse beyond the first page');
     assert.equal((await status()).observation.kind, 'unknown');
-    assert.equal((await call('link_status', { link_id: input.link_id, admin: input.admin })).uses, 0);
+    // Unknown availability clears delivery prerequisites, not link guardrails.
+    await eventually(() => storage('installation', current), row => row?.selected_repos?.length === 0);
+    const unavailableLink = await call('link_status', { link_id: input.link_id, admin: input.admin });
+    assert.equal(unavailableLink.uses, 0);
+    assert.deepEqual(unavailableLink.creation.repos, input.repos);
     mode = 'available';
     assert.deepEqual(await call('admit', unavailableAttempt), rejected, 'definitive rejection is retained');
     const accepted = await call('admit', retry);
     assert.equal(accepted.result.kind, 'accepted', 'incomplete observation must not bind a rejection');
+    await eventually(() => storage('installation', current), row => row?.selected_repos?.length === 101);
+    assert.deepEqual((await storage('installation', current)).selected_repos, scope);
     console.log('PASS Worker/D1 unavailable installation and incomplete paginated scope recover without consuming a use');
 
     await eventually(() => storage('audit', account), page => page.events.some(row => row.target_id === '8201' && row.event_type === 'installation.created'));
@@ -69,7 +83,6 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     assert.ok(lost.invocation(), 'faulted invocation identity must be observed');
     await http(`${ingress}/restate/invocation/${lost.invocation()}/attach`, undefined, 'GET');
     assert.deepEqual((await storage('audit', account)).events.filter(row => row.target_id === String(current) && row.event_type === 'installation.created'), created);
-    const scope = Array.from({ length: 101 }, (_, n) => n + 10);
     const assertReplacement = async () => {
       const replacement = await status();
       assert.equal(replacement.account.installation_id, current);
