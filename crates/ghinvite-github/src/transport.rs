@@ -103,9 +103,9 @@ impl Response {
     /// caller has to re-read headers to tell a throttled 403 from a
     /// permission-denied one.
     ///
-    /// Either way the summary keeps GitHub's documented `message` and
-    /// validation sub-codes and nothing else; see [`crate::redact`] for why the
-    /// body itself never survives. Classification reads the *raw* body first —
+    /// Either way the summary keeps the documented validation sub-codes and
+    /// nothing else; see [`crate::redact`] for why no upstream text survives.
+    /// Classification reads the *raw* body first —
     /// [`rate_limit`](Response::rate_limit) looks for GitHub's rate-limit
     /// wording — so sanitizing never costs us the evidence.
     pub fn status_error(&self) -> Error {
@@ -404,7 +404,8 @@ mod tests {
         match r.ensure_success().unwrap_err() {
             Error::Status { status, body } => {
                 assert_eq!(status, 422);
-                assert!(body.contains("Validation Failed"), "{body}");
+                assert!(body.contains("message withheld"), "{body}");
+                assert!(!body.contains("Validation Failed"), "{body}");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -469,9 +470,11 @@ mod tests {
             Error::Status { status, body } => {
                 assert_eq!(status, 422);
                 // The 422 sub-code is what tells "already a collaborator" apart
-                // from "permission not valid"; it has to survive.
+                // from "permission not valid"; it has to survive. GitHub's
+                // prose does not.
                 assert!(body.contains("already_exists"), "{body}");
-                assert!(body.contains("Validation Failed"), "{body}");
+                assert!(body.contains("message withheld"), "{body}");
+                assert!(!body.contains("Validation Failed"), "{body}");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -649,7 +652,11 @@ mod tests {
         match response.status_error() {
             Error::Status { status, body } => {
                 assert_eq!(status, 403);
-                assert!(body.contains("not accessible"));
+                // The refusal is classified from the raw body; what the
+                // diagnostic keeps is that GitHub sent an envelope, not its
+                // wording. See `crate::redact`.
+                assert!(body.contains("message withheld"), "{body}");
+                assert!(!body.contains("not accessible"), "{body}");
             }
             other => panic!("expected Status, got {other:?}"),
         }
@@ -827,7 +834,10 @@ mod tests {
                 rate_limit,
             } => {
                 assert_eq!(status, 403);
-                assert!(body.contains("secondary rate limit"));
+                // Classification reads the raw body before sanitizing, so the
+                // limit is still recognised even though its wording is not kept.
+                assert!(body.contains("message withheld"), "{body}");
+                assert!(!body.contains("secondary rate limit"), "{body}");
                 assert_eq!(rate_limit.scope, RateLimitScope::Secondary);
                 assert_eq!(rate_limit.retry_after, Some(Duration::from_secs(30)));
             }
@@ -836,9 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn response_ensure_success_bounds_a_huge_body_without_splitting_a_codepoint() {
-        // A long `message` whose bound lands mid-codepoint: '€' (U+20AC) is
-        // three bytes, so a naive byte slice through it would panic.
+    fn response_ensure_success_reduces_a_huge_body_to_a_summary() {
         let body = format!(r#"{{"message":"{}€ tail"}}"#, "a".repeat(4096));
         let r = Response {
             status: 500,
@@ -851,8 +859,11 @@ mod tests {
                 body: summary,
             } => {
                 assert_eq!(status, 500);
-                assert!(summary.len() < body.len() / 4, "{}", summary.len());
-                assert!(summary.contains('…'), "{summary}");
+                // Enumerated, not copied: the summary's size is set by what we
+                // chose to say, not by how much the upstream sent.
+                assert!(summary.len() < 64, "{summary}");
+                assert!(!summary.contains("aaaa"), "{summary}");
+                assert!(summary.contains("message withheld"), "{summary}");
             }
             other => panic!("expected Status, got {other:?}"),
         }

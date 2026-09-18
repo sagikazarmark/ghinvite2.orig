@@ -55,6 +55,16 @@ impl IngressFailure {
         }
     }
 
+    /// The status the ingress answered with, where it answered at all. Safe to
+    /// log beside the failure: it is a number, not a body.
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            Self::Rejected { status } => Some(*status),
+            Self::OutcomeUnknown { status, .. } => *status,
+            Self::Config(_) => None,
+        }
+    }
+
     /// Treat this failure as leaving the command's effect in doubt.
     ///
     /// Routes that change state and cannot cheaply re-read the result use
@@ -220,8 +230,7 @@ impl WebError {
     pub fn upstream_status(&self) -> Option<u16> {
         match self {
             WebError::Github(error) => error.status(),
-            WebError::Restate(IngressFailure::Rejected { status }) => Some(*status),
-            WebError::Restate(IngressFailure::OutcomeUnknown { status, .. }) => *status,
+            WebError::Restate(failure) => failure.upstream_status(),
             _ => None,
         }
     }

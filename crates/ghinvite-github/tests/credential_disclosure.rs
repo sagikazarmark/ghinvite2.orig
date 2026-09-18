@@ -193,10 +193,11 @@ async fn a_throttled_response_is_summarised_without_losing_its_evidence() {
         &[INSTALLATION_TOKEN, "observed_token"],
         "logs",
     );
-    // Throttling is still classified, and the wording that classified it is
-    // GitHub's documented `message`, which the summary keeps.
+    // Throttling is classified from the raw body, before the diagnostic is
+    // built, so the limit is still recognised even though the wording that
+    // named it is not kept.
     assert!(error.rate_limit().is_some(), "{rendered}");
-    assert!(rendered.contains("secondary rate limit"), "{rendered}");
+    assert!(!rendered.contains("secondary rate limit"), "{rendered}");
     assert_eq!(error.status(), Some(429));
     mock.assert_exhausted();
 }

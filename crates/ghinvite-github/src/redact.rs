@@ -7,55 +7,37 @@
 //! formatted into logs, into Restate terminal errors, and (historically) into
 //! browser responses — so nothing in this crate may retain a raw body.
 //!
-//! This module is the single seam where a body becomes a diagnostic. It keeps
-//! only what triages an incident:
+//! This module is the single seam where a body becomes a diagnostic, and it
+//! keeps **no upstream text at all**. That is deliberate, and it is the second
+//! design here: the first tried to keep GitHub's `message` and scrub
+//! credentials out of it by pattern. Pattern-matching cannot do that job. A
+//! secret need not look like one (`client-secret-do-not-expose` is just a
+//! lowercase word), an assignment can be split across a newline, and the key
+//! naming it can be a word no list carries. Every such hole is invisible until
+//! someone finds it.
 //!
-//! * the fields GitHub documents on its error envelope (`message`, and the
-//!   `errors[].code` sub-codes that distinguish validation failures), and
-//! * the size and shape of anything it does not recognise.
+//! So what survives is only what this crate can enumerate:
 //!
-//! Both paths are bounded and run through [`scrub_credentials`] as a backstop.
+//! * that a body *was* a GitHub error envelope, and how many bytes its message
+//!   ran to — never the message itself;
+//! * the `errors[].code` sub-codes GitHub documents, matched against
+//!   [`VALIDATION_SUB_CODES`], because a 422's sub-code is the whole reason a
+//!   caller looks at a 422;
+//! * the size and shape of anything unrecognised.
+//!
+//! Callers that need to classify a response — [`crate::Response::rate_limit`]
+//! reads GitHub's rate-limit wording — do so against the *raw* body, before it
+//! reaches here. Classification and retention are separate questions.
 
-/// Longest diagnostic we keep. Bodies are summarised, not truncated, so this
-/// is a backstop rather than the usual outcome.
+/// Longest diagnostic we keep. Everything below is enumerated rather than
+/// copied, so this is a backstop that should never bind in practice.
 const MAX_DIAGNOSTIC: usize = 512;
-
-/// Largest body worth parsing to look for an error envelope. GitHub's error
-/// responses are a few hundred bytes; anything past this is described by size
-/// rather than walked, so a gateway cannot make us parse what it likes.
-const MAX_INSPECT: usize = 64 * 1024;
-
-/// Longest `message` we echo from a recognised GitHub error envelope.
-const MAX_MESSAGE: usize = 160;
 
 /// Most `errors[].code` sub-codes we keep from one envelope.
 const MAX_CODES: usize = 4;
 
-/// Longest single sub-code we keep.
-const MAX_CODE: usize = 40;
-
-/// Credential prefixes GitHub issues. Any word starting with one of these is a
-/// token, whatever else it looks like.
-const TOKEN_PREFIXES: &[&str] = &[
-    "github_pat_",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "ghg_",
-];
-
-/// Placeholder left where a credential was removed.
-const REDACTED: &str = "[redacted]";
-
 /// Summarise a non-2xx response body into a diagnostic safe to keep in an
-/// error value.
-///
-/// A recognised GitHub error envelope keeps its `message` and validation
-/// sub-codes, because those are what tell a 422 "already a collaborator" apart
-/// from a 422 "permission not valid". Anything else is reduced to its size and
-/// media shape — the body itself never survives.
+/// error value. See the module docs for what "safe" is taken to mean.
 pub(crate) fn upstream_diagnostic(body: &[u8]) -> String {
     // Parse at most once, and only when the body is small enough to be worth
     // parsing at all. Nothing upstream sends a megabyte of error envelope, and
@@ -68,8 +50,13 @@ pub(crate) fn upstream_diagnostic(body: &[u8]) -> String {
         .as_ref()
         .and_then(envelope_summary)
         .unwrap_or_else(|| unrecognised_summary(body, parsed.is_some()));
-    bound(&scrub_credentials(&summary), MAX_DIAGNOSTIC)
+    bound(&summary, MAX_DIAGNOSTIC)
 }
+
+/// Largest body worth parsing to look for an error envelope. GitHub's error
+/// responses are a few hundred bytes; anything past this is described by size
+/// rather than walked, so a gateway cannot make us parse what it likes.
+const MAX_INSPECT: usize = 64 * 1024;
 
 /// Describe a body we could not decode without quoting any of it.
 ///
@@ -92,15 +79,12 @@ pub(crate) fn decode_diagnostic(error: &serde_json::Error, body_len: usize) -> S
 
 /// Reduce an upstream-supplied code to one of the values `known` lists.
 ///
-/// The slots this guards — an OAuth `error`, an installation's account type,
-/// its repository selection — all take values from a documented set, and every
-/// one of them arrives either on a browser-controlled redirect or in a GitHub
-/// response. A syntax rule alone is not enough: a secret such as
-/// `client-secret-do-not-expose` is lowercase, hyphenated and short, so it
-/// would pass as an identifier and land in the logs verbatim. Matching against
-/// the caller's allowlist removes that whole class — anything unrecognised
-/// becomes [`UNRECOGNIZED`], and the status or field name still says what
-/// happened.
+/// The slots this guards — an OAuth `error`, a validation sub-code, an
+/// installation's account type, its repository selection — all take values from
+/// a documented set, and every one of them arrives either on a
+/// browser-controlled redirect or in a GitHub response. Matching against the
+/// caller's allowlist is what makes them safe to keep; judging them by shape is
+/// not, for the reasons in the module docs.
 pub fn bounded_upstream_code(raw: &str, known: &[&str]) -> String {
     if known.contains(&raw) {
         raw.to_owned()
@@ -123,149 +107,36 @@ pub const OAUTH_ERROR_CODES: &[&str] = &[
     "unverified_user_email",
 ];
 
-/// Field and parameter names whose value is a credential wherever it appears —
-/// in a reflected JSON body, a form encoding, or a header dump.
-const CREDENTIAL_KEYS: &[&str] = &[
-    "access_token",
-    "api_key",
-    "apikey",
-    "auth",
-    "authorization",
-    "client_secret",
-    "credential",
-    "credentials",
-    "passwd",
-    "password",
-    "private_key",
-    "refresh_token",
-    "secret",
-    "token",
+/// The `code` values GitHub documents on a validation error object, plus the
+/// `already_exists` its collaborator-invitation endpoint returns. A sub-code
+/// outside this set is not one any caller branches on.
+pub const VALIDATION_SUB_CODES: &[&str] = &[
+    "already_exists",
+    "custom",
+    "invalid",
+    "missing",
+    "missing_field",
+    "unprocessable",
 ];
 
-/// Authentication schemes that introduce a credential as the next word, with
-/// no `=` or `:` in between.
-const CREDENTIAL_SCHEMES: &[&str] = &["basic", "bearer", "token"];
-
-/// What the scrubber expects of the next word it sees.
-#[derive(Clone, Copy, PartialEq)]
-enum Expect {
-    /// Nothing in particular; judge the word on its own shape.
-    Anything,
-    /// A credential named by the preceding scheme (`Bearer <token>`).
-    Credential,
-    /// A credential, but only once an `=` or `:` confirms this is an
-    /// assignment rather than prose that happens to contain the word.
-    AssignedCredential { assigned: bool },
-}
-
-/// Replace credential-shaped runs with [`REDACTED`].
-///
-/// Defence in depth: the callers above already drop everything they do not
-/// recognise, so this only has to cover text that survived as a documented
-/// field. It walks the text as runs of token characters separated by anything
-/// else, and judges each run by its own shape and by what introduced it.
-pub(crate) fn scrub_credentials(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut word = String::new();
-    let mut expect = Expect::Anything;
-
-    for ch in text.chars() {
-        if is_token_char(ch) {
-            word.push(ch);
-            continue;
-        }
-        expect = push_word(&mut out, &word, expect);
-        word.clear();
-        expect = match ch {
-            '=' | ':' => match expect {
-                Expect::AssignedCredential { .. } => Expect::AssignedCredential { assigned: true },
-                other => other,
-            },
-            // Quotes and spaces sit between a key and its value; anything else
-            // ends the assignment.
-            ' ' | '\t' | '"' | '\'' => expect,
-            _ => Expect::Anything,
-        };
-        out.push(ch);
-    }
-    push_word(&mut out, &word, expect);
-    out
-}
-
-/// Emit one word, redacted or not, and report what the word implies about the
-/// next one.
-fn push_word(out: &mut String, word: &str, expect: Expect) -> Expect {
-    if word.is_empty() {
-        return expect;
-    }
-    let lowered = word.to_ascii_lowercase();
-    let introduced = matches!(
-        expect,
-        Expect::Credential | Expect::AssignedCredential { assigned: true }
-    );
-    if introduced {
-        // `Authorization: Bearer <token>` — a scheme in the value slot names
-        // the credential after it and is not itself secret. Reading schemes
-        // only here keeps prose ("the request had no token and was rejected")
-        // from dragging the next word in.
-        if CREDENTIAL_SCHEMES.contains(&lowered.as_str()) {
-            out.push_str(word);
-            return Expect::Credential;
-        }
-        out.push_str(REDACTED);
-        return Expect::Anything;
-    }
-    if looks_like_credential(word) {
-        out.push_str(REDACTED);
-        return Expect::Anything;
-    }
-    out.push_str(word);
-    if CREDENTIAL_KEYS.contains(&lowered.as_str()) {
-        Expect::AssignedCredential { assigned: false }
-    } else {
-        Expect::Anything
-    }
-}
-
-/// `=` is deliberately absent: it separates a key from its value far more
-/// often than it pads a token, and GitHub's tokens and compact JWTs carry no
-/// base64 padding.
-fn is_token_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '+' | '/' | '~')
-}
-
-fn looks_like_credential(word: &str) -> bool {
-    if TOKEN_PREFIXES
-        .iter()
-        .any(|prefix| word.len() >= prefix.len() + 8 && word.starts_with(prefix))
-    {
-        return true;
-    }
-    // A compact JWT: three base64url segments, the first of which is the
-    // `{"alg":` header every GitHub App JWT starts with.
-    word.starts_with("eyJ") && word.matches('.').count() == 2 && word.len() >= 20
-}
-
 /// Pull the documented fields out of an already-parsed GitHub error envelope.
+///
+/// `message` is free upstream prose, so only its size is kept; `errors[].code`
+/// is an identifier indistinguishable by shape from an opaque secret, so it
+/// survives only by being one GitHub documents.
 fn envelope_summary(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
     let message = object.get("message")?.as_str()?;
-    // Scrub before `{:?}` escapes the text, not after. Escaping inserts
-    // backslashes, and a backslash ends the `key = value` run the scanner
-    // follows — so `client_secret=\"…\"` would walk straight past it.
-    let mut summary = format!(
-        "message={:?}",
-        scrub_credentials(&bound(message, MAX_MESSAGE))
-    );
-    let codes: Vec<&str> = object
+    let mut summary = format!("message withheld ({} bytes)", message.len());
+    let codes: Vec<String> = object
         .get("errors")
         .and_then(|errors| errors.as_array())
         .map(|errors| {
             errors
                 .iter()
                 .filter_map(|entry| entry.get("code")?.as_str())
-                .filter(|code| is_sub_code(code))
                 .take(MAX_CODES)
+                .map(|code| bounded_upstream_code(code, VALIDATION_SUB_CODES))
                 .collect()
         })
         .unwrap_or_default();
@@ -273,16 +144,6 @@ fn envelope_summary(value: &serde_json::Value) -> Option<String> {
         summary.push_str(&format!(" codes=[{}]", codes.join(",")));
     }
     Some(summary)
-}
-
-/// GitHub's validation sub-codes are short snake_case identifiers. Anything
-/// else in that slot is not a code we know how to act on.
-fn is_sub_code(code: &str) -> bool {
-    !code.is_empty()
-        && code.len() <= MAX_CODE
-        && code
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Describe a body we do not recognise by size alone. `parsed` says whether it
@@ -319,12 +180,45 @@ mod tests {
     const APP_JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl";
     const INSTALLATION_TOKEN: &str = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
 
+    /// `message` is free upstream prose. These are three shapes no pattern
+    /// scrubber catches: an opaque value with no key beside it, an assignment
+    /// split by a newline, and a credential named by an unlisted word. None of
+    /// it survives, because none of the text does.
     #[test]
-    fn envelope_keeps_message_and_validation_sub_codes() {
-        let body = br#"{"message":"Validation Failed","errors":[{"resource":"RepositoryInvitation","code":"already_exists","field":"invitee_id"}]}"#;
-        let diagnostic = upstream_diagnostic(body);
-        assert!(diagnostic.contains("Validation Failed"), "{diagnostic}");
+    fn no_upstream_message_text_is_retained() {
+        for body in [
+            r#"{"message":"client-secret-do-not-expose"}"#,
+            "{\"message\":\"client_secret:\\nopaque-value-here\"}",
+            r#"{"message":"passphrase was opaque-value-here"}"#,
+            r#"{"message":"Validation Failed"}"#,
+        ] {
+            let diagnostic = upstream_diagnostic(body.as_bytes());
+            assert!(!diagnostic.contains("opaque-value-here"), "{diagnostic}");
+            assert!(
+                !diagnostic.contains("client-secret-do-not-expose"),
+                "{diagnostic}"
+            );
+            assert!(!diagnostic.contains("Validation Failed"), "{diagnostic}");
+            // The envelope stays recognisable as one, which is what tells a
+            // GitHub refusal apart from a gateway's HTML.
+            assert!(diagnostic.contains("message withheld"), "{diagnostic}");
+        }
+    }
+
+    /// The sub-code is the whole reason a caller looks at a 422, so it has to
+    /// survive — but only by being one GitHub documents.
+    #[test]
+    fn only_documented_validation_sub_codes_are_retained() {
+        let body = r#"{"message":"Validation Failed","errors":[{"resource":"RepositoryInvitation","code":"already_exists","field":"invitee_id"},{"code":"client-secret-do-not-expose"}]}"#;
+        let diagnostic = upstream_diagnostic(body.as_bytes());
         assert!(diagnostic.contains("already_exists"), "{diagnostic}");
+        assert!(
+            !diagnostic.contains("client-secret-do-not-expose"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains(UNRECOGNIZED), "{diagnostic}");
+        // Fields we never asked for are not carried either.
+        assert!(!diagnostic.contains("invitee_id"), "{diagnostic}");
     }
 
     #[test]
@@ -335,34 +229,9 @@ mod tests {
             r#"{{"message":"Bad gateway","request_headers":{{"authorization":"Bearer {APP_JWT}"}}}}"#
         );
         let diagnostic = upstream_diagnostic(body.as_bytes());
-        assert!(diagnostic.contains("Bad gateway"), "{diagnostic}");
         assert!(!diagnostic.contains(APP_JWT), "{diagnostic}");
         assert!(!diagnostic.contains("request_headers"), "{diagnostic}");
-    }
-
-    #[test]
-    fn credential_in_a_documented_field_is_scrubbed() {
-        let body =
-            format!(r#"{{"message":"upstream rejected token {INSTALLATION_TOKEN} for install"}}"#);
-        let diagnostic = upstream_diagnostic(body.as_bytes());
-        assert!(!diagnostic.contains(INSTALLATION_TOKEN), "{diagnostic}");
-        assert!(diagnostic.contains(REDACTED), "{diagnostic}");
-        assert!(
-            diagnostic.contains("upstream rejected token"),
-            "{diagnostic}"
-        );
-    }
-
-    /// The summary renders `message` with `{:?}`, which escapes any quotes
-    /// inside it. Scrubbing the escaped form would walk past a credential:
-    /// the backslash breaks the `key = value` run the scanner follows.
-    #[test]
-    fn a_quoted_assignment_inside_message_is_still_scrubbed() {
-        let body = r#"{"message":"upstream rejected client_secret=\"opaque-secret-value\" today"}"#;
-        let diagnostic = upstream_diagnostic(body.as_bytes());
-        assert!(!diagnostic.contains("opaque-secret-value"), "{diagnostic}");
-        assert!(diagnostic.contains(REDACTED), "{diagnostic}");
-        assert!(diagnostic.contains("upstream rejected"), "{diagnostic}");
+        assert!(diagnostic.contains("message withheld"), "{diagnostic}");
     }
 
     #[test]
@@ -402,24 +271,16 @@ mod tests {
         assert!(upstream_diagnostic(b"").contains("empty body (0 bytes)"));
     }
 
+    /// Every diagnostic is now enumerated rather than copied, so the bound is a
+    /// backstop. It still has to hold, and still has to land on a character
+    /// boundary — the euro sign sits exactly where a naive byte slice would cut.
     #[test]
-    fn diagnostics_are_bounded() {
-        let body = format!(r#"{{"message":"{}"}}"#, "a".repeat(8192));
-        let diagnostic = upstream_diagnostic(body.as_bytes());
-        assert!(
-            diagnostic.len() <= MAX_DIAGNOSTIC + 4,
-            "{}",
-            diagnostic.len()
-        );
-        assert!(diagnostic.contains('…'), "{diagnostic}");
-    }
-
-    #[test]
-    fn bounding_never_splits_a_codepoint() {
-        let body = format!(r#"{{"message":"{}€ tail"}}"#, "a".repeat(MAX_MESSAGE));
-        // Reaching here without a panic is the assertion; the euro sign sits
-        // exactly where the naive byte slice would land.
-        assert!(upstream_diagnostic(body.as_bytes()).contains('…'));
+    fn the_diagnostic_bound_never_splits_a_codepoint() {
+        let text = format!("{}€ tail", "a".repeat(MAX_DIAGNOSTIC));
+        let bounded = bound(&text, MAX_DIAGNOSTIC);
+        assert!(bounded.ends_with('…'), "{bounded}");
+        assert!(bounded.len() <= MAX_DIAGNOSTIC + 4, "{}", bounded.len());
+        assert_eq!(bound("short", MAX_DIAGNOSTIC), "short");
     }
 
     #[test]
@@ -447,6 +308,9 @@ mod tests {
     fn bounded_code_passes_documented_codes_through() {
         for code in OAUTH_ERROR_CODES {
             assert_eq!(bounded_upstream_code(code, OAUTH_ERROR_CODES), *code);
+        }
+        for code in VALIDATION_SUB_CODES {
+            assert_eq!(bounded_upstream_code(code, VALIDATION_SUB_CODES), *code);
         }
     }
 
@@ -485,51 +349,9 @@ mod tests {
             bounded_upstream_code("all", OAUTH_ERROR_CODES),
             UNRECOGNIZED
         );
-    }
-
-    #[test]
-    fn scrub_leaves_ordinary_prose_alone() {
-        let text = "Validation Failed: invitee_id already_exists on repo owner/name.";
-        assert_eq!(scrub_credentials(text), text);
-    }
-
-    #[test]
-    fn scrub_redacts_the_value_of_a_credential_key() {
-        // A reflected form body or header dump names the credential next to it,
-        // so the name is enough even when the value has no recognisable shape.
-        for text in [
-            "client_secret=s3cr3t-value-here",
-            r#""access_token": "opaque-value-here""#,
-            "Authorization: Bearer opaque-value-here",
-            "api_key=s3cr3t-value-here",
-        ] {
-            let scrubbed = scrub_credentials(text);
-            assert!(!scrubbed.contains("value-here"), "{text} -> {scrubbed}");
-            assert!(scrubbed.contains(REDACTED), "{text} -> {scrubbed}");
-        }
-    }
-
-    #[test]
-    fn scrub_does_not_swallow_a_key_name_mentioned_in_prose() {
-        let text = "the request had no token and was rejected";
-        assert_eq!(scrub_credentials(text), text);
-    }
-
-    #[test]
-    fn scrub_stops_at_the_end_of_an_assignment() {
-        let scrubbed = scrub_credentials(r#"{"token":"abcdefgh","repo":"owner/name"}"#);
-        assert!(scrubbed.contains("owner/name"), "{scrubbed}");
-        assert!(!scrubbed.contains("abcdefgh"), "{scrubbed}");
-    }
-
-    #[test]
-    fn scrub_catches_every_github_token_prefix() {
-        for prefix in TOKEN_PREFIXES {
-            let token = format!("{prefix}0123456789abcdef");
-            assert_eq!(
-                scrub_credentials(&format!("got {token} back")),
-                format!("got {REDACTED} back"),
-            );
-        }
+        assert_eq!(
+            bounded_upstream_code("already_exists", OAUTH_ERROR_CODES),
+            UNRECOGNIZED
+        );
     }
 }

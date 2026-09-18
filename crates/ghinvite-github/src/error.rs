@@ -40,9 +40,10 @@ pub enum Error {
     Transport(String),
 
     /// The server returned a non-2xx status. Holds the numeric status and a
-    /// bounded, sanitized summary of the body — GitHub's documented `message`
-    /// and validation sub-codes when the body is an error envelope, its size
-    /// otherwise. Build it with [`crate::Response::status_error`].
+    /// bounded, sanitized summary of the body: the documented validation
+    /// sub-codes when it was a GitHub error envelope, and its size and shape
+    /// otherwise. No upstream text survives — see [`crate::redact`]. Build it
+    /// with [`crate::Response::status_error`].
     ///
     /// A 403 arriving as this variant carries no rate-limit evidence, so it is
     /// a genuine permission refusal rather than throttling; throttled responses
@@ -55,9 +56,10 @@ pub enum Error {
     /// outright, so nothing was applied and it may be retried once the limit
     /// named in `rate_limit` clears.
     ///
-    /// `body` is the same sanitized summary [`Error::Status`] carries — a
-    /// throttled response is still an upstream body, and the rate-limit wording
-    /// this variant was classified by lives in GitHub's documented `message`.
+    /// `body` is the same sanitized summary [`Error::Status`] carries: a
+    /// throttled response is still an upstream body. The rate-limit wording
+    /// that produced this classification is read from the raw response before
+    /// the summary is built, so nothing is lost by not keeping it.
     #[error("github throttled the request with status {status}: {body}")]
     RateLimited {
         status: u16,

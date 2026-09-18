@@ -734,6 +734,7 @@ async fn save_link_details(
             Err(crate::WebError::Restate(failure)) => {
                 tracing::warn!(
                     ingress_failure = %failure,
+                    upstream_status = ?failure.upstream_status(),
                     link_id = %id,
                     "invitation link metadata save outcome unknown"
                 );
