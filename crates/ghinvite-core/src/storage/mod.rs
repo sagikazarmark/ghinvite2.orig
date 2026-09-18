@@ -17,6 +17,7 @@ use thiserror::Error;
 #[cfg(feature = "test-suite")]
 pub mod test_suite;
 
+pub mod admin_attempts;
 pub mod audit_read;
 pub mod delivery_projection;
 pub mod projection;
@@ -100,6 +101,33 @@ pub struct GithubInvitationUpdate {
 
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
+    /// First writer wins atomically by ID and logical binding; return that record.
+    async fn retain_admin_attempt(
+        &self,
+        _scope: &str,
+        _id: &str,
+        _binding: &str,
+        _payload: &str,
+        _expires_at: i64,
+        _now: i64,
+    ) -> Result<admin_attempts::StoredAttempt> {
+        Err(Error::Database("attempt storage unavailable".into()))
+    }
+    async fn get_admin_attempt(
+        &self,
+        _scope: &str,
+        _id: &str,
+        _now: i64,
+    ) -> Result<Option<admin_attempts::StoredAttempt>> {
+        Err(Error::Database("attempt storage unavailable".into()))
+    }
+    async fn list_admin_attempts(
+        &self,
+        _scope: &str,
+        _now: i64,
+    ) -> Result<Vec<admin_attempts::StoredAttempt>> {
+        Err(Error::Database("attempt storage unavailable".into()))
+    }
     /// Atomically settle the observed Sent invitation and publish its audit.
     /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
     async fn settle_github_invitation(&self, _transition: &settlement::Settlement) -> Result<()> {
@@ -411,7 +439,9 @@ pub trait Storage: Send + Sync + 'static {
         _repo_id: u64,
         _requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        Err(Error::Database("member invitation lookup unavailable".into()))
+        Err(Error::Database(
+            "member invitation lookup unavailable".into(),
+        ))
     }
 
     /// Retain the first matching result (including None) for a verified body hash.
@@ -440,7 +470,9 @@ pub trait Storage: Send + Sync + 'static {
         &self,
         _account_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        Err(Error::Database("account invitation history read unavailable".into()))
+        Err(Error::Database(
+            "account invitation history read unavailable".into(),
+        ))
     }
 
     // -------- audit --------

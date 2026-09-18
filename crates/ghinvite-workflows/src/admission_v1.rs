@@ -218,6 +218,9 @@ pub trait InvitationLinkV1 {
         input: Json<RequestStatus>,
     ) -> Result<Json<RequestSnapshot>, TerminalError>;
     async fn decide(input: Json<DecideRequest>) -> Result<Json<DecisionReceipt>, TerminalError>;
+    async fn decision_status(
+        input: Json<DecideRequest>,
+    ) -> Result<Json<Option<DecisionReceipt>>, TerminalError>;
     async fn prepare_dispatch(
         input: Json<RequestStatus>,
     ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
@@ -593,6 +596,22 @@ fn validate_admin(admin: &AccountAdmin, account_id: u64) -> Result<(), TerminalE
         return Err(missing());
     }
     Ok(())
+}
+
+fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError> {
+    if let DecisionAction::Decline { reason } = &mut input.action {
+        *reason = reason
+            .take()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
+            return Err(invalid());
+        }
+    }
+    Ok(format!(
+        "v1/lifecycle-op/{}",
+        String::from(input.operation_id.clone())
+    ))
 }
 
 fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError> {
@@ -1421,6 +1440,25 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         Ok(Json(request))
     }
 
+    async fn decision_status(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(mut input): Json<DecideRequest>,
+    ) -> Result<Json<Option<DecisionReceipt>>, TerminalError> {
+        validate_key(&ctx, input.link_id).await?;
+        let Json(link) = ctx
+            .get::<Json<LinkSnapshot>>("v1/link")
+            .await?
+            .ok_or_else(missing)?;
+        validate_admin(&input.admin, link.creation.account_id)?;
+        let key = normalize_decision(&mut input)?;
+        match ctx.get::<Json<LifecycleRecord>>(&key).await? {
+            Some(Json(old)) if old.input == input => Ok(Json(Some(old.receipt))),
+            Some(_) => Err(conflict()),
+            None => Ok(Json(None)),
+        }
+    }
+
     async fn decide(
         &self,
         ctx: ObjectContext<'_>,
@@ -1432,19 +1470,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
-        if let DecisionAction::Decline { reason } = &mut input.action {
-            *reason = reason
-                .take()
-                .map(|s| s.trim().to_owned())
-                .filter(|s| !s.is_empty());
-            if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
-                return Err(invalid());
-            }
-        }
-        let key = format!(
-            "v1/lifecycle-op/{}",
-            String::from(input.operation_id.clone())
-        );
+        let key = normalize_decision(&mut input)?;
         if let Some(Json(old)) = ctx.get::<Json<LifecycleRecord>>(&key).await? {
             if old.input != input {
                 return Err(conflict());

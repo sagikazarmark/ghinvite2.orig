@@ -191,6 +191,68 @@ fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -
 
 #[async_trait]
 impl Storage for SqlxStorage {
+    async fn retain_admin_attempt(
+        &self,
+        scope: &str,
+        id: &str,
+        binding: &str,
+        payload: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<ghinvite_core::storage::admin_attempts::StoredAttempt> {
+        use ghinvite_core::storage::admin_attempts::*;
+        sqlx::query(INSERT)
+            .bind(scope)
+            .bind(id)
+            .bind(binding)
+            .bind(payload)
+            .bind(expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        let (id, payload): (String, String) = sqlx::query_as(BY_BINDING)
+            .bind(scope)
+            .bind(binding)
+            .bind(id)
+            .bind(now)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(StoredAttempt { id, payload })
+    }
+    async fn get_admin_attempt(
+        &self,
+        scope: &str,
+        id: &str,
+        now: i64,
+    ) -> Result<Option<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
+        use ghinvite_core::storage::admin_attempts::*;
+        let row: Option<(String, String)> = sqlx::query_as(GET)
+            .bind(scope)
+            .bind(id)
+            .bind(now)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(row.map(|(id, payload)| StoredAttempt { id, payload }))
+    }
+    async fn list_admin_attempts(
+        &self,
+        scope: &str,
+        now: i64,
+    ) -> Result<Vec<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
+        use ghinvite_core::storage::admin_attempts::*;
+        let rows: Vec<(String, String)> = sqlx::query_as(LIST)
+            .bind(scope)
+            .bind(now)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, payload)| StoredAttempt { id, payload })
+            .collect())
+    }
     async fn settle_github_invitation(
         &self,
         transition: &ghinvite_core::storage::settlement::Settlement,
@@ -888,15 +950,14 @@ impl Storage for SqlxStorage {
         repo_id: u64,
         requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
-            ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES,
-        )
-        .bind(u64_to_i64(account_id))
-        .bind(u64_to_i64(repo_id))
-        .bind(u64_to_i64(requester_id))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
+        let rows: Vec<crate::records::GithubInvitationRow> =
+            sqlx::query_as(ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES)
+                .bind(u64_to_i64(account_id))
+                .bind(u64_to_i64(repo_id))
+                .bind(u64_to_i64(requester_id))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
@@ -908,9 +969,18 @@ impl Storage for SqlxStorage {
         sqlx::query("INSERT INTO member_webhook_receipts(payload_sha256, invitation_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING")
             .bind(payload_sha256).bind(invitation_id.map(|id| id.to_string()))
             .execute(&self.pool).await.map_err(crate::to_db_err)?;
-        let id: Option<String> = sqlx::query_scalar("SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1")
-            .bind(payload_sha256).fetch_one(&self.pool).await.map_err(crate::to_db_err)?;
-        id.map(|id| id.parse().map_err(|_| Error::Corrupt("member webhook invitation ID".into()))).transpose()
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1",
+        )
+        .bind(payload_sha256)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(crate::to_db_err)?;
+        id.map(|id| {
+            id.parse()
+                .map_err(|_| Error::Corrupt("member webhook invitation ID".into()))
+        })
+        .transpose()
     }
 
     async fn list_pending_github_invitations_for_account(

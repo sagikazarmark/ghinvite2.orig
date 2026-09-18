@@ -133,6 +133,9 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                             None => rsx! {},
                         }}
                         {props.children}
+                        div { class: "mt-6 text-sm",
+                            a { class: "link", href: "/console/accounts/{login}/attempts", "Recover attempts" }
+                        }
                     }
                 }
             }

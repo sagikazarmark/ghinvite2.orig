@@ -7,6 +7,12 @@ use std::sync::Arc;
 #[async_trait::async_trait]
 pub trait RequestLifecycle: Send + Sync + 'static {
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt>;
+    /// Read the retained receipt without applying an undecided command on GET.
+    async fn decision_status(&self, _command: DecideRequest) -> Result<Option<DecisionReceipt>> {
+        Err(crate::WebError::Restate(
+            "Decision status unavailable".into(),
+        ))
+    }
     async fn status(&self, query: RequestStatus) -> Result<RequestSnapshot>;
     async fn delivery_progress(
         &self,
@@ -26,6 +32,16 @@ impl RestateRequestLifecycle {
 }
 #[async_trait::async_trait]
 impl RequestLifecycle for RestateRequestLifecycle {
+    async fn decision_status(&self, command: DecideRequest) -> Result<Option<DecisionReceipt>> {
+        self.client
+            .authoritative_call(
+                "InvitationLinkV1",
+                &command.link_id.to_string(),
+                "decision_status",
+                &command,
+            )
+            .await
+    }
     async fn delivery_progress(
         &self,
         query: RequestStatus,

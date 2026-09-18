@@ -23,6 +23,7 @@ use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
 
+mod attempts;
 mod audit;
 
 pub fn router() -> Router<AppState> {
@@ -51,6 +52,11 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(revoke_link),
         )
         .route("/console/accounts/{login}/requests", get(requests_queue))
+        .route("/console/accounts/{login}/attempts", get(attempts::index))
+        .route(
+            "/console/accounts/{login}/attempts/{attempt_id}",
+            get(attempts::page).post(attempts::retry),
+        )
         .route(
             "/console/accounts/{login}/requests/{request_id}/approve",
             axum::routing::post(approve_request),
@@ -500,6 +506,39 @@ async fn create_link(
         (Utc::now(), None)
     };
 
+    // Recover before present repository eligibility; expiry and repository names
+    // are canonical business input, not values to recompute on retry.
+    if let Some(id) = link_id {
+        match attempts::load(&state, &admin, &format!("create-{id}")).await {
+            Ok(Some(attempts::Command::Create(original))) => {
+                let repos = original
+                    .repos
+                    .iter()
+                    .map(|r| RepositoryChoice {
+                        id: r.repo_id,
+                        full_name: r.repo_full_name.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                let matches = create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
+                    v.description == original.description
+                        && v.internal_note == original.internal_note
+                        && v.expires_at == original.expires_at
+                        && v.max_uses == original.max_uses
+                        && v.permission == original.permission
+                        && v.approval_required == original.approval_required
+                        && v.repos == original.repos
+                });
+                let command = attempts::Command::Create(original);
+                if !matches {
+                    return attempts::failed(&admin, &command, crate::WebError::Conflict);
+                }
+                return attempts::execute(&state, &admin, command).await;
+            }
+            Ok(_) => {}
+            Err(e) => return e.into_response(),
+        }
+    }
+
     // Loaded once, before validating: the validators need the available
     // repositories to resolve the repository scope, and the error path needs
     // the same list to re-render the form. Validation itself is synchronous
@@ -542,9 +581,9 @@ async fn create_link(
         }
     };
 
-    if let Some(admission) = &state.admission {
+    if state.admission.is_some() {
         let id = link_id.unwrap();
-        let command = ghinvite_core::storage::projection::CreateLink {
+        let mut command = ghinvite_core::storage::projection::CreateLink {
             version: 1,
             link_id: id,
             admin: admin_assertion(&admin),
@@ -558,30 +597,8 @@ async fn create_link(
             approval_required: validated.approval_required,
             repos: validated.repos,
         };
-        return match admission.create(command).await {
-            Ok(_) => axum::response::Redirect::to(&format!(
-                "/console/accounts/{}/links/{id}",
-                admin.account.account_login
-            ))
-            .into_response(),
-            Err(crate::WebError::Restate(_)) => {
-                let mut errors = crate::views::links::LinkFormErrors::default();
-                errors.summary.push("Creation outcome unknown. Retry these same values or check the link detail URL before starting another link.".into());
-                (
-                    axum::http::StatusCode::BAD_GATEWAY,
-                    creation_form_response(
-                        &admin,
-                        None,
-                        Ok(repos),
-                        form.into_view_values(errors),
-                        now,
-                        Some(id),
-                    ),
-                )
-                    .into_response()
-            }
-            Err(error) => super::invitation_v1::safe_error(error),
-        };
+        command.repos.sort_by_key(|repo| repo.repo_id);
+        return attempts::execute(&state, &admin, attempts::Command::Create(command)).await;
     }
 
     let output = match state
@@ -780,8 +797,17 @@ async fn link_detail(
     };
     let link = match authoritative_or_projected_link(&state, &admin, link_id).await {
         Ok(link) => link,
-        Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            match attempts::load(&state, &admin, &format!("create-{link_id}")).await {
+                Ok(Some(command)) => return attempts::unknown(&admin, &command),
+                Err(error) => return error.into_response(),
+                Ok(None) => {}
+            }
+            return match e {
+                crate::WebError::NotFound => console_not_found_response(&admin),
+                error => super::invitation_v1::safe_error(error),
+            };
+        }
     };
 
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
@@ -817,26 +843,16 @@ async fn revoke_link(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    if let Some(admission) = &state.admission {
-        return match admission
-            .revoke(ghinvite_core::admission::AdminLinkCommand {
+    if state.admission.is_some() {
+        return attempts::execute(
+            &state,
+            &admin,
+            attempts::Command::Revoke(ghinvite_core::admission::AdminLinkCommand {
                 link_id,
                 admin: admin_assertion(&admin),
-            })
-            .await
-        {
-            Ok(_) => axum::response::Redirect::to(&format!(
-                "/console/accounts/{}/links/{link_id}",
-                admin.account.account_login
-            ))
-            .into_response(),
-            Err(crate::WebError::Restate(_)) => (
-                axum::http::StatusCode::BAD_GATEWAY,
-                "Revocation outcome unknown. Check the link details or retry revocation.",
-            )
-                .into_response(),
-            Err(error) => super::invitation_v1::safe_error(error),
-        };
+            }),
+        )
+        .await;
     }
     if let Err(e) = find_account_admin_invitation_link(
         state.storage.as_ref(),
@@ -944,9 +960,9 @@ async fn approve_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    if let Some(lifecycle) = &state.request_lifecycle {
+    if state.request_lifecycle.is_some() {
         return authoritative_decision(
-            lifecycle.as_ref(),
+            &state,
             &admin,
             request_id,
             form,
@@ -1017,9 +1033,9 @@ async fn decline_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    if let Some(lifecycle) = &state.request_lifecycle {
+    if state.request_lifecycle.is_some() {
         return authoritative_decision(
-            lifecycle.as_ref(),
+            &state,
             &admin,
             request_id,
             form,
@@ -1086,13 +1102,13 @@ struct LifecycleForm {
 }
 
 async fn authoritative_decision(
-    lifecycle: &dyn crate::lifecycle::RequestLifecycle,
+    state: &AppState,
     admin: &RequireConsoleAdminOf,
     request_id: ghinvite_core::RequestId,
     form: LifecycleForm,
     action: ghinvite_core::request_lifecycle::DecisionAction,
 ) -> axum::response::Response {
-    use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome};
+    use ghinvite_core::request_lifecycle::DecideRequest;
     let (Some(link_id), Some(operation_id)) = (form.link_id, form.operation_id) else {
         return crate::WebError::BadRequest(
             "Missing lifecycle command identity. Reload the queue.".into(),
@@ -1110,52 +1126,7 @@ async fn authoritative_decision(
         },
         action,
     };
-    match lifecycle.decide(command).await {
-        Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => (
-            axum::http::StatusCode::CONFLICT,
-            format!(
-                "Request is {}. The requested decision was not applied.",
-                receipt.request.state
-            ),
-        )
-            .into_response(),
-        Ok(receipt) => {
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Success,
-                    message: format!(
-                        "Request {}{}.{}",
-                        if receipt.outcome == DecisionOutcome::AlreadyCompleted {
-                            "already "
-                        } else {
-                            ""
-                        },
-                        receipt.request.state,
-                        if receipt.request.state == ghinvite_core::RequestState::Approved {
-                            " Unavailable repositories may block delivery. The original scope and decision deadline stay unchanged."
-                        } else { "" }
-                    ),
-                },
-            )
-            .await;
-            axum::response::Redirect::to(&format!(
-                "/console/accounts/{}/requests",
-                admin.account.account_login
-            ))
-            .into_response()
-        }
-        Err(
-            error @ (crate::WebError::BadRequest(_)
-            | crate::WebError::NotFound
-            | crate::WebError::Conflict),
-        ) => error.into_response(),
-        Err(_) => (
-            axum::http::StatusCode::BAD_GATEWAY,
-            "Decision outcome could not be confirmed. Retry the same submitted form.",
-        )
-            .into_response(),
-    }
+    attempts::execute(state, admin, attempts::Command::Decision(command)).await
 }
 
 fn admin_assertion(
