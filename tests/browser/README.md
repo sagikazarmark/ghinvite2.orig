@@ -1,5 +1,27 @@
 # Browser Regression Tests
 
+## Requester delivery lifecycle
+
+```bash
+npm ci --prefix crates/ghinvite-web
+npm run build:css --prefix crates/ghinvite-web
+npm ci --prefix tests/browser
+npm exec --prefix tests/browser -- playwright install --with-deps chromium
+npm exec --prefix tests/browser -- playwright test --config tests/browser/delivery.config.mjs
+```
+
+This suite serves the production authenticated `/i/{code}` route on port 4175,
+with real SQLite projections and HTTP-stubbed Restate/OAuth boundaries. It checks
+mixed per-repository outcomes, acceptance/notification links, privacy, and later
+accepted/declined/cancelled/expired lifecycle updates while retaining the create
+receipts. Desktop Chromium and mobile Chromium with JavaScript disabled verify
+manual refresh and responsive presentation. No island bundle is required.
+The fixture updates lifecycle through the storage port; webhook processing and
+live GitHub settlement are covered separately, not simulated by browser clicks.
+CI runs this alongside the admission and form suites.
+
+## Invitation link form
+
 Playwright tests the registry integration through the production new invitation
 link page: `LinkCreateFormPage`, the application's `Field` wrapper with registry
 Field context, FieldLabel, Input, and FieldError for description; Field context,

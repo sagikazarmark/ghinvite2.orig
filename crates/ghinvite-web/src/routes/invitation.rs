@@ -97,6 +97,7 @@ async fn invitation_page(
     let mut selection = select_requester_request_state(&context.requests, session.user_id);
     let mut delivery_request_id = None;
     let mut delivery_progress = Vec::new();
+    let mut delivery_unavailable = false;
     if let Some(lifecycle) = &state.request_lifecycle {
         let request_id = query.request_id.or_else(|| {
             context
@@ -130,7 +131,10 @@ async fn invitation_page(
                     .await
                 {
                     Ok(progress) => progress,
-                    Err(error) => return error.into_response(),
+                    Err(_) => {
+                        delivery_unavailable = true;
+                        Vec::new()
+                    }
                 };
             }
             delivery_request_id = Some(request_id);
@@ -150,17 +154,21 @@ async fn invitation_page(
     let delivery = match delivery_request_id {
         Some(id) => match state.storage.list_delivery_for_request(id).await {
             Ok(rows) => rows,
-            Err(error) => return crate::WebError::from(error).into_response(),
+            Err(_) => {
+                delivery_unavailable = true;
+                Vec::new()
+            }
         },
         None => Vec::new(),
     };
     let legacy_delivery = match delivery_request_id {
-        Some(id) if state.request_lifecycle.is_none() => {
-            match state.storage.list_github_invitations_for_request(id).await {
-                Ok(rows) => rows,
-                Err(error) => return crate::WebError::from(error).into_response(),
+        Some(id) => match state.storage.list_github_invitations_for_request(id).await {
+            Ok(rows) => rows,
+            Err(_) => {
+                delivery_unavailable = true;
+                Vec::new()
             }
-        }
+        },
         _ => Vec::new(),
     };
     if !context.link.is_active(now) && selection.current_status.is_none() {
@@ -184,6 +192,7 @@ async fn invitation_page(
                 delivery: delivery.clone(),
                 delivery_progress: delivery_progress.clone(),
                 legacy_delivery: legacy_delivery.clone(),
+                delivery_unavailable,
             }
         }
     });
