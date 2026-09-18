@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 
 // Consume worker-build output directly, without either runtime-test shim.
@@ -8,6 +9,9 @@ for (const { name, scriptPath } of configurations) {
   let outgoing = 0;
   const mf = new Miniflare({
     log: new Log(LogLevel.ERROR), modules: true, scriptPath,
+    // Keep worker/shim.mjs as the entrypoint while allowing its ../index.js
+    // import inside the complete artifact, independently of the caller's cwd.
+    modulesRoot: resolve(dirname(scriptPath), '..'),
     modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }, { type: 'ESModule', include: ['**/*.js'] }],
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
     kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],

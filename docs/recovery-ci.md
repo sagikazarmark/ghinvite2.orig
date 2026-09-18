@@ -51,6 +51,9 @@ Custom build commands run from the repository root, matching the documented
 `wrangler deploy --config wrangler/web.toml` and `restate-svc.toml` invocations.
 The packaging gate uses that same working directory; entrypoint paths remain
 relative to the Wrangler configuration files.
+The runtime check anchors Miniflare's module root at each artifact's `build/`
+directory and retains `build/worker/shim.mjs` as the entrypoint, including when
+invoked from npm's `tests/worker` working directory.
 
 ## Evidence limits and ownership
 
