@@ -37,6 +37,9 @@ impl HandlerError {
                     429 | 500..=599 => false, // transient
                     _ => true,                // terminal (4xx)
                 },
+                // GitHub declining to answer for now, not a decision about the
+                // request: a throttled 403 must never settle as a failure.
+                ghinvite_github::Error::RateLimited { .. } => false,
                 ghinvite_github::Error::Transport(_)
                 | ghinvite_github::Error::Decode(_)
                 | ghinvite_github::Error::OAuth(_)
@@ -130,6 +133,28 @@ mod tests {
             body: "rate limited".into(),
         });
         assert!(!e.is_terminal());
+    }
+
+    #[test]
+    fn github_throttled_403_is_transient() {
+        let e = HandlerError::Github(ghinvite_github::Error::RateLimited {
+            status: 403,
+            body: "You have exceeded a secondary rate limit".into(),
+            rate_limit: ghinvite_github::RateLimit {
+                scope: ghinvite_github::RateLimitScope::Secondary,
+                retry_after: Some(std::time::Duration::from_secs(60)),
+            },
+        });
+        assert!(!e.is_terminal());
+    }
+
+    #[test]
+    fn github_permission_denied_403_is_terminal() {
+        let e = HandlerError::Github(ghinvite_github::Error::Status {
+            status: 403,
+            body: "Resource not accessible by integration".into(),
+        });
+        assert!(e.is_terminal());
     }
 
     #[test]

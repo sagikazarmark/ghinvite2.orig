@@ -679,6 +679,50 @@ mod write_tests {
     }
 
     #[tokio::test]
+    async fn add_collaborator_separates_a_throttled_403_from_a_denied_one() {
+        for (headers, message, throttled) in [
+            (
+                vec![("retry-after", "42")],
+                "You have exceeded a secondary rate limit",
+                true,
+            ),
+            (vec![], "Resource not accessible by integration", false),
+        ] {
+            let mock = MockTransport::scripted(vec![
+                token_mint_expectation(),
+                Expectation {
+                    method: Method::Put,
+                    url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                    required_headers: BTreeMap::new(),
+                    expected_body: None,
+                    response: Response {
+                        status: 403,
+                        headers: headers
+                            .into_iter()
+                            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                            .collect(),
+                        body: serde_json::json!({ "message": message }).to_string().into(),
+                    },
+                },
+            ]);
+            let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+                .with_base("https://api.github.test");
+            let err = client
+                .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+                .await
+                .unwrap_err();
+            assert_eq!(err.status(), Some(403));
+            assert_eq!(
+                err.rate_limit()
+                    .map(|limit| limit.retry_after)
+                    .map(|after| after == Some(std::time::Duration::from_secs(42))),
+                throttled.then_some(true),
+                "unexpected classification of {message:?}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn delete_invitation_succeeds_on_204() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),

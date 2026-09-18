@@ -36,6 +36,7 @@ pub mod reconcile;
 pub mod request_lifecycle_v1;
 pub mod settlement_v1;
 pub mod state;
+pub mod throttle;
 
 #[cfg(test)]
 pub(crate) mod test_support;

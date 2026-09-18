@@ -384,4 +384,37 @@ mod tests {
         assert!(!err.is_terminal(), "got {err:?}");
         mock.assert_exhausted();
     }
+
+    #[tokio::test]
+    async fn observe_retries_a_throttled_listing_rather_than_skipping_it() {
+        let throttled = ghinvite_github::transport::Response {
+            status: 403,
+            headers: [("retry-after".to_owned(), "60".to_owned())].into_iter().collect(),
+            body: serde_json::json!({"message":"You have exceeded a secondary rate limit"}).to_string().into(),
+        };
+        let mock = MockTransport::scripted(vec![
+            Expectation::ok_json(Method::Get, "https://api.github.test/app/installations/9",
+                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null})),
+            token_mint(9),
+            Expectation::ok_json(Method::Get, "https://api.github.test/repos/acme/api",
+                serde_json::json!({"id":10,"full_name":"acme/api","private":true})),
+            Expectation {
+                method: Method::Get,
+                url: "https://api.github.test/repos/acme/api/invitations?per_page=100".into(),
+                required_headers: Default::default(),
+                expected_body: None,
+                response: throttled,
+            },
+        ]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        // A throttled 403 used to read as terminal, which dropped this row from
+        // the sweep silently. It is an unread observation, so the sweep retries.
+        let err = observe(&state, &row, dt("2026-05-05T13:00:00Z"))
+            .await
+            .unwrap_err();
+
+        assert!(!err.is_terminal(), "got {err:?}");
+        mock.assert_exhausted();
+    }
 }

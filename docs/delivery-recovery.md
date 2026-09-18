@@ -21,9 +21,10 @@ to the controlled cutover in ADR 0003 and #58.
   acknowledgement or the subsequent HTTP result is lost, recovery reads GitHub
   evidence and never repeats that PUT. This deliberately permits conservative
   outcome-unknown results even when a crash occurred before the HTTP send.
-  An explicit 401/403/404/429 rejection releases only that exact generation for
-  a later availability/rate-limit retry. A stale rejection cannot release a newer
-  attempt. Transport errors and uncertain responses never release the fence.
+  An explicit 401/403/404/429 rejection — a throttled refusal included — releases
+  only that exact generation for a later availability/rate-limit retry. A stale
+  rejection cannot release a newer attempt. Transport errors and uncertain
+  responses never release the fence.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
 
@@ -76,7 +77,8 @@ conflicts, durably resubmits original commands, and records submission checkpoin
 It never starts `InvitationRequestV1/run`. Its response describes submission only;
 read `GithubCreateV1/<id>/status` or the current request page for delivery outcomes.
 
-Blocked creates schedule a one-hour dependency recheck; explicit recovery may
+Blocked creates schedule a one-hour dependency recheck, or the throttling wait
+below when that is what blocked them; explicit recovery may
 check sooner. Unknown outcomes only perform read-only reconciliation on recovery.
 Pending invitations are matched on numeric requester identity and permission;
 membership evidence must likewise include numeric identity and permission.
@@ -91,6 +93,28 @@ complete historical plan before workflow fan-out. It validates scope/approval an
 rejects changed input or IDs once bound. Existing SQL Sent rows with upstream IDs
 are affirmative create evidence; ambiguous historical rows are fenced before
 reconciliation. Never infer a successful original create from decline/expiry alone.
+
+## GitHub throttling
+
+A 403 or 429 carrying documented rate-limit evidence — `x-ratelimit-remaining: 0`,
+`retry-after`, or GitHub's rate-limit wording in the body — is classified at the
+transport boundary as throttling rather than as an answer about the request. A 403
+without that evidence remains a permission refusal and still settles a legacy
+invitation as failed. The primary-limit wait is read as `x-ratelimit-reset` minus
+the response's own `date`, so a skewed local clock cannot shorten it, and GitHub's
+guidance is clamped to between one second and one hour.
+
+Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
+and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
+records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
+the same wait instead of the one-hour dependency cadence. Either way the wait is a
+durable continuation, not a held retry: no handler keeps an invitation object's
+lock across an external rate-limit window, and a bounded wait keeps one absurd
+`retry-after` from parking an invitation.
+
+Only a response classifies. Transport errors, timeouts, and every other uncertain
+result stay outcome-unknown and keep the write fence, so throttling handling can
+never conclude that an ambiguous PUT was not applied.
 
 ## Notification retention and orphan promises
 
@@ -116,7 +140,8 @@ management commands remain part of the #58 cutover rehearsal.
 native SQLx, and the GitHub HTTP stub: stable plans, 201/204/422, ambiguous 502,
 HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
-numeric identity/rename validation, and recovery after actual workflow cleanup.
+numeric identity/rename validation, throttled delivery resuming on its own
+scheduled recheck, and recovery after actual workflow cleanup.
 `authoritative_admission` additionally checks missing delivery projection
 prerequisites do not block link commands or workflow submission.
 

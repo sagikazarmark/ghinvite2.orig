@@ -8,7 +8,7 @@ use ghinvite_core::audit::EventType;
 // `#[restate_sdk::object]` below.
 use ghinvite_core::GithubInvitation as DomainGithubInvitation;
 use ghinvite_core::{GithubInvitationId, InvitationState, RepositoryIdentity, RequestId};
-use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
+use restate_sdk::context::{ContextClient, ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
 use schemars::JsonSchema;
@@ -120,13 +120,26 @@ impl GithubInvitation for GithubInvitationImpl {
     ) -> std::result::Result<(), TerminalError> {
         let Json(input) = input;
         let request_id = Some(ctx.invocation_id().to_string());
-        ctx.run(|| async {
-            create_logic(&self.state, &input, request_id.clone())
-                .await
-                .map_err(crate::error::to_sdk_handler_error)
-        })
-        .name("create")
-        .await
+        let Json(throttled_for_secs) = ctx
+            .run(|| async {
+                create_logic(&self.state, &input, request_id.clone())
+                    .await
+                    .map(Json)
+                    .map_err(crate::error::to_sdk_handler_error)
+            })
+            .name("create")
+            .await?;
+        if let Some(secs) = throttled_for_secs {
+            // Waiting here would hold this invitation's object lock for the
+            // whole rate-limit window, blocking its webhook, cancel, and expiry
+            // handlers. A durable continuation releases the lock and re-enters
+            // the same idempotent attempt once the limit has had time to clear.
+            ctx.object_client::<GithubInvitationClient>(ctx.key())
+                .create(Json(input))
+                .send_after(std::time::Duration::from_secs(secs))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn on_webhook(
@@ -179,14 +192,23 @@ impl GithubInvitation for GithubInvitationImpl {
 }
 
 /// Pure logic: row-insert in `Sending`, call GitHub, branch on status, update
-/// row + audit. Returns `Ok(())` for both 201 (sent) and 204 (already a
+/// row + audit. Returns `Ok(None)` for both 201 (sent) and 204 (already a
 /// collaborator) paths. Terminal 4xx is recorded as Failed and returns Ok so
 /// Restate does NOT retry. Transient 5xx returns Err to trigger Restate retry.
+///
+/// A throttled response is neither: it records nothing, leaves the row in
+/// `Sending`, and returns `Ok(Some(seconds))` so the caller can re-attempt
+/// after that bounded wait. A rate limit is GitHub declining to answer, so
+/// presenting it as a definitive send failure would be a lie about the
+/// invitation.
+///
+/// The `Option<u64>` is journaled by the caller's `ctx.run`; a `null` left by
+/// an older `()`-returning journal still reads back as `None`.
 pub async fn create_logic(
     state: &AppState,
     input: &CreateInvitationInput,
     request_id: Option<String>,
-) -> crate::error::Result<()> {
+) -> crate::error::Result<Option<u64>> {
     // Row insert in `Sending` state. Idempotent under retry: if the row
     // already exists with `id = input.invitation_id`, storage returns
     // `Conflict::DuplicateId` and we proceed (Restate retried after the
@@ -215,7 +237,7 @@ pub async fn create_logic(
                     ghinvite_core::storage::Error::NotFound,
                 ))?;
             if existing.state.is_terminal() {
-                return Ok(());
+                return Ok(None);
             }
             // Fall through and re-attempt the GitHub call.
         }
@@ -250,6 +272,14 @@ pub async fn create_logic(
             mark_invitation_already_accepted_transition(state, input, account_id, request_id)
                 .await?;
         }
+        Err(ghinvite_github::Error::RateLimited { rate_limit, .. }) => {
+            // Throttled: no invitation was created and none was refused, so the
+            // row stays in `Sending` with nothing audited. The caller defers the
+            // next attempt by the wait GitHub's guidance bounds.
+            return Ok(Some(
+                crate::throttle::backoff(rate_limit.retry_after).as_secs(),
+            ));
+        }
         Err(e) => {
             let h: crate::error::HandlerError = e.into();
             if !h.is_terminal() {
@@ -268,7 +298,7 @@ pub async fn create_logic(
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 async fn mark_invitation_sent_transition(
@@ -931,6 +961,93 @@ mod tests {
         create_logic(&state, &sample_input(inv_id, req_id), None)
             .await
             .unwrap();
+
+        let row = state
+            .storage
+            .get_github_invitation(inv_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InvitationState::Failed);
+        assert!(row.error_message.is_some());
+    }
+
+    /// A 403 or 429 answering the collaborator PUT, carrying `headers` and the
+    /// `{"message": ...}` body GitHub sends with every refusal.
+    fn refused_put(status: u16, headers: &[(&str, &str)], message: &str) -> Vec<Expectation> {
+        vec![
+            token_mint(9),
+            Expectation {
+                method: Method::Put,
+                url: "https://api.github.test/repos/acme/api/collaborators/alice".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status,
+                    headers: headers
+                        .iter()
+                        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                        .collect(),
+                    body: serde_json::json!({ "message": message }).to_string().into(),
+                },
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn create_defers_a_throttled_send_instead_of_failing_it() {
+        for (status, headers, message, expected_wait) in [
+            (
+                403,
+                vec![("retry-after", "45")],
+                "You have exceeded a secondary rate limit",
+                45,
+            ),
+            // No guidance at all: the documented minute stands in for it.
+            (429, vec![], "Too Many Requests", 60),
+        ] {
+            let mock = MockTransport::scripted(refused_put(status, &headers, message));
+            let (state, storage) = state_with_storage_and_mock(mock).await;
+            let req_id = seed_chain(&state).await;
+
+            let inv_id = GithubInvitationId::new();
+            let deferred = create_logic(&state, &sample_input(inv_id, req_id), None)
+                .await
+                .unwrap();
+
+            assert_eq!(deferred, Some(expected_wait), "for {status} {message:?}");
+            // The invitation is neither sent nor failed: GitHub never decided it.
+            let row = state
+                .storage
+                .get_github_invitation(inv_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.state, InvitationState::Sending);
+            assert_eq!(row.error_message, None);
+            assert!(audit_events(&storage, 100).await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn create_marks_a_permission_denied_403_failed() {
+        let mock = MockTransport::scripted(refused_put(
+            403,
+            &[("x-ratelimit-remaining", "4998")],
+            "Resource not accessible by integration",
+        ));
+        let (state, _storage) = state_with_storage_and_mock(mock).await;
+        let req_id = seed_chain(&state).await;
+
+        let inv_id = GithubInvitationId::new();
+        // A refusal with no rate-limit evidence is GitHub's answer, so it
+        // settles the invitation rather than scheduling another attempt.
+        assert_eq!(
+            create_logic(&state, &sample_input(inv_id, req_id), None)
+                .await
+                .unwrap(),
+            None
+        );
 
         let row = state
             .storage

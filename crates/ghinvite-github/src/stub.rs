@@ -41,6 +41,7 @@ enum Outcome {
     CreatedResponseLost,
     CreatedThenDeclined,
     AccessLostOnce,
+    ThrottledOnce,
 }
 
 #[derive(Deserialize)]
@@ -157,6 +158,9 @@ async fn add_collaborator(
         Some(Outcome::CreatedResponseLost | Outcome::CreatedThenDeclined)
     );
     let declined = matches!(s.outcomes.get(&key), Some(Outcome::CreatedThenDeclined));
+    // A throttled refusal answers with GitHub's secondary-limit shape, not the
+    // bare body every other controlled failure uses.
+    let mut throttled = false;
     let status = match s.outcomes.get(&key) {
         Some(Outcome::AlreadyCollaborator) => {
             s.collaborators.insert(key.clone(), true);
@@ -169,6 +173,11 @@ async fn add_collaborator(
         }
         Some(Outcome::AccessLostOnce) => {
             s.outcomes.remove(&key);
+            StatusCode::FORBIDDEN
+        }
+        Some(Outcome::ThrottledOnce) => {
+            s.outcomes.remove(&key);
+            throttled = true;
             StatusCode::FORBIDDEN
         }
         Some(Outcome::CreatedResponseLost | Outcome::CreatedThenDeclined) => StatusCode::CREATED,
@@ -185,6 +194,14 @@ async fn add_collaborator(
         return StatusCode::NO_CONTENT.into_response();
     }
     if !status.is_success() {
+        if throttled {
+            return (
+                status,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                Json(json!({"message": "You have exceeded a secondary rate limit"})),
+            )
+                .into_response();
+        }
         return (status, Json(json!({"message": "Controlled stub failure"}))).into_response();
     }
     s.next_id += 1;
@@ -337,6 +354,7 @@ mod tests {
             ("member", "already_collaborator"),
             ("denied", "terminal_failure"),
             ("retry", "transient_once"),
+            ("throttled", "throttled_once"),
         ] {
             let response = http
                 .post(format!("{base}/outcomes"))
@@ -384,6 +402,24 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // The throttled refusal is a 403 like `denied`, but its documented
+        // evidence separates it from a permission decision.
+        let throttled = github
+            .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
+            .await
+            .unwrap_err();
+        assert_eq!(throttled.status(), Some(403));
+        assert_eq!(
+            throttled.rate_limit().and_then(|limit| limit.retry_after),
+            Some(std::time::Duration::from_secs(1))
+        );
+        assert!(
+            github
+                .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let calls: serde_json::Value = http
             .get(format!("{base}/calls"))
             .send()
@@ -405,6 +441,8 @@ mod tests {
                 &json!({"method":"PUT", "path":"/repos/acme/denied/collaborators/alice", "permission":"pull", "status":422}),
                 &json!({"method":"PUT", "path":"/repos/acme/retry/collaborators/alice", "permission":"pull", "status":502}),
                 &json!({"method":"PUT", "path":"/repos/acme/retry/collaborators/alice", "permission":"pull", "status":201}),
+                &json!({"method":"PUT", "path":"/repos/acme/throttled/collaborators/alice", "permission":"pull", "status":403}),
+                &json!({"method":"PUT", "path":"/repos/acme/throttled/collaborators/alice", "permission":"pull", "status":201}),
             ]
         );
         assert!(!calls.to_string().contains("test-token"));

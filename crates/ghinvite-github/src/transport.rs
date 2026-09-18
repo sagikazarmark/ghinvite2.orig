@@ -1,9 +1,10 @@
 //! HTTP transport seam. Every GitHub call funnels through this trait so the
 //! reqwest impl can be swapped for `MockTransport` in tests.
 
-use crate::error::{Error, Result};
+use crate::error::{Error, RateLimit, RateLimitScope, Result};
 use async_trait::async_trait;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -87,10 +88,15 @@ impl Response {
         }
     }
 
-    /// Build an `Error::Status` from this response, applying the same body
+    /// Build the error for a non-2xx response, applying the same body
     /// truncation as [`ensure_success`]. Callers that match on status manually
     /// (e.g. to special-case 201 vs 204) use this for the unexpected-status arm
     /// so error logs stay consistent across the crate.
+    ///
+    /// A response carrying [rate-limit evidence](Response::rate_limit) becomes
+    /// [`Error::RateLimited`], so throttling is classified once here and no
+    /// caller has to re-read headers to tell a throttled 403 from a
+    /// permission-denied one.
     pub fn status_error(&self) -> Error {
         // Truncate to keep error logs sane. Slicing bytes (not the lossy String)
         // avoids any chance of mid-codepoint panic.
@@ -99,9 +105,16 @@ impl Response {
         } else {
             String::from_utf8_lossy(&self.body).to_string()
         };
-        Error::Status {
-            status: self.status,
-            body: truncated,
+        match self.rate_limit() {
+            Some(rate_limit) => Error::RateLimited {
+                status: self.status,
+                body: truncated,
+                rate_limit,
+            },
+            None => Error::Status {
+                status: self.status,
+                body: truncated,
+            },
         }
     }
 
@@ -117,11 +130,70 @@ impl Response {
     /// On 429 / 403-secondary-rate-limit responses, GitHub sends `Retry-After`
     /// as a non-negative integer of seconds. We don't parse the HTTP-date form
     /// (rare; GitHub sends seconds in practice).
-    pub fn retry_after(&self) -> Option<std::time::Duration> {
+    pub fn retry_after(&self) -> Option<Duration> {
         self.headers
             .get("retry-after")
             .and_then(|v| v.parse::<u64>().ok())
-            .map(std::time::Duration::from_secs)
+            .map(Duration::from_secs)
+    }
+
+    /// How long until the primary quota resets, measured as `x-ratelimit-reset`
+    /// minus the response's own `date`. Reading both ends off GitHub's clock
+    /// keeps a skewed local one from shortening the wait. `None` if either
+    /// header is absent or unparseable, or if the reset has already passed.
+    pub fn rate_limit_reset_after(&self) -> Option<Duration> {
+        let reset: i64 = self.headers.get("x-ratelimit-reset")?.parse().ok()?;
+        let sent = chrono::DateTime::parse_from_rfc2822(self.headers.get("date")?)
+            .ok()?
+            .timestamp();
+        u64::try_from(reset.checked_sub(sent)?)
+            .ok()
+            .map(Duration::from_secs)
+    }
+
+    /// The documented rate-limit evidence on this response, or `None` when there
+    /// is none and the status is therefore GitHub's answer to the request.
+    ///
+    /// GitHub reports throttling as 403 or 429 and names the limit one of three
+    /// documented ways: `x-ratelimit-remaining: 0` for the exhausted primary
+    /// quota, `retry-after` for a secondary limit, and the rate-limit wording in
+    /// the response body for either. A 403 with none of those is a permission
+    /// refusal; a 429 is a secondary limit by the definition of the status.
+    ///
+    /// Only a response classifies. A transport failure never reaches here, so a
+    /// request whose effect is unknown is never mistaken for a refused one.
+    pub fn rate_limit(&self) -> Option<RateLimit> {
+        if self.status != 403 && self.status != 429 {
+            return None;
+        }
+        let retry_after = self.retry_after();
+        let quota_exhausted = self.rate_limit_remaining() == Some(0);
+        let scope = if quota_exhausted {
+            RateLimitScope::Primary
+        } else if retry_after.is_some() || self.status == 429 || self.body_reports_rate_limit() {
+            RateLimitScope::Secondary
+        } else {
+            return None;
+        };
+        Some(RateLimit {
+            scope,
+            // `retry-after` is the more specific instruction when GitHub sends
+            // both; the reset stands in for an exhausted quota that sent none.
+            retry_after: retry_after.or_else(|| self.rate_limit_reset_after()),
+        })
+    }
+
+    /// Whether the body carries GitHub's documented rate-limit wording — the
+    /// only evidence a secondary limit leaves when it sends no headers.
+    fn body_reports_rate_limit(&self) -> bool {
+        serde_json::from_slice::<serde_json::Value>(&self.body)
+            .ok()
+            .as_ref()
+            .and_then(|body| body.get("message")?.as_str())
+            .is_some_and(|message| {
+                let message = message.to_ascii_lowercase();
+                message.contains("rate limit") || message.contains("abuse detection")
+            })
     }
 }
 
@@ -365,7 +437,163 @@ mod tests {
             headers,
             body: vec![],
         };
-        assert_eq!(r.retry_after(), Some(std::time::Duration::from_secs(60)));
+        assert_eq!(r.retry_after(), Some(Duration::from_secs(60)));
+    }
+
+    /// A response with the given headers and `{"message": ...}` body, the shape
+    /// GitHub returns for every refusal.
+    fn refusal(status: u16, headers: &[(&str, &str)], message: &str) -> Response {
+        Response {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+            body: serde_json::json!({ "message": message }).to_string().into(),
+        }
+    }
+
+    #[test]
+    fn retry_after_classifies_a_secondary_limit_on_403() {
+        let limit = refusal(
+            403,
+            &[("retry-after", "60"), ("x-ratelimit-remaining", "4998")],
+            "You have exceeded a secondary rate limit",
+        )
+        .rate_limit()
+        .expect("retry-after is documented secondary-limit evidence");
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn exhausted_quota_takes_its_wait_from_the_reset_header() {
+        let limit = refusal(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "API rate limit exceeded for installation ID 9.",
+        )
+        .rate_limit()
+        .expect("an exhausted quota is documented primary-limit evidence");
+        assert_eq!(limit.scope, RateLimitScope::Primary);
+        // 1893457800 is 1800s after the `date` above.
+        assert_eq!(limit.retry_after, Some(Duration::from_secs(1800)));
+    }
+
+    #[test]
+    fn reset_is_measured_against_githubs_clock_not_ours() {
+        // Reset already passed by GitHub's own reckoning: no wait to report,
+        // and a local clock behind GitHub's cannot invent one.
+        let response = refusal(
+            403,
+            &[
+                ("x-ratelimit-remaining", "0"),
+                ("x-ratelimit-reset", "1893454200"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "API rate limit exceeded",
+        );
+        assert_eq!(response.rate_limit_reset_after(), None);
+        let limit = response.rate_limit().unwrap();
+        assert_eq!(limit.scope, RateLimitScope::Primary);
+        assert_eq!(limit.retry_after, None);
+    }
+
+    #[test]
+    fn body_wording_classifies_a_limit_that_sent_no_headers() {
+        let limit = refusal(403, &[], "You have exceeded a secondary rate limit")
+            .rate_limit()
+            .expect("the documented body wording is evidence on its own");
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, None);
+    }
+
+    #[test]
+    fn malformed_or_absent_headers_fall_back_to_the_other_evidence() {
+        // Unparseable numbers are no evidence at all, so the body still decides.
+        let limit = refusal(
+            403,
+            &[
+                ("retry-after", "in a little while"),
+                ("x-ratelimit-remaining", "plenty"),
+                ("x-ratelimit-reset", "soon"),
+                ("date", "whenever"),
+            ],
+            "API rate limit exceeded for installation ID 9.",
+        )
+        .rate_limit()
+        .expect("body wording survives unparseable headers");
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, None);
+
+        // A 429 is evidence by itself, with or without readable headers.
+        let limit = refusal(429, &[("retry-after", "?")], "Too Many Requests")
+            .rate_limit()
+            .expect("429 is a secondary limit by definition");
+        assert_eq!(limit.scope, RateLimitScope::Secondary);
+        assert_eq!(limit.retry_after, None);
+    }
+
+    #[test]
+    fn a_genuine_forbidden_response_is_not_throttling() {
+        let response = refusal(
+            403,
+            &[
+                ("x-ratelimit-remaining", "4998"),
+                ("x-ratelimit-reset", "1893457800"),
+                ("date", "Tue, 01 Jan 2030 00:00:00 GMT"),
+            ],
+            "Resource not accessible by integration",
+        );
+        assert_eq!(response.rate_limit(), None);
+        match response.status_error() {
+            Error::Status { status, body } => {
+                assert_eq!(status, 403);
+                assert!(body.contains("not accessible"));
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_non_throttling_status_never_classifies_as_a_limit() {
+        // Quota headers ride along on every response; only 403/429 report a limit.
+        assert_eq!(
+            refusal(
+                404,
+                &[("x-ratelimit-remaining", "0"), ("retry-after", "60")],
+                "Not Found"
+            )
+            .rate_limit(),
+            None
+        );
+    }
+
+    #[test]
+    fn status_error_reports_a_throttled_response_as_rate_limited() {
+        let err = refusal(
+            403,
+            &[("retry-after", "30")],
+            "You have exceeded a secondary rate limit",
+        )
+        .status_error();
+        match err {
+            Error::RateLimited {
+                status,
+                body,
+                rate_limit,
+            } => {
+                assert_eq!(status, 403);
+                assert!(body.contains("secondary rate limit"));
+                assert_eq!(rate_limit.scope, RateLimitScope::Secondary);
+                assert_eq!(rate_limit.retry_after, Some(Duration::from_secs(30)));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 
     #[test]
