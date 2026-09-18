@@ -663,8 +663,8 @@ impl Storage for SqlxStorage {
             r#"
             INSERT INTO invitation_requests
               (id, invitation_link_id, requester_id, justification, state,
-               decided_by, decided_at, decline_reason, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+               decided_by, decided_at, decline_reason, created_at, decision_deadline)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
         )
         .bind(request.id.to_string())
@@ -676,6 +676,7 @@ impl Storage for SqlxStorage {
         .bind(request.decided_at)
         .bind(request.decline_reason.as_deref())
         .bind(request.created_at)
+        .bind(request.decision_deadline)
         .execute(&mut *tx)
         .await;
 
@@ -732,7 +733,7 @@ impl Storage for SqlxStorage {
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         let row: Option<crate::records::InvitationRequestRow> = sqlx::query_as(
             r#"SELECT id, invitation_link_id, requester_id, justification, state,
-                      decided_by, decided_at, decline_reason, created_at
+                      decided_by, decided_at, decline_reason, created_at, decision_deadline
                FROM invitation_requests WHERE id = ?1"#,
         )
         .bind(id.to_string())
@@ -748,7 +749,7 @@ impl Storage for SqlxStorage {
     ) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
             r#"SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
-                      r.decided_by, r.decided_at, r.decline_reason, r.created_at
+                      r.decided_by, r.decided_at, r.decline_reason, r.created_at, r.decision_deadline
                FROM invitation_requests r
                JOIN invitation_links l ON l.id = r.invitation_link_id
                WHERE l.account_id = ?1 AND r.state = 'pending'
@@ -767,7 +768,7 @@ impl Storage for SqlxStorage {
     ) -> Result<Vec<InvitationRequest>> {
         let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
             r#"SELECT id, invitation_link_id, requester_id, justification, state,
-                      decided_by, decided_at, decline_reason, created_at
+                      decided_by, decided_at, decline_reason, created_at, decision_deadline
                FROM invitation_requests WHERE invitation_link_id = ?1
                ORDER BY created_at DESC"#,
         )
@@ -1468,6 +1469,7 @@ mod tests {
             decided_at: None,
             decline_reason: None,
             created_at: dt("2026-05-04T12:30:00Z"),
+            decision_deadline: None,
         }
     }
 

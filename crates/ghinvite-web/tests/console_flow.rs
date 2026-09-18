@@ -21,6 +21,158 @@ use tower::ServiceExt;
 
 mod common;
 
+async fn deadline_queue_app(
+    expires_at: Option<&str>,
+) -> (
+    axum::Router,
+    String,
+    Arc<ghinvite_storage_sqlx::SqlxStorage>,
+    ghinvite_core::storage::projection::ProjectionEnvelope,
+) {
+    use ghinvite_core::storage::projection::ProjectionStorage;
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    storage
+        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .await
+        .unwrap();
+    for (user_id, login) in [(42, "octocat"), (99, "requester")] {
+        storage
+            .upsert_user(&ghinvite_core::User {
+                user_id,
+                login: login.into(),
+                avatar_url: None,
+                last_seen_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+    }
+    let link = ghinvite_core::InvitationLinkId::new();
+    let request = ghinvite_core::RequestId::new();
+    // A historical/custom deadline, deliberately not today's seven-day policy.
+    let envelope = serde_json::from_value(serde_json::json!({
+        "version":1, "transition_id":format!("v1/link/{link}/2"),
+        "link":{"link_id":link,"revision":2,"uses":1,"invitation_code":"DeadlineQueue001",
+            "created_at":"2026-01-01T00:00:00Z", "revoked_at":null,"revoked_by":null,
+            "creation":{"version":1,"link_id":link,"admin":{"account_id":42,"user_id":42},
+                "account_id":42,"installation_id":77,"description":"Deadline fixture",
+                "internal_note":null,"expires_at":expires_at,"max_uses":null,"permission":"pull",
+                "approval_required":true,"repos":[{"repo_id":10,"repo_full_name":"octocat/api"}]}},
+        "requests":[{"request_id":request,"link_id":link,"account_id":42,"requester_id":99,
+            "state":"pending","admitted_at":"2026-01-01T01:00:00Z",
+            "decision_deadline":"2026-01-03T12:34:56Z","revision":1}],"events":[]
+    }))
+    .unwrap();
+    storage.apply_transition(&envelope).await.unwrap();
+    let state = AppState::new(
+        storage.clone(),
+        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(RecordingCommands::default()),
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    (app, cookie, storage, envelope)
+}
+
+#[tokio::test]
+async fn queue_shows_recorded_decision_deadline_for_non_expiring_link() {
+    let (app, cookie, _, _) = deadline_queue_app(None).await;
+    let response =
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response_html(response).await;
+    assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
+    assert!(html.contains("Invitation link expiration: No expiration"));
+    assert!(html.contains("The decision deadline shown is the recorded deadline for this request."));
+    assert!(!html.contains("Link expiration only stops new requests."));
+    assert!(!html.contains("Expires:"));
+}
+
+#[tokio::test]
+async fn queue_keeps_historical_deadline_independent_of_earlier_or_later_link_expiration() {
+    for (expiration, label) in [
+        ("2026-01-02T00:00:00Z", "2026-01-02 00:00:00 UTC"),
+        ("2026-02-01T00:00:00Z", "2026-02-01 00:00:00 UTC"),
+    ] {
+        let (app, cookie, _, _) = deadline_queue_app(Some(expiration)).await;
+        let response =
+            identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = response_html(response).await;
+        assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
+        assert!(html.contains(&format!("Invitation link expiration: {label}")));
+    }
+}
+
+#[tokio::test]
+async fn queue_does_not_invent_a_deadline_for_missing_historical_data() {
+    let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
+    // Legacy/migrated rows may have no recorded deadline. The old insert path
+    // represents those rows without requiring a fabricated projection snapshot.
+    let mut historical = storage
+        .get_invitation_request(envelope.requests[0].request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    historical.id = ghinvite_core::RequestId::new();
+    historical.requester_id = 42;
+    historical.decision_deadline = None;
+    storage
+        .insert_invitation_request_and_increment_uses(&historical)
+        .await
+        .unwrap();
+    let response =
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response_html(response).await;
+    assert!(html.contains("Decision deadline: Unavailable"));
+    assert!(!html.contains("Decision deadline: No expiration"));
+    assert!(
+        !html.contains("2026-01-08"),
+        "must not recompute from current seven-day policy"
+    );
+}
+
+#[tokio::test]
+async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
+    use ghinvite_core::storage::projection::ProjectionStorage;
+    let (app, cookie, storage, mut envelope) = deadline_queue_app(None).await;
+    let link = ghinvite_core::InvitationLinkId::new();
+    envelope.link.link_id = link;
+    envelope.link.creation.link_id = link;
+    envelope.link.creation.approval_required = false;
+    envelope.link.invitation_code = "AutoDeadline0001".into();
+    envelope.transition_id = format!("v1/link/{link}/2");
+    envelope.requests[0].link_id = link;
+    envelope.requests[0].request_id = ghinvite_core::RequestId::new();
+    envelope.requests[0].state = ghinvite_core::RequestState::Approved;
+    envelope.requests[0].decision_deadline = None;
+    envelope.requests[0].justification = Some("Auto-approved request fixture".into());
+    storage.apply_transition(&envelope).await.unwrap();
+    let response =
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response_html(response).await;
+    assert!(!html.contains("Auto-approved request fixture"));
+    assert!(!html.contains("AutoDeadline0001"));
+    assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
+}
+
+#[tokio::test]
+async fn overdue_queue_row_warns_about_projection_lag_without_claiming_a_decision() {
+    let (app, cookie, _, _) = deadline_queue_app(None).await;
+    let response =
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
+    let html = response_html(response).await;
+    assert!(html.contains("Decision deadline passed. Queue updates may be delayed."));
+    assert!(!html.contains("decisions are checked against the authoritative request state"));
+    assert!(html.contains("Approve request"));
+    assert!(html.contains("Decline request"));
+}
+
 #[tokio::test]
 async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};

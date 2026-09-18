@@ -11,6 +11,7 @@ pub(crate) struct AccountAdminPendingRequestRow {
     pub(crate) requester_login: String,
     pub(crate) justification: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
+    pub(crate) decision_deadline: Option<DateTime<Utc>>,
     pub(crate) permission: Option<ghinvite_core::Permission>,
     pub(crate) repos: Vec<String>,
     pub(crate) expires_at: Option<DateTime<Utc>>,
@@ -121,6 +122,7 @@ fn pending_request_row(
         requester_login,
         justification: request.justification,
         created_at: request.created_at,
+        decision_deadline: request.decision_deadline,
         permission,
         repos,
         expires_at,
@@ -208,6 +210,7 @@ mod tests {
             decided_by: None,
             decided_at: None,
             decline_reason: None,
+            decision_deadline: None,
             created_at: dt(created_at),
         }
     }

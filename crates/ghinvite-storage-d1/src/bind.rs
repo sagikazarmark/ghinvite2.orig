@@ -231,6 +231,7 @@ pub mod wasm_impl {
         pub decided_at: Option<String>,
         pub decline_reason: Option<String>,
         pub created_at: String,
+        pub decision_deadline: Option<String>,
     }
 
     impl InvitationRequestRow {
@@ -255,6 +256,11 @@ pub mod wasm_impl {
                 decided_at: self.decided_at.as_deref().map(parse_dt).transpose()?,
                 decline_reason: self.decline_reason,
                 created_at: parse_dt(&self.created_at)?,
+                decision_deadline: self
+                    .decision_deadline
+                    .as_deref()
+                    .map(parse_dt)
+                    .transpose()?,
             })
         }
     }

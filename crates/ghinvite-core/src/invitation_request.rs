@@ -63,6 +63,9 @@ pub struct InvitationRequest {
     pub decided_at: Option<DateTime<Utc>>,
     pub decline_reason: Option<String>,
     pub created_at: DateTime<Utc>,
+    /// Persisted admission deadline, independent of invitation-link expiration.
+    /// None means no recorded deadline (auto-approval or missing historical data).
+    pub decision_deadline: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

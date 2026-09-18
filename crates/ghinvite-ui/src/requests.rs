@@ -13,6 +13,7 @@ pub struct PendingRequestRow {
     pub requester_login: String,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub decision_deadline: Option<DateTime<Utc>>,
     pub permission: Option<String>,
     pub repos: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
@@ -36,6 +37,7 @@ mod tests {
                     signed_in_login: Some("admin".into()),
                     flash: None,
                     account_login: "acme",
+                    now: dt("2026-05-04T13:00:00Z"),
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                         link_slug: "QueueSlug0000006".into(),
@@ -43,6 +45,7 @@ mod tests {
                         requester_login: "octocat".into(),
                         justification: Some("Need access for launch".into()),
                         created_at: dt("2026-05-04T12:30:00Z"),
+                        decision_deadline: None,
                         permission: Some("push".into()),
                         repos: vec!["acme/api".into(), "acme/web".into()],
                         expires_at: Some(dt("2026-06-03T12:00:00Z")),
@@ -77,6 +80,7 @@ mod tests {
                     signed_in_login: Some("admin".into()),
                     flash: None,
                     account_login: "acme",
+                    now: dt("2026-05-04T13:00:00Z"),
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                         link_slug: "(deleted link)".into(),
@@ -84,6 +88,7 @@ mod tests {
                         requester_login: "octocat".into(),
                         justification: None,
                         created_at: dt("2026-05-04T12:30:00Z"),
+                        decision_deadline: None,
                         permission: None,
                         repos: vec![],
                         expires_at: None,
@@ -110,6 +115,7 @@ mod tests {
 
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestsQueueProps {
+    pub now: DateTime<Utc>,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
@@ -159,7 +165,8 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let permission = r.permission.clone().unwrap_or_else(|| "unknown permission".into());
                                 let repos_available = !r.repos.is_empty();
                                 let actions_available = !link_id.is_empty() && repos_available;
-                                let expires = r.expires_at.map(|when| when.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "No expiration".into());
+                                let deadline = r.decision_deadline.map(|when| when.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(|| "Unavailable".into());
+                                let expires = r.expires_at.map(|when| when.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(|| if link_id.is_empty() { "Unavailable".into() } else { "No expiration".into() });
                                 let approval = match r.approval_required {
                                     Some(true) => "Account admin approval required",
                                     Some(false) => "Auto-approved invitation link",
@@ -190,8 +197,13 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                             }
                                             div { class: "flex flex-wrap gap-1.5",
                                                 span { class: "badge badge-neutral badge-sm", "Permission: {permission}" }
-                                                span { class: "badge badge-ghost badge-sm", "Expires: {expires}" }
+                                                span { class: "badge badge-ghost badge-sm", "Decision deadline: {deadline}" }
+                                                span { class: "badge badge-ghost badge-sm", "Invitation link expiration: {expires}" }
                                                 span { class: "badge badge-ghost badge-sm", "{approval}" }
+                                            }
+                                            p { class: "text-xs text-base-content/65", "The decision deadline shown is the recorded deadline for this request." }
+                                            if r.decision_deadline.is_some_and(|deadline| deadline <= props.now) {
+                                                p { class: "text-xs text-warning", "Decision deadline passed. Queue updates may be delayed." }
                                             }
                                             div {
                                                 p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Repositories" }

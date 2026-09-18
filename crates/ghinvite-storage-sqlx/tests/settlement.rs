@@ -56,6 +56,7 @@ async fn fixture() -> (SqlxStorage, GithubInvitation) {
         decided_by: None,
         decided_at: Some(at),
         decline_reason: None,
+        decision_deadline: None,
         created_at: at,
     };
     s.insert_invitation_request_and_increment_uses(&request)

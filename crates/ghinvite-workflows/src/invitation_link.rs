@@ -597,6 +597,7 @@ mod tests {
                 decided_by: None,
                 decided_at: None,
                 decline_reason: None,
+                decision_deadline: None,
                 created_at: dt("2026-05-04T12:30:00Z"),
             })
             .await

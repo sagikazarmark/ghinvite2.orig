@@ -278,6 +278,12 @@ pub async fn pre_decision_logic(
         ));
     }
 
+    // Persist the exact timeout enforced by this legacy workflow. Authoritative
+    // admission owns its independent deadline policy in admission_v1.
+    let decision_deadline = link.approval_required.then(|| match link.expires_at {
+        Some(e) => std::cmp::min(e, now + MAX_DECISION_WAIT),
+        None => now + MAX_DECISION_WAIT,
+    });
     let request = DomainInvitationRequest {
         id: input.request_id,
         invitation_link_id: input.invitation_link_id,
@@ -287,6 +293,7 @@ pub async fn pre_decision_logic(
         decided_by: None,
         decided_at: None,
         decline_reason: None,
+        decision_deadline,
         created_at: input.created_at,
     };
     state
@@ -308,20 +315,15 @@ pub async fn pre_decision_logic(
     )
     .await?;
 
-    if !link.approval_required {
-        return Ok(PreDecisionOutcome::AutoApprove {
+    match decision_deadline {
+        None => Ok(PreDecisionOutcome::AutoApprove {
             account_id: link.account_id,
-        });
+        }),
+        Some(deadline) => Ok(PreDecisionOutcome::PendingDecision {
+            account_id: link.account_id,
+            decision_deadline: deadline,
+        }),
     }
-
-    let deadline = match link.expires_at {
-        Some(e) => std::cmp::min(e, now + MAX_DECISION_WAIT),
-        None => now + MAX_DECISION_WAIT,
-    };
-    Ok(PreDecisionOutcome::PendingDecision {
-        account_id: link.account_id,
-        decision_deadline: deadline,
-    })
 }
 
 /// Apply an Approve/Decline/AutoApprove/Expire decision and emit the audit event.
@@ -664,17 +666,19 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(req.state, RequestState::Pending); // pre-decision only inserts pending
+        assert_eq!(req.decision_deadline, None);
     }
 
     #[tokio::test]
     async fn pre_decision_pending_with_deadline_capped_at_7d() {
         let state = fixture_state().await;
         let link_id = seed_link(&state, true, None).await;
+        let req_id = RequestId::new();
 
         let outcome = pre_decision_logic(
             &state,
             &SubmitRequestInput {
-                request_id: RequestId::new(),
+                request_id: req_id,
                 invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
@@ -697,17 +701,25 @@ mod tests {
             }
             other => panic!("expected PendingDecision, got {other:?}"),
         }
+        let stored = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.decision_deadline, Some(dt("2026-05-11T12:30:00Z")));
     }
 
     #[tokio::test]
     async fn pre_decision_pending_uses_link_expires_when_sooner() {
         let state = fixture_state().await;
         let link_id = seed_link(&state, true, Some(dt("2026-05-06T12:00:00Z"))).await;
+        let req_id = RequestId::new();
 
         let outcome = pre_decision_logic(
             &state,
             &SubmitRequestInput {
-                request_id: RequestId::new(),
+                request_id: req_id,
                 invitation_link_id: link_id,
                 requester_id: 8,
                 justification: None,
@@ -727,6 +739,13 @@ mod tests {
             }
             other => panic!("expected PendingDecision, got {other:?}"),
         }
+        let stored = state
+            .storage
+            .get_invitation_request(req_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.decision_deadline, Some(dt("2026-05-06T12:00:00Z")));
     }
 
     #[tokio::test]

@@ -785,6 +785,7 @@ async fn requests_queue(
                 requester_login: row.requester_login,
                 justification: row.justification,
                 created_at: row.created_at,
+                decision_deadline: row.decision_deadline,
                 permission: row.permission.map(|permission| permission.to_string()),
                 repos: row.repos,
                 expires_at: row.expires_at,
@@ -801,6 +802,7 @@ async fn requests_queue(
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
             crate::views::requests::RequestsQueuePage {
+                now: Utc::now(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),

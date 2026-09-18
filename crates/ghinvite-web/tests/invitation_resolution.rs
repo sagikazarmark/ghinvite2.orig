@@ -1038,6 +1038,7 @@ fn request_with_state(
         decided_by: None,
         decided_at: None,
         decline_reason: None,
+        decision_deadline: None,
         created_at: dt("2026-05-04T12:30:00Z"),
     }
 }
@@ -1155,6 +1156,7 @@ async fn requester_sees_persisted_unknown_created_and_legacy_delivery_without_pr
             decided_by: Some(CREATOR_ID),
             decided_at: Some(Utc::now()),
             decline_reason: None,
+            decision_deadline: None,
             created_at: Utc::now(),
         };
         let id = GithubInvitationId::new();
@@ -1306,6 +1308,7 @@ fn request_with_state_at(
         decided_by: None,
         decided_at: None,
         decline_reason: None,
+        decision_deadline: None,
         created_at: dt(created_at),
     }
 }
