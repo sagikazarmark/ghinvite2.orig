@@ -82,9 +82,11 @@ To rerun the smoke against the last build, use `node tests/worker/smoke.mjs`.
 - `/login` returns a dummy GitHub authorization redirect and persists one
   versioned encrypted KV record. Raw bytes contain neither the OAuth state nor
   session field names/return destination.
-- A callback with a deliberately wrong state returns 400 **CSRF state mismatch**,
-  proving the persisted record was decrypted and loaded on a later request.
-  It does not rewrite ciphertext or issue another cookie.
+- A callback with a deliberately wrong state returns 400 with the **state did
+  not match** failure page rather than the **no sign-in pending** one, proving
+  the persisted record was decrypted and loaded on a later request. The page
+  carries ghinvite's own copy and a `/login` link, never an internal or
+  upstream diagnostic. It does not rewrite ciphertext or issue another cookie.
 - A logout request with an injected KV-read failure returns 503, clears the
   browser cookie, reports unconfirmed server sign-out, and attempts no storage
   mutation. This request alone uses the explicit test-only KV failure wrapper in

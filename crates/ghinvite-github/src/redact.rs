@@ -20,6 +20,11 @@
 /// is a backstop rather than the usual outcome.
 const MAX_DIAGNOSTIC: usize = 512;
 
+/// Largest body worth parsing to look for an error envelope. GitHub's error
+/// responses are a few hundred bytes; anything past this is described by size
+/// rather than walked, so a gateway cannot make us parse what it likes.
+const MAX_INSPECT: usize = 64 * 1024;
+
 /// Longest `message` we echo from a recognised GitHub error envelope.
 const MAX_MESSAGE: usize = 160;
 
@@ -52,10 +57,17 @@ const REDACTED: &str = "[redacted]";
 /// from a 422 "permission not valid". Anything else is reduced to its size and
 /// media shape — the body itself never survives.
 pub(crate) fn upstream_diagnostic(body: &[u8]) -> String {
-    let summary = match envelope_summary(body) {
-        Some(summary) => summary,
-        None => unrecognised_summary(body),
-    };
+    // Parse at most once, and only when the body is small enough to be worth
+    // parsing at all. Nothing upstream sends a megabyte of error envelope, and
+    // the transport buffers whatever it is handed, so an oversized body is
+    // described rather than walked.
+    let parsed = (body.len() <= MAX_INSPECT)
+        .then(|| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .flatten();
+    let summary = parsed
+        .as_ref()
+        .and_then(envelope_summary)
+        .unwrap_or_else(|| unrecognised_summary(body, parsed.is_some()));
     bound(&scrub_credentials(&summary), MAX_DIAGNOSTIC)
 }
 
@@ -78,31 +90,38 @@ pub(crate) fn decode_diagnostic(error: &serde_json::Error, body_len: usize) -> S
     )
 }
 
-/// Reduce an upstream-supplied code to a bounded identifier.
+/// Reduce an upstream-supplied code to one of the values `known` lists.
 ///
-/// GitHub answers with short lowercase snake_case values in the slots callers
-/// branch on — an OAuth `error`, an installation's account type, its
-/// repository selection. Anything not shaped like one of those is prose (or
-/// worse) and is dropped rather than carried.
-///
-/// A credential is itself shaped like an identifier — `ghs_16C7e42F…` is forty
-/// characters of letters, digits and underscores — so the identifier rule on
-/// its own would wave one through. [`looks_like_credential`] is what actually
-/// keeps a token out of this slot; the lowercase rule narrows the opening
-/// further, since none of the documented values has a capital in it.
-pub fn bounded_upstream_code(raw: &str) -> String {
-    let usable = !raw.is_empty()
-        && raw.len() <= 64
-        && raw
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        && !looks_like_credential(raw);
-    if usable {
+/// The slots this guards — an OAuth `error`, an installation's account type,
+/// its repository selection — all take values from a documented set, and every
+/// one of them arrives either on a browser-controlled redirect or in a GitHub
+/// response. A syntax rule alone is not enough: a secret such as
+/// `client-secret-do-not-expose` is lowercase, hyphenated and short, so it
+/// would pass as an identifier and land in the logs verbatim. Matching against
+/// the caller's allowlist removes that whole class — anything unrecognised
+/// becomes [`UNRECOGNIZED`], and the status or field name still says what
+/// happened.
+pub fn bounded_upstream_code(raw: &str, known: &[&str]) -> String {
+    if known.contains(&raw) {
         raw.to_owned()
     } else {
-        "unrecognized_error".to_owned()
+        UNRECOGNIZED.to_owned()
     }
 }
+
+/// Stands in for any upstream value that is not one the caller knows.
+pub const UNRECOGNIZED: &str = "unrecognized";
+
+/// The `error` codes GitHub documents for the OAuth web flow.
+pub const OAUTH_ERROR_CODES: &[&str] = &[
+    "access_denied",
+    "application_suspended",
+    "bad_verification_code",
+    "incorrect_client_credentials",
+    "redirect_uri_mismatch",
+    "unsupported_response_type",
+    "unverified_user_email",
+];
 
 /// Field and parameter names whose value is a credential wherever it appears —
 /// in a reflected JSON body, a form encoding, or a header dump.
@@ -227,12 +246,17 @@ fn looks_like_credential(word: &str) -> bool {
     word.starts_with("eyJ") && word.matches('.').count() == 2 && word.len() >= 20
 }
 
-/// Pull the documented fields out of a GitHub error envelope.
-fn envelope_summary(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+/// Pull the documented fields out of an already-parsed GitHub error envelope.
+fn envelope_summary(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
     let message = object.get("message")?.as_str()?;
-    let mut summary = format!("message={:?}", bound(message, MAX_MESSAGE));
+    // Scrub before `{:?}` escapes the text, not after. Escaping inserts
+    // backslashes, and a backslash ends the `key = value` run the scanner
+    // follows — so `client_secret=\"…\"` would walk straight past it.
+    let mut summary = format!(
+        "message={:?}",
+        scrub_credentials(&bound(message, MAX_MESSAGE))
+    );
     let codes: Vec<&str> = object
         .get("errors")
         .and_then(|errors| errors.as_array())
@@ -261,11 +285,14 @@ fn is_sub_code(code: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Describe a body we do not recognise by size alone.
-fn unrecognised_summary(body: &[u8]) -> String {
+/// Describe a body we do not recognise by size alone. `parsed` says whether it
+/// was valid JSON, so this never has to parse it a second time.
+fn unrecognised_summary(body: &[u8], parsed: bool) -> String {
     let shape = if body.is_empty() {
         "empty"
-    } else if serde_json::from_slice::<serde_json::Value>(body).is_ok() {
+    } else if body.len() > MAX_INSPECT {
+        "oversized"
+    } else if parsed {
         "unrecognized json"
     } else {
         "non-json"
@@ -326,6 +353,18 @@ mod tests {
         );
     }
 
+    /// The summary renders `message` with `{:?}`, which escapes any quotes
+    /// inside it. Scrubbing the escaped form would walk past a credential:
+    /// the backslash breaks the `key = value` run the scanner follows.
+    #[test]
+    fn a_quoted_assignment_inside_message_is_still_scrubbed() {
+        let body = r#"{"message":"upstream rejected client_secret=\"opaque-secret-value\" today"}"#;
+        let diagnostic = upstream_diagnostic(body.as_bytes());
+        assert!(!diagnostic.contains("opaque-secret-value"), "{diagnostic}");
+        assert!(diagnostic.contains(REDACTED), "{diagnostic}");
+        assert!(diagnostic.contains("upstream rejected"), "{diagnostic}");
+    }
+
     #[test]
     fn unrecognised_body_is_reduced_to_its_size() {
         let body = format!("<html><body>proxy error: Bearer {APP_JWT}</body></html>");
@@ -345,6 +384,17 @@ mod tests {
         assert!(!diagnostic.contains(INSTALLATION_TOKEN), "{diagnostic}");
         assert!(!diagnostic.contains("access_token"), "{diagnostic}");
         assert!(diagnostic.contains("unrecognized json"), "{diagnostic}");
+    }
+
+    /// A gateway can hand the transport whatever it likes. Past the inspection
+    /// cap the body is described, not parsed.
+    #[test]
+    fn an_oversized_body_is_described_rather_than_parsed() {
+        let body = format!(r#"{{"message":"{}"}}"#, "a".repeat(MAX_INSPECT));
+        let diagnostic = upstream_diagnostic(body.as_bytes());
+        assert!(diagnostic.contains("oversized body"), "{diagnostic}");
+        assert!(diagnostic.contains(&body.len().to_string()), "{diagnostic}");
+        assert!(!diagnostic.contains("aaaa"), "{diagnostic}");
     }
 
     #[test]
@@ -395,51 +445,46 @@ mod tests {
 
     #[test]
     fn bounded_code_passes_documented_codes_through() {
-        assert_eq!(
-            bounded_upstream_code("bad_verification_code"),
-            "bad_verification_code"
-        );
-        assert_eq!(bounded_upstream_code("access_denied"), "access_denied");
+        for code in OAUTH_ERROR_CODES {
+            assert_eq!(bounded_upstream_code(code, OAUTH_ERROR_CODES), *code);
+        }
     }
 
     #[test]
-    fn bounded_code_drops_prose_and_injected_values() {
-        assert_eq!(
-            bounded_upstream_code(&format!("see {INSTALLATION_TOKEN}")),
-            "unrecognized_error"
-        );
-        assert_eq!(bounded_upstream_code(""), "unrecognized_error");
-        assert_eq!(bounded_upstream_code(&"a".repeat(65)), "unrecognized_error");
-    }
-
-    /// A credential is itself shaped like an identifier — no spaces, no
-    /// punctuation — so the identifier rule alone would wave one straight
-    /// through into the logs.
-    #[test]
-    fn bounded_code_drops_a_bare_credential_in_the_code_slot() {
+    fn bounded_code_drops_anything_the_caller_does_not_know() {
         for raw in [
+            // Prose, and an empty or overlong value.
+            &format!("see {INSTALLATION_TOKEN}"),
+            "",
+            &"a".repeat(65),
+            // A credential is shaped like an identifier, so a syntax rule
+            // alone would wave these straight through into the logs.
             INSTALLATION_TOKEN,
             &INSTALLATION_TOKEN.to_ascii_lowercase(),
             APP_JWT,
             "ghp_0123456789abcdefghij",
             "github_pat_0123456789abcdefghij",
+            // Lowercase, hyphenated and short: indistinguishable from a
+            // documented code by shape, which is why shape is not the test.
+            "client-secret-do-not-expose",
         ] {
-            assert_eq!(bounded_upstream_code(raw), "unrecognized_error", "{raw}");
+            assert_eq!(
+                bounded_upstream_code(raw, OAUTH_ERROR_CODES),
+                UNRECOGNIZED,
+                "{raw}"
+            );
         }
     }
 
+    /// Each slot brings its own documented set; a value from one is not
+    /// automatically good in another.
     #[test]
-    fn bounded_code_keeps_every_oauth_code_github_documents() {
-        for code in [
-            "access_denied",
-            "application_suspended",
-            "bad_verification_code",
-            "incorrect_client_credentials",
-            "redirect_uri_mismatch",
-            "unverified_user_email",
-        ] {
-            assert_eq!(bounded_upstream_code(code), code);
-        }
+    fn bounded_code_is_scoped_to_the_allowlist_it_is_given() {
+        assert_eq!(bounded_upstream_code("all", &["all", "selected"]), "all");
+        assert_eq!(
+            bounded_upstream_code("all", OAUTH_ERROR_CODES),
+            UNRECOGNIZED
+        );
     }
 
     #[test]

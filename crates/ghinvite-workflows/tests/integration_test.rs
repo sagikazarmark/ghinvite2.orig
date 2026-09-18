@@ -498,8 +498,10 @@ async fn approval_fanout(
             event: EventType::InvitationSendFailed,
             actor: ActorKind::System,
             detail: Some((
+                // The audit detail is the sanitized diagnostic now: GitHub's
+                // documented `message`, not the response body it came in.
                 "error",
-                "github returned status 422: {\"message\":\"Controlled stub failure\"}",
+                "github returned status 422: message=\"Controlled stub failure\"",
             )),
         },
         ExpectedDelivery {

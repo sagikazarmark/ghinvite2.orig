@@ -153,7 +153,7 @@ async fn oauth_callback(
     let expected_state = session
         .oauth_csrf
         .clone()
-        .ok_or(WebError::OAuth(OAuthFailure::State))?;
+        .ok_or(WebError::OAuth(OAuthFailure::NoPendingSignIn))?;
     // Constant-time-ish comparison (the strings are short and not secret in
     // the timing-attack sense, but defensive).
     if expected_state.len() != supplied_state.len()
@@ -164,7 +164,7 @@ async fn oauth_callback(
             .fold(0u8, |acc, (a, b)| acc | (a ^ b))
             != 0
     {
-        return Err(WebError::OAuth(OAuthFailure::State));
+        return Err(WebError::OAuth(OAuthFailure::StateMismatch));
     }
     // Consume the CSRF token so it can't be replayed.
     session.oauth_csrf = None;

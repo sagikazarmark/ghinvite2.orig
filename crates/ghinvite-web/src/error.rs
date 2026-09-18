@@ -66,11 +66,11 @@ impl IngressFailure {
                 detail: "ingress rejected the command",
                 status: Some(status),
             },
-            Self::Config(detail) => Self::OutcomeUnknown {
-                detail,
-                status: None,
-            },
-            unknown => unknown,
+            // `Config` stays as it is: the client could not be built, so the
+            // request was never sent and the outcome is known to be "nothing
+            // happened". Calling that unknown would send people hunting for an
+            // effect that cannot exist.
+            known => known,
         }
     }
 }
@@ -85,7 +85,10 @@ pub struct OAuthErrorCode(String);
 
 impl OAuthErrorCode {
     pub fn new(raw: &str) -> Self {
-        Self(ghinvite_github::bounded_upstream_code(raw))
+        Self(ghinvite_github::bounded_upstream_code(
+            raw,
+            ghinvite_github::OAUTH_ERROR_CODES,
+        ))
     }
 
     pub fn as_str(&self) -> &str {
@@ -110,10 +113,20 @@ pub enum OAuthFailure {
     #[error("github reported {0}")]
     Provider(OAuthErrorCode),
 
-    /// The callback did not match this browser's pending sign-in: no stored
-    /// CSRF state, or a state that does not match.
-    #[error("callback does not match a pending sign-in")]
-    State,
+    /// The browser has no sign-in waiting for a callback at all.
+    #[error("no pending sign-in for this browser")]
+    NoPendingSignIn,
+
+    /// A sign-in was pending, but the state on the callback is not the one it
+    /// was started with.
+    ///
+    /// Kept apart from [`OAuthFailure::NoPendingSignIn`] on purpose: telling
+    /// the two failures apart is what proves the pending state was actually
+    /// loaded and decrypted, which `tests/worker/smoke.mjs` asserts against the
+    /// real Worker KV adapter. Both messages are ghinvite's own words about
+    /// ghinvite's own session, so neither discloses anything upstream.
+    #[error("callback state does not match the pending sign-in")]
+    StateMismatch,
 
     /// The installation the setup return named is not visible to the
     /// signed-in user.
@@ -294,9 +307,13 @@ fn oauth_problem(failure: &OAuthFailure) -> Problem {
             "Sign-in could not be completed",
             "GitHub could not complete this sign-in. Please start the sign-in again.",
         ),
-        OAuthFailure::State => (
+        OAuthFailure::NoPendingSignIn => (
+            "There is no sign-in waiting to finish",
+            "This browser has no sign-in in progress. Please start the sign-in again.",
+        ),
+        OAuthFailure::StateMismatch => (
             "This sign-in link is no longer valid",
-            "The link did not match a sign-in started in this browser. Please start the sign-in again.",
+            "The link did not match the sign-in started in this browser. Please start the sign-in again.",
         ),
         OAuthFailure::InstallationNotVisible => (
             "That installation is not available",
@@ -543,14 +560,48 @@ mod tests {
         for failure in [
             OAuthFailure::Declined,
             OAuthFailure::Provider(OAuthErrorCode::new("bad_verification_code")),
-            OAuthFailure::State,
+            OAuthFailure::NoPendingSignIn,
+            OAuthFailure::StateMismatch,
             OAuthFailure::InstallationNotVisible,
+            OAuthFailure::UnsupportedInstallation {
+                field: "account type",
+            },
         ] {
             let resp = WebError::OAuth(failure.clone()).into_response();
             assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{failure:?}");
             let body = body_text(resp).await;
             assert!(body.contains("href=\"/login\""), "{failure:?}: {body}");
             assert!(body.contains("href=\"/\""), "{failure:?}: {body}");
+        }
+    }
+
+    /// `tests/worker/smoke.mjs` proves the encrypted OAuth state was really
+    /// loaded back out of Worker KV by checking that a wrong state renders the
+    /// mismatch page rather than the no-pending-sign-in one. That only works
+    /// while the two read differently, so the wording is pinned here — in the
+    /// crate that owns it — rather than only in a job that needs wasm-bindgen
+    /// to run.
+    #[tokio::test]
+    async fn the_two_sign_in_state_failures_stay_distinguishable() {
+        let mismatch =
+            body_text(WebError::OAuth(OAuthFailure::StateMismatch).into_response()).await;
+        let no_pending =
+            body_text(WebError::OAuth(OAuthFailure::NoPendingSignIn).into_response()).await;
+
+        assert!(
+            mismatch.contains("did not match the sign-in started in this browser"),
+            "{mismatch}"
+        );
+        assert!(!mismatch.contains("no sign-in in progress"), "{mismatch}");
+        assert!(
+            no_pending.contains("no sign-in in progress"),
+            "{no_pending}"
+        );
+        // Neither names the CSRF check: that is ghinvite's internal mechanism,
+        // not something the visitor can act on.
+        for body in [&mismatch, &no_pending] {
+            assert!(!body.contains("CSRF"), "{body}");
+            assert!(body.contains("href=\"/login\""), "{body}");
         }
     }
 
@@ -564,7 +615,7 @@ mod tests {
         );
         assert_eq!(
             OAuthErrorCode::new("<script>alert(1)</script>").as_str(),
-            "unrecognized_error"
+            ghinvite_github::UNRECOGNIZED
         );
         assert_eq!(
             OAuthFailure::from_callback("access_denied"),
@@ -600,7 +651,7 @@ mod tests {
         let cases: [(WebError, &str); 6] = [
             (WebError::Conflict, "conflict"),
             (WebError::Session("secret".into()), "session"),
-            (WebError::OAuth(OAuthFailure::State), "oauth"),
+            (WebError::OAuth(OAuthFailure::StateMismatch), "oauth"),
             (
                 WebError::Restate(IngressFailure::Rejected { status: 500 }),
                 "ingress",

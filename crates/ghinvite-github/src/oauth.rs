@@ -106,7 +106,8 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
         // The code is the actionable distinction and is bounded to a documented
         // shape. `error_description` is upstream prose that ends up in logs and
         // in the browser's failure page, so it stops here.
-        let error_code = crate::redact::bounded_upstream_code(error_code);
+        let error_code =
+            crate::redact::bounded_upstream_code(error_code, crate::redact::OAUTH_ERROR_CODES);
         tracing::warn!(
             error_code = %error_code,
             "oauth token exchange returned error payload"
@@ -117,7 +118,11 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
     // message would quote it.
     let token: GhTokenResponse =
         serde_json::from_value(value).map_err(|_| Error::decode_shape("oauth token response"))?;
-    tracing::info!(scope = %token.scope, "oauth token exchange succeeded");
+    // `scope` is upstream text on the success path — a proxy can return a
+    // well-formed token payload whose scope is arbitrarily long or carries a
+    // reflected secret. ghinvite requests a fixed scope, so the event itself
+    // is the useful part.
+    tracing::info!("oauth token exchange succeeded");
     Ok(token)
 }
 
@@ -371,7 +376,7 @@ mod exchange_tests {
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
         let rendered = format!("{err} {err:?}");
         assert!(!rendered.contains("ghs_"), "{rendered}");
-        assert!(rendered.contains("unrecognized_error"), "{rendered}");
+        assert!(rendered.contains(crate::redact::UNRECOGNIZED), "{rendered}");
         mock.assert_exhausted();
     }
 

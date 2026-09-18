@@ -15,6 +15,13 @@ use ghinvite_github::payloads::GhUserInstallation;
 use serde::Deserialize;
 use tower_sessions::Session as TowerSession;
 
+/// The `account.type` / `target_type` values GitHub documents for an
+/// installation. Anything else is logged as unrecognised rather than echoed.
+const ACCOUNT_TYPES: &[&str] = &["Bot", "Organization", "User"];
+
+/// The `repository_selection` values GitHub documents for an installation.
+const REPOSITORY_SELECTIONS: &[&str] = &["all", "selected"];
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/setup/github", get(handle_github_setup))
 }
@@ -109,7 +116,7 @@ fn account_type_for(installation: &GhUserInstallation) -> Result<AccountType> {
         // `raw` is whatever GitHub put in the field. Bound it for the log and
         // keep it out of the error, which the browser renders.
         tracing::warn!(
-            account_type = %ghinvite_github::bounded_upstream_code(raw),
+            account_type = %ghinvite_github::bounded_upstream_code(raw, ACCOUNT_TYPES),
             "installation account type is not supported"
         );
         WebError::OAuth(OAuthFailure::UnsupportedInstallation {
@@ -134,7 +141,7 @@ async fn selected_repos_for(
         }
         other => {
             tracing::warn!(
-                repository_selection = %ghinvite_github::bounded_upstream_code(other),
+                repository_selection = %ghinvite_github::bounded_upstream_code(other, REPOSITORY_SELECTIONS),
                 "installation repository selection is not supported"
             );
             Err(WebError::OAuth(OAuthFailure::UnsupportedInstallation {

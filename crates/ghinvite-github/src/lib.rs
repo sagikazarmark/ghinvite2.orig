@@ -38,5 +38,5 @@ pub use oauth::{AuthorizeUrl, OAuthConfig, UserApiClient};
 // but the rule for bounding an upstream-supplied code is needed by the web
 // crate too, which reads the same kind of value off GitHub's callback query
 // string and off the installations it lists.
-pub use redact::bounded_upstream_code;
+pub use redact::{OAUTH_ERROR_CODES, UNRECOGNIZED, bounded_upstream_code};
 pub use transport::{HttpTransport, Method, Request, Response};

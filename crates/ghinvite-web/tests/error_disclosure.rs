@@ -295,7 +295,7 @@ async fn unsupported_installation_fields_are_not_reflected() {
         // could not act on.
         assert_absent(&logs.text(), &leaked, "logs");
         assert!(
-            logs.text().contains("unrecognized_error"),
+            logs.text().contains(ghinvite_github::UNRECOGNIZED),
             "{}",
             logs.text()
         );
@@ -344,7 +344,14 @@ async fn restate_ingress_body_never_reaches_the_browser() {
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let body = body_text(response).await;
-    let leaked = [INGRESS_KEY, "ingress rejected", &ingress.uri()];
+    // The needle is the upstream wording specifically: ghinvite's own
+    // "ingress rejected the command" detail is a literal from this crate and is
+    // meant to be in the log.
+    let leaked = [
+        INGRESS_KEY,
+        "ingress rejected authorization",
+        &ingress.uri(),
+    ];
     assert_absent(&body, &leaked, "setup response");
     assert_absent(&logs.text(), &leaked, "logs");
     assert!(body.contains("href=\"/\""), "{body}");
