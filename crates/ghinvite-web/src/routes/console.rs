@@ -419,7 +419,10 @@ async fn load_installation_repos_for_form(
                     StatusCode::GATEWAY_TIMEOUT,
                     "GitHub did not respond in time. Try again in a moment.",
                 ),
-                ghinvite_github::Error::Status { status: 429, .. } => (
+                // Every throttled response arrives here, a 429 and a
+                // rate-limited 403 alike, so the refusal arm below no longer
+                // has to hedge between denial and a limit.
+                ghinvite_github::Error::RateLimited { .. } => (
                     StatusCode::SERVICE_UNAVAILABLE,
                     "GitHub is limiting requests. Wait a moment, then try again.",
                 ),
@@ -429,7 +432,7 @@ async fn load_installation_repos_for_form(
                 ),
                 ghinvite_github::Error::Status { status: 403, .. } => (
                     StatusCode::BAD_GATEWAY,
-                    "GitHub denied repository access or is limiting requests. Retry later or review GitHub App settings.",
+                    "GitHub denied repository access. Review GitHub App settings, then retry.",
                 ),
                 _ => (
                     StatusCode::BAD_GATEWAY,
