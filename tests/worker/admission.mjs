@@ -12,6 +12,7 @@ import { browserAdmission } from './browser-admission.mjs';
 import { settlement } from './settlement.mjs';
 import { frames, fields } from './protocol.mjs';
 import { deadlineRecovery, stalledResponse } from './deadline-recovery.mjs';
+import { installationRecovery } from './installation.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { cwd: root, encoding: 'utf8', timeout: 120_000 }));
@@ -38,6 +39,10 @@ const children = new Set();
 let cleanupPromise;
 let primaryFailure;
 let networkFault;
+let installationObservation;
+let auditAckAccount;
+let lostAuditAcks = 0;
+let lostAuditInvocation;
 let faultPuts = 0;
 const stalledCleanup = [];
 function fault(phase) {
@@ -128,6 +133,7 @@ const mf = new Miniflare({
       return new Response('Outbound network disabled', { status: 502 });
     }
     if (request.method === 'PUT') faultPuts++;
+    if (installationObservation) return installationObservation(request);
     if (networkFault && (request.method === 'PUT' || new URL(request.url).pathname === '/app/installations/1')) {
       if (request.method === 'PUT') networkFault.wrote(); else networkFault.observed();
       return stalledResponse(networkFault.phase, stalledCleanup);
@@ -185,11 +191,16 @@ try {
       }
       const result = await mf.dispatchFetch(`http://worker.test${request.url}`, {
         method: request.method, headers: { ...Object.fromEntries(Object.entries(request.headers).filter(([key]) => !key.startsWith(':'))),
-          ...(clock === undefined ? {} : { 'x-test-clock': String(clock) }) },
+          ...(clock === undefined ? {} : { 'x-test-clock': String(clock) }),
+          ...(auditAckAccount && objectKey === auditAckAccount && request.url.endsWith('/InstallationProjectionV1/apply')
+            ? { 'x-test-lose-audit-ack': '1' } : {}) },
         body: body.length ? body : undefined,
       });
       if (result.status >= 500) console.error('Worker failure:', await result.clone().text());
       const output = Buffer.from(await result.arrayBuffer());
+      const lost = Number(result.headers.get('x-test-lost-audit-acks') || 0);
+      lostAuditAcks += lost;
+      if (lost) lostAuditInvocation = invocation;
       const outgoing = incoming.length && result.status === 200 ? frames(output) : [];
       if (incoming.length) traffic.push({ path: request.url, input: body.length, output: output.length,
         frames: outgoing.map(frame => ({ type: frame.type, bytes: frame.payload.length })), invocation, objectKey });
@@ -226,6 +237,18 @@ try {
     await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
     await deliveryDb.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
   }
+  if (process.env.INSTALLATION_ONLY === '1') {
+    for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
+    await installationRecovery({ ingress, http, storage, id, creation, eventually,
+      observe: value => { installationObservation = value; },
+      loseAuditAck: account => {
+        auditAckAccount = account; lostAuditAcks = 0; lostAuditInvocation = undefined;
+        return { count: async () => lostAuditAcks, invocation: () => lostAuditInvocation,
+          release: () => { auditAckAccount = null; } };
+      },
+    });
+    assert.equal(unexpectedOutbound, 0);
+  } else {
   await storage('delivery-suite', null);
   console.log('PASS shared SQLx/D1 confirmed-create audit conformance: all outcomes, replay, ordering and immutable content');
   await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'[10,11]')").run();
@@ -572,6 +595,7 @@ try {
   assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
   console.log('PASS #66 acknowledged webhook survives first D1 adoption outage and converges without another event');
+  }
   }
 } catch (error) {
   primaryFailure = error;

@@ -90,7 +90,33 @@ jobs:
       - run: npm test --prefix tests/worker
       - run: npm run test:queue --prefix tests/worker
       - run: npm run test:deadlines --prefix tests/worker
+      - name: Verify Worker/D1 installation failure and replacement recovery
+        run: npm run test:installation --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker
+
+  worker-production:
+    name: Production-feature Worker packaging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+          cache: npm
+          cache-dependency-path: tests/worker/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.9'
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall -y wasm-bindgen-cli@0.2.120 worker-build@0.8.1
+      - run: npm ci --prefix tests/worker
+      - name: Build deployment artifacts and verify runtime entrypoints without fixture routes
+        run: npm run test:production --prefix tests/worker
 
   island:
     name: Island bundle
@@ -181,3 +207,5 @@ jobs:
         run: bash scripts/test-restate.sh writer_cutover
       - name: Verify installation convergence and admission availability
         run: bash scripts/test-restate.sh installation_availability
+      - name: Verify durable projection acknowledgement loss, invariant repair, and complete audit recovery
+        run: bash scripts/test-restate.sh durable_projection
