@@ -79,7 +79,9 @@ impl Response {
         })
     }
 
-    /// Returns `Ok(self)` if `status` is 2xx, otherwise `Err(Error::Status)`.
+    /// Returns `Ok(self)` if `status` is 2xx, otherwise the error
+    /// [`status_error`](Response::status_error) builds — `Error::RateLimited`
+    /// for a throttled response, `Error::Status` for every other non-2xx.
     pub fn ensure_success(self) -> Result<Self> {
         if (200..300).contains(&self.status) {
             Ok(self)

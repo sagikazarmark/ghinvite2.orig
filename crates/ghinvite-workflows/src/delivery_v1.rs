@@ -199,7 +199,6 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             ));
         }
         ctx.clear("v1/recheck_scheduled");
-        ctx.clear(RECHECK_WAIT);
         ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
             .create(Json(command))
             .send()
@@ -323,26 +322,23 @@ impl GithubCreateV1 for GithubCreateV1Impl {
         // unknown: rereading is safe, and it is the only way a delivery GitHub
         // would not let us read ever resolves on its own. Either way the object
         // lock is released first — the wait is a continuation, not a held retry.
+        // Exactly one recheck stands per invitation. A sooner one does not
+        // supersede a pending later one: a timer already sent cannot be
+        // withdrawn, so superseding means two timers, and telling which is
+        // stale needs a due time and a token on `recheck` — retained protocol,
+        // for a case only explicit recovery during a blocked window reaches.
+        // It costs that recovery the pending hour; it settles nothing wrongly.
         let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
-        if blocked || throttled_for_secs.is_some() {
+        if (blocked || throttled_for_secs.is_some())
+            && ctx.get::<bool>("v1/recheck_scheduled").await?.is_none()
+        {
             let wait =
                 throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
-            // One recheck at a time, except when this one would arrive sooner:
-            // a throttle observed while an hourly dependency recheck is already
-            // pending must not have to wait that hour out. A superseded timer
-            // still fires, and the create it re-runs is idempotent.
-            if ctx
-                .get::<u64>(RECHECK_WAIT)
-                .await?
-                .is_none_or(|pending| wait.as_secs() < pending)
-            {
-                ctx.set("v1/recheck_scheduled", true);
-                ctx.set(RECHECK_WAIT, wait.as_secs());
-                ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
-                    .recheck(Json(command))
-                    .send_after(wait)
-                    .await?;
-            }
+            ctx.set("v1/recheck_scheduled", true);
+            ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
+                .recheck(Json(command))
+                .send_after(wait)
+                .await?;
         }
         Ok(Json(receipt))
     }
@@ -389,10 +385,6 @@ impl Attempt {
 /// Throttling replaces this with GitHub's own guidance, which the same bound
 /// caps, so an unexplained block never rechecks more slowly than a named one.
 const BLOCKED_RECHECK_INTERVAL: std::time::Duration = crate::throttle::MAXIMUM;
-
-/// Seconds of the recheck currently scheduled, so a sooner one can supersede it
-/// rather than queue behind it. Cleared by the recheck it describes.
-const RECHECK_WAIT: &str = "v1/recheck_wait";
 
 async fn attempt(
     state: &AppState,

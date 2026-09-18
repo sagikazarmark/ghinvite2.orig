@@ -252,7 +252,8 @@ impl InstallationClient {
     /// confirmation.
     ///
     /// **Errors:** `Error::Status { status: 404, .. }` if the App lost access
-    /// to the repo (caller should treat that as `selected_repos` drift).
+    /// to the repo (caller should treat that as `selected_repos` drift), and
+    /// `Error::RateLimited` when GitHub would not answer — unread, not lost.
     #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn get_repo(&self, installation_id: u64, owner: &str, repo: &str) -> Result<GhRepo> {
         let path = format!("/repos/{}/{}", path_segment(owner), path_segment(repo));
@@ -272,7 +273,10 @@ impl InstallationClient {
     /// - `Ok(Some(invitation_id))` on 201 — recipient now has a pending invitation.
     /// - `Ok(None)` on 204 — recipient was already a collaborator (no invitation
     ///   created). Caller should treat as immediate-accept.
-    /// - `Err(Error::Status)` on any other status.
+    /// - `Err(Error::RateLimited)` when GitHub throttled the write rather than
+    ///   deciding it, so nothing was created and the PUT may be retried.
+    /// - `Err(Error::Status)` on any other status. A 403 arriving this way is a
+    ///   permission refusal, never a rate limit.
     ///
     /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
     /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
@@ -317,7 +321,8 @@ impl InstallationClient {
     /// cancel a pending invitation.
     ///
     /// **Errors:** `Error::Status { status: 404 }` if the invitation no longer
-    /// exists (already accepted/declined/cancelled).
+    /// exists (already accepted/declined/cancelled), and `Error::RateLimited`
+    /// when GitHub throttled the delete rather than performing it.
     #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn delete_invitation(
         &self,

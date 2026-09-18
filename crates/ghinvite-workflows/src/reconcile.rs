@@ -16,6 +16,21 @@ pub struct DailyRunInput {
     pub at: DateTime<Utc>,
 }
 
+/// One invitation the sweep will observe, and the account whose GitHub quota
+/// observing it spends. Rate limits belong to the installation, so the sweep
+/// waits one out per account rather than once for every account at a time.
+///
+/// The row is flattened and the account defaulted so a journal written before
+/// the grouping still reads: its `settlement_candidates_v1` value is an array
+/// of bare rows, which land here under account `0` and share one deferral.
+#[derive(Debug, Deserialize, Serialize)]
+struct Candidate {
+    #[serde(flatten)]
+    row: ghinvite_core::GithubInvitation,
+    #[serde(default)]
+    account_id: u64,
+}
+
 /// What one sweep step learned about an invitation: the settlement evidence, or
 /// the bounded wait GitHub asked for before it would answer at all.
 ///
@@ -54,20 +69,29 @@ impl Reconcile for ReconcileImpl {
                             .list_pending_github_invitations_for_account(account.account_id)
                             .await?
                             .into_iter()
-                            .filter(crate::settlement_v1::eligible),
+                            .filter(crate::settlement_v1::eligible)
+                            .map(|row| Candidate {
+                                account_id: account.account_id,
+                                row,
+                            }),
                     );
                 }
                 Ok::<_, restate_sdk::errors::HandlerError>(Json(rows))
             })
             .name("settlement_candidates_v1")
             .await?;
-        // One deferral for the whole sweep, not one per row: the limit is
-        // account-wide, so a wait that clears it clears it for every remaining
-        // row, and a limit outlasting GitHub's own guidance is tomorrow's sweep
-        // to observe rather than this one's to hold open for row after row. The
-        // sweep is a service, so the wait holds no invitation object.
-        let mut deferred = false;
-        for row in rows {
+        // One deferral per account, not per row and not per sweep. A quota is
+        // the installation's, so a wait that clears one account's limit clears
+        // it for that account's remaining rows and says nothing about any
+        // other; and a limit outlasting GitHub's own guidance is tomorrow's
+        // sweep to observe rather than this one's to hold open row after row.
+        // The sweep is a service, so the wait holds no invitation object.
+        let mut deferred = std::collections::HashSet::new();
+        let mut exhausted = std::collections::HashSet::new();
+        for Candidate { account_id, row } in rows {
+            if exhausted.contains(&account_id) {
+                continue;
+            }
             let evidence = loop {
                 let Json(observed) = ctx.run(|| async {
                     match crate::settlement_v1::observe(&self.state, &row, input.at).await {
@@ -86,12 +110,17 @@ impl Reconcile for ReconcileImpl {
                 }).name("observe_invitation_v1").await?;
                 match observed {
                     Observed::Evidence(evidence) => break evidence,
-                    Observed::Throttled { throttled_for_secs } if !deferred => {
-                        deferred = true;
+                    Observed::Throttled { throttled_for_secs } if deferred.insert(account_id) => {
                         ctx.sleep(std::time::Duration::from_secs(throttled_for_secs))
                             .await?;
                     }
-                    Observed::Throttled { .. } => break None,
+                    // Throttled again after waiting out GitHub's own guidance.
+                    // Probing this account's remaining rows would only spend
+                    // more of the quota it has already run out of.
+                    Observed::Throttled { .. } => {
+                        exhausted.insert(account_id);
+                        break None;
+                    }
                 }
             };
             if let Some(evidence) = evidence {
@@ -697,5 +726,32 @@ mod tests {
             .unwrap();
         assert_eq!(row.state, InvitationState::Sent);
         mock.assert_exhausted();
+    }
+
+    #[test]
+    fn candidates_journaled_before_account_grouping_read_back_ungrouped() {
+        let row = serde_json::json!({
+            "id": GithubInvitationId::new(),
+            "invitation_request_id": ghinvite_core::RequestId::new(),
+            "repo_id": 10,
+            "github_invitation_id": 9988,
+            "state": "sent",
+            "error_message": null,
+            "created_at": "2026-05-04T13:00:00Z",
+            "updated_at": "2026-05-04T13:00:00Z",
+        });
+        // An older sweep journaled bare rows. They still read, sharing the one
+        // deferral account `0` gets, rather than failing the resumed sweep.
+        let candidate: Candidate = serde_json::from_value(row.clone()).unwrap();
+        assert_eq!(candidate.account_id, 0);
+        assert_eq!(candidate.row.github_invitation_id, Some(9988));
+
+        let grouped = Candidate {
+            account_id: 100,
+            row: candidate.row,
+        };
+        let journaled = serde_json::to_value(&grouped).unwrap();
+        assert_eq!(journaled["account_id"], 100);
+        assert_eq!(journaled["repo_id"], row["repo_id"]);
     }
 }

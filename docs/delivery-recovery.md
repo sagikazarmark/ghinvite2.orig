@@ -121,14 +121,20 @@ and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
 records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
 the same wait instead of the hourly dependency cadence; a throttled *read* during
 reconciliation earns that recheck too, because rereading is safe and is the only
-way a delivery GitHub would not let us observe resolves on its own. One recheck
-stands per invitation, except that a sooner one supersedes a pending later one,
-so a throttle observed during an hourly blocked window does not wait that hour
-out. The settlement sweep defers once per sweep — the limit is account-wide, so
-one wait covers every remaining row and a limit outlasting it is the next sweep's
-to observe. Either way the wait is a durable continuation or a service-side
-timer, never a held retry: no handler keeps an invitation object's lock across a
-rate-limit window.
+way a delivery GitHub would not let us observe resolves on its own. Exactly one
+recheck stands per invitation: a timer already sent cannot be withdrawn, so a
+sooner one would mean two, and telling which is stale needs a due time and a
+token on `recheck` — retained protocol, for a case only explicit recovery during
+a blocked window reaches. A throttle observed then waits the pending hour out;
+nothing is settled wrongly by it.
+
+The settlement sweep waits a limit out once per account, not once per row or
+once per sweep: a quota belongs to the installation, so one wait covers that
+account's remaining rows and says nothing about any other. An account throttled
+again after its wait has its remaining rows left to the next sweep rather than
+spending more of a quota it has already run out of. Either way the wait is a
+durable continuation or a service-side timer, never a held retry: no handler
+keeps an invitation object's lock across a rate-limit window.
 
 Only a response classifies. Transport errors, timeouts, and every other uncertain
 result stay outcome-unknown and keep the write fence, so throttling handling can

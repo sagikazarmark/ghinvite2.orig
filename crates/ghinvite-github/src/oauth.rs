@@ -162,7 +162,8 @@ impl UserApiClient {
     /// from this plus `last_seen_at = Utc::now()`).
     ///
     /// **Errors:** `Error::Status` for non-2xx (401 = expired token, etc.),
-    /// `Error::Decode` for malformed JSON.
+    /// `Error::RateLimited` for a throttled 403/429, `Error::Decode` for
+    /// malformed JSON.
     #[tracing::instrument(skip(self), fields(method = "get_user"))]
     pub async fn get_user(&self) -> Result<GhUser> {
         tracing::debug!("calling GET /user");
@@ -178,7 +179,9 @@ impl UserApiClient {
     /// (spec §10.3). Returns `Error::Status { status: 404, .. }` if the user is
     /// not a member of the org; the caller should map that to "not admin".
     ///
-    /// **Errors:** `Error::Status` for non-2xx, `Error::Decode` for malformed JSON.
+    /// **Errors:** `Error::Status` for non-2xx, `Error::RateLimited` for a
+    /// throttled 403/429 — which is not evidence of non-membership — and
+    /// `Error::Decode` for malformed JSON.
     #[tracing::instrument(skip(self), fields(method = "get_org_membership", org_login))]
     pub async fn get_org_membership(&self, org_login: &str) -> Result<GhMembership> {
         // Path-encode the login to defend against odd characters (org renames,
