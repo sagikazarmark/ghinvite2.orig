@@ -660,3 +660,26 @@ mod tests {
         assert!(html.contains("action=\"/i/abcdEFGH01234567\""));
     }
 }
+#[dioxus::prelude::component]
+pub fn InvitationUnavailablePage(
+    signed_in_login: Option<String>,
+    retry_href: String,
+) -> dioxus::prelude::Element {
+    dioxus::prelude::rsx! {
+        crate::layouts::InvitationLayout {
+            signed_in_login,
+            title: "Temporarily unavailable · ghinvite",
+            account_login: None,
+            active_nav: None,
+            flash: None,
+            children: dioxus::prelude::rsx! {
+                section { class: "space-y-4 p-6",
+                    h1 { class: "text-xl font-semibold", "Invitation request flow is temporarily unavailable" }
+                    p { "We could not load this page. Try again in a moment." }
+                    a { class: "btn btn-primary", href: retry_href, "Try again" }
+                    a { class: "btn btn-ghost", href: "/", "Go home" }
+                }
+            },
+        }
+    }
+}

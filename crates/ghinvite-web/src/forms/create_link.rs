@@ -28,6 +28,8 @@ use std::str::FromStr;
 /// deserialization.
 #[derive(Debug, Deserialize)]
 pub struct CreateLinkSubmission {
+    #[serde(default)]
+    pub reload_repos: bool,
     pub description: Option<String>,
     /// `Option` so a POST that omits the key (tampering — the `<select>` always
     /// submits one) reaches validation and gets the inline permission error
@@ -194,6 +196,7 @@ mod tests {
 
     fn valid_form() -> CreateLinkSubmission {
         CreateLinkSubmission {
+            reload_repos: false,
             description: Some("AI coding workshop".into()),
             permission: Some("push".into()),
             approval_required: Some("true".into()),
@@ -300,6 +303,7 @@ mod tests {
         // required and permission is tampered; max use / expiration / note
         // are legitimately blank.
         let form = CreateLinkSubmission {
+            reload_repos: false,
             description: None,
             permission: None,
             approval_required: None,
@@ -614,9 +618,9 @@ mod tests {
     }
 
     #[test]
-    fn repo_scope_follows_available_order_drops_unknown_and_ignores_duplicates() {
+    fn repo_scope_follows_available_order_and_ignores_duplicates() {
         let validated = validate(
-            &with_repo_ids(vec![12, 999, 10, 12, 11, 10]),
+            &with_repo_ids(vec![12, 10, 12, 11, 10]),
             &available_repos(),
             now(),
         )

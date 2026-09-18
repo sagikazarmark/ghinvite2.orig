@@ -379,6 +379,8 @@ pub fn register_validators(
     core.register_sync_field_validator(fields.repo_ids(), "repo_scope", move |selected, _| {
         if repository_scope(selected, &available).is_empty() {
             vec![REPO_SCOPE_REQUIRED.to_string()]
+        } else if let Some(message) = missing_repository_notice(selected, &available) {
+            vec![message]
         } else {
             vec![]
         }
@@ -402,6 +404,18 @@ pub(crate) fn description_problem(raw: &str) -> Option<&'static str> {
 }
 
 // --- shared derivations -----------------------------------------------------
+pub fn missing_repository_notice(
+    selected: &[u64],
+    available: &[RepositoryChoice],
+) -> Option<String> {
+    let missing: Vec<_> = selected
+        .iter()
+        .filter(|id| !available.iter().any(|repo| repo.id == **id))
+        .map(u64::to_string)
+        .collect();
+    (!missing.is_empty()).then(|| format!("Selected repositories are no longer available: {}. Review the remaining scope before creating the invitation link.", missing.join(", ")))
+}
+
 //
 // The two rules whose outcome is also a value the server needs (an expiration
 // timestamp, the repository scope) are written as derivations. The validators
@@ -810,8 +824,8 @@ mod tests {
     }
 
     #[test]
-    fn repo_scope_accepts_available_repositories_even_alongside_unknown_ids() {
-        for repo_ids in [vec![11], vec![999, 10, 1000], vec![12, 10, 12, 11, 10]] {
+    fn repo_scope_accepts_available_repositories_and_duplicates() {
+        for repo_ids in [vec![11], vec![12, 10, 12, 11, 10]] {
             let model = CreateLinkForm {
                 repo_ids: repo_ids.clone(),
                 ..valid_model()

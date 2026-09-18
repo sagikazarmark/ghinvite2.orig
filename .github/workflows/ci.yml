@@ -139,6 +139,9 @@ jobs:
       - name: Requester delivery browser regressions
         working-directory: tests/browser
         run: npx playwright test --config delivery.config.mjs
+      - name: No-JavaScript read recovery regressions
+        working-directory: tests/browser
+        run: npx playwright test --config read-recovery.config.mjs
       - name: Browser failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4

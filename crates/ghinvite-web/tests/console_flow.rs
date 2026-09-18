@@ -21,6 +21,9 @@ use tower::ServiceExt;
 
 mod common;
 
+#[path = "console_flow/read_recovery.rs"]
+mod read_recovery;
+
 async fn deadline_queue_app(
     expires_at: Option<&str>,
 ) -> (
@@ -86,7 +89,9 @@ async fn queue_shows_recorded_decision_deadline_for_non_expiring_link() {
     let html = response_html(response).await;
     assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
     assert!(html.contains("Invitation link expiration: No expiration"));
-    assert!(html.contains("The decision deadline shown is the recorded deadline for this request."));
+    assert!(
+        html.contains("The decision deadline shown is the recorded deadline for this request.")
+    );
     assert!(!html.contains("Link expiration only stops new requests."));
     assert!(!html.contains("Expires:"));
 }
@@ -784,11 +789,11 @@ async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
     for (membership, denied_status) in [
         (
             serde_json::json!({"role": "admin", "state": "active"}),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
         ),
         (
             serde_json::json!({"role": "admin", "state": "active", "organization": {"id": "9001"}}),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
         ),
         (
             serde_json::json!({"role": "admin", "state": "pending", "organization": {"id": 9001}}),
@@ -866,7 +871,7 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
         );
         let app = build_app(state, store);
         let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let response =
             identity_request(&app, &cookie, "POST", "/console/accounts/acme/links").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -3149,13 +3154,21 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
     assert_eq!(props.values.permission, "owner");
     assert_eq!(props.values.max_uses, "7");
     assert_eq!(props.values.expires_in_days, "45");
-    assert_eq!(props.values.selected_repo_ids, vec![999, 10]);
+    assert_eq!(props.values.selected_repo_ids, vec![10]);
     assert_eq!(
         props.values.errors.permission.as_deref(),
         Some("Choose a supported permission level: pull, triage, push, maintain, or admin.")
     );
     assert!(props.values.errors.description.is_none());
-    assert!(props.values.errors.repo_scope.is_none());
+    assert!(
+        props
+            .values
+            .errors
+            .repo_scope
+            .as_deref()
+            .unwrap()
+            .contains("no longer available")
+    );
     assert!(!props.values.errors.summary.is_empty());
 
     // The description cannot break out of the data block: the raw bytes hold
@@ -3556,23 +3569,19 @@ async fn create_link_with_only_unknown_repositories_rerenders_form_with_reposito
 }
 
 #[tokio::test]
-async fn create_link_with_valid_and_unknown_repositories_scopes_only_the_available_ones() {
+async fn create_link_with_unavailable_selection_requires_review_before_reducing_scope() {
     let (resp, calls) = post_create_link(
         "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=11&repo_ids=10",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.starts_with("/console/accounts/acme/links/"));
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let RecordedCommand::CreateInvitationLink { repo_ids, .. } = &calls[0];
-    assert_eq!(
-        *repo_ids,
-        vec![10, 11],
-        "available order, unknown 999 dropped"
-    );
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = response_html(resp).await;
+    assert!(html.contains("Selected repositories are no longer available: 999"));
+    assert!(html.contains("Review the remaining scope before creating"));
+    assert!(html.contains("value=\"10\" checked"));
+    assert!(html.contains("value=\"11\" checked"));
+    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3586,8 +3595,8 @@ async fn create_link_validation_failure_keeps_available_repositories_checked_and
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("id=\"description-error\""));
     assert!(
-        !text.contains("repo_ids-error"),
-        "a valid available repository was selected, so repository scope passes"
+        text.contains("repo_ids-error"),
+        "the unavailable selection must be reviewed"
     );
     assert!(text.contains("value=\"10\" checked"));
     assert!(text.contains("value=\"11\""));

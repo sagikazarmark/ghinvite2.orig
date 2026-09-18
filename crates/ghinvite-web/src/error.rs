@@ -67,7 +67,20 @@ impl IntoResponse for WebError {
                 "Session temporarily unavailable. Please try again later.".into(),
             ),
             WebError::Restate(msg) => (StatusCode::BAD_GATEWAY, format!("Restate error: {msg}")),
-            WebError::Storage(_) | WebError::Github(_) | WebError::Internal(_) => {
+            WebError::Github(error) => {
+                tracing::warn!(upstream_status = error.status(), "GitHub read failed");
+                let (status, message) = match error {
+                    ghinvite_github::Error::Status { status: 429, .. } =>
+                        (StatusCode::SERVICE_UNAVAILABLE, "GitHub is limiting requests. Wait a moment, then try again."),
+                    ghinvite_github::Error::Status { status: 504, .. } =>
+                        (StatusCode::GATEWAY_TIMEOUT, "GitHub did not respond in time. Please try again."),
+                    // Transport errors do not carry a typed timeout distinction;
+                    // DNS/TLS failures must not be reported as known timeouts.
+                    _ => (StatusCode::BAD_GATEWAY, "GitHub access could not be verified. Please try again."),
+                };
+                (status, message.to_string())
+            }
+            WebError::Storage(_) | WebError::Internal(_) => {
                 tracing::error!(error = ?self, "internal error rendering response");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,

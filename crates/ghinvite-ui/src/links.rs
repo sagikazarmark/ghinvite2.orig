@@ -35,6 +35,49 @@ use ghinvite_core::{InvitationLink, Permission};
 
 pub use crate::link_form::{LinkFormErrors, LinkFormValues};
 
+/// Only echoes the caller's submission while account authority is unknown.
+/// No account facts or repository names may be rendered here.
+#[component]
+pub fn AccessVerificationRetryPage(
+    signed_in_login: Option<String>,
+    action: String,
+    values: LinkFormValues,
+) -> Element {
+    rsx! {
+        crate::layouts::HomeLayout {
+            signed_in_login,
+            title: "Access verification unavailable · ghinvite",
+            account_login: None,
+            active_nav: None,
+            flash: None,
+            children: rsx! {
+                section { class: "mx-auto max-w-3xl space-y-4 py-8",
+                    h1 { class: "text-xl font-semibold", "Access verification is temporarily unavailable" }
+                    p { "Your submitted values are preserved. Retry to verify access and reload repositories before creating the invitation link." }
+                    form { method: "post", action,
+                        crate::csrf::CsrfField {}
+                        input { r#type: "hidden", name: "reload_repos", value: "true" }
+                        input { r#type: "hidden", name: "description", value: values.description.clone() }
+                        input { r#type: "hidden", name: "internal_note", value: values.internal_note.clone() }
+                        input { r#type: "hidden", name: "permission", value: values.permission.clone() }
+                        input { r#type: "hidden", name: "max_uses", value: values.max_uses.clone() }
+                        input { r#type: "hidden", name: "expires_in_days", value: values.expires_in_days.clone() }
+                        if values.approval_required {
+                            input { r#type: "hidden", name: "approval_required", value: "true" }
+                        }
+                        for id in values.selected_repo_ids.iter() {
+                            input { r#type: "hidden", name: "repo_ids", value: "{id}" }
+                        }
+                        p { "Description: {values.description}" }
+                        button { r#type: "submit", class: "btn btn-primary", "Retry access verification" }
+                    }
+                    a { class: "btn btn-ghost", href: "/", "Go home" }
+                }
+            },
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormPageProps {
     #[props(default)]
@@ -44,6 +87,8 @@ pub struct LinkCreateFormPageProps {
     pub account_login: String,
     /// Available repositories, in the order the account makes them available.
     pub repos: Vec<RepositoryChoice>,
+    #[props(default)]
+    pub repository_error: Option<String>,
     pub form: LinkFormValues,
     /// The server's instant: what the route validated (or will validate)
     /// against. Handed to the island through the props blob so browser-side
@@ -93,16 +138,19 @@ pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
                         action: action.clone(),
                         form: props.form.clone(),
                         repos: props.repos.clone(),
+                        repository_error: props.repository_error.clone(),
                     }
                 }
                 // Data, not code: a JSON script block is inert for the browser
                 // and for the CSP. `dangerous_inner_html` writes it verbatim,
                 // which is why `script_json` escapes `<`.
+                if props.repository_error.is_none() {
                 script { r#type: "application/json", id: LINK_FORM_ISLAND_PROPS_ID, dangerous_inner_html: "{island_props}" }
                 // Module scripts are deferred wherever they sit, so this can
                 // live next to the island it drives instead of in the shared
                 // layout head; it runs after the whole document is parsed.
                 script { r#type: "module", src: LINK_FORM_ISLAND_MODULE_SRC }
+                }
             },
         }
     }
@@ -155,11 +203,17 @@ pub fn LinkCreateForm(
     form: LinkFormValues,
     /// Available repositories, in the order the account makes them available.
     repos: Vec<RepositoryChoice>,
+    #[props(default)] repository_error: Option<String>,
     /// Listeners for the island; the server passes none.
     #[props(default)]
     handlers: LinkFormHandlers,
 ) -> Element {
     let fields = CreateLinkForm::fields();
+    let action_path = action.split('?').next().unwrap_or(&action);
+    let settings_href = format!(
+        "{}/settings",
+        action_path.strip_suffix("/links").unwrap_or("/console")
+    );
     let mut form_listeners: Vec<Attribute> = Vec::new();
     if let Some(handler) = handlers.onsubmit {
         form_listeners.push(dioxus_elements::events::onsubmit(handler));
@@ -274,6 +328,16 @@ pub fn LinkCreateForm(
             }
             section { class: "mac-panel",
                 div { class: "space-y-4 p-4",
+                    if let Some(message) = repository_error.clone() {
+                        h2 { class: "text-base font-semibold", "Repository scope unavailable" }
+                        p { role: "alert", "{message}" }
+                        p { "Your entered values and repository selections are preserved. Reload repositories, then review the scope before creating the invitation link." }
+                        for id in form.selected_repo_ids.iter() {
+                            input { r#type: "hidden", name: "repo_ids", value: "{id}" }
+                            p { "Selected repository ID: {id} (availability unverified)" }
+                        }
+                        a { class: "link", href: settings_href, "Review installation settings" }
+                    } else {
                     RepositoryScopeGroup {
                         name: fields.repo_ids().field_name().to_string(),
                         repos: repos.clone(),
@@ -283,10 +347,15 @@ pub fn LinkCreateForm(
                         onchange: handlers.repo_scope.onchange,
                         onblur: handlers.repo_scope.onblur,
                     }
+                    }
                 }
             }
             div { class: "flex justify-end",
-                Button { r#type: "submit", color: ButtonColor::Primary, "Create invitation link" }
+                if repository_error.is_some() {
+                    button { r#type: "submit", name: "reload_repos", value: "true", formnovalidate: true, class: "btn btn-primary", "Retry loading repositories" }
+                } else {
+                    Button { r#type: "submit", color: ButtonColor::Primary, "Create invitation link" }
+                }
             }
         }
     }
