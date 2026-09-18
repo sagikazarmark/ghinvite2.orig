@@ -941,6 +941,10 @@ async fn lifecycle_boundaries(runtime: &Runtime) {
             "operation_id": ghinvite_core::RequestId::new(),
             "request_id": admitted["result"]["request_id"], "admin": input["admin"],
             "action": {"kind": action}});
+        assert_eq!(
+            runtime.ok(id, "decision_status", &decision).await,
+            Value::Null
+        );
         let result = runtime.ok(id, "decide", &decision).await;
         assert_eq!(result["request"]["state"], expected);
         assert_eq!(
@@ -955,6 +959,7 @@ async fn lifecycle_boundaries(runtime: &Runtime) {
             .faults
             .set_clock(Some(deadline + chrono::Duration::days(1)));
         assert_eq!(runtime.ok(id, "decide", &decision).await, result);
+        assert_eq!(runtime.ok(id, "decision_status", &decision).await, result);
         for field in ["admin", "request_id", "version"] {
             let mut foreign = decision.clone();
             foreign[field] = match field {
@@ -964,6 +969,13 @@ async fn lifecycle_boundaries(runtime: &Runtime) {
             };
             assert_eq!(
                 runtime.command(id, "decide", &foreign).await.status(),
+                if field == "admin" { 404 } else { 409 }
+            );
+            assert_eq!(
+                runtime
+                    .command(id, "decision_status", &foreign)
+                    .await
+                    .status(),
                 if field == "admin" { 404 } else { 409 }
             );
         }

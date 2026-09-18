@@ -115,6 +115,85 @@ impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
 
 #[async_trait]
 impl Storage for D1Storage {
+    async fn retain_admin_attempt(
+        &self,
+        scope: &str,
+        id: &str,
+        binding: &str,
+        payload: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<ghinvite_core::storage::admin_attempts::StoredAttempt> {
+        use ghinvite_core::storage::admin_attempts::*;
+        wasm_send(async {
+            self.db
+                .prepare(CLEANUP)
+                .bind(&[(now as f64).into()])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            self.db
+                .prepare(INSERT)
+                .bind(&[
+                    scope.into(),
+                    id.into(),
+                    binding.into(),
+                    payload.into(),
+                    (expires_at as f64).into(),
+                ])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            self.db
+                .prepare(BY_BINDING)
+                .bind(&[scope.into(), binding.into(), id.into(), (now as f64).into()])
+                .map_err(bind_err)?
+                .first::<StoredAttempt>(None)
+                .await
+                .map_err(classify_d1_error)?
+                .ok_or(ghinvite_core::storage::Error::NotFound)
+        })
+        .await
+    }
+    async fn get_admin_attempt(
+        &self,
+        scope: &str,
+        id: &str,
+        now: i64,
+    ) -> Result<Option<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
+        use ghinvite_core::storage::admin_attempts::*;
+        wasm_send(async {
+            self.db
+                .prepare(GET)
+                .bind(&[scope.into(), id.into(), (now as f64).into()])
+                .map_err(bind_err)?
+                .first::<StoredAttempt>(None)
+                .await
+                .map_err(classify_d1_error)
+        })
+        .await
+    }
+    async fn list_admin_attempts(
+        &self,
+        scope: &str,
+        now: i64,
+    ) -> Result<Vec<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
+        use ghinvite_core::storage::admin_attempts::*;
+        wasm_send(async {
+            self.db
+                .prepare(LIST)
+                .bind(&[scope.into(), (now as f64).into()])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<StoredAttempt>()
+                .map_err(bind_err)
+        })
+        .await
+    }
     async fn settle_github_invitation(
         &self,
         transition: &ghinvite_core::storage::settlement::Settlement,
@@ -1082,22 +1161,27 @@ impl Storage for D1Storage {
         account_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
         wasm_send(async {
-            let rows = self.db.prepare(
-                "SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id,
+            let rows = self
+                .db
+                .prepare(
+                    "SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id,
                         g.state, g.error_message, g.created_at, g.updated_at
                  FROM github_invitations g
                  JOIN invitation_requests r ON r.id = g.invitation_request_id
                  JOIN invitation_links l ON l.id = r.invitation_link_id
                  WHERE l.account_id = ?1 AND g.state IN ('sending', 'sent')
                  ORDER BY g.created_at",
-            )
-            .bind(&[JsValue::from_f64(account_id as f64)])
-            .map_err(bind_err)?
-            .all().await.map_err(classify_d1_error)?
-            .results::<GithubInvitationRow>()
-            .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+                )
+                .bind(&[JsValue::from_f64(account_id as f64)])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<GithubInvitationRow>()
+                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
             rows.into_iter().map(|r| r.try_into_domain()).collect()
-        }).await
+        })
+        .await
     }
 
     // -------- audit --------
@@ -1109,14 +1193,23 @@ impl Storage for D1Storage {
         requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
         wasm_send(async {
-            let rows = self.db.prepare(ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES)
-                .bind(&[JsValue::from_f64(account_id as f64), JsValue::from_f64(repo_id as f64), JsValue::from_f64(requester_id as f64)])
+            let rows = self
+                .db
+                .prepare(ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES)
+                .bind(&[
+                    JsValue::from_f64(account_id as f64),
+                    JsValue::from_f64(repo_id as f64),
+                    JsValue::from_f64(requester_id as f64),
+                ])
                 .map_err(bind_err)?
-                .all().await.map_err(classify_d1_error)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
                 .results::<GithubInvitationRow>()
                 .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
             rows.into_iter().map(|r| r.try_into_domain()).collect()
-        }).await
+        })
+        .await
     }
 
     async fn bind_member_webhook(

@@ -6,6 +6,7 @@ import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 // Exercise the production D1 adapter and authenticated HTTP routes. Only the
 // external OAuth and lifecycle service responses are controlled at the boundary.
 let receipt;
+let loseAcknowledgement = false;
 const decisions = [];
 const mf = new Miniflare({
   log: new Log(LogLevel.ERROR), modules: true,
@@ -26,8 +27,10 @@ const mf = new Miniflare({
     if (/^https:\/\/restate.test\/InvitationLinkV1\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
       assert.ok(receipt, 'unexpected decision');
+      if (loseAcknowledgement) { loseAcknowledgement = false; return new Response('acknowledgement lost', { status: 503 }); }
       return Response.json(receipt);
     }
+    if (request.url.endsWith('/decision_status')) return Response.json(receipt);
     throw new Error(`unexpected outbound ${request.url}`);
   },
 });
@@ -40,7 +43,7 @@ try {
   await db.prepare("INSERT INTO installations VALUES (1,42,'octocat','User','2026-01-01T00:00:00Z',NULL,'[]')").run();
   for (const user of [42, 99]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
-  const request = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
+  let request = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
   await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
     VALUES (?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture')`).bind(link).run();
   await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(link).run();
@@ -81,11 +84,16 @@ try {
   // already decided the request. The HTTP action must report its receipt.
   await db.prepare("UPDATE invitation_requests SET state='pending',decision_deadline='2026-01-03T12:34:56Z' WHERE id=?").bind(request).run();
   for (const [action, outcome, state, status, message] of [
-    ['approve', 'incompatible', 'expired', 409, 'Request is expired. The requested decision was not applied.'],
-    ['decline', 'incompatible', 'expired', 409, 'Request is expired. The requested decision was not applied.'],
+    ['approve', 'incompatible', 'expired', 409, 'Request expired. The decision deadline passed; the requested decision was not applied.'],
+    ['decline', 'incompatible', 'expired', 409, 'Request expired. The decision deadline passed; the requested decision was not applied.'],
     ['approve', 'already_completed', 'approved', 303, 'Request already approved.'],
     ['decline', 'incompatible', 'approved', 409, 'Request is approved. The requested decision was not applied.'],
   ]) {
+    // Each case represents a different original request; navigation must not
+    // allocate another decision operation for an already submitted request.
+    const next = `01ARZ3NDEKTSV4RRFFQ69G5FB${decisions.length}`;
+    await db.prepare('UPDATE invitation_requests SET id=? WHERE id=?').bind(next, request).run();
+    request = next;
     html = await queue();
     const form = html.match(new RegExp(`<form[^>]*action="[^"]+/${action}"[^>]*>([\\s\\S]*?)</form>`))?.[1];
     assert.ok(form);
@@ -103,6 +111,46 @@ try {
     assert.equal(decisions.at(-1).operation_id, field('operation_id'));
   }
   assert.equal(decisions.length, 4);
+  const next = '01ARZ3NDEKTSV4RRFFQ69G5FC0';
+  await db.prepare('UPDATE invitation_requests SET id=? WHERE id=?').bind(next, request).run();
+  request = next;
+  html = await queue();
+  const form = html.match(/<form[^>]*action="[^"]+\/approve"[^>]*>([\s\S]*?)<\/form>/)[1];
+  const field = name => form.match(new RegExp(`name="${name}"[^>]*value="([^"]+)"`))[1];
+  receipt = { outcome: 'applied', request: { request_id: request, link_id: link, account_id: 42, requester_id: 99,
+    state: 'approved', admitted_at: '2026-01-01T01:00:00Z', decision_deadline: '2026-01-03T12:34:56Z', revision: 2 } };
+  loseAcknowledgement = true;
+  const submit = operation => mf.dispatchFetch(`https://queue.test/console/accounts/octocat/requests/${request}/approve`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, redirect: 'manual',
+    body: new URLSearchParams({ csrf_token: field('csrf_token'), link_id: link, operation_id: operation }).toString(),
+  });
+  const concurrent = await Promise.all([submit(field('operation_id')), submit('01ARZ3NDEKTSV4RRFFQ69G5FC1')]);
+  assert.deepEqual(concurrent.map(r => r.status).sort(), [303, 502]);
+  assert.equal(decisions.length, 5, 'D1 atomically binds just one original decision');
+  const original = decisions.at(-1);
+  const recovery = `/console/accounts/octocat/attempts/decision-${link}-${original.operation_id}`;
+  const list = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/attempts', { headers: { cookie } });
+  assert.ok((await list.text()).includes(recovery));
+  const status = await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } });
+  assert.ok((await status.text()).includes('Request approved.'));
+  // Expired records from other sessions are physically reclaimed in bounded
+  // batches by retention, while the live original input remains recoverable.
+  await db.batch(Array.from({ length: 205 }, (_, i) => db.prepare(
+    'INSERT INTO admin_attempts(scope,id,binding,payload,expires_at) VALUES (?,?,?,?,?)'
+  ).bind('expired-session', `expired-${i}`, `expired-${i}`, 'expired-ciphertext', 1)));
+  const retryOriginal = () => mf.dispatchFetch(`https://queue.test${recovery}`, {
+    method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, redirect: 'manual',
+    body: new URLSearchParams({ csrf_token: field('csrf_token') }).toString(),
+  });
+  const retry = await retryOriginal();
+  assert.equal(retry.status, 303);
+  assert.deepEqual(decisions.at(-1), original);
+  for (const remaining of [105, 5, 0]) {
+    assert.equal(await db.prepare("SELECT count(*) AS count FROM admin_attempts WHERE scope='expired-session'").first('count'), remaining);
+    if (remaining > 0) assert.equal((await retryOriginal()).status, 303);
+  }
+  assert.deepEqual(decisions.at(-1), original);
+  assert.ok((await (await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } })).text()).includes('Request approved.'));
   console.log('PASS Worker/D1 decision queue: independent historical deadlines, missing data, auto-approval, overdue projection and authoritative late actions');
 } finally {
   await mf.dispose();

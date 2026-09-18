@@ -49,6 +49,16 @@ cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignor
 
 ## Adding a new migration
 
+Migration 0008 stores encrypted admin browser continuations separately from
+authentication sessions. A unique session/account scope plus logical binding
+atomically retains the first submitted input, including on D1. These are
+recovery records, not authoritative business receipts. Their `expires_at`
+integer is a Unix-second browser-session deadline (like session storage), not a
+domain timestamp. Reads exclude expired records. Each retention call deletes at
+most 100 expired continuations across all sessions, using the expiry index from
+migration 0009, in both SQLite and D1. Cleanup runs with mutation traffic and
+does not affect authoritative Restate receipts or extend live session deadlines.
+
 Migration 0004 adds v1 projection revisions, content/identity checks, deadlines,
 and audit identities. Its `projection_assertions` table is transient within each
 SQLx transaction/D1 batch: named CHECK failures abort the entire application,

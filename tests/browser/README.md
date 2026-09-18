@@ -1,5 +1,17 @@
 # Browser Regression Tests
 
+## Admin mutation recovery
+
+Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/mutation-recovery.config.mjs`
+from the repository root after installing browser dependencies and building CSS.
+This no-JavaScript suite serves the production Console routes on port 4175,
+using encrypted SQLite-backed sessions and an HTTP Restate fixture. The fixture
+retains create/revoke/approve/decline effects but drops their first acknowledgement.
+Navigation, a second tab, receipt status reads, and native retries must preserve
+the original input and operation identity, with one logical effect per mutation
+while SQL projections lag. The transport fixture checks replay input equality;
+durable workflow behavior is covered by the separate Restate integration suite.
+
 ## Requester delivery lifecycle
 
 ```bash

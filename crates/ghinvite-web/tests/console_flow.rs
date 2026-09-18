@@ -24,6 +24,9 @@ mod common;
 #[path = "console_flow/read_recovery.rs"]
 mod read_recovery;
 
+#[path = "console_flow/mutation_recovery.rs"]
+mod mutation_recovery;
+
 async fn deadline_queue_app(
     expires_at: Option<&str>,
 ) -> (

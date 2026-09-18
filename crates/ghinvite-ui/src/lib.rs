@@ -12,6 +12,7 @@
 //! `--workspace --target wasm32-unknown-unknown` (feature unification would
 //! drag Worker-only dependencies into the browser build and vice versa).
 
+pub mod attempts;
 pub mod audit;
 pub mod components;
 pub mod console;
