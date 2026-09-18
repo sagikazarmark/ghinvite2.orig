@@ -91,6 +91,24 @@ pub(crate) fn token_mint(installation_id: u64) -> ghinvite_github::mocks::Expect
     }
 }
 
+/// The `{"message": ...}` response GitHub returns for a refusal, carrying
+/// whatever evidence `headers` gives it. Every throttling test varies the
+/// evidence and nothing else, so the shape lives here rather than in each one.
+pub(crate) fn refusal(
+    status: u16,
+    headers: &[(&str, &str)],
+    message: &str,
+) -> ghinvite_github::transport::Response {
+    ghinvite_github::transport::Response {
+        status,
+        headers: headers
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        body: serde_json::json!({ "message": message }).to_string().into(),
+    }
+}
+
 /// Identities of the rows [`seed_pending_invitation`] inserted, for tests that
 /// address the request or the link as well as the invitation.
 pub(crate) struct SeededInvitation {

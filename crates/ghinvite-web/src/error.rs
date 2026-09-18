@@ -70,7 +70,10 @@ impl IntoResponse for WebError {
             WebError::Github(error) => {
                 tracing::warn!(upstream_status = error.status(), "GitHub read failed");
                 let (status, message) = match error {
-                    ghinvite_github::Error::Status { status: 429, .. } =>
+                    // Every throttled response arrives here, a 429 and a
+                    // rate-limited 403 alike: GitHub declined to answer, so the
+                    // read is unavailable rather than refused.
+                    ghinvite_github::Error::RateLimited { .. } =>
                         (StatusCode::SERVICE_UNAVAILABLE, "GitHub is limiting requests. Wait a moment, then try again."),
                     ghinvite_github::Error::Status { status: 504, .. } =>
                         (StatusCode::GATEWAY_TIMEOUT, "GitHub did not respond in time. Please try again."),
@@ -135,5 +138,37 @@ mod tests {
     async fn restate_error_renders_502() {
         let resp = WebError::Restate("timeout".into()).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn throttled_github_reads_are_unavailable_and_denied_ones_are_not() {
+        // The status alone no longer decides: a 403 that carried a limit is as
+        // unavailable as a 429, and one that carried none is still a refusal.
+        for (headers, message, expected) in [
+            (
+                vec![("retry-after", "60")],
+                "You have exceeded a secondary rate limit",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                vec![],
+                "Resource not accessible by integration",
+                StatusCode::BAD_GATEWAY,
+            ),
+        ] {
+            let error = ghinvite_github::Response {
+                status: 403,
+                headers: headers
+                    .into_iter()
+                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
+                    .collect(),
+                body: serde_json::json!({ "message": message }).to_string().into(),
+            }
+            .status_error();
+            let resp = WebError::Github(error).into_response();
+            assert_eq!(resp.status(), expected, "for {message:?}");
+            // Neither discloses the upstream diagnostic.
+            assert!(!body_text(resp).await.contains(message));
+        }
     }
 }

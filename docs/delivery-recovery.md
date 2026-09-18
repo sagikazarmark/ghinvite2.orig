@@ -21,9 +21,11 @@ to the controlled cutover in ADR 0003 and #58.
   acknowledgement or the subsequent HTTP result is lost, recovery reads GitHub
   evidence and never repeats that PUT. This deliberately permits conservative
   outcome-unknown results even when a crash occurred before the HTTP send.
-  An explicit 401/403/404/429 rejection releases only that exact generation for
-  a later availability/rate-limit retry. A stale rejection cannot release a newer
-  attempt. Transport errors and uncertain responses never release the fence.
+  An explicit rejection releases only that exact generation for a later
+  availability/rate-limit retry: a 401/403/404 refusing access, or any throttled
+  refusal (see **GitHub throttling**), which a 429 always is. A stale rejection
+  cannot release a newer attempt. Transport errors and uncertain responses never
+  release the fence.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
 
@@ -76,7 +78,8 @@ conflicts, durably resubmits original commands, and records submission checkpoin
 It never starts `InvitationRequestV1/run`. Its response describes submission only;
 read `GithubCreateV1/<id>/status` or the current request page for delivery outcomes.
 
-Blocked creates schedule a one-hour dependency recheck; explicit recovery may
+Blocked creates schedule a one-hour dependency recheck, or the throttling wait
+below when that is what blocked them; explicit recovery may
 check sooner. Unknown outcomes only perform read-only reconciliation on recovery.
 Pending invitations are matched on numeric requester identity and permission;
 membership evidence must likewise include numeric identity and permission.
@@ -91,6 +94,67 @@ complete historical plan before workflow fan-out. It validates scope/approval an
 rejects changed input or IDs once bound. Existing SQL Sent rows with upstream IDs
 are affirmative create evidence; ambiguous historical rows are fenced before
 reconciliation. Never infer a successful original create from decline/expiry alone.
+
+## GitHub throttling
+
+A 403 or 429 carrying documented rate-limit evidence is classified at the
+transport boundary as throttling rather than as an answer about the request.
+`retry-after` and the 429 status address the request itself; the rate-limit
+wording in the body names the limit. `x-ratelimit-remaining: 0` is weaker: the
+quota headers ride along on every response, so a permission refusal served as the
+hour's last request reports an exhausted quota too. An exhausted quota therefore
+only counts where GitHub named no other reason, and a 403 with no evidence at all
+remains a permission refusal that still settles a legacy invitation as failed.
+
+The wait follows whichever evidence describes it. A `retry-after` — seconds or an
+HTTP-date — names this request's wait and wins outright. Failing that, only an
+exhausted quota makes `x-ratelimit-reset` this request's wait; the reset rides
+along on a healthy quota too, and idling out an untouched hour is worse than the
+unguided backoff. A numeric `retry-after` is already a duration; the HTTP-date
+form and the reset are read against the response's own `date`, so a skewed local
+clock cannot shorten them. The resulting wait is clamped to between one second
+and one hour. Each wait is bounded; the retries are not. Giving up would settle
+an invitation on a limit never shown to be permanent, which is the failure this
+policy exists to prevent.
+
+Sending `retry-after` at all cites a limit, even where the value yields no usable
+wait: discarding that evidence would leave a refusal looking permanent. The scope
+records which limit GitHub cited; the wait may still come from the quota reset,
+because which limit was cited and when the request can next succeed are different
+questions.
+
+Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
+and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
+records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
+the same wait instead of the hourly dependency cadence; a throttled *read* during
+reconciliation earns that recheck too, because rereading is safe and is the only
+way a delivery GitHub would not let us observe resolves on its own. Exactly one
+recheck stands per invitation: a timer already sent cannot be withdrawn, so a
+sooner one would mean two, and telling which is stale needs a due time and a
+token on `recheck` — retained protocol, for a case only explicit recovery during
+a blocked window reaches. A throttle observed then waits the pending hour out;
+nothing is settled wrongly by it.
+
+The settlement sweep waits a limit out once per account, not once per row or
+once per sweep: a quota belongs to the installation, so one wait covers that
+account's remaining rows and says nothing about any other. An account throttled
+again after its wait has its remaining rows left to the next sweep rather than
+spending more of a quota it has already run out of. Either way the wait is a
+durable continuation or a service-side timer, never a held retry: no handler
+keeps an invitation object's lock across a rate-limit window.
+
+Only a response classifies. Transport errors, timeouts, and every other uncertain
+result stay outcome-unknown and keep the write fence, so throttling handling can
+never conclude that an ambiguous PUT was not applied.
+
+Settlement's `cancel_v1` and `tick_expire_v1` are not covered by the continuation
+policy above. A throttled DELETE or listing is transient there, so Restate
+retries it inside the invitation object's lock — the same way a 5xx or a 429
+already did before throttling was classified. That is deliberate: the alternative
+is settling a cancellation GitHub never performed, which is the failure this work
+exists to prevent, and the lock is one invitation's rather than the account's.
+Giving those handlers their own bounded continuations is follow-up work, not part
+of #80's delivery and observation scope.
 
 ## Notification retention and orphan promises
 
@@ -116,7 +180,8 @@ management commands remain part of the #58 cutover rehearsal.
 native SQLx, and the GitHub HTTP stub: stable plans, 201/204/422, ambiguous 502,
 HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
-numeric identity/rename validation, and recovery after actual workflow cleanup.
+numeric identity/rename validation, throttled delivery resuming on its own
+scheduled recheck, and recovery after actual workflow cleanup.
 `authoritative_admission` additionally checks missing delivery projection
 prerequisites do not block link commands or workflow submission.
 

@@ -30,7 +30,7 @@ pub mod stub;
 pub mod wasm_smoke;
 
 // Re-exports filled in as each module gains its public types:
-pub use error::{Error, Result};
+pub use error::{Error, RateLimit, RateLimitScope, Result};
 pub use installation::InstallationClient;
 pub use oauth::{AuthorizeUrl, OAuthConfig, UserApiClient};
 pub use transport::{HttpTransport, Method, Request, Response};
