@@ -363,6 +363,28 @@ Then browser-check it: `cargo run -p ghinvite-web` from the repo root serves
 `cargo run -p ghinvite-island --example ssr_fixture > dist/public/index.html`
 (local only — see `crates/ghinvite-island/README.md`).
 
+### Document shell (#68)
+
+Every full HTML response is one standards-mode document with an explicit
+language and a mobile viewport. The markup is asserted against the real router
+in the workspace suite:
+
+```bash
+cargo test -p ghinvite-web --test document_shell
+```
+
+Standards mode and the layout viewport are the browser's verdict, not the
+markup's, so a phone-sized engine has to render the pages:
+
+```bash
+npm exec --prefix tests/browser -- playwright test --config document.config.mjs
+```
+
+That config starts the `#[ignore]`d `document_browser_server` fixture from the
+same test file (the production router over in-memory storage, no island bundle
+or Restate) and visits the public and Console documents at 390 x 844 and
+1440 x 1000. See `tests/browser/README.md` for the covered pages.
+
 ## CI vs Local
 
 | Job | Local | CI |
@@ -371,5 +393,6 @@ Then browser-check it: `cargo run -p ghinvite-web` from the repo root serves
 | Lint | ✅ always | ✅ push + PR |
 | wasm32 build | ✅ always | ✅ push + PR |
 | Island bundle | ✅ requires dx | ✅ push + PR |
+| Document shell browser suite | ✅ requires Playwright | ✅ push + PR |
 | Restate integration | ✅ `bash scripts/test-restate.sh` | ✅ push + PR |
 | D1 suite | ✅ requires wrangler | ❌ not in CI v1 |
