@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 mod common;
+mod requester_delivery;
 
 #[tokio::test]
 async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
@@ -154,7 +155,7 @@ impl wiremock::Respond for LostAdmissionResponse {
                 }
                 let accepted = attempt.is_some_and(|a| !a["receipt"].is_null());
                 let can_start =
-                    !revoked && !(accepted && matches!(status.as_str(), "pending" | "approved"));
+                    !(revoked || accepted && matches!(status.as_str(), "pending" | "approved"));
                 let current = if accepted {
                     json!({"request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     "link_id": self.link_id, "account_id": 1, "requester_id": body["requester_id"],
@@ -1728,7 +1729,7 @@ async fn signed_in_landing_shows_approved_status_instead_of_form() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Approved"));
     assert!(text.contains("Repository delivery is tracked separately"));
-    assert!(text.contains("Awaiting delivery confirmation"));
+    assert!(text.contains("Delivery status unavailable"));
     assert!(!text.contains("Submit request"));
     assert!(!text.contains("http-equiv=\"refresh\""));
 }
@@ -1924,7 +1925,7 @@ async fn inactive_link_with_existing_approved_request_shows_status() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("Approved"));
     assert!(text.contains("Repository delivery is tracked separately"));
-    assert!(text.contains("Awaiting delivery confirmation"));
+    assert!(text.contains("Delivery status unavailable"));
     assert!(!text.contains("revoked"));
     assert!(!text.contains("Submit request"));
 }

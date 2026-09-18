@@ -300,6 +300,7 @@ async fn document_fixture() -> (axum::Router, String) {
                     decided_at: None,
                     decline_reason: None,
                     created_at: Utc::now(),
+                    decision_deadline: None,
                 })
                 .await
                 .unwrap();

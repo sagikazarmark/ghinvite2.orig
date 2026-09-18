@@ -116,6 +116,8 @@ pub struct RequestPageProps {
     pub delivery_progress: Vec<ghinvite_core::delivery::RepositoryProgress>,
     #[props(default)]
     pub legacy_delivery: Vec<ghinvite_core::GithubInvitation>,
+    #[props(default)]
+    pub delivery_unavailable: bool,
 }
 
 fn retry_notice_copy(state: RequestState) -> Option<&'static str> {
@@ -186,14 +188,16 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
                 p { class: "text-sm leading-6 text-base-content/70",
                     "Your request is approved. Repository delivery is tracked separately below."
                 }
-                ul { class: "space-y-2",
+                ul { class: "space-y-4", aria_label: "Repository delivery",
                     for repo in &props.link.repos {
-                        li {
-                            span { class: "font-mono text-sm", "{repo.repo_full_name}: " }
-                            {delivery_label(
-                                props.delivery.iter().find(|r| r.command.repo_id == repo.repo_id).map(|r| &r.outcome),
-                                props.delivery_progress.iter().find(|r| r.repo_id == repo.repo_id).map(|r| &r.stage),
-                                props.legacy_delivery.iter().find(|r| r.repo_id == repo.repo_id).map(|r| r.state))}
+                        DeliveryRow {
+                            row: delivery_presentation(
+                                repo,
+                                &props.delivery,
+                                &props.delivery_progress,
+                                &props.legacy_delivery,
+                                props.delivery_unavailable),
+                            login: login.clone(),
                         }
                     }
                 }
@@ -259,37 +263,186 @@ pub fn RequestPage(props: RequestPageProps) -> Element {
     }
 }
 
-pub fn delivery_label(
-    outcome: Option<&ghinvite_core::delivery::CreateOutcome>,
-    stage: Option<&ghinvite_core::delivery::DispatchStage>,
-    legacy: Option<ghinvite_core::InvitationState>,
-) -> &'static str {
+#[derive(Clone, Copy, PartialEq)]
+pub enum DeliveryStatus {
+    Approved,
+    Planned,
+    Submitted,
+    Blocked,
+    Unknown,
+    Created,
+    Sent,
+    Collaborator,
+    Failed,
+    Accepted,
+    Declined,
+    Expired,
+    Cancelled,
+    Unavailable,
+}
+
+impl DeliveryStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Approved => "Approved — awaiting dispatch",
+            Self::Planned => "Planned — awaiting dispatch",
+            Self::Submitted => "Submitted — awaiting GitHub confirmation",
+            Self::Blocked => "Blocked — waiting for availability or identity verification",
+            Self::Unknown => "GitHub outcome unknown — awaiting reconciliation",
+            Self::Created => "GitHub invitation created — awaiting acceptance",
+            Self::Sent => "GitHub invitation sent — awaiting acceptance",
+            Self::Collaborator => "Already a collaborator",
+            Self::Failed => "GitHub rejected delivery",
+            Self::Accepted => "Repository access accepted",
+            Self::Declined => "GitHub invitation declined",
+            Self::Expired => "GitHub invitation expired",
+            Self::Cancelled => "GitHub invitation cancelled",
+            Self::Unavailable => "Delivery status unavailable",
+        }
+    }
+
+    fn guidance(self) -> &'static str {
+        match self {
+            Self::Approved | Self::Planned | Self::Submitted => {
+                "Wait, then check again for GitHub confirmation. Approval alone does not mean an invitation has been sent. If this persists, contact an account admin."
+            }
+            Self::Blocked => {
+                "Delivery is waiting for a prerequisite. Wait, then check again; if it stays blocked, contact an account admin."
+            }
+            Self::Unknown => {
+                "GitHub may already have sent an invitation. Check your GitHub notifications or email, then check this page again. If the outcome stays unknown, contact an account admin; do not submit another request to resend it."
+            }
+            Self::Created | Self::Sent => {
+                "Finish accepting repository access on GitHub. Check your GitHub notifications or invitation email. After accepting, check this page again; updates may take time. If you cannot find or accept it, contact an account admin."
+            }
+            Self::Collaborator => {
+                "GitHub confirmed you already had repository access; no invitation needs accepting. If you cannot open the repository, contact an account admin."
+            }
+            Self::Accepted => {
+                "Your GitHub invitation was accepted; no further acceptance is needed. If you cannot open the repository, contact an account admin."
+            }
+            Self::Declined | Self::Expired | Self::Cancelled => {
+                "This GitHub invitation is no longer awaiting acceptance. If you still need access, contact an account admin."
+            }
+            Self::Failed => {
+                "GitHub definitively rejected this delivery. Contact an account admin to resolve access."
+            }
+            Self::Unavailable => {
+                "Missing status does not mean delivery failed. Check your GitHub notifications or email and check this page again later. If status stays unavailable, contact an account admin."
+            }
+        }
+    }
+}
+
+/// Requester-safe view data: no retained commands, reasons or diagnostics.
+#[derive(Clone, PartialEq)]
+pub struct DeliveryPresentation {
+    pub repo: String,
+    pub status: DeliveryStatus,
+    pub observation_unavailable: bool,
+}
+
+pub fn delivery_presentation(
+    repo: &ghinvite_core::InvitationLinkRepo,
+    receipts: &[ghinvite_core::delivery::CreateReceipt],
+    progress: &[ghinvite_core::delivery::RepositoryProgress],
+    invitations: &[ghinvite_core::GithubInvitation],
+    read_unavailable: bool,
+) -> DeliveryPresentation {
+    use DeliveryStatus as S;
     use ghinvite_core::{
         InvitationState,
         delivery::{CreateOutcome, DispatchStage},
     };
-    match outcome {
-        None => match stage {
-            Some(DispatchStage::Approved) => "Approved — awaiting delivery plan",
-            Some(DispatchStage::Planned) => "Planned — awaiting submission",
-            Some(DispatchStage::Submitted) => "Submitted — awaiting GitHub confirmation",
-            None => match legacy {
-                Some(InvitationState::Sent) => "GitHub invitation sent",
-                Some(InvitationState::Accepted) => "Repository access accepted",
-                Some(InvitationState::Declined) => "GitHub invitation declined",
-                Some(InvitationState::Expired) => "GitHub invitation expired",
-                Some(InvitationState::Cancelled) => "GitHub invitation cancelled",
-                Some(InvitationState::Failed) => "GitHub rejected delivery",
-                _ => "Awaiting delivery confirmation",
-            },
-        },
-        Some(CreateOutcome::Blocked { .. }) => {
-            "Blocked — waiting for availability or identity verification"
+    let outcome = receipts
+        .iter()
+        .find(|r| r.command.repo_id == repo.repo_id)
+        .map(|r| &r.outcome);
+    let stage = progress
+        .iter()
+        .find(|r| r.repo_id == repo.repo_id)
+        .map(|r| &r.stage);
+    let invitation = invitations.iter().find(|r| r.repo_id == repo.repo_id);
+    let lifecycle = invitation.map(|r| r.state);
+    // Settlement is later evidence; a retained create receipt is historical.
+    let status = match (lifecycle, outcome) {
+        (Some(InvitationState::Declined), _) => S::Declined,
+        (Some(InvitationState::Expired), _) => S::Expired,
+        (Some(InvitationState::Cancelled), _) => S::Cancelled,
+        (_, Some(CreateOutcome::AlreadyCollaborator)) => S::Collaborator,
+        // Legacy 204 responses have no upstream invitation to accept. A retained
+        // create ID, when present, still distinguishes a real invitation.
+        (Some(InvitationState::Accepted), None)
+            if invitation.is_some_and(|r| r.github_invitation_id.is_none()) =>
+        {
+            S::Collaborator
         }
-        Some(CreateOutcome::OutcomeUnknown) => "GitHub outcome unknown — awaiting reconciliation",
-        Some(CreateOutcome::Created { .. }) => "GitHub invitation created",
-        Some(CreateOutcome::AlreadyCollaborator) => "Already a collaborator",
-        Some(CreateOutcome::Failed { .. }) => "GitHub rejected delivery",
+        (Some(InvitationState::Accepted), _) => S::Accepted,
+        (_, Some(CreateOutcome::Created { .. })) => S::Created,
+        (Some(InvitationState::Sent), _) => S::Sent,
+        (_, Some(CreateOutcome::Failed { .. })) => S::Failed,
+        (_, Some(CreateOutcome::Blocked { .. })) => S::Blocked,
+        (_, Some(CreateOutcome::OutcomeUnknown)) => S::Unknown,
+        (Some(InvitationState::Failed), None) => S::Failed,
+        _ => match stage {
+            Some(DispatchStage::Approved) => S::Approved,
+            Some(DispatchStage::Planned) => S::Planned,
+            Some(DispatchStage::Submitted) => S::Submitted,
+            None => S::Unavailable,
+        },
+    };
+    DeliveryPresentation {
+        repo: repo.repo_full_name.clone(),
+        status,
+        observation_unavailable: read_unavailable || (lifecycle.is_none() && status == S::Created),
+    }
+}
+
+#[component]
+pub fn DeliveryRow(row: DeliveryPresentation, login: String) -> Element {
+    use DeliveryStatus as S;
+    let label = row.status.label();
+    let guidance = row.status.guidance();
+    // Only offer repository URLs for GitHub-compatible owner/name segments.
+    let repository_url = row
+        .repo
+        .split_once('/')
+        .filter(|(owner, name)| {
+            [*owner, *name].iter().all(|part| {
+                !part.is_empty()
+                    && !matches!(*part, "." | "..")
+                    && part
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            })
+        })
+        .map(|_| format!("https://github.com/{}", row.repo));
+    let (repository_action, show_notifications) = match row.status {
+        S::Created | S::Sent => (Some(("Accept on GitHub", "/invitations")), true),
+        S::Accepted | S::Collaborator => (Some(("Open repository", "")), false),
+        S::Unknown | S::Unavailable => (None, true),
+        _ => (None, false),
+    };
+    rsx! {
+        li { class: "rounded-box bg-base-200 p-4 space-y-3 break-words",
+            h3 { class: "font-mono text-sm break-all", "{row.repo}" }
+            p { class: "font-semibold", "{label}" }
+            p { class: "text-sm leading-6", "{guidance}" }
+            if row.observation_unavailable {
+                p { class: "text-sm", "Latest status updates are unavailable. Any known outcome above is retained history; the invitation may have changed since. Missing status does not mean delivery failed." }
+            }
+            if repository_action.is_some() || show_notifications {
+                p { class: "text-sm", "Use GitHub signed in as @{login}." }
+                div { class: "flex flex-wrap gap-3",
+                    if let (Some(url), Some((label, suffix))) = (repository_url, repository_action) {
+                        a { class: "link", href: "{url}{suffix}", "{label}" }
+                    }
+                    if show_notifications {
+                        a { class: "link", href: "https://github.com/notifications", "GitHub notifications" }
+                    }
+                }
+            }
+        }
     }
 }
 

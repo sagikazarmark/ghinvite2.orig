@@ -1,4 +1,4 @@
-//! Native forms for recoverable authoritative attempts; SQL is not on this path.
+//! Native forms for authoritative attempts, with optional SQL delivery observations.
 use crate::{WebError, admission::RestateAdmission, session::Session};
 use axum::{
     http::StatusCode,
@@ -129,19 +129,20 @@ pub async fn page(
             .list_delivery_for_request(request.request_id)
             .await
             .ok();
+        let invitations = state
+            .storage
+            .list_github_invitations_for_request(request.request_id)
+            .await
+            .ok();
         for repo in &page.repos {
-            let label = ghinvite_ui::invitation::delivery_label(
-                receipts
-                    .as_ref()
-                    .and_then(|rows| rows.iter().find(|r| r.command.repo_id == repo.repo_id))
-                    .map(|r| &r.outcome),
-                progress
-                    .as_ref()
-                    .and_then(|rows| rows.iter().find(|r| r.repo_id == repo.repo_id))
-                    .map(|r| &r.stage),
-                None,
+            let row = ghinvite_ui::invitation::delivery_presentation(
+                repo,
+                receipts.as_deref().unwrap_or_default(),
+                progress.as_deref().unwrap_or_default(),
+                invitations.as_deref().unwrap_or_default(),
+                receipts.is_none() || invitations.is_none() || progress.is_none(),
             );
-            delivery.push(format!("{}: {label}", repo.repo_full_name));
+            delivery.push(row);
         }
     }
     let mode = if receipt.is_some() || (!page.can_start_fresh && page.attempt.is_none()) {
@@ -459,7 +460,7 @@ fn render(
     original: Option<&str>,
     mode: FormMode,
     status: StatusCode,
-    delivery: Vec<String>,
+    delivery: Vec<ghinvite_ui::invitation::DeliveryPresentation>,
 ) -> Response {
     let code = code.to_owned();
     let id = id.to_owned();
@@ -502,7 +503,7 @@ fn render(
                             div { class: "alert alert-success",
                                 div {
                                     h2 { class: "text-xl font-semibold", "Approved" }
-                                    p { "Check your GitHub notifications and email to accept any GitHub invitations once they are sent. Repository delivery is tracked separately below." }
+                                    p { "Your request is approved. Repository delivery is tracked separately below. Check again for updates; accepting access happens on GitHub." }
                                 }
                             }
                         }
@@ -512,7 +513,13 @@ fn render(
                         }
                     }
                 }
-                ul { for row in &delivery { li { "{row}" } } }
+                if !delivery.is_empty() {
+                    ul { class: "space-y-4", aria_label: "Repository delivery",
+                        for row in &delivery {
+                            ghinvite_ui::invitation::DeliveryRow { row: row.clone(), login: login.clone() }
+                        }
+                    }
+                }
                 if mode != FormMode::Closed {
                     form { method: "post", action: "/i/{code}?operation_id={id}", class: "space-y-4",
                         ghinvite_ui::csrf::CsrfField {}
