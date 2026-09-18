@@ -52,11 +52,12 @@ impl Request {
     }
 
     pub fn json_body<T: serde::Serialize>(mut self, value: &T) -> Result<Self> {
-        // serde's message renders the value it choked on, and request bodies
-        // carry the caller's input (justifications, logins). Only the fact of
-        // the failure is safe to keep.
-        let body =
-            serde_json::to_vec(value).map_err(|_| Error::decode_shape("encoding request body"))?;
+        // Nothing has been sent yet, so this is the caller's value, not a
+        // response. serde's message renders the value it choked on, and
+        // request bodies carry the caller's input (justifications, logins), so
+        // only the fact of the failure is safe to keep.
+        let body = serde_json::to_vec(value)
+            .map_err(|_| Error::InvalidInput("request body could not be encoded".into()))?;
         self.body = Some(body);
         self.headers
             .insert("content-type".into(), "application/json".into());

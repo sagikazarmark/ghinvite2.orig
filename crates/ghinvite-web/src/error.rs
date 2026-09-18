@@ -85,7 +85,7 @@ pub struct OAuthErrorCode(String);
 
 impl OAuthErrorCode {
     pub fn new(raw: &str) -> Self {
-        Self(ghinvite_github::oauth_error_code(raw))
+        Self(ghinvite_github::bounded_upstream_code(raw))
     }
 
     pub fn as_str(&self) -> &str {
@@ -119,6 +119,12 @@ pub enum OAuthFailure {
     /// signed-in user.
     #[error("installation is not visible to the signed-in user")]
     InstallationNotVisible,
+
+    /// GitHub described the installation with a value ghinvite cannot act on.
+    /// `field` names which one, as a literal — the value itself is upstream
+    /// text and stays in the (bounded) log at the call site.
+    #[error("installation has an unsupported {field}")]
+    UnsupportedInstallation { field: &'static str },
 }
 
 impl OAuthFailure {
@@ -296,6 +302,10 @@ fn oauth_problem(failure: &OAuthFailure) -> Problem {
             "That installation is not available",
             "This GitHub App installation is not visible to your GitHub account. Sign in as an account admin, then open it again.",
         ),
+        OAuthFailure::UnsupportedInstallation { .. } => (
+            "This installation is not supported",
+            "ghinvite cannot manage this GitHub App installation. Check the installation's account and repository settings on GitHub, then open it again.",
+        ),
     };
     Problem {
         status: StatusCode::BAD_REQUEST,
@@ -404,8 +414,10 @@ impl WebError {
                 "GitHub read failed"
             ),
             WebError::Storage(_) | WebError::Internal(_) => {
-                // Neither variant can hold an upstream body: both are built
-                // from ghinvite's own strings.
+                // Neither variant can reach a GitHub or ingress response body.
+                // `Storage` does carry the storage driver's own message, which
+                // is why this stays at error level rather than being widened
+                // to anything a request can influence.
                 tracing::error!(error = ?self, "internal error rendering response");
             }
             _ => {}

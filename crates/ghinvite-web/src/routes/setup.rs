@@ -105,8 +105,17 @@ fn account_type_for(installation: &GhUserInstallation) -> Result<AccountType> {
         .account_type
         .as_deref()
         .unwrap_or(installation.target_type.as_str());
-    raw.parse::<AccountType>()
-        .map_err(|_| WebError::BadRequest(format!("unsupported installation account type: {raw}")))
+    raw.parse::<AccountType>().map_err(|_| {
+        // `raw` is whatever GitHub put in the field. Bound it for the log and
+        // keep it out of the error, which the browser renders.
+        tracing::warn!(
+            account_type = %ghinvite_github::bounded_upstream_code(raw),
+            "installation account type is not supported"
+        );
+        WebError::OAuth(OAuthFailure::UnsupportedInstallation {
+            field: "account type",
+        })
+    })
 }
 
 async fn selected_repos_for(
@@ -123,9 +132,15 @@ async fn selected_repos_for(
                 repos.repositories.into_iter().map(|repo| repo.id).collect(),
             ))
         }
-        other => Err(WebError::BadRequest(format!(
-            "unsupported repository_selection: {other}"
-        ))),
+        other => {
+            tracing::warn!(
+                repository_selection = %ghinvite_github::bounded_upstream_code(other),
+                "installation repository selection is not supported"
+            );
+            Err(WebError::OAuth(OAuthFailure::UnsupportedInstallation {
+                field: "repository selection",
+            }))
+        }
     }
 }
 

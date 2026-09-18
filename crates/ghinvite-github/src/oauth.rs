@@ -106,7 +106,7 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
         // The code is the actionable distinction and is bounded to a documented
         // shape. `error_description` is upstream prose that ends up in logs and
         // in the browser's failure page, so it stops here.
-        let error_code = crate::redact::oauth_error_code(error_code);
+        let error_code = crate::redact::bounded_upstream_code(error_code);
         tracing::warn!(
             error_code = %error_code,
             "oauth token exchange returned error payload"

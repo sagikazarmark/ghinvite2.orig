@@ -140,9 +140,13 @@ impl Error {
         Error::Decode(crate::redact::decode_diagnostic(error, body_len))
     }
 
-    /// A decode failure for a value that was already parsed once and then
+    /// A decode failure for a *response* that was already parsed once and then
     /// failed to match the expected shape. `context` names the call site and
     /// must be a literal — never anything derived from the response.
+    ///
+    /// Failures encoding a request belong in [`Error::InvalidInput`]: nothing
+    /// has been received yet, so calling them a decode error misreads which
+    /// side was at fault.
     pub(crate) fn decode_shape(context: &'static str) -> Self {
         Error::Decode(format!("{context}: unexpected response shape"))
     }

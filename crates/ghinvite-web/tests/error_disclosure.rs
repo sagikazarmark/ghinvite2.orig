@@ -243,6 +243,67 @@ async fn github_gateway_body_never_reaches_the_browser() {
     assert!(body.contains("href=\"/\""), "{body}");
 }
 
+/// The setup return reads the installation's shape out of GitHub's JSON. Those
+/// fields are upstream strings, and ghinvite used to echo the ones it could not
+/// act on straight back into a bare 400 with nowhere to go.
+#[tokio::test]
+async fn unsupported_installation_fields_are_not_reflected() {
+    for (account_type, repository_selection) in [
+        (
+            "Mystery <b>type</b> gho_16C7e42F292c6912E7710c838347Ae178B4a",
+            "all",
+        ),
+        (
+            "Organization",
+            "mystery gho_16C7e42F292c6912E7710c838347Ae178B4a",
+        ),
+    ] {
+        let (logs, _guard) = capture_logs();
+        let mut expectations = oauth_expectations();
+        expectations.push(Expectation::ok_json(
+            Method::Get,
+            "https://api.github.com/user/installations?per_page=100",
+            serde_json::json!({
+                "total_count": 1,
+                "installations": [{
+                    "id": 77,
+                    "account": {"id": 9001, "login": "acme", "type": account_type},
+                    "repository_selection": repository_selection,
+                    "target_type": account_type,
+                    "target_id": 9001
+                }]
+            }),
+        ));
+        let app = build_app_with(
+            MockTransport::scripted(expectations),
+            "http://127.0.0.1:8080",
+        )
+        .await;
+        let cookie = sign_in(&app).await;
+
+        let response = get(
+            &app,
+            "/setup/github?installation_id=77&setup_action=install",
+            Some(&cookie),
+        )
+        .await;
+
+        let body = body_text(response).await;
+        let leaked = [USER_TOKEN, "Mystery", "mystery", "<b>"];
+        assert_absent(&body, &leaked, "setup response");
+        // The bounded log keeps the field name without the value ghinvite
+        // could not act on.
+        assert_absent(&logs.text(), &leaked, "logs");
+        assert!(
+            logs.text().contains("unrecognized_error"),
+            "{}",
+            logs.text()
+        );
+        assert!(body.contains("not supported"), "{body}");
+        assert!(body.contains("href=\"/\""), "{body}");
+    }
+}
+
 /// The Restate ingress answers a setup-return command with a diagnostic that
 /// quotes the ingress API key.
 #[tokio::test]

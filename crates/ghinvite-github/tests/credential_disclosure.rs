@@ -167,6 +167,40 @@ async fn documented_validation_sub_codes_survive_sanitizing() {
     mock.assert_exhausted();
 }
 
+/// A throttled response is a second body-carrying variant, so it needs the
+/// same summarising as `Error::Status` — and the rate-limit wording it was
+/// classified by has to survive that summarising.
+#[tokio::test]
+async fn a_throttled_response_is_summarised_without_losing_its_evidence() {
+    let (logs, _guard) = capture_logs();
+    let body = format!(
+        r#"{{"message":"You have exceeded a secondary rate limit","observed_token":"{INSTALLATION_TOKEN}"}}"#
+    );
+    let mock = responds(MINT_URL, 429, body.into_bytes());
+    let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+        .with_base("https://api.github.test");
+
+    let error = client.mint_installation_token(55).await.unwrap_err();
+
+    let rendered = format!("{error} {error:?}");
+    assert_absent(
+        &rendered,
+        &[INSTALLATION_TOKEN, "observed_token"],
+        "error formatting",
+    );
+    assert_absent(
+        &logs.text(),
+        &[INSTALLATION_TOKEN, "observed_token"],
+        "logs",
+    );
+    // Throttling is still classified, and the wording that classified it is
+    // GitHub's documented `message`, which the summary keeps.
+    assert!(error.rate_limit().is_some(), "{rendered}");
+    assert!(rendered.contains("secondary rate limit"), "{rendered}");
+    assert_eq!(error.status(), Some(429));
+    mock.assert_exhausted();
+}
+
 /// The OAuth token endpoint, reached with the client secret in the request
 /// body. A failure there must not carry the response payload either.
 #[tokio::test]

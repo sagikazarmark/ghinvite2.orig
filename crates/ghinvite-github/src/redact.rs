@@ -78,17 +78,25 @@ pub(crate) fn decode_diagnostic(error: &serde_json::Error, body_len: usize) -> S
     )
 }
 
-/// Reduce an upstream OAuth `error` code to a bounded identifier.
+/// Reduce an upstream-supplied code to a bounded identifier.
 ///
-/// GitHub documents a small set of snake_case codes, and callers branch on
-/// them. Anything that is not shaped like one of those is prose (or worse) and
-/// is dropped rather than carried.
-pub fn oauth_error_code(raw: &str) -> String {
-    let usable = raw.len() <= 64
-        && !raw.is_empty()
+/// GitHub answers with short lowercase snake_case values in the slots callers
+/// branch on — an OAuth `error`, an installation's account type, its
+/// repository selection. Anything not shaped like one of those is prose (or
+/// worse) and is dropped rather than carried.
+///
+/// A credential is itself shaped like an identifier — `ghs_16C7e42F…` is forty
+/// characters of letters, digits and underscores — so the identifier rule on
+/// its own would wave one through. [`looks_like_credential`] is what actually
+/// keeps a token out of this slot; the lowercase rule narrows the opening
+/// further, since none of the documented values has a capital in it.
+pub fn bounded_upstream_code(raw: &str) -> String {
+    let usable = !raw.is_empty()
+        && raw.len() <= 64
         && raw
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        && !looks_like_credential(raw);
     if usable {
         raw.to_owned()
     } else {
@@ -386,22 +394,52 @@ mod tests {
     }
 
     #[test]
-    fn oauth_error_code_passes_documented_codes_through() {
+    fn bounded_code_passes_documented_codes_through() {
         assert_eq!(
-            oauth_error_code("bad_verification_code"),
+            bounded_upstream_code("bad_verification_code"),
             "bad_verification_code"
         );
-        assert_eq!(oauth_error_code("access_denied"), "access_denied");
+        assert_eq!(bounded_upstream_code("access_denied"), "access_denied");
     }
 
     #[test]
-    fn oauth_error_code_drops_prose_and_injected_values() {
+    fn bounded_code_drops_prose_and_injected_values() {
         assert_eq!(
-            oauth_error_code(&format!("see {INSTALLATION_TOKEN}")),
+            bounded_upstream_code(&format!("see {INSTALLATION_TOKEN}")),
             "unrecognized_error"
         );
-        assert_eq!(oauth_error_code(""), "unrecognized_error");
-        assert_eq!(oauth_error_code(&"a".repeat(65)), "unrecognized_error");
+        assert_eq!(bounded_upstream_code(""), "unrecognized_error");
+        assert_eq!(bounded_upstream_code(&"a".repeat(65)), "unrecognized_error");
+    }
+
+    /// A credential is itself shaped like an identifier — no spaces, no
+    /// punctuation — so the identifier rule alone would wave one straight
+    /// through into the logs.
+    #[test]
+    fn bounded_code_drops_a_bare_credential_in_the_code_slot() {
+        for raw in [
+            INSTALLATION_TOKEN,
+            &INSTALLATION_TOKEN.to_ascii_lowercase(),
+            APP_JWT,
+            "ghp_0123456789abcdefghij",
+            "github_pat_0123456789abcdefghij",
+        ] {
+            assert_eq!(bounded_upstream_code(raw), "unrecognized_error", "{raw}");
+        }
+    }
+
+    #[test]
+    fn bounded_code_keeps_every_oauth_code_github_documents() {
+        for code in [
+            "access_denied",
+            "application_suspended",
+            "bad_verification_code",
+            "incorrect_client_credentials",
+            "redirect_uri_mismatch",
+            "unverified_user_email",
+        ] {
+            assert_eq!(bounded_upstream_code(code), code);
+        }
     }
 
     #[test]

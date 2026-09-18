@@ -35,7 +35,8 @@ pub use error::{Error, RateLimit, RateLimitScope, Result};
 pub use installation::InstallationClient;
 pub use oauth::{AuthorizeUrl, OAuthConfig, UserApiClient};
 // `redact` itself stays private — bodies are summarised inside this crate —
-// but the rule for bounding an upstream OAuth error code is needed by the web
-// crate too, which reads the same codes off GitHub's callback query string.
-pub use redact::oauth_error_code;
+// but the rule for bounding an upstream-supplied code is needed by the web
+// crate too, which reads the same kind of value off GitHub's callback query
+// string and off the installations it lists.
+pub use redact::bounded_upstream_code;
 pub use transport::{HttpTransport, Method, Request, Response};
