@@ -82,12 +82,14 @@ pub fn query(after: bool) -> String {
     let limit = PENDING_PAGE_SIZE + 1;
     format!(
         r#"WITH page AS MATERIALIZED (
-      SELECT r.*, {SEEK_KEY} AS seek_key FROM invitation_requests r
+      SELECT r.id, r.invitation_link_id, r.requester_id, r.justification,
+        r.created_at, r.decision_deadline, {SEEK_KEY} AS seek_key FROM invitation_requests r
       JOIN invitation_links owner ON owner.id = r.invitation_link_id AND owner.account_id = ?1
       WHERE r.queue_account_id = ?1 AND r.state = 'pending' {seek}
       ORDER BY {SEEK_KEY} LIMIT {limit}
     ), links AS MATERIALIZED (
-      SELECT l.*, COALESCE((SELECT json_group_array(repo_full_name) FROM
+      SELECT l.id, l.slug, l.description, l.permission, l.expires_at,
+        l.approval_required, COALESCE((SELECT json_group_array(repo_full_name) FROM
         (SELECT repo_full_name FROM invitation_link_repos WHERE invitation_link_id = l.id ORDER BY repo_id)), '[]') AS repos
       FROM invitation_links l WHERE l.id IN (SELECT invitation_link_id FROM page)
     )

@@ -17,13 +17,22 @@ async fn send_signed_member(
     let body = payload.to_string();
     let mut mac = Hmac::<sha2::Sha256>::new_from_slice(MEMBER_WEBHOOK_SECRET).unwrap();
     mac.update(body.as_bytes());
-    let digest: String = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect();
-    client.post(format!("{web_url}/webhooks/github"))
+    let digest: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    client
+        .post(format!("{web_url}/webhooks/github"))
         .header("content-type", "application/json")
         .header("x-github-event", "member")
         .header("x-github-delivery", delivery)
         .header("x-hub-signature-256", format!("sha256={digest}"))
-        .body(body).send().await.unwrap()
+        .body(body)
+        .send()
+        .await
+        .unwrap()
 }
 
 /// Real web route and Restate adapter, with an HTTP proxy that loses one send ack.
@@ -31,19 +40,36 @@ async fn member_webhook_ingress(
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     ingress: &str,
     client: reqwest::Client,
-) -> (String, Arc<std::sync::Mutex<Vec<String>>>, tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
-    use axum::{body::Body, extract::{Path, Json}, response::{IntoResponse, Response}, routing::post};
+) -> (
+    String,
+    Arc<std::sync::Mutex<Vec<String>>>,
+    tokio::task::JoinHandle<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    use axum::{
+        body::Body,
+        extract::{Json, Path},
+        response::{IntoResponse, Response},
+        routing::post,
+    };
     let invocations = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let recorded = invocations.clone();
     let ingress = ingress.to_owned();
-    let proxy = axum::Router::new().route("/GithubInvitation/{id}/on_webhook_v1/send", post(
-        move |Path(id): Path<String>, Json(input): Json<Value>| {
+    let proxy = axum::Router::new().route(
+        "/GithubInvitation/{id}/on_webhook_v1/send",
+        post(move |Path(id): Path<String>, Json(input): Json<Value>| {
             let client = client.clone();
             let ingress = ingress.clone();
             let recorded = recorded.clone();
             async move {
-                let response = client.post(format!("{ingress}/GithubInvitation/{id}/on_webhook_v1/send"))
-                    .json(&input).send().await.unwrap();
+                let response = client
+                    .post(format!(
+                        "{ingress}/GithubInvitation/{id}/on_webhook_v1/send"
+                    ))
+                    .json(&input)
+                    .send()
+                    .await
+                    .unwrap();
                 assert!(response.status().is_success());
                 let ack: Value = response.json().await.unwrap();
                 let lose_ack = {
@@ -57,15 +83,19 @@ async fn member_webhook_ingress(
                     Json(ack).into_response()
                 }
             }
-        }
-    ));
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_url = format!("http://{}", listener.local_addr().unwrap());
-    let proxy_server = tokio::spawn(async move { axum::serve(listener, proxy).await.unwrap(); });
+    let proxy_server = tokio::spawn(async move {
+        axum::serve(listener, proxy).await.unwrap();
+    });
     let state = ghinvite_web::AppState::new(
         storage,
         Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-        Arc::new(ghinvite_web::RestateCommands::new(Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()))),
+        Arc::new(ghinvite_web::RestateCommands::new(Arc::new(
+            ghinvite_web::RestateClient::new(proxy_url).unwrap(),
+        ))),
         ghinvite_web::WebConfig {
             webhook_secret: MEMBER_WEBHOOK_SECRET.to_vec(),
             ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
@@ -74,7 +104,9 @@ async fn member_webhook_ingress(
     let app = ghinvite_web::routes::webhook::router().with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let web_url = format!("http://{}", listener.local_addr().unwrap());
-    let web_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let web_server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     (web_url, invocations, web_server, proxy_server)
 }
 
@@ -128,24 +160,33 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             let reassigned = reassigned.clone();
             let tokens = tokens.clone();
             async move {
-                if let Some(token) = request.headers().get("authorization").and_then(|h| h.to_str().ok())
-                    && token.starts_with("Bearer test-token-for-") {
+                if let Some(token) = request
+                    .headers()
+                    .get("authorization")
+                    .and_then(|h| h.to_str().ok())
+                    && token.starts_with("Bearer test-token-for-")
+                {
                     tokens.lock().unwrap().push(token.to_owned());
                     if unavailable.load(std::sync::atomic::Ordering::SeqCst) {
-                        return axum::response::Response::builder().status(401).body(axum::body::Body::empty()).unwrap();
+                        return axum::response::Response::builder()
+                            .status(401)
+                            .body(axum::body::Body::empty())
+                            .unwrap();
                     }
                 }
-                if request.uri().path() == "/repos/acme/api" && reassigned.load(std::sync::atomic::Ordering::SeqCst) {
-                    return axum::response::IntoResponse::into_response(axum::Json(json!({"id":999,"full_name":"acme/api","private":true})));
+                if request.uri().path() == "/repos/acme/api"
+                    && reassigned.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return axum::response::IntoResponse::into_response(axum::Json(
+                        json!({"id":999,"full_name":"acme/api","private":true}),
+                    ));
                 }
                 next.run(request).await
             }
         },
     ));
     let stub_task = tokio::spawn(async move {
-        axum::serve(stub, router)
-            .await
-            .unwrap();
+        axum::serve(stub, router).await.unwrap();
     });
     let github = Arc::new(
         ghinvite_github::InstallationClient::new(
@@ -953,8 +994,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     assert_eq!(calls["count"], 0);
     // Explicit 403 proves rejection, so restoration may safely try again.
-    client.post(format!("{base}/identity"))
-        .json(&json!({"login":"user-84","addressed_id":84})).send().await.unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"user-84","addressed_id":84}))
+        .send()
+        .await
+        .unwrap();
     workflow_faults
         .pause_before_dispatch
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -967,7 +1012,15 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let rejected_link = ghinvite_core::InvitationLinkId::new();
     call("InvitationLinkV1",rejected_link.to_string(),"create",json!({"version":1,"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Access rejection","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
-    storage.upsert_user(&ghinvite_core::User { user_id:84, login:"user-84".into(), avatar_url:None, last_seen_at:now }).await.unwrap();
+    storage
+        .upsert_user(&ghinvite_core::User {
+            user_id: 84,
+            login: "user-84".into(),
+            avatar_url: None,
+            last_seen_at: now,
+        })
+        .await
+        .unwrap();
     let admitted: Value = call("InvitationLinkV1",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
     let rejected_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":84});
@@ -1022,8 +1075,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_create_audit(&*storage, &rejected).await;
     // The stub exposes one addressed identity at a time. This sweep observes
     // older Alice invitations; the blocked user-84 create is ineligible.
-    client.post(format!("{base}/identity"))
-        .json(&json!({"login":"alice","addressed_id":8})).send().await.unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"alice","addressed_id":8}))
+        .send()
+        .await
+        .unwrap();
     let sweep = client
         .post(format!("{ingress}/Reconcile/daily_run_v1"))
         .json(&json!({"at":chrono::Utc::now()}))
@@ -1044,8 +1101,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .state,
         ghinvite_core::InvitationState::Sending
     );
-    client.post(format!("{base}/identity"))
-        .json(&json!({"login":"user-84","addressed_id":84})).send().await.unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"user-84","addressed_id":84}))
+        .send()
+        .await
+        .unwrap();
     let resumed: Value = call("GithubCreateV1", id.into(), "create", command.clone())
         .send()
         .await
@@ -1120,7 +1181,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // Unsupported reordered removal is not contradictory settlement evidence.
     let mut removed = payload.clone();
     removed["action"] = json!("removed");
-    assert_eq!(send_signed_member(&client, &web_url, "member-3", &removed).await.status(), 204);
+    assert_eq!(
+        send_signed_member(&client, &web_url, "member-3", &removed)
+            .await
+            .status(),
+        204
+    );
     assert_eq!(
         storage
             .get_github_invitation(sent.id)
@@ -1148,8 +1214,15 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(event.metadata, json!({"action":"accepted"}));
     let completed_invocations = invocations.lock().unwrap().clone();
     for invocation in completed_invocations {
-        assert!(client.get(format!("{ingress}/restate/invocation/{invocation}/attach"))
-            .send().await.unwrap().status().is_success());
+        assert!(
+            client
+                .get(format!("{ingress}/restate/invocation/{invocation}/attach"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
     }
     web_server.abort();
     proxy_server.abort();
@@ -1260,17 +1333,46 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
     assert!(created.status().is_success());
-    let admitted: Value = call("InvitationLinkV1", historical_link.to_string(), "admit", json!({
-        "version":1,"link_id":historical_link,"requester_id":8,"operation_id":RequestId::new()
-    })).send().await.unwrap().json().await.unwrap();
+    let admitted: Value = call(
+        "InvitationLinkV1",
+        historical_link.to_string(),
+        "admit",
+        json!({
+            "version":1,"link_id":historical_link,"requester_id":8,"operation_id":RequestId::new()
+        }),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let query = json!({"link_id":historical_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
-    let plan: Value = call("InvitationLinkV1", historical_link.to_string(), "prepare_dispatch", query.clone())
-        .send().await.unwrap().json().await.unwrap();
+    let plan: Value = call(
+        "InvitationLinkV1",
+        historical_link.to_string(),
+        "prepare_dispatch",
+        query.clone(),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
-    storage.mark_installation_uninstalled(9, chrono::Utc::now()).await.unwrap();
+    storage
+        .mark_installation_uninstalled(9, chrono::Utc::now())
+        .await
+        .unwrap();
     let blocked: Value = call("GithubCreateV1", id.into(), "create", command.clone())
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(blocked["outcome"]["kind"], "blocked");
     let mut replacement = storage.get_installation(9).await.unwrap().unwrap();
     replacement.installation_id = 19;
@@ -1278,58 +1380,169 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     replacement.uninstalled_at = None;
     storage.insert_installation(&replacement).await.unwrap();
     let delivered: Value = call("GithubCreateV1", id.into(), "create", command.clone())
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(delivered["outcome"]["kind"], "created");
     assert_eq!(delivered["command"], command);
-    let original_link = storage.get_invitation_link_by_id(historical_link).await.unwrap().unwrap();
-    let original_request = storage.get_invitation_request(command["request_id"].as_str().unwrap().parse().unwrap()).await.unwrap().unwrap();
-    let original_deliveries = storage.list_delivery_for_request(original_request.id).await.unwrap();
+    let original_link = storage
+        .get_invitation_link_by_id(historical_link)
+        .await
+        .unwrap()
+        .unwrap();
+    let original_request = storage
+        .get_invitation_request(command["request_id"].as_str().unwrap().parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    let original_deliveries = storage
+        .list_delivery_for_request(original_request.id)
+        .await
+        .unwrap();
     let original_audit = assert_create_audit(&*storage, &delivered).await.unwrap();
     // GitHub acceptance without a webhook: remove pending evidence, expose access.
-    client.delete(format!("{base}/repos/acme/api/invitations/{}", delivered["outcome"]["upstream_id"].as_u64().unwrap()))
-        .send().await.unwrap();
-    client.post(format!("{base}/identity")).json(&json!({"login":"alice","addressed_id":8,"role_name":"write"}))
-        .send().await.unwrap();
+    client
+        .delete(format!(
+            "{base}/repos/acme/api/invitations/{}",
+            delivered["outcome"]["upstream_id"].as_u64().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"alice","addressed_id":8,"role_name":"write"}))
+        .send()
+        .await
+        .unwrap();
     // A stale/corrupt local installation mapping must not grant another account
     // authority to observe this request, even if its repo/login evidence matches.
-    client.post(format!("{base}/installation-identity"))
+    client
+        .post(format!("{base}/installation-identity"))
         .json(&json!({"id":200,"login":"acme","type":"Organization"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     run_sweep(&client, &ingress).await;
-    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
-        ghinvite_core::InvitationState::Sent, "another account cannot supply observation authority");
-    client.post(format!("{base}/installation-identity"))
+    assert_eq!(
+        storage
+            .get_github_invitation(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Sent,
+        "another account cannot supply observation authority"
+    );
+    client
+        .post(format!("{base}/installation-identity"))
         .json(&json!({"id":100,"login":"acme","type":"Organization"}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
     github_tokens.lock().unwrap().clear();
     run_sweep(&client, &ingress).await;
-    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
-        ghinvite_core::InvitationState::Sent, "unavailable credentials must preserve recoverability");
+    assert_eq!(
+        storage
+            .get_github_invitation(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Sent,
+        "unavailable credentials must preserve recoverability"
+    );
     let tokens = github_tokens.lock().unwrap().clone();
     assert!(!tokens.is_empty());
-    assert!(tokens.iter().all(|token| token == "Bearer test-token-for-19"), "{tokens:?}");
+    assert!(
+        tokens
+            .iter()
+            .all(|token| token == "Bearer test-token-for-19"),
+        "{tokens:?}"
+    );
     credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
     repository_reassigned.store(true, std::sync::atomic::Ordering::SeqCst);
     run_sweep(&client, &ingress).await;
-    assert_eq!(storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap().state,
-        ghinvite_core::InvitationState::Sent, "a reused repository name cannot supply evidence");
+    assert_eq!(
+        storage
+            .get_github_invitation(id.parse().unwrap())
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ghinvite_core::InvitationState::Sent,
+        "a reused repository name cannot supply evidence"
+    );
     repository_reassigned.store(false, std::sync::atomic::Ordering::SeqCst);
     run_sweep(&client, &ingress).await;
-    let settled = storage.get_github_invitation(id.parse().unwrap()).await.unwrap().unwrap();
-    assert_eq!(settled.state, ghinvite_core::InvitationState::Accepted,
-        "active replacement sweeps must discover the historical invitation");
-    assert_eq!(settled.github_invitation_id, delivered["outcome"]["upstream_id"].as_u64());
-    assert_eq!(storage.get_invitation_link_by_id(historical_link).await.unwrap().unwrap(), original_link);
+    let settled = storage
+        .get_github_invitation(id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        settled.state,
+        ghinvite_core::InvitationState::Accepted,
+        "active replacement sweeps must discover the historical invitation"
+    );
+    assert_eq!(
+        settled.github_invitation_id,
+        delivered["outcome"]["upstream_id"].as_u64()
+    );
+    assert_eq!(
+        storage
+            .get_invitation_link_by_id(historical_link)
+            .await
+            .unwrap()
+            .unwrap(),
+        original_link
+    );
     assert_eq!(original_link.installation_id, 9);
-    assert_eq!(storage.get_invitation_request(original_request.id).await.unwrap().unwrap(), original_request);
-    assert_eq!(storage.list_delivery_for_request(original_request.id).await.unwrap(), original_deliveries);
-    let retained_plan: Value = call("InvitationLinkV1", historical_link.to_string(), "prepare_dispatch", query)
-        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(
+        storage
+            .get_invitation_request(original_request.id)
+            .await
+            .unwrap()
+            .unwrap(),
+        original_request
+    );
+    assert_eq!(
+        storage
+            .list_delivery_for_request(original_request.id)
+            .await
+            .unwrap(),
+        original_deliveries
+    );
+    let retained_plan: Value = call(
+        "InvitationLinkV1",
+        historical_link.to_string(),
+        "prepare_dispatch",
+        query,
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     assert_eq!(retained_plan, plan);
-    let events = storage.list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest).await.unwrap().events;
+    let events = storage
+        .list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
     assert!(events.contains(&original_audit));
-    let settlements: Vec<_> = events.iter().filter(|event| event.target_id == id && event.event_type == ghinvite_core::audit::EventType::InvitationAccepted).collect();
+    let settlements: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.target_id == id
+                && event.event_type == ghinvite_core::audit::EventType::InvitationAccepted
+        })
+        .collect();
     assert_eq!(settlements.len(), 1);
     assert_eq!(settlements[0].metadata, json!({"reconciled":true}));
     // A rate limit is GitHub declining to answer: it blocks rather than failing
@@ -1407,7 +1620,11 @@ async fn run_sweep(client: &reqwest::Client, ingress: &str) {
         .send()
         .await
         .unwrap();
-    assert!(response.status().is_success(), "{}", response.text().await.unwrap());
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
 }
 
 async fn assert_create_audit(

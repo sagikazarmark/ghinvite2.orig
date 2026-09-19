@@ -314,10 +314,14 @@ fn wasm_send<F: std::future::Future>(f: F) -> F {
 /// terminal errors, only the classification survives — which is what triage
 /// reads anyway.
 fn transport_failure(error: &reqwest::Error, phase: &str) -> String {
+    // Fetch does not expose reqwest's native connection classification. Keep
+    // native diagnostics precise without inspecting or rendering upstream text.
+    #[cfg(not(target_arch = "wasm32"))]
+    if error.is_connect() && !error.is_timeout() {
+        return format!("{phase}: could not connect");
+    }
     let cause = if error.is_timeout() {
         "timed out"
-    } else if error.is_connect() {
-        "could not connect"
     } else if error.is_redirect() {
         "too many redirects"
     } else if error.is_decode() {

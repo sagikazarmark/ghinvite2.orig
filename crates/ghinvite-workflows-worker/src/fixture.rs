@@ -19,13 +19,19 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/member-binding" => {
-            let (digest, invitation): (String, Option<ghinvite_core::GithubInvitationId>) = serde_json::from_value(input).map_err(super::worker_err)?;
-            storage.bind_member_webhook(&digest, invitation).await
+            let (digest, invitation): (String, Option<ghinvite_core::GithubInvitationId>) =
+                serde_json::from_value(input).map_err(super::worker_err)?;
+            storage
+                .bind_member_webhook(&digest, invitation)
+                .await
                 .map(|value| serde_json::to_value(value).unwrap())
         }
         "/__fixture/member-candidates" => {
-            let (account, repo, requester): (u64, u64, u64) = serde_json::from_value(input).map_err(super::worker_err)?;
-            storage.member_invitation_candidates(account, repo, requester).await
+            let (account, repo, requester): (u64, u64, u64) =
+                serde_json::from_value(input).map_err(super::worker_err)?;
+            storage
+                .member_invitation_candidates(account, repo, requester)
+                .await
                 .map(|value| serde_json::to_value(value).unwrap())
         }
         "/__fixture/settle" => storage
