@@ -34,7 +34,7 @@ dioxus = { version = "0.7.10", default-features = false, features = ["html", "ma
 dioxus-ssr = { version = "0.7.10" }
 hmac = "0.12"
 jsonwebtoken = { version = "10", default-features = false }   # only used by tests as a verifier
-octoevents = { version = "0.2", default-features = false, features = ["http-body", "derive", "tracing"] }
+octoevents = { version = "0.3", default-features = false, features = ["http-body", "derive", "tracing"] }
 parking_lot = "0.12"
 rand = { version = "0.8", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
