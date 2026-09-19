@@ -151,6 +151,93 @@ try {
   }
   assert.deepEqual(decisions.at(-1), original);
   assert.ok((await (await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } })).text()).includes('Request approved.'));
+
+  // Repeated requester AND link identities, with more than two pages. Terminal
+  // rows and unrelated accounts must not inflate page work or shift a cursor.
+  await db.prepare("UPDATE invitation_requests SET state='approved'").run();
+  const id = n => `01ARZ3NDEKTSV4RRFFQ69G5${String(n).padStart(3, '0')}`;
+  await db.batch(Array.from({ length: 153 }, (_, i) => db.prepare(
+    `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,decision_deadline,projection_revision,justification)
+     VALUES(?,?,99,?,'2026-01-01T01:00:00Z','2026-01-03T12:34:56Z',1,?)`
+  ).bind(id(i + 1), link, i < 53 ? 'pending' : 'approved', `Queue item ${i + 1}`)));
+  const page = async (path = '/console/accounts/octocat/requests') => {
+    const response = await mf.dispatchFetch(`https://queue.test${path}`, { headers: { cookie, 'x-test-observe-d1': '1' } });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(Number(response.headers.get('x-test-d1-queries')), 2, 'one authorization lookup + one queue statement, never N+1');
+    assert.ok(Number(response.headers.get('x-test-d1-rows-read')) < 350, 'bounded page work');
+    const plans = JSON.parse(response.headers.get('x-test-d1-plans')).join('\n');
+    assert.match(plans, /SEARCH r USING INDEX idx_pending_queue_seek \(queue_account_id=\?/);
+    if (path.includes('?after=')) assert.ok(plans.includes('<expr>>?'), plans);
+    const html = await response.text();
+    return { html, next: html.match(/rel="next" href="([^"]+)"/)?.[1] };
+  };
+  const first = await page();
+  assert.equal((first.html.match(/Approve request/g) ?? []).length, 25);
+  assert.ok(first.html.includes(`/${id(1)}/approve`));
+  assert.ok(!first.html.includes(`/${id(26)}/approve`));
+  assert.ok(first.html.includes('>Deadline fixture</a>'));
+  // Work stays page-bounded as another account and terminal history grow.
+  const otherLink = '01ARZ3NDEKTSV4RRFFQ69G5FD0';
+  await db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
+    VALUES(?,'OtherQueue000001',1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account')`).bind(otherLink).run();
+  await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
+    `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,projection_revision)
+     VALUES(?,?,99,?,'2025-01-01T00:00:00Z',1)`
+  ).bind(id(i + 200), i % 2 ? otherLink : link, i % 2 ? 'pending' : 'approved')));
+  assert.ok(!(await page()).html.includes('Private other account'));
+  // A large equal-time prefix must be skipped by the index, not scanned then
+  // filtered on request ID. Keep every earlier request pending while seeking.
+  await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
+    `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,projection_revision)
+     VALUES(?,?,99,'pending','2026-01-01T01:00:00Z',1)`
+  ).bind(`01ARZ3NDEKTSV4RRFFQ69G4${String(i).padStart(3, '0')}`, link)));
+  await page(first.next);
+  await db.prepare("UPDATE invitation_requests SET state='approved' WHERE id LIKE '01ARZ3NDEKTSV4RRFFQ69G4%'").run();
+  await db.batch(Array.from({ length: 26 }, (_, i) => db.prepare("UPDATE invitation_requests SET state='declined' WHERE id=?").bind(id(i + 1))));
+  const second = await page(first.next);
+  assert.ok(second.html.includes(`/${id(27)}/approve`));
+  assert.ok(second.html.includes('Back to oldest requests'));
+  const third = await page(second.next);
+  assert.equal((third.html.match(/Approve request/g) ?? []).length, 2);
+  assert.equal(third.next, undefined);
+  // Both UTC encodings and nanosecond precision must survive cursor round trips.
+  await db.prepare("UPDATE invitation_requests SET state='expired'").run();
+  for (const [n, time] of [[1, '2026-01-01T00:00:00.000000001Z'], [2, '2026-01-01T00:00:00+00:00'], [3, '2026-01-01T00:00:00Z']]) {
+    await db.prepare("UPDATE invitation_requests SET state='pending',created_at=? WHERE id=?").bind(time, id(n)).run();
+  }
+  const mixed = await page();
+  assert.ok(mixed.html.indexOf(`/${id(2)}/approve`) < mixed.html.indexOf(`/${id(3)}/approve`));
+  assert.ok(mixed.html.indexOf(`/${id(3)}/approve`) < mixed.html.indexOf(`/${id(1)}/approve`));
+  const boundary = Buffer.from(JSON.stringify({ created_at: '2026-01-01T00:00:00Z', request_id: id(3) })).toString('base64url');
+  assert.equal(((await page(`/console/accounts/octocat/requests?after=${boundary}`)).html.match(/Approve request/g) ?? []).length, 1);
+  await db.prepare('DELETE FROM invitation_link_repos WHERE invitation_link_id=?').bind(link).run();
+  const missingRepos = await page();
+  assert.ok(missingRepos.html.includes('Repository details unavailable'));
+  assert.ok(!missingRepos.html.includes('Approve request'));
+  await db.prepare("UPDATE invitation_links SET permission='corrupt' WHERE id=?").bind(link).run();
+  const corrupt = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', { headers: { cookie } });
+  assert.equal(corrupt.status, 500);
+  assert.ok(!(await corrupt.text()).includes('No pending requests'));
+  await db.prepare("UPDATE invitation_links SET permission='pull' WHERE id=?").bind(link).run();
+  await db.prepare("UPDATE invitation_requests SET state='expired'").run();
+  const stale = await page(first.next);
+  assert.ok(stale.html.includes('No more pending requests on this page'));
+  assert.ok(stale.html.includes('Back to oldest requests'));
+  // Restore an orphaned request's owner: the derived queue key must recover too.
+  await db.prepare("UPDATE invitation_requests SET state='pending' WHERE id=?").bind(id(1)).run();
+  await db.batch([
+    db.prepare('PRAGMA defer_foreign_keys=ON'),
+    db.prepare('DELETE FROM invitation_links WHERE id=?').bind(link),
+    db.prepare('UPDATE invitation_requests SET queue_account_id=NULL WHERE invitation_link_id=?').bind(link),
+    db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
+      VALUES(?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored')`).bind(link),
+  ]);
+  assert.ok((await page()).html.includes('>Restored</a>'));
+  const failed = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', {
+    headers: { cookie, 'x-test-observe-d1': '1', 'x-test-fail-queue': '1' },
+  });
+  assert.equal(failed.status, 500);
+  assert.ok(!(await failed.text()).includes('No pending requests'));
   console.log('PASS Worker/D1 decision queue: independent historical deadlines, missing data, auto-approval, overdue projection and authoritative late actions');
 } finally {
   await mf.dispose();

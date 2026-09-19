@@ -92,6 +92,16 @@ class CutoverTest(unittest.TestCase):
             db.execute("UPDATE invitation_links SET revoked_at='2026-02-01T00:00:00Z',revoked_by=7")
             self.assertEqual(db.execute("SELECT uses_count FROM invitation_links").fetchone()[0], 1)
 
+    def test_fence_allows_projected_queue_index_maintenance_but_not_domain_writes(self):
+        self.cli("fence", "--database", self.db, "--migration-id", "queue")
+        with sqlite3.connect(self.db) as db:
+            db.execute("""INSERT INTO invitation_requests
+                (id,invitation_link_id,requester_id,state,created_at,projection_revision)
+                VALUES ('01ARZ3NDEKTSV4RRFFQ69G5FAX','01ARZ3NDEKTSV4RRFFQ69G5FAV',8,'pending','2026-01-02T00:00:00Z',1)""")
+            self.assertEqual(db.execute("SELECT queue_account_id FROM invitation_requests WHERE id='01ARZ3NDEKTSV4RRFFQ69G5FAX'").fetchone(), (100,))
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "obsolete writer"):
+                db.execute("UPDATE invitation_requests SET queue_account_id=100,state='approved' WHERE id='01ARZ3NDEKTSV4RRFFQ69G5FAX'")
+
     def test_prepare_preserves_deadline_and_terminal_history_and_requires_runtime_fence(self):
         evidence = Path(self.tmp.name) / "evidence.json"
         prepared = Path(self.tmp.name) / "prepared.json"

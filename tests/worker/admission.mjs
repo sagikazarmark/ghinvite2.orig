@@ -45,13 +45,13 @@ let lostAuditAcks = 0;
 let lostAuditInvocation;
 let faultPuts = 0;
 const stalledCleanup = [];
-function fault(phase) {
+function fault(phase, installationId) {
   if (!phase) { networkFault = null; return; }
   faultPuts = 0;
   let wrote, observed;
   const write = new Promise(resolve => { wrote = resolve; });
   const observation = new Promise(resolve => { observed = resolve; });
-  networkFault = { phase, wrote, observed };
+  networkFault = { phase, installationId, wrote, observed };
   return { write, observation, puts: () => faultPuts };
 }
 const stopCompose = () => new Promise((resolve, reject) => {
@@ -134,7 +134,7 @@ const mf = new Miniflare({
     }
     if (request.method === 'PUT') faultPuts++;
     if (installationObservation) return installationObservation(request);
-    if (networkFault && (request.method === 'PUT' || new URL(request.url).pathname === '/app/installations/1')) {
+    if (networkFault && (request.method === 'PUT' || (faultPuts > 0 && new URL(request.url).pathname === `/app/installations/${networkFault.installationId}`))) {
       if (request.method === 'PUT') networkFault.wrote(); else networkFault.observed();
       return stalledResponse(networkFault.phase, stalledCleanup);
     }

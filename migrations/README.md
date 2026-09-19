@@ -54,6 +54,28 @@ cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignor
 
 ## Adding a new migration
 
+Migration 0010 adds the pending queue's derived `queue_account_id`, backfilled
+from the owning invitation link. Portable SQLite triggers maintain it for both
+legacy and versioned projection writers (including link/request relationship
+updates and restoration of missing links). This is an indexing key, never an authorization source: the read also
+joins the current owning link and checks its account. An orphan link cannot
+establish account ownership and is excluded, as with the previous queue query.
+The partial index excludes terminal history and orders pending requests by an
+exact composite UTC-time/request-ID text key. Using one expression lets SQLite
+seek past a large equal-timestamp pending prefix, rather than filtering its IDs
+after seeking the timestamp alone. Keep its expression identical to
+`storage::pending_queue`; it follows the audit normalization rules above.
+
+Each queue read executes one statement, materializing at most 26 candidate
+requests (25 displayed plus one lookahead) before loading context. Repository
+scopes are loaded once per distinct page link. The final bounded page may use a
+temporary sort; candidate selection must use the account-local seek index.
+SQLx tests count actual query events and inspect both initial/continuation plans.
+`npm run test:queue --prefix tests/worker` observes actual D1 statements, plans,
+and rows-read metadata through the authenticated Worker routes. Queue cursors
+are value boundaries, so a decided boundary row need not still exist; new or
+late-projected earlier requests appear on returning to the oldest page.
+
 Migration 0008 stores encrypted admin browser continuations separately from
 authentication sessions. A unique session/account scope plus logical binding
 atomically retains the first submitted input, including on D1. These are
@@ -73,7 +95,7 @@ rows so reordered projections can converge without becoming admission authority.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
 1. Choose the next `NNNN`.
-2. Write `NNNN_purpose.sql` containing only `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, and `DROP INDEX` statements that are SQLite-portable.
+2. Write `NNNN_purpose.sql` using SQLite-portable schema statements. Derived indexing keys may use a data backfill and `CREATE TRIGGER` maintenance, as in 0010; verify these on both SQLx and D1.
 3. **Avoid altering existing CHECK constraints** — SQLite cannot do this without a 12-step `ALTER TABLE` recreate. If unavoidable, write the recreate dance in plain SQL inside the migration file.
 4. Run `cargo test -p ghinvite-storage-sqlx` locally to verify migrations apply cleanly to a fresh in-memory DB.
 5. Rehearse `wrangler d1 migrations apply DB --local --config wrangler/web.toml`, then the disposable remote D1 gate before the operator-owned production procedure.

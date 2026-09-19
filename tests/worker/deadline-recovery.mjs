@@ -12,6 +12,16 @@ export function stalledResponse(phase, cleanup) {
 }
 
 export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, pause, fault }) {
+  const installation = await http(`${ingress}/AccountInstallationV1/100/status`);
+  const installationId = installation.account.installation_id;
+  const waitForFault = async (promise, label) => {
+    let timer;
+    try {
+      await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`fault not reached: ${label}`)), 10_000);
+      })]);
+    } finally { clearTimeout(timer); }
+  };
   const call = async (path, input) => {
     const response = await fetch(`${ingress}/${path}`, { method: 'POST', headers: input === undefined ? {} : { 'content-type': 'application/json' },
       body: input === undefined ? undefined : JSON.stringify(input), signal: AbortSignal.timeout(40_000) });
@@ -35,11 +45,11 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       const pending = creation();
       await http(`${ingress}/InvitationLinkV1/${pending.link_id}/create`, pending);
       const attempt = { version: 1, link_id: pending.link_id, operation_id: id(), requester_id: 91 };
-      const seen = fault(phase);
+      const seen = fault(phase, installationId);
       const write = call(`GithubCreateV1/${command.invitation_id}/create`, command);
-      await seen.write;
+      await waitForFault(seen.write, 'GitHub PUT');
       const admission = call(`InvitationLinkV1/${pending.link_id}/admit`, attempt);
-      await seen.observation;
+      await waitForFault(seen.observation, `installation ${installationId} observation`);
       const queuedStatus = call('AccountInstallationV1/100/status');
       const [created, admitted, status] = await Promise.all([write, admission, queuedStatus]);
       assert.equal(created.status, 200);
@@ -50,7 +60,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       fault(null);
       // Restore observation/projection, then replay with no pending invitation
       // or collaborator evidence. Absence must never authorize another PUT.
-      await http(`${ingress}/AccountInstallationV1/100/refresh`, 1);
+      await http(`${ingress}/AccountInstallationV1/100/refresh`, installationId);
       const recovered = await http(`${ingress}/InvitationLinkV1/${pending.link_id}/admit`, attempt);
       assert.equal(recovered.result.kind, 'accepted');
       assert.deepEqual(await http(`${ingress}/InvitationLinkV1/${pending.link_id}/admit`, attempt), recovered);

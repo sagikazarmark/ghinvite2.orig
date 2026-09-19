@@ -33,8 +33,8 @@ pub async fn observe(
     if !eligible(row) {
         return Ok(None);
     }
-    let Some(context) = crate::invitation_context::load_verified_settlement_context(state, row)
-        .await?
+    let Some(context) =
+        crate::invitation_context::load_verified_settlement_context(state, row).await?
     else {
         return Ok(None);
     };
@@ -328,11 +328,17 @@ mod tests {
     #[tokio::test]
     async fn observe_finds_no_settlement_when_still_pending_on_a_later_page() {
         let mock = MockTransport::scripted(vec![
-            Expectation::ok_json(Method::Get, "https://api.github.test/app/installations/9",
-                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/app/installations/9",
+                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null}),
+            ),
             token_mint(9),
-            Expectation::ok_json(Method::Get, "https://api.github.test/repos/acme/api",
-                serde_json::json!({"id":10,"full_name":"acme/api","private":true})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api",
+                serde_json::json!({"id":10,"full_name":"acme/api","private":true}),
+            ),
             invitation_page(
                 "https://api.github.test/repos/acme/api/invitations?per_page=100",
                 serde_json::json!([invitation_item(7001)]),
@@ -357,11 +363,17 @@ mod tests {
     #[tokio::test]
     async fn observe_fails_rather_than_settling_when_a_later_page_fails() {
         let mock = MockTransport::scripted(vec![
-            Expectation::ok_json(Method::Get, "https://api.github.test/app/installations/9",
-                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/app/installations/9",
+                serde_json::json!({"id":9,"account":{"id":100,"login":"acme"},"suspended_at":null}),
+            ),
             token_mint(9),
-            Expectation::ok_json(Method::Get, "https://api.github.test/repos/acme/api",
-                serde_json::json!({"id":10,"full_name":"acme/api","private":true})),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api",
+                serde_json::json!({"id":10,"full_name":"acme/api","private":true}),
+            ),
             invitation_page(
                 "https://api.github.test/repos/acme/api/invitations?per_page=100",
                 serde_json::json!([invitation_item(7001)]),

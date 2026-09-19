@@ -829,6 +829,21 @@ impl Storage for SqlxStorage {
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
+    async fn pending_request_page(
+        &self,
+        account_id: u64,
+        after: Option<ghinvite_core::storage::pending_queue::PendingBoundary>,
+    ) -> Result<ghinvite_core::storage::pending_queue::PendingPage> {
+        use ghinvite_core::storage::pending_queue::{self, PendingPage};
+        let rows: Vec<String> = sqlx::query_scalar(&pending_queue::query(after.is_some()))
+            .bind(u64_to_i64(account_id))
+            .bind(after.map(|b| b.seek_key()))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        PendingPage::from_json(rows)
+    }
+
     async fn list_requests_for_link(
         &self,
         link_id: InvitationLinkId,

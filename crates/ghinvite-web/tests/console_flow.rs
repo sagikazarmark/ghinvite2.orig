@@ -84,6 +84,71 @@ async fn deadline_queue_app(
 }
 
 #[tokio::test]
+async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
+    use ghinvite_core::storage::projection::ProjectionStorage;
+    let (app, cookie, storage, mut envelope) = deadline_queue_app(None).await;
+    let template = envelope.requests[0].clone();
+    envelope.link.revision += 1;
+    envelope.link.uses = 54;
+    envelope.transition_id = format!("v1/link/{}/3", envelope.link.link_id);
+    envelope.requests = (1..=53)
+        .map(|n| {
+            let mut request = template.clone();
+            request.request_id = format!("01ARZ3NDEKTSV4RRFFQ69G5{n:03}").parse().unwrap();
+            request.justification = Some(format!("Queue item {n:03}"));
+            request
+        })
+        .collect();
+    for request in &envelope.requests {
+        let mut transition = envelope.clone();
+        transition.requests = vec![request.clone()];
+        storage.apply_transition(&transition).await.unwrap();
+    }
+    let path = "/console/accounts/octocat/requests";
+    let html = response_html(identity_request(&app, &cookie, "GET", path).await).await;
+    assert_eq!(html.matches("Approve request").count(), 25);
+    assert!(html.contains("Queue item 001"));
+    assert!(!html.contains("Queue item 026"));
+    assert!(html.contains(">Deadline fixture</a>"));
+    let next = html
+        .split("rel=\"next\" href=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&amp;", "&");
+    for request in &envelope.requests[..26] {
+        storage
+            .record_request_decision(&ghinvite_core::storage::RequestDecision {
+                request_id: request.request_id,
+                state: ghinvite_core::RequestState::Declined,
+                decided_by: Some(42),
+                decided_at: Utc::now(),
+                decline_reason: None,
+            })
+            .await
+            .unwrap();
+    }
+    let html = response_html(identity_request(&app, &cookie, "GET", &next).await).await;
+    assert!(html.contains("Queue item 027"));
+    assert!(!html.contains("Queue item 025"));
+    assert!(html.contains("Back to oldest requests"));
+    assert_eq!(
+        identity_request(&app, &cookie, "GET", &format!("{path}?after=broken"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        identity_request(&app, &cookie, "GET", &next.replace("octocat", "unknown"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
 async fn queue_shows_recorded_decision_deadline_for_non_expiring_link() {
     let (app, cookie, _, _) = deadline_queue_app(None).await;
     let response =
