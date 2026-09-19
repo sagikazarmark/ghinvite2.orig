@@ -17,7 +17,7 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "esbuild": "0.27.3",
-    "miniflare": "4.20260302.0"
+    "esbuild": "0.28.1",
+    "miniflare": "5.20260918.0-alpha"
   }
 }
