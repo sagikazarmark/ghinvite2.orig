@@ -68,9 +68,15 @@ try {
     headers: { cookie }, redirect: 'manual',
   });
   assert.equal(mismatch.status, 400);
-  // "Mismatch", rather than "no CSRF state", proves a later request decrypted
-  // and loaded the pending OAuth state through the actual Worker KV adapter.
-  assert.equal(await mismatch.text(), 'OAuth error: CSRF state mismatch');
+  // The failure page says ghinvite's own words, never the upstream or internal
+  // diagnostic. "Did not match the sign-in started", rather than the
+  // no-sign-in-pending copy, still proves a later request decrypted and loaded
+  // the pending OAuth state through the actual Worker KV adapter.
+  const mismatchBody = await mismatch.text();
+  assert.match(mismatchBody, /did not match the sign-in started in this browser/);
+  assert.doesNotMatch(mismatchBody, /no sign-in in progress/);
+  assert.match(mismatchBody, /href="\/login"/);
+  assert.doesNotMatch(mismatchBody, /CSRF/);
   assert.equal(mismatch.headers.get('set-cookie'), null);
   assert.deepEqual(Buffer.from(await kv.get(key, 'arrayBuffer')), raw);
   console.log('PASS callback mismatch: 400; persisted state loaded, ciphertext unchanged');

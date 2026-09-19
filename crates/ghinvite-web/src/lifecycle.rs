@@ -9,8 +9,10 @@ pub trait RequestLifecycle: Send + Sync + 'static {
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt>;
     /// Read the retained receipt without applying an undecided command on GET.
     async fn decision_status(&self, _command: DecideRequest) -> Result<Option<DecisionReceipt>> {
+        // Not being able to read the retained receipt leaves the decision's
+        // outcome in doubt, which is what callers must show.
         Err(crate::WebError::Restate(
-            "Decision status unavailable".into(),
+            crate::error::IngressFailure::unreachable("decision status unavailable"),
         ))
     }
     async fn status(&self, query: RequestStatus) -> Result<RequestSnapshot>;

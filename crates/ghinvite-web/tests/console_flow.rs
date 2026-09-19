@@ -948,7 +948,8 @@ enum RecordedCommand {
 struct RecordingCommands {
     calls: Arc<Mutex<Vec<RecordedCommand>>>,
     edit_storage: Option<Arc<ghinvite_storage_sqlx::SqlxStorage>>,
-    fail_edits: bool,
+    /// How the metadata command fails, when it is meant to.
+    fail_edits: Option<ghinvite_web::IngressFailure>,
 }
 
 #[async_trait::async_trait]
@@ -957,10 +958,8 @@ impl GhinviteCommands for RecordingCommands {
         &self,
         command: UpdateInvitationLinkMetadata,
     ) -> ghinvite_web::Result<()> {
-        if self.fail_edits {
-            return Err(ghinvite_web::WebError::Restate(
-                "service unavailable".into(),
-            ));
+        if let Some(failure) = self.fail_edits.clone() {
+            return Err(ghinvite_web::WebError::Restate(failure));
         }
         assert_eq!(command.by_user, 42);
         self.edit_storage
@@ -1536,7 +1535,7 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
         assert!(html.contains("> Keep\nthis </textarea>"));
     }
     let commands = Arc::new(RecordingCommands {
-        fail_edits: true,
+        fail_edits: Some(ghinvite_web::IngressFailure::Rejected { status: 503 }),
         ..Default::default()
     });
     let mut expectations = oauth_expectations();
@@ -1571,6 +1570,59 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
     let (_, detail) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
     assert!(detail.contains("Workshop 001</h1>"));
     assert!(!detail.contains("New details"));
+}
+
+/// A refused ingress call and one whose outcome is unknown must not read the
+/// same. Restate may have persisted the invocation before the response went
+/// wrong, so "please try again" on an unknown outcome invites applying the same
+/// mutation twice.
+#[tokio::test]
+async fn an_unknown_save_outcome_does_not_invite_a_blind_retry() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    // `links_app` seeds the account the link hangs off.
+    let _ = links_app(storage.clone(), "admin").await;
+    let link = list_link(1);
+    storage.insert_invitation_link(&link).await.unwrap();
+    let commands = Arc::new(RecordingCommands {
+        fail_edits: Some(ghinvite_web::IngressFailure::OutcomeUnknown {
+            detail: "ingress send rejected",
+            status: Some(503),
+        }),
+        ..Default::default()
+    });
+    let mut expectations = oauth_expectations();
+    expectations.push(Expectation::ok_json(
+        Method::Get,
+        "https://api.github.com/user/memberships/orgs/acme",
+        serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
+    ));
+    let state = AppState::new(
+        storage.clone(),
+        Arc::new(MockTransport::scripted(expectations)),
+        commands,
+        WebConfig::for_local_dev_with_secret([7; 32]),
+    );
+    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+
+    let response = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=New+details&internal_note=",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+    assert!(html.contains("Save outcome unknown"), "{html}");
+    assert!(!html.contains("Please try again"), "{html}");
+    // The operational detail stays in the log, never in the page.
+    assert!(!html.contains("ingress send rejected"), "{html}");
 }
 
 #[tokio::test]

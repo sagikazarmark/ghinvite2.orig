@@ -95,7 +95,11 @@ async fn console_index(
     let accounts = match load_console_accounts(&state, &mut session).await {
         Ok(accounts) => accounts,
         Err(error) => {
-            tracing::warn!(error = ?error, "failed to load console accounts");
+            tracing::warn!(
+                kind = error.kind(),
+                upstream_status = ?error.upstream_status(),
+                "failed to load console accounts"
+            );
             let signed_in_login = Some(session.login.clone());
             let html = render(session.csrf_token.clone(), move || {
                 rsx! {
@@ -622,12 +626,21 @@ async fn create_link(
         .await
     {
         Ok(v) => v,
-        Err(_) => {
-            tracing::warn!("create invitation link command failed");
+        Err(error) => {
+            tracing::warn!(
+                kind = error.kind(),
+                upstream_status = ?error.upstream_status(),
+                "create invitation link command failed"
+            );
             let mut errors = crate::views::links::LinkFormErrors::default();
-            errors
-                .summary
-                .push("Failed to create invitation link. Please try again.".into());
+            errors.summary.push(
+                if error.outcome_unknown() {
+                    "Creation outcome unknown. Check the invitation links list before creating another with these values."
+                } else {
+                    "Failed to create invitation link. Please try again."
+                }
+                .into(),
+            );
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 link_form_response(&admin, None, Ok(repos), form.into_view_values(errors), now),
@@ -713,16 +726,40 @@ async fn save_link_details(
         Err(error) => return edit_link_response(&admin, id, values, Some(error), None),
     };
     if let Some(admission) = &state.admission {
-        return match admission.update_metadata(ghinvite_core::admission::UpdateMetadata {
-            link_id: id, admin: admin_assertion(&admin), description, internal_note,
-        }).await {
-            Ok(_) => axum::response::Redirect::to(&format!("/console/accounts/{}/links/{id}", admin.account.account_login)).into_response(),
-            Err(crate::WebError::Restate(_)) => (axum::http::StatusCode::BAD_GATEWAY,
-                edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response(),
-            Err(error) => super::invitation_v1::safe_error(error),
+        return match admission
+            .update_metadata(ghinvite_core::admission::UpdateMetadata {
+                link_id: id,
+                admin: admin_assertion(&admin),
+                description,
+                internal_note,
+            })
+            .await
+        {
+            Ok(_) => axum::response::Redirect::to(&format!(
+                "/console/accounts/{}/links/{id}",
+                admin.account.account_login
+            ))
+            .into_response(),
+            Err(crate::WebError::Restate(failure)) => {
+                tracing::warn!(
+                    ingress_failure = %failure,
+                    upstream_status = ?failure.upstream_status(),
+                    link_id = %id,
+                    "invitation link metadata save outcome unknown"
+                );
+                (axum::http::StatusCode::BAD_GATEWAY,
+                edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
+            }
+            Err(error) => error.into_response_with_recovery(
+                format!(
+                    "/console/accounts/{}/links/{id}",
+                    admin.account.account_login
+                ),
+                "Back to link details",
+            ),
         };
     }
-    if state
+    if let Err(error) = state
         .commands
         .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
             account_id: admin.account.account_id,
@@ -732,19 +769,21 @@ async fn save_link_details(
             internal_note,
         })
         .await
-        .is_err()
     {
         // Ingress errors may include command payloads; do not log private metadata.
-        tracing::warn!("update invitation link metadata command failed");
+        tracing::warn!(
+            kind = error.kind(),
+            upstream_status = ?error.upstream_status(),
+            "update invitation link metadata command failed"
+        );
+        let message = if error.outcome_unknown() {
+            "Save outcome unknown. Check the link details before retrying these values."
+        } else {
+            "Failed to save invitation link details. Please try again."
+        };
         return (
             axum::http::StatusCode::BAD_GATEWAY,
-            edit_link_response(
-                &admin,
-                id,
-                values,
-                None,
-                Some("Failed to save invitation link details. Please try again.".into()),
-            ),
+            edit_link_response(&admin, id, values, None, Some(message.into())),
         )
             .into_response();
     }
@@ -808,7 +847,10 @@ async fn link_detail(
             }
             return match e {
                 crate::WebError::NotFound => console_not_found_response(&admin),
-                error => super::invitation_v1::safe_error(error),
+                error => error.into_response_with_recovery(
+                    format!("/console/accounts/{}/links", admin.account.account_login),
+                    "Back to invitation links",
+                ),
             };
         }
     };
@@ -877,12 +919,21 @@ async fn revoke_link(
         })
         .await
     {
-        tracing::warn!(error = ?e, "revoke invitation link command failed");
+        tracing::warn!(
+            kind = e.kind(),
+            upstream_status = ?e.upstream_status(),
+            "revoke invitation link command failed"
+        );
         let _ = session::set_flash(
             &admin.tower,
             session::Flash {
                 level: session::FlashLevel::Error,
-                message: "Could not stop this invitation link. Please try again.".into(),
+                message: if e.outcome_unknown() {
+                    "Revocation outcome unknown. Check the link details before retrying revocation."
+                } else {
+                    "Could not stop this invitation link. Please try again."
+                }
+                .into(),
             },
         )
         .await;
@@ -1005,12 +1056,21 @@ async fn approve_request(
             .await;
         }
         Err(e) => {
-            tracing::warn!(error = ?e, "approve invitation request command failed");
+            tracing::warn!(
+                kind = e.kind(),
+                upstream_status = ?e.upstream_status(),
+                "approve invitation request command failed"
+            );
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: "Failed to approve request. Please try again.".into(),
+                    message: if e.outcome_unknown() {
+                        "Approval outcome unknown. Check the request status before deciding again."
+                    } else {
+                        "Failed to approve request. Please try again."
+                    }
+                    .into(),
                 },
             )
             .await;
@@ -1080,12 +1140,21 @@ async fn decline_request(
             .await;
         }
         Err(e) => {
-            tracing::warn!(error = ?e, "decline invitation request command failed");
+            tracing::warn!(
+                kind = e.kind(),
+                upstream_status = ?e.upstream_status(),
+                "decline invitation request command failed"
+            );
             let _ = session::set_flash(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: "Failed to decline request. Please try again.".into(),
+                    message: if e.outcome_unknown() {
+                        "Decline outcome unknown. Check the request status before deciding again."
+                    } else {
+                        "Failed to decline request. Please try again."
+                    }
+                    .into(),
                 },
             )
             .await;

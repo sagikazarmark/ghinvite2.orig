@@ -498,8 +498,11 @@ async fn approval_fanout(
             event: EventType::InvitationSendFailed,
             actor: ActorKind::System,
             detail: Some((
+                // The audit detail is the sanitized diagnostic now. No upstream
+                // text survives at all: the status classifies the failure and
+                // the envelope's size is all that is said about its message.
                 "error",
-                "github returned status 422: {\"message\":\"Controlled stub failure\"}",
+                "github returned status 422: message withheld (23 bytes)",
             )),
         },
         ExpectedDelivery {

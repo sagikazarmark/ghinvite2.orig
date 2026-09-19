@@ -1,7 +1,7 @@
 //! GitHub App Setup URL return handling.
 
 use crate::commands::{SetupReturn, SetupReturnAction, handle_setup_return};
-use crate::error::{Result, WebError};
+use crate::error::{OAuthFailure, Result, WebError};
 use crate::session;
 use crate::state::AppState;
 use axum::Router;
@@ -14,6 +14,13 @@ use ghinvite_github::oauth::UserApiClient;
 use ghinvite_github::payloads::GhUserInstallation;
 use serde::Deserialize;
 use tower_sessions::Session as TowerSession;
+
+/// The `account.type` / `target_type` values GitHub documents for an
+/// installation. Anything else is logged as unrecognised rather than echoed.
+const ACCOUNT_TYPES: &[&str] = &["Bot", "Organization", "User"];
+
+/// The `repository_selection` values GitHub documents for an installation.
+const REPOSITORY_SELECTIONS: &[&str] = &["all", "selected"];
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/setup/github", get(handle_github_setup))
@@ -75,7 +82,7 @@ async fn handle_github_setup(
         .installations
         .into_iter()
         .find(|candidate| candidate.id == installation_id)
-        .ok_or_else(|| WebError::OAuth("installation is not visible to signed-in user".into()))?;
+        .ok_or(WebError::OAuth(OAuthFailure::InstallationNotVisible))?;
 
     let account_type = account_type_for(&installation)?;
     let selected_repos = selected_repos_for(&user_api, &installation).await?;
@@ -105,8 +112,17 @@ fn account_type_for(installation: &GhUserInstallation) -> Result<AccountType> {
         .account_type
         .as_deref()
         .unwrap_or(installation.target_type.as_str());
-    raw.parse::<AccountType>()
-        .map_err(|_| WebError::BadRequest(format!("unsupported installation account type: {raw}")))
+    raw.parse::<AccountType>().map_err(|_| {
+        // `raw` is whatever GitHub put in the field. Bound it for the log and
+        // keep it out of the error, which the browser renders.
+        tracing::warn!(
+            account_type = %ghinvite_github::bounded_upstream_code(raw, ACCOUNT_TYPES),
+            "installation account type is not supported"
+        );
+        WebError::OAuth(OAuthFailure::UnsupportedInstallation {
+            field: "account type",
+        })
+    })
 }
 
 async fn selected_repos_for(
@@ -123,9 +139,15 @@ async fn selected_repos_for(
                 repos.repositories.into_iter().map(|repo| repo.id).collect(),
             ))
         }
-        other => Err(WebError::BadRequest(format!(
-            "unsupported repository_selection: {other}"
-        ))),
+        other => {
+            tracing::warn!(
+                repository_selection = %ghinvite_github::bounded_upstream_code(other, REPOSITORY_SELECTIONS),
+                "installation repository selection is not supported"
+            );
+            Err(WebError::OAuth(OAuthFailure::UnsupportedInstallation {
+                field: "repository selection",
+            }))
+        }
     }
 }
 

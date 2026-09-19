@@ -38,6 +38,9 @@ wiremock = { workspace = true, optional = true }
 ghinvite-github = { path = ".", features = ["test-mock"] }
 jsonwebtoken = { workspace = true, features = ["rust_crypto", "use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
 tokio.workspace = true
+# Captures `tracing` output so the credential-disclosure tests can assert on
+# what an operator would actually see.
+tracing-subscriber.workspace = true
 wiremock.workspace = true
 # examples/stub.rs only:
 clap = { version = "4", features = ["derive"] }

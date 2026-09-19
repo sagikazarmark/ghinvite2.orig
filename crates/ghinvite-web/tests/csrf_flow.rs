@@ -231,7 +231,13 @@ async fn create_service_failure_redisplays_input_and_token_and_allows_retry() {
     ] {
         assert!(page.contains(value), "missing preserved value {value}");
     }
-    assert!(page.contains("Failed to create invitation link"));
+    // A 503 from ingress leaves the creation's effect in doubt — Restate may
+    // have persisted the invocation before the response went wrong — so the
+    // page says to check before creating another rather than inviting a blind
+    // retry. Resubmitting is still possible; the input and token below are
+    // preserved for exactly that.
+    assert!(page.contains("Creation outcome unknown"), "{page}");
+    assert!(!page.contains("Please try again"), "{page}");
     browser.ingress.reset().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(
@@ -259,12 +265,17 @@ async fn requester_service_failure_preserves_justification_request_id_and_token(
     let page = html(response).await;
     for value in [
         "Keep my context",
-        "Failed to submit request",
+        // A 503 on a fire-and-forget send leaves admission in doubt, and an
+        // admitted request spends a use of the invitation link. The page says
+        // to check first rather than inviting a blind resubmit; the preserved
+        // request ID below is what makes a deliberate retry idempotent.
+        "Submission outcome unknown",
         &id.to_string(),
         &token,
     ] {
-        assert!(page.contains(value));
+        assert!(page.contains(value), "missing {value}");
     }
+    assert!(!page.contains("Please try again"), "{page}");
     browser.ingress.reset().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(202))

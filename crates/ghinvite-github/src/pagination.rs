@@ -24,8 +24,12 @@ pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Opti
         return Ok(None);
     };
     let Some(path) = next.strip_prefix(base_url).filter(|p| p.starts_with('/')) else {
+        // The rejected target is whatever answered us, so it is named by shape
+        // only: a gateway can put a credential in a query string as readily as
+        // in a body, and this error reaches logs and Restate terminal errors.
         return Err(Error::InvalidInput(format!(
-            "pagination link outside {base_url}: {next}"
+            "pagination link points outside {base_url} ({}-byte target)",
+            next.len()
         )));
     };
     Ok(Some(path.to_owned()))
@@ -41,7 +45,14 @@ pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Opti
 /// page we could not read, and reading it as the last page would turn a
 /// truncated walk into confirmed absence.
 fn next_relation(header: &str) -> Result<Option<&str>> {
-    let malformed = || Error::InvalidInput(format!("unparseable pagination link: {header}"));
+    // Same reasoning as the off-base case: the header is upstream text, so only
+    // its size is reported.
+    let malformed = || {
+        Error::InvalidInput(format!(
+            "unparseable pagination link header ({}-byte value)",
+            header.len()
+        ))
+    };
     let mut rest = header;
     let mut seen_link = false;
     while let Some(open) = rest.find('<') {
@@ -149,6 +160,30 @@ mod tests {
             next_page_path(&response(Some(link)), "https://api.github.test").unwrap(),
             Some("/x?ids=1,2&page=3".into())
         );
+    }
+
+    /// A `Link` header is upstream text exactly like a body is, and whatever
+    /// answers our request chooses it. Neither the rejected target nor the
+    /// header it came in may survive into an error that reaches logs or a
+    /// Restate terminal error.
+    #[test]
+    fn a_credential_bearing_link_header_never_reaches_the_error() {
+        let token = "installation-token-test-only-not-a-credential";
+        let cases = [
+            // Off-base target: the URL is the attacker's.
+            format!("<https://evil.test/x?token={token}>; rel=\"next\""),
+            // Unparseable header: no brackets to cut it down to a URL.
+            format!("rel=next token={token}"),
+            // Unclosed link: the whole header is suspect.
+            format!("<https://api.github.test/x?token={token}; rel=\"next\""),
+        ];
+        for link in cases {
+            let err =
+                next_page_path(&response(Some(&link)), "https://api.github.test").unwrap_err();
+            let rendered = format!("{err} {err:?}");
+            assert!(!rendered.contains(token), "{rendered}");
+            assert!(!rendered.contains("evil.test"), "{rendered}");
+        }
     }
 
     #[test]

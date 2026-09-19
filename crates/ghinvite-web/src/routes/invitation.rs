@@ -301,7 +301,7 @@ async fn submit_request(
     let request_id = ghinvite_core::RequestId::from_str(&form.request_id)
         .unwrap_or_else(|_| ghinvite_core::RequestId::new());
 
-    if state
+    if let Err(error) = state
         .commands
         .submit_invitation_request(SubmitInvitationRequest::new(
             request_id,
@@ -311,12 +311,23 @@ async fn submit_request(
             now,
         ))
         .await
-        .is_err()
     {
-        tracing::warn!("submit invitation request command failed");
+        tracing::warn!(
+            kind = error.kind(),
+            upstream_status = ?error.upstream_status(),
+            "submit invitation request command failed"
+        );
+        // A submission whose outcome is unknown may already have been admitted,
+        // and an admitted request consumes a use of the invitation link. Asking
+        // for a blind retry here can spend a second one.
         let flash = Some(session::Flash {
             level: session::FlashLevel::Error,
-            message: "Failed to submit request. Please try again.".into(),
+            message: if error.outcome_unknown() {
+                "Submission outcome unknown. Check this invitation link for your request before submitting again."
+            } else {
+                "Failed to submit request. Please try again."
+            }
+            .into(),
         });
         let html = render(session.csrf_token.clone(), move || {
             rsx! {
