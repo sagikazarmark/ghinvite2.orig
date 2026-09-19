@@ -65,10 +65,17 @@ pub async fn page(
                     );
                 }
                 if matches!(error, WebError::NotFound | WebError::Restate(_)) {
-                    return failed(session, code, &local, WebError::Restate("unknown".into()));
+                    return failed(
+                        session,
+                        code,
+                        &local,
+                        WebError::Restate(crate::error::IngressFailure::unreachable(
+                            "attempt status read failed",
+                        )),
+                    );
                 }
             }
-            return page_error(session, error);
+            return page_error(session, code, error);
         }
     };
     if operation.is_none()
@@ -199,7 +206,7 @@ pub async fn submit(
         {
             let page = match admission.lookup(code, session.user_id, None).await {
                 Ok(page) => page,
-                Err(error) => return page_error(session, error),
+                Err(error) => return page_error(session, code, error),
             };
             if !page.can_start_fresh {
                 return self::page(state, tower, admission, session, code, None, false).await;
@@ -217,7 +224,7 @@ pub async fn submit(
                 vec![],
             );
         }
-        Err(error) => return safe_error(error),
+        Err(error) => return safe_error(code, error),
     };
     // Save a separate protected record before ingress. Each attempt has its own
     // key, so concurrent request-local session snapshots cannot erase it.
@@ -267,7 +274,7 @@ fn failed(session: &Session, code: &str, command: &Admit, error: WebError) -> Re
         WebError::BadRequest(_)
         | WebError::NotFound
         | WebError::Forbidden
-        | WebError::Session(_) => safe_error(error),
+        | WebError::Session(_) => safe_error(code, error),
         _ => {
             let conflict = matches!(error, WebError::Conflict);
             let id = String::from(command.operation_id.clone());
@@ -402,22 +409,18 @@ enum FormMode {
     Closed,
 }
 
-pub(crate) fn safe_error(error: WebError) -> Response {
-    match error {
-        WebError::Restate(_) => (
-            StatusCode::BAD_GATEWAY,
-            "Status temporarily unavailable. Keep this URL and check again.",
-        )
-            .into_response(),
-        _ => error.into_response(),
-    }
+/// Render a failure that interrupted the invitation request flow, sending the
+/// visitor back to the invitation link they were working through rather than
+/// to a generic page.
+pub(crate) fn safe_error(code: &str, error: WebError) -> Response {
+    error.into_response_with_recovery(format!("/i/{code}"), "Back to the invitation link")
 }
 
-fn page_error(session: &Session, error: WebError) -> Response {
+fn page_error(session: &Session, code: &str, error: WebError) -> Response {
     if matches!(error, WebError::NotFound) {
         super::invitation::invitation_not_found_response(session)
     } else {
-        safe_error(error)
+        safe_error(code, error)
     }
 }
 

@@ -665,24 +665,21 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                                         "This stops new invitation requests through this invitation link. It does not cancel existing invitation requests or GitHub invitations."
                                     }
                                 }
-                                a { class: "btn btn-error w-fit", href: "#stop-link-modal", "Stop accepting new requests" }
+                                a { id: "stop-link-trigger", class: "btn btn-error w-fit", href: "#stop-link-confirmation", "Stop accepting new requests" }
                             }
                         }
-                        div { class: "modal", role: "dialog", id: "stop-link-modal", aria_labelledby: "stop-link-modal-title", aria_modal: "true",
-                            div { class: "modal-box",
-                                h3 { id: "stop-link-modal-title", class: "text-lg font-semibold", "Confirm stop" }
-                                p { class: "mt-2 text-sm text-base-content/70",
-                                    "GitHub users will no longer be able to create invitation requests from this invitation link. Existing invitation requests and GitHub invitations continue."
-                                }
-                                div { class: "modal-action",
-                                    a { class: "btn btn-ghost", href: "#", "Cancel" }
-                                    form { method: "post", action: "/console/accounts/{login}/links/{id_str}/revoke",
-                                        crate::csrf::CsrfField {}
-                                        button { r#type: "submit", class: "btn btn-error", "Confirm stop" }
-                                    }
+                        section { class: "revoke-confirmation mac-panel mt-4 p-6", id: "stop-link-confirmation", tabindex: "-1", aria_labelledby: "stop-link-title", aria_describedby: "stop-link-description",
+                            h3 { id: "stop-link-title", class: "text-lg font-semibold", "Confirm stop" }
+                            p { id: "stop-link-description", class: "mt-2 text-sm text-base-content/70",
+                                "GitHub users will no longer be able to create invitation requests from this invitation link. Existing invitation requests and GitHub invitations continue."
+                            }
+                            div { class: "modal-action",
+                                a { class: "btn btn-ghost", href: "#stop-link-trigger", "Cancel" }
+                                form { method: "post", action: "/console/accounts/{login}/links/{id_str}/revoke",
+                                    crate::csrf::CsrfField {}
+                                    button { r#type: "submit", class: "btn btn-error", "Confirm stop" }
                                 }
                             }
-                            a { class: "modal-backdrop", href: "#", "Close" }
                         }
                     }
                 } else {
@@ -772,7 +769,11 @@ mod tests {
                 assert!(html.contains(&format!(
                     "<form method=\"post\" action=\"/console/accounts/acme/links/{id}/revoke\">"
                 )));
-                assert!(html.contains("href=\"#stop-link-modal\">Stop accepting new requests</a>"));
+                assert!(
+                    html.contains(
+                        "href=\"#stop-link-confirmation\">Stop accepting new requests</a>"
+                    )
+                );
                 assert!(html.contains(
                     "<button type=\"submit\" class=\"btn btn-error\">Confirm stop</button>"
                 ));
@@ -1868,11 +1869,12 @@ mod tests {
         assert!(html.contains("push"));
         assert!(html.contains("2 / 5"));
         assert!(html.contains("Contractor onboarding"));
-        assert!(html.contains("id=\"stop-link-modal\""));
-        assert!(html.contains("role=\"dialog\""));
-        assert!(html.contains("aria-labelledby=\"stop-link-modal-title\""));
-        assert!(html.contains("aria-modal=\"true\""));
-        assert!(html.contains("id=\"stop-link-modal-title\""));
+        assert!(html.contains("id=\"stop-link-confirmation\""));
+        assert!(!html.contains("role=\"dialog\""));
+        assert!(html.contains("aria-labelledby=\"stop-link-title\""));
+        assert!(!html.contains("aria-modal=\"true\""));
+        assert!(html.contains("aria-describedby=\"stop-link-description\""));
+        assert!(html.contains("id=\"stop-link-title\""));
         assert!(html.contains("Confirm stop"));
         assert!(html.contains("property-list"));
         assert!(html.contains("property-row"));

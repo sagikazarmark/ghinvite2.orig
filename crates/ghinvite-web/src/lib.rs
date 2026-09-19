@@ -21,7 +21,7 @@ pub mod wasm_compat;
 // Re-exports filled in as types appear:
 pub use commands::{GhinviteCommands, RestateCommands};
 pub use config::WebConfig;
-pub use error::{Result, WebError};
+pub use error::{IngressFailure, OAuthFailure, Result, WebError};
 pub use restate_client::RestateClient;
 pub use state::AppState;
 

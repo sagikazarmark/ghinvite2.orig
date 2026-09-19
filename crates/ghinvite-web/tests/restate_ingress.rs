@@ -1,6 +1,6 @@
 //! Public ingress boundary: credentials stay on server-to-Restate requests.
-use ghinvite_web::RestateClient;
 use ghinvite_web::restate_client::RestateAuth;
+use ghinvite_web::{RestateClient, WebError};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -38,6 +38,46 @@ fn ingress_credentials_cannot_be_embedded_in_urls() {
     ] {
         let error = RestateClient::new(url).unwrap_err();
         assert!(!format!("{error} {error:?}").contains(API_KEY));
+    }
+}
+
+/// A rejected fire-and-forget send is not proof the command did not happen:
+/// the ingress may have persisted the invocation before the response went
+/// wrong. A refused read carries no such doubt.
+#[tokio::test]
+async fn a_rejected_send_stays_outcome_unknown_while_a_refused_read_does_not() {
+    let ingress = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream capacity exceeded"))
+        .mount(&ingress)
+        .await;
+    let client = RestateClient::new(ingress.uri()).unwrap();
+
+    let sent = client.send("Service", "", "write", &()).await.unwrap_err();
+    let read = client
+        .call::<_, Value>("Service", "", "read", &())
+        .await
+        .unwrap_err();
+
+    assert!(sent.to_string().contains("outcome unknown"), "{sent}");
+    assert!(!read.to_string().contains("outcome unknown"), "{read}");
+    // A route that changes state through `call` can still upgrade the refusal
+    // to outcome-unknown when it cannot re-read the result.
+    let WebError::Restate(failure) = &read else {
+        panic!("expected an ingress failure, got {read:?}")
+    };
+    assert!(
+        failure
+            .clone()
+            .into_outcome_unknown()
+            .to_string()
+            .contains("outcome unknown")
+    );
+    // Either way the ingress's own words stay out of the error, and the status
+    // stays available for logs.
+    for error in [&sent, &read] {
+        assert!(!format!("{error} {error:?}").contains("capacity exceeded"));
+        assert_eq!(error.upstream_status(), Some(503));
     }
 }
 

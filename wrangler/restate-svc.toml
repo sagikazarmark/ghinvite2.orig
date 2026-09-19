@@ -1,8 +1,10 @@
 # Cloudflare Worker — Restate Service
-# Deploy: wrangler deploy --config wrangler/restate-svc.toml
+# Release: wrangler versions upload --config wrangler/restate-svc.toml
+# Register the immutable version Preview URL; see docs/deploy.md for bootstrap/cutover.
 # Build: run [build].command from the repository root with worker-build 0.8.1.
 
 name = "ghinvite-restate-svc"
+preview_urls = true
 main = "../crates/ghinvite-workflows-worker/build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]

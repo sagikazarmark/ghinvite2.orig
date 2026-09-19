@@ -105,6 +105,20 @@ fn invitation_request_command_key(request_id: ghinvite_core::RequestId) -> Strin
     request_id.to_string()
 }
 
+/// Every handler behind [`GhinviteCommands`] changes state, and none of these
+/// call sites can cheaply re-read the result. A refused or unreachable ingress
+/// therefore leaves the command's effect in doubt — the invocation may have
+/// been persisted before the response went wrong — so each failure is reported
+/// as outcome-unknown rather than as a clean refusal that never happened.
+fn mutation_outcome(error: crate::WebError) -> crate::WebError {
+    match error {
+        crate::WebError::Restate(failure) => {
+            crate::WebError::Restate(failure.into_outcome_unknown())
+        }
+        other => other,
+    }
+}
+
 #[async_trait]
 impl<R> GhinviteCommands for RestateCommands<R>
 where
@@ -123,6 +137,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn update_invitation_link_metadata(
@@ -138,6 +153,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()> {
@@ -150,6 +166,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()> {
@@ -163,6 +180,7 @@ where
                 &payload,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()> {
@@ -176,7 +194,8 @@ where
                 DECIDE_INVITATION_REQUEST_METHOD,
                 &payload,
             )
-            .await?;
+            .await
+            .map_err(mutation_outcome)?;
         Ok(())
     }
 
@@ -189,6 +208,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn record_repository_selection_change(
@@ -196,26 +216,26 @@ where
         command: RecordRepositorySelectionChange,
     ) -> Result<()> {
         match command.source {
-            RepositorySelectionChangeSource::SetupReturn => {
-                self.restate
-                    .call(
-                        "Installation",
-                        &command.installation_id.to_string(),
-                        "repos_changed",
-                        &command,
-                    )
-                    .await
-            }
-            RepositorySelectionChangeSource::Webhook => {
-                self.restate
-                    .send(
-                        "Installation",
-                        &command.installation_id.to_string(),
-                        "repos_changed",
-                        &command,
-                    )
-                    .await
-            }
+            RepositorySelectionChangeSource::SetupReturn => self
+                .restate
+                .call(
+                    "Installation",
+                    &command.installation_id.to_string(),
+                    "repos_changed",
+                    &command,
+                )
+                .await
+                .map_err(mutation_outcome),
+            RepositorySelectionChangeSource::Webhook => self
+                .restate
+                .send(
+                    "Installation",
+                    &command.installation_id.to_string(),
+                    "repos_changed",
+                    &command,
+                )
+                .await
+                .map_err(mutation_outcome),
         }
     }
 
@@ -231,6 +251,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 
     async fn route_github_invitation_webhook(
@@ -245,6 +266,7 @@ where
                 &command,
             )
             .await
+            .map_err(mutation_outcome)
     }
 }
 
@@ -775,8 +797,11 @@ mod tests {
                 send: false,
                 body: serde_json::to_value(input).unwrap(),
             });
-            serde_json::from_value(self.response.clone())
-                .map_err(|e| WebError::Restate(format!("decoding fake response: {e}")))
+            serde_json::from_value(self.response.clone()).map_err(|_| {
+                WebError::Restate(crate::error::IngressFailure::unreachable(
+                    "fake response could not be decoded",
+                ))
+            })
         }
     }
 

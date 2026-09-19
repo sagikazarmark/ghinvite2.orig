@@ -1,6 +1,6 @@
 //! OAuth flow routes: /login, /oauth/callback, /install, /logout.
 
-use crate::error::{Result, WebError};
+use crate::error::{OAuthFailure, Result, WebError};
 use crate::session;
 use crate::state::AppState;
 use axum::Router;
@@ -120,6 +120,10 @@ struct CallbackQuery {
     #[allow(dead_code)]
     setup_action: Option<String>,
     error: Option<String>,
+    /// Present on GitHub's error redirects and deliberately never read: it is
+    /// upstream prose on a browser-controlled URL, and reflecting it was how
+    /// upstream diagnostics used to reach the response body.
+    #[allow(dead_code)]
     error_description: Option<String>,
 }
 
@@ -129,10 +133,11 @@ async fn oauth_callback(
     axum::extract::Query(q): axum::extract::Query<CallbackQuery>,
 ) -> Result<impl IntoResponse> {
     // GitHub may redirect with `?error=access_denied` if the user clicked
-    // cancel. Surface as a friendly message.
+    // cancel. Both parameters are browser-supplied: the code is bounded to a
+    // documented shape and the description is dropped, so neither can be
+    // reflected back into the response.
     if let Some(err) = q.error {
-        let desc = q.error_description.unwrap_or_default();
-        return Err(WebError::OAuth(format!("{err}: {desc}")));
+        return Err(WebError::OAuth(OAuthFailure::from_callback(&err)));
     }
 
     let code = q
@@ -148,7 +153,7 @@ async fn oauth_callback(
     let expected_state = session
         .oauth_csrf
         .clone()
-        .ok_or_else(|| WebError::OAuth("no CSRF state in session".into()))?;
+        .ok_or(WebError::OAuth(OAuthFailure::NoPendingSignIn))?;
     // Constant-time-ish comparison (the strings are short and not secret in
     // the timing-attack sense, but defensive).
     if expected_state.len() != supplied_state.len()
@@ -159,7 +164,7 @@ async fn oauth_callback(
             .fold(0u8, |acc, (a, b)| acc | (a ^ b))
             != 0
     {
-        return Err(WebError::OAuth("CSRF state mismatch".into()));
+        return Err(WebError::OAuth(OAuthFailure::StateMismatch));
     }
     // Consume the CSRF token so it can't be replayed.
     session.oauth_csrf = None;

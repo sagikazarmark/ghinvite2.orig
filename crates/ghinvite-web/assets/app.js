@@ -104,6 +104,61 @@
   });
 })();
 
+/* Enhance the inline revocation confirmation using the browser's modal dialog:
+ * showModal makes the background inert and provides native Escape dismissal.
+ * Move the original form so its native POST and CSRF token stay intact. */
+document.addEventListener('DOMContentLoaded', function () {
+  var confirmation = document.getElementById('stop-link-confirmation');
+  var opener = document.getElementById('stop-link-trigger');
+  if (!confirmation || !opener || typeof HTMLDialogElement === 'undefined' ||
+      typeof HTMLDialogElement.prototype.showModal !== 'function') return;
+
+  function asButton(link) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.id = link.id;
+    button.className = link.className;
+    button.textContent = link.textContent;
+    link.replaceWith(button);
+    return button;
+  }
+
+  opener = asButton(opener);
+  var dialog = document.createElement('dialog');
+  // Keep the dialog out of the fallback's :target styling (including DaisyUI's
+  // hash-based modal rule), so closing a bookmarked confirmation hides it.
+  dialog.className = 'modal';
+  dialog.setAttribute('aria-labelledby', confirmation.getAttribute('aria-labelledby'));
+  dialog.setAttribute('aria-describedby', confirmation.getAttribute('aria-describedby'));
+  var box = document.createElement('div');
+  box.className = 'modal-box';
+  while (confirmation.firstChild) box.appendChild(confirmation.firstChild);
+  dialog.appendChild(box);
+  confirmation.replaceWith(dialog);
+  var cancel = asButton(dialog.querySelector('a[href="#stop-link-trigger"]'));
+  cancel.autofocus = true;
+  opener.setAttribute('aria-haspopup', 'dialog');
+  opener.addEventListener('click', function () { dialog.showModal(); });
+  cancel.addEventListener('click', function () { dialog.close(); });
+  dialog.addEventListener('close', function () { opener.focus(); });
+  // Native dialogs keep the page inert, but Tab can still leave for browser
+  // chrome. Wrap the two confirmation actions in both directions.
+  var confirm = dialog.querySelector('button[type="submit"]');
+  dialog.addEventListener('keydown', function (event) {
+    if (event.key !== 'Tab') return;
+    if (event.shiftKey && document.activeElement === cancel) {
+      event.preventDefault();
+      confirm.focus();
+    } else if (!event.shiftKey && document.activeElement === confirm) {
+      event.preventDefault();
+      cancel.focus();
+    }
+  });
+
+  // A bookmarked fallback fragment should still open the confirmation.
+  if (window.location.hash === '#' + confirmation.id) dialog.showModal();
+});
+
 /* Invitation-code shortcut (home page, signed in): open /i/{code} from the
  * code input. Uses delegated listeners and null-checks every lookup so it is
  * inert on pages without the hooks. */

@@ -187,7 +187,15 @@ impl InstallationClient {
         match self.transport.send(req).await?.ensure_success() {
             Ok(resp) => resp.json(),
             Err(err) => {
-                tracing::warn!(?err, "installation token mint failed");
+                // This request carries the App JWT, so whatever answered it may
+                // be quoting our own credential back at us. Log the same safe
+                // shape as every other call site: status and kind, never the
+                // error itself.
+                tracing::warn!(
+                    status = ?err.status(),
+                    kind = err.kind(),
+                    "installation token mint failed"
+                );
                 Err(err)
             }
         }
@@ -224,30 +232,6 @@ impl InstallationClient {
             .header("x-github-api-version", "2022-11-28"))
     }
 
-    /// `GET /installation/repositories` — paginated upstream; v1 only follows
-    /// page 1 (per_page=100). If GitHub ever ships a customer with > 100 repos
-    /// per install, Plan 3's `Reconcile::sweep` adds pagination there.
-    #[tracing::instrument(skip(self), fields(installation_id, owner = tracing::field::Empty, repo = tracing::field::Empty))]
-    pub async fn list_installation_repos(
-        &self,
-        installation_id: u64,
-    ) -> Result<GhInstallationRepos> {
-        let req = self
-            .auth_request(
-                installation_id,
-                Method::Get,
-                "/installation/repositories?per_page=100",
-            )
-            .await?;
-        match self.transport.send(req).await?.ensure_success() {
-            Ok(resp) => resp.json(),
-            Err(err) => {
-                tracing::warn!(status = ?err.status(), "github request failed");
-                Err(err)
-            }
-        }
-    }
-
     /// `GET /repos/{owner}/{repo}` — small surface for display + access
     /// confirmation.
     ///
@@ -280,9 +264,10 @@ impl InstallationClient {
     ///
     /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
     /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
-    /// already-declined invitations, etc. Callers wanting to distinguish these
-    /// must currently parse `Error::Status::body` themselves; v1 just surfaces
-    /// the raw body. See spec §16 for the agreed error-handling discipline.
+    /// already-declined invitations, etc. `Error::Status::body` carries those
+    /// sub-codes through as a sanitized summary (see [`crate::redact`]), so
+    /// callers can still tell them apart; the response body itself does not
+    /// survive. See spec §16 for the agreed error-handling discipline.
     #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn add_collaborator(
         &self,
@@ -377,9 +362,11 @@ impl InstallationClient {
         let mut walked = std::collections::HashSet::new();
         for _ in 0..MAX_INVITATION_PAGES {
             if !walked.insert(path.clone()) {
-                return Err(crate::Error::InvalidInput(format!(
-                    "pagination returns to {path}"
-                )));
+                // `path` came out of an upstream `Link` header; the fault is
+                // the revisit, which needs none of its text to state.
+                return Err(crate::Error::InvalidInput(
+                    "pagination returned to a page already walked".into(),
+                ));
             }
             let req = self
                 .auth_request(installation_id, Method::Get, &path)
@@ -533,7 +520,7 @@ mod read_tests {
     }
 
     #[tokio::test]
-    async fn list_installation_repos_decodes_envelope() {
+    async fn a_single_page_of_repositories_is_read_without_a_second_request() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation::ok_json(
@@ -547,9 +534,10 @@ mod read_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let r = client.list_installation_repos(9).await.unwrap();
-        assert_eq!(r.total_count, 1);
-        assert_eq!(r.repositories[0].full_name, "acme/api");
+
+        assert_eq!(client.all_installation_repo_ids(9).await.unwrap(), vec![5]);
+        // The count the first page reported is already accounted for, so asking
+        // for a second page would be asking GitHub a question it answered.
         mock.assert_exhausted();
     }
 

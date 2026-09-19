@@ -11,12 +11,18 @@ remain under #61.
 1. Deploy production-feature web/workflow artifacts to disposable remote Workers,
    D1 and KV with a dedicated Restate Cloud environment. Record commit/artifact
    versions, deployment IDs, ingress host, binding names and test fixture IDs.
+   Follow [remote migration/readback](deploy.md#3-apply-and-verify-remote-database-migrations)
+   through both `DB` bindings, recording the account and shared database UUID.
 2. Follow [credential provisioning](deploy.md#6-set-secrets). Set web
    `GHINVITE_RESTATE_AUTH=bearer`, `GHINVITE_RESTATE_API_KEY` as a Worker secret,
    and `GHINVITE_RESTATE_INGRESS` to the environment's HTTPS ingress. Configure
-   `RESTATE_IDENTITY_KEY` separately on the workflow Worker and register it.
+   `RESTATE_IDENTITY_KEY` separately before uploading the workflow Worker version.
+   Register its [immutable version URL](deploy.md#9-register-with-restate-cloud),
+   retaining the URL, full Worker version ID and Restate deployment ID together.
 3. Verify deployment discovery and signed Restate → workflow requests independently;
-   an unsigned direct request to the workflow endpoint must be rejected.
+   an unsigned direct request to that exact workflow version endpoint must be
+   rejected. Confirm the signed invocation is pinned to its recorded deployment,
+   and check alternate mutable/preview routes cannot accept unsigned calls either.
 4. Use a disposable GitHub App/account/repository and test users. Use the cutover
    runbook before enabling authoritative admission; this gate is not permission
    to change a live production account's admission mode.

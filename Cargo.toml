@@ -24,7 +24,6 @@ async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
-cookie = { version = "0.18", default-features = false }
 # The `dioform` facade (Dioxus bindings) is for the browser island only; the
 # server and the shared form model use `dioform-core` + `dioform-derive`
 # (Dioxus-free validators).
@@ -35,7 +34,6 @@ dioxus = { version = "0.7.10", default-features = false, features = ["html", "ma
 dioxus-ssr = { version = "0.7.10" }
 hmac = "0.12"
 jsonwebtoken = { version = "10", default-features = false }   # only used by tests as a verifier
-oauth2 = { version = "5", default-features = false, features = ["reqwest"] }
 octoevents = { version = "0.2", default-features = false, features = ["http-body", "derive", "tracing"] }
 parking_lot = "0.12"
 rand = { version = "0.8", default-features = false }
@@ -55,7 +53,6 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt", "
 tower = { version = "0.5", default-features = false, features = ["util"] }
 tower-http = { version = "0.6", default-features = false, features = ["trace", "set-header"] }
 tower-sessions = { version = "0.14", default-features = false, features = ["axum-core"] }
-tower-sessions-sqlx-store = { version = "0.15", default-features = false, features = ["sqlite"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 ulid = { version = "1", features = ["serde"] }
