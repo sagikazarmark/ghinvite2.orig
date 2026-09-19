@@ -111,72 +111,26 @@ impl InstallationProjectionV1 for InstallationProjectionV1Impl {
         ctx: ObjectContext<'_>,
         Json(input): Json<InstallationProjection>,
     ) -> Result<(), TerminalError> {
-        use ghinvite_core::audit::{ActorKind, AuditEvent, EventType, TargetKind};
         let account_id: u64 = ctx.key().parse().map_err(|_| invalid())?;
-        let Json(event) = ctx.run(|| async {
-            let (id, event_type, actor_id, metadata) = match &input {
-                InstallationProjection::Onboard { input } => (input.installation_id, EventType::InstallationCreated, Some(input.actor_user_id), serde_json::json!({"account_login":input.account_login,"account_type":input.account_type.to_string()})),
-                InstallationProjection::Repos { input } => (input.installation_id, EventType::InstallationReposChanged, None, serde_json::json!({"selected_repos_kind":"subset"})),
-                InstallationProjection::Uninstall { input } => (input.installation_id, EventType::InstallationUninstalled, None, serde_json::json!({"uninstalled_at":input.uninstalled_at.to_rfc3339()})),
-            };
-            Ok::<_, HandlerError>(Json(AuditEvent { id: ghinvite_core::AuditEventId::new(), account_id, occurred_at: chrono::Utc::now(), event_type,
-                actor_kind: if actor_id.is_some() { ActorKind::User } else { ActorKind::Github }, actor_id, target_kind: TargetKind::Installation,
-                target_id: id.to_string(), metadata, request_id: Some(ctx.invocation_id().to_string()) }))
-        }).name("retain_installation_audit").await?;
+        // Retained before the projection runs, so a retry replays the event the
+        // first attempt minted instead of minting a second one for the same
+        // transition.
+        let Json(event) = ctx
+            .run(|| async {
+                Ok::<_, HandlerError>(Json(installation_audit(
+                    account_id,
+                    &input,
+                    ghinvite_core::AuditEventId::new(),
+                    chrono::Utc::now(),
+                    ctx.invocation_id().to_string(),
+                )))
+            })
+            .name("retain_installation_audit")
+            .await?;
         ctx.run(|| async {
-            match &input {
-                InstallationProjection::Onboard { input } => {
-                    let account = Account {
-                        installation_id: input.installation_id,
-                        account_id: input.account_id,
-                        account_login: input.account_login.clone(),
-                        account_type: input.account_type,
-                        installed_at: input.installed_at,
-                        uninstalled_at: None,
-                        selected_repos: input.selected_repos.clone(),
-                    };
-                    match self.state.storage.insert_installation(&account).await {
-                        Ok(()) => (),
-                        Err(ghinvite_core::storage::Error::Conflict(
-                            ghinvite_core::storage::ConflictKind::DuplicateId,
-                        )) => {
-                            if self
-                                .state
-                                .storage
-                                .get_installation(input.installation_id)
-                                .await?
-                                .as_ref()
-                                != Some(&account)
-                            {
-                                return Err(TerminalError::new_with_code(
-                                    409,
-                                    "installation projection conflict",
-                                )
-                                .into());
-                            }
-                        }
-                        Err(error) => return Err(HandlerError::from(error)),
-                    }
-                }
-                InstallationProjection::Repos { input } => {
-                    self.state
-                        .storage
-                        .update_installation_repos(input.installation_id, &input.selected_repos)
-                        .await?;
-                }
-                InstallationProjection::Uninstall { input } => {
-                    match self
-                        .state
-                        .storage
-                        .mark_installation_uninstalled(input.installation_id, input.uninstalled_at)
-                        .await
-                    {
-                        Ok(()) | Err(ghinvite_core::storage::Error::NotFound) => (),
-                        Err(error) => return Err(HandlerError::from(error)),
-                    }
-                }
-            }
-            Ok::<_, HandlerError>(())
+            project_installation(&self.state, &input)
+                .await
+                .map_err(HandlerError::from)
         })
         .name("project_installation")
         .await?;
@@ -185,12 +139,146 @@ impl InstallationProjectionV1 for InstallationProjectionV1Impl {
                 .storage
                 .audit(&event)
                 .await
-                .map_err(HandlerError::from)
+                .map_err(|error| HandlerError::from(ProjectionFailure::Storage(error)))
         })
         .name("project_installation_audit")
         .await
     }
 }
+
+/// The audit event one installation transition retains, independent of whether
+/// storage has taken the transition yet.
+fn installation_audit(
+    account_id: u64,
+    input: &InstallationProjection,
+    id: ghinvite_core::AuditEventId,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+    request_id: String,
+) -> ghinvite_core::audit::AuditEvent {
+    use ghinvite_core::audit::{ActorKind, AuditEvent, EventType, TargetKind};
+    let (installation_id, event_type, actor_id, metadata) = match input {
+        InstallationProjection::Onboard { input } => (
+            input.installation_id,
+            EventType::InstallationCreated,
+            Some(input.actor_user_id),
+            serde_json::json!({
+                "account_login": input.account_login,
+                "account_type": input.account_type.to_string(),
+            }),
+        ),
+        InstallationProjection::Repos { input } => (
+            input.installation_id,
+            EventType::InstallationReposChanged,
+            None,
+            serde_json::json!({"selected_repos_kind": "subset"}),
+        ),
+        InstallationProjection::Uninstall { input } => (
+            input.installation_id,
+            EventType::InstallationUninstalled,
+            None,
+            serde_json::json!({"uninstalled_at": input.uninstalled_at.to_rfc3339()}),
+        ),
+    };
+    AuditEvent {
+        id,
+        account_id,
+        occurred_at,
+        event_type,
+        // Only an installing user names themselves; GitHub owns every other
+        // installation transition.
+        actor_kind: if actor_id.is_some() {
+            ActorKind::User
+        } else {
+            ActorKind::Github
+        },
+        actor_id,
+        target_kind: TargetKind::Installation,
+        target_id: installation_id.to_string(),
+        metadata,
+        request_id: Some(request_id),
+    }
+}
+
+/// Why one installation transition did not reach storage.
+#[derive(Debug)]
+enum ProjectionFailure {
+    /// A replayed onboarding names facts the stored installation does not have,
+    /// so no retry converges and the projection is refused outright.
+    IdentityConflict,
+    /// Storage refused the write or could not answer. Which of the two it was
+    /// decides whether Restate retries, so the crate's own classification
+    /// settles it rather than the SDK's retry-everything default.
+    Storage(ghinvite_core::storage::Error),
+}
+
+impl From<ProjectionFailure> for HandlerError {
+    fn from(failure: ProjectionFailure) -> Self {
+        match failure {
+            ProjectionFailure::IdentityConflict => {
+                TerminalError::new_with_code(409, "installation projection conflict").into()
+            }
+            ProjectionFailure::Storage(error) => {
+                crate::error::to_sdk_handler_error(crate::HandlerError::Storage(error))
+            }
+        }
+    }
+}
+
+/// Take one installation transition into storage. Idempotent: replaying a
+/// transition already applied leaves the installation as it stands.
+async fn project_installation(
+    state: &AppState,
+    input: &InstallationProjection,
+) -> std::result::Result<(), ProjectionFailure> {
+    use ghinvite_core::storage::{ConflictKind, Error as StorageError};
+    match input {
+        InstallationProjection::Onboard { input } => {
+            let account = Account {
+                installation_id: input.installation_id,
+                account_id: input.account_id,
+                account_login: input.account_login.clone(),
+                account_type: input.account_type,
+                installed_at: input.installed_at,
+                uninstalled_at: None,
+                selected_repos: input.selected_repos.clone(),
+            };
+            match state.storage.insert_installation(&account).await {
+                Ok(()) => Ok(()),
+                Err(StorageError::Conflict(ConflictKind::DuplicateId)) => {
+                    let stored = state
+                        .storage
+                        .get_installation(input.installation_id)
+                        .await
+                        .map_err(ProjectionFailure::Storage)?;
+                    if stored.as_ref() == Some(&account) {
+                        Ok(())
+                    } else {
+                        Err(ProjectionFailure::IdentityConflict)
+                    }
+                }
+                Err(error) => Err(ProjectionFailure::Storage(error)),
+            }
+        }
+        InstallationProjection::Repos { input } => state
+            .storage
+            .update_installation_repos(input.installation_id, &input.selected_repos)
+            .await
+            .map_err(ProjectionFailure::Storage),
+        InstallationProjection::Uninstall { input } => {
+            match state
+                .storage
+                .mark_installation_uninstalled(input.installation_id, input.uninstalled_at)
+                .await
+            {
+                // An installation ghinvite never projected is already as
+                // uninstalled as this transition can make it.
+                Ok(()) | Err(StorageError::NotFound) => Ok(()),
+                Err(error) => Err(ProjectionFailure::Storage(error)),
+            }
+        }
+    }
+}
+
 async fn project(
     ctx: &ObjectContext<'_>,
     input: InstallationProjection,
@@ -647,6 +735,246 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{dt, fixture_state};
+    use ghinvite_core::AccountType;
+    use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
+    use ghinvite_core::storage::{ConflictKind, Error as StorageError};
+
+    fn onboarding() -> InstallationProjection {
+        InstallationProjection::Onboard {
+            input: onboarding_input(),
+        }
+    }
+
+    fn onboarding_input() -> OnboardInput {
+        OnboardInput {
+            installation_id: 1,
+            actor_user_id: 7,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            selected_repos: SelectedRepos::All,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+        }
+    }
+
+    #[tokio::test]
+    async fn onboarding_writes_the_installation_it_names() {
+        let state = fixture_state().await;
+
+        project_installation(&state, &onboarding()).await.unwrap();
+
+        let account = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(account.account_id, 100);
+        assert_eq!(account.account_login, "acme");
+        assert!(account.uninstalled_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn replayed_onboarding_keeps_the_installation_it_already_wrote() {
+        let state = fixture_state().await;
+        let input = onboarding();
+        project_installation(&state, &input).await.unwrap();
+
+        project_installation(&state, &input)
+            .await
+            .expect("a replayed onboarding is the same onboarding");
+
+        let account = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(account.installed_at, dt("2026-05-04T12:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn onboarding_refuses_an_installation_that_names_different_facts() {
+        let state = fixture_state().await;
+        project_installation(&state, &onboarding()).await.unwrap();
+
+        let mut renamed = onboarding_input();
+        renamed.account_login = "someone-else".into();
+        let failure =
+            project_installation(&state, &InstallationProjection::Onboard { input: renamed })
+                .await
+                .expect_err("the same installation cannot have been onboarded twice over");
+
+        assert!(matches!(failure, ProjectionFailure::IdentityConflict));
+    }
+
+    #[tokio::test]
+    async fn onboarding_a_second_active_installation_for_one_account_conflicts() {
+        let state = fixture_state().await;
+        project_installation(&state, &onboarding()).await.unwrap();
+
+        let mut second = onboarding_input();
+        second.installation_id = 2;
+        let failure =
+            project_installation(&state, &InstallationProjection::Onboard { input: second })
+                .await
+                .expect_err("an account has at most one active installation");
+
+        // Retrying cannot converge while the first installation is active, so
+        // the crate's own classification has to settle it rather than the SDK's
+        // retry-everything default.
+        assert!(matches!(
+            failure,
+            ProjectionFailure::Storage(StorageError::Conflict(
+                ConflictKind::DuplicateActiveInstallation
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_repository_change_replaces_the_selected_repositories() {
+        let state = fixture_state().await;
+        project_installation(&state, &onboarding()).await.unwrap();
+
+        project_installation(
+            &state,
+            &InstallationProjection::Repos {
+                input: crate::installation::ReposChangedInput {
+                    installation_id: 1,
+                    selected_repos: SelectedRepos::Subset(vec![10, 20]),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let account = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(account.selected_repos, SelectedRepos::Subset(vec![10, 20]));
+    }
+
+    #[tokio::test]
+    async fn a_repository_change_for_an_unknown_installation_has_nothing_to_change() {
+        let state = fixture_state().await;
+
+        let failure = project_installation(
+            &state,
+            &InstallationProjection::Repos {
+                input: crate::installation::ReposChangedInput {
+                    installation_id: 999,
+                    selected_repos: SelectedRepos::All,
+                },
+            },
+        )
+        .await
+        .expect_err("repositories cannot change on an installation that was never projected");
+
+        assert!(matches!(
+            failure,
+            ProjectionFailure::Storage(StorageError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn uninstalling_stamps_the_time_the_installation_ended() {
+        let state = fixture_state().await;
+        project_installation(&state, &onboarding()).await.unwrap();
+        let uninstalled_at = dt("2026-05-05T00:00:00Z");
+
+        project_installation(
+            &state,
+            &InstallationProjection::Uninstall {
+                input: UninstallInput {
+                    installation_id: 1,
+                    uninstalled_at,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        let account = state.storage.get_installation(1).await.unwrap().unwrap();
+        assert_eq!(account.uninstalled_at, Some(uninstalled_at));
+    }
+
+    #[tokio::test]
+    async fn uninstalling_an_installation_that_was_never_projected_succeeds() {
+        let state = fixture_state().await;
+
+        project_installation(
+            &state,
+            &InstallationProjection::Uninstall {
+                input: UninstallInput {
+                    installation_id: 999,
+                    uninstalled_at: dt("2026-05-05T00:00:00Z"),
+                },
+            },
+        )
+        .await
+        .expect("an installation ghinvite never held cannot be left installed");
+
+        assert!(state.storage.get_installation(999).await.unwrap().is_none());
+    }
+
+    fn audit_for(input: &InstallationProjection) -> ghinvite_core::audit::AuditEvent {
+        installation_audit(
+            100,
+            input,
+            ghinvite_core::AuditEventId::new(),
+            dt("2026-05-04T12:00:00Z"),
+            "inv-1".into(),
+        )
+    }
+
+    #[test]
+    fn an_onboarding_audit_names_the_user_who_installed() {
+        let event = audit_for(&onboarding());
+
+        assert_eq!(event.event_type, EventType::InstallationCreated);
+        assert_eq!(event.actor_kind, ActorKind::User);
+        assert_eq!(event.actor_id, Some(7));
+        assert_eq!(event.target_kind, TargetKind::Installation);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(event.request_id.as_deref(), Some("inv-1"));
+        assert_eq!(
+            event.metadata.get("account_login"),
+            Some(&serde_json::json!("acme"))
+        );
+        assert_eq!(
+            event.metadata.get("account_type"),
+            Some(&serde_json::json!("Organization"))
+        );
+    }
+
+    #[test]
+    fn a_repository_change_audit_is_attributed_to_github() {
+        let event = audit_for(&InstallationProjection::Repos {
+            input: crate::installation::ReposChangedInput {
+                installation_id: 1,
+                selected_repos: SelectedRepos::Subset(vec![10, 20]),
+            },
+        });
+
+        assert_eq!(event.event_type, EventType::InstallationReposChanged);
+        // No GitHub user asked for this; the refresh observed it.
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(
+            event.metadata.get("selected_repos_kind"),
+            Some(&serde_json::json!("subset"))
+        );
+    }
+
+    #[test]
+    fn an_uninstall_audit_records_when_the_installation_ended() {
+        let uninstalled_at = dt("2026-05-05T00:00:00Z");
+        let event = audit_for(&InstallationProjection::Uninstall {
+            input: UninstallInput {
+                installation_id: 1,
+                uninstalled_at,
+            },
+        });
+
+        assert_eq!(event.event_type, EventType::InstallationUninstalled);
+        assert_eq!(event.actor_kind, ActorKind::Github);
+        assert_eq!(event.actor_id, None);
+        assert_eq!(event.target_id, "1");
+        assert_eq!(
+            event.metadata.get("uninstalled_at"),
+            Some(&serde_json::json!(uninstalled_at.to_rfc3339()))
+        );
+    }
 
     #[test]
     fn refresh_backoff_is_bounded_by_the_recheck_cadence() {
