@@ -175,6 +175,9 @@ jobs:
       - name: No-JavaScript admin mutation recovery regressions
         working-directory: tests/browser
         run: npx playwright test --config mutation-recovery.config.mjs
+      - name: Accessible revocation confirmation regressions
+        working-directory: tests/browser
+        run: npx playwright test --config revocation.config.mjs
       - name: Browser failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
