@@ -171,7 +171,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 } else {
                                     rsx! {
                                         a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{description}" }
-                                        span { class: "ml-2 text-xs text-base-content/55", "Code: {link_slug}" }
+                                        span { class: "ml-2 text-xs text-muted", "Code: {link_slug}" }
                                     }
                                 };
                                 let requester = r.requester_login.clone();
