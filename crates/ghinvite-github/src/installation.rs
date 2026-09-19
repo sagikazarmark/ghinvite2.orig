@@ -386,9 +386,11 @@ impl InstallationClient {
         let mut walked = std::collections::HashSet::new();
         for _ in 0..MAX_INVITATION_PAGES {
             if !walked.insert(path.clone()) {
-                return Err(crate::Error::InvalidInput(format!(
-                    "pagination returns to {path}"
-                )));
+                // `path` came out of an upstream `Link` header; the fault is
+                // the revisit, which needs none of its text to state.
+                return Err(crate::Error::InvalidInput(
+                    "pagination returned to a page already walked".into(),
+                ));
             }
             let req = self
                 .auth_request(installation_id, Method::Get, &path)

@@ -244,18 +244,22 @@ impl RestateClient {
                 }));
             }
             let body = resp.bytes().await.map_err(|_| {
-                WebError::Restate(IngressFailure::unreachable(
-                    "ingress response body unreadable",
-                ))
+                WebError::Restate(IngressFailure::OutcomeUnknown {
+                    detail: "ingress response body unreadable",
+                    status: Some(status.as_u16()),
+                })
             })?;
             // Restate may return an empty body for unit-returning handlers.
             let body: &[u8] = if body.is_empty() { b"null" } else { &body };
             // Deserializer errors can quote untrusted response values, including
             // reflected credentials. Never pass them to logs or browser errors.
             serde_json::from_slice::<O>(body).map_err(|_| {
-                WebError::Restate(IngressFailure::unreachable(
-                    "ingress response could not be decoded",
-                ))
+                // The ingress answered; we could not use it. Keep the status it
+                // answered with — the outcome is unknown, not statusless.
+                WebError::Restate(IngressFailure::OutcomeUnknown {
+                    detail: "ingress response could not be decoded",
+                    status: Some(status.as_u16()),
+                })
             })
         })
         .await

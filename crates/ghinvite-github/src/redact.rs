@@ -128,18 +128,24 @@ fn envelope_summary(value: &serde_json::Value) -> Option<String> {
     let object = value.as_object()?;
     let message = object.get("message")?.as_str()?;
     let mut summary = format!("message withheld ({} bytes)", message.len());
-    let codes: Vec<String> = object
-        .get("errors")
-        .and_then(|errors| errors.as_array())
-        .map(|errors| {
-            errors
-                .iter()
-                .filter_map(|entry| entry.get("code")?.as_str())
-                .take(MAX_CODES)
-                .map(|code| bounded_upstream_code(code, VALIDATION_SUB_CODES))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Allowlist and dedupe *before* the cap. GitHub does not order the `errors`
+    // array, so capping first would let four unrecognised entries crowd out a
+    // later `already_exists` — the one sub-code callers actually branch on.
+    // One `UNRECOGNIZED` is enough to say the rest were not ours.
+    let mut codes: Vec<String> = Vec::new();
+    if let Some(errors) = object.get("errors").and_then(|errors| errors.as_array()) {
+        for code in errors
+            .iter()
+            .filter_map(|entry| entry.get("code")?.as_str())
+        {
+            let code = bounded_upstream_code(code, VALIDATION_SUB_CODES);
+            if !codes.contains(&code) {
+                codes.push(code);
+            }
+        }
+        codes.sort_by_key(|code| code == UNRECOGNIZED);
+        codes.truncate(MAX_CODES);
+    }
     if !codes.is_empty() {
         summary.push_str(&format!(" codes=[{}]", codes.join(",")));
     }
@@ -203,6 +209,25 @@ mod tests {
             // GitHub refusal apart from a gateway's HTML.
             assert!(diagnostic.contains("message withheld"), "{diagnostic}");
         }
+    }
+
+    /// GitHub does not order the `errors` array, so a documented sub-code can
+    /// arrive behind a run of ones we do not know. Capping before allowlisting
+    /// would drop exactly the entry a caller branches on.
+    #[test]
+    fn a_documented_sub_code_survives_a_crowd_of_unknown_ones() {
+        let unknown = (0..12)
+            .map(|i| format!(r#"{{"code":"opaque-{i}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = format!(
+            r#"{{"message":"Validation Failed","errors":[{unknown},{{"code":"already_exists"}}]}}"#
+        );
+        let diagnostic = upstream_diagnostic(body.as_bytes());
+        assert!(diagnostic.contains("already_exists"), "{diagnostic}");
+        assert!(!diagnostic.contains("opaque-"), "{diagnostic}");
+        // One placeholder stands for every entry that was not ours.
+        assert_eq!(diagnostic.matches(UNRECOGNIZED).count(), 1, "{diagnostic}");
     }
 
     /// The sub-code is the whole reason a caller looks at a 422, so it has to
