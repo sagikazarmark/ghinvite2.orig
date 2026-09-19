@@ -305,6 +305,33 @@ fn wasm_send<F: std::future::Future>(f: F) -> F {
     f
 }
 
+/// Describe a `reqwest` failure by what went wrong, never by where.
+///
+/// `reqwest` renders the URL it was working on into its error text, and that
+/// URL is not always ours: a same-origin pagination `Link` is followed with its
+/// query intact, so whatever answered the previous request chooses part of the
+/// next request's URL. Since `Error::Transport` reaches logs and Restate
+/// terminal errors, only the classification survives — which is what triage
+/// reads anyway.
+fn transport_failure(error: &reqwest::Error, phase: &str) -> String {
+    let cause = if error.is_timeout() {
+        "timed out"
+    } else if error.is_connect() {
+        "could not connect"
+    } else if error.is_redirect() {
+        "too many redirects"
+    } else if error.is_decode() {
+        "could not decode the response"
+    } else if error.is_body() {
+        "failed mid-body"
+    } else if error.is_request() {
+        "could not build the request"
+    } else {
+        "failed"
+    };
+    format!("{phase}: {cause}")
+}
+
 #[async_trait]
 impl HttpTransport for ReqwestTransport {
     async fn send(&self, request: Request) -> Result<Response> {
@@ -331,7 +358,7 @@ impl HttpTransport for ReqwestTransport {
             let resp = builder
                 .send()
                 .await
-                .map_err(|e| Error::Transport(e.to_string()))?;
+                .map_err(|e| Error::Transport(transport_failure(&e, "sending request")))?;
 
             let status = resp.status().as_u16();
             let mut headers = BTreeMap::new();
@@ -344,7 +371,7 @@ impl HttpTransport for ReqwestTransport {
             let body = resp
                 .bytes()
                 .await
-                .map_err(|e| Error::Transport(format!("reading body: {e}")))?
+                .map_err(|e| Error::Transport(transport_failure(&e, "reading body")))?
                 .to_vec();
             Ok(Response {
                 status,
@@ -438,7 +465,7 @@ mod tests {
     /// logs and Restate terminal errors.
     #[test]
     fn response_json_decode_error_never_quotes_the_payload() {
-        let token = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
+        let token = "installation-token-test-only-not-a-credential";
         let body = format!(r#"{{"token":"{token}","expires_at":1234}}"#);
         let r = Response {
             status: 200,
@@ -482,7 +509,7 @@ mod tests {
 
     #[test]
     fn status_error_drops_a_gateway_body_that_echoes_our_credentials() {
-        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl";
+        let jwt = "app-jwt-test-only-not-a-credential";
         let r = Response {
             status: 502,
             headers: BTreeMap::new(),

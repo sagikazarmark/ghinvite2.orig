@@ -168,7 +168,7 @@ mod tests {
     /// Restate terminal error.
     #[test]
     fn a_credential_bearing_link_header_never_reaches_the_error() {
-        let token = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
+        let token = "installation-token-test-only-not-a-credential";
         let cases = [
             // Off-base target: the URL is the attacker's.
             format!("<https://evil.test/x?token={token}>; rel=\"next\""),

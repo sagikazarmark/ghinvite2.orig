@@ -17,10 +17,10 @@ use std::sync::{Arc, Mutex};
 /// Same static key the unit tests use — signing a fresh one costs seconds.
 const TEST_KEY_PEM: &str = include_str!("../src/jwt_test_key.pem");
 
-const INSTALLATION_TOKEN: &str = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
-const USER_TOKEN: &str = "gho_16C7e42F292c6912E7710c838347Ae178B4a";
+const INSTALLATION_TOKEN: &str = "installation-token-test-only-not-a-credential";
+const USER_TOKEN: &str = "user-token-test-only-not-a-credential";
 const CLIENT_SECRET: &str = "client-secret-do-not-expose";
-const APP_JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl";
+const APP_JWT: &str = "app-jwt-test-only-not-a-credential";
 
 /// A `tracing` sink that keeps everything written to it, so a test can assert
 /// on what an operator would actually see.

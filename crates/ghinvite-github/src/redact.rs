@@ -183,8 +183,8 @@ fn bound(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
-    const APP_JWT: &str = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiIxMjM0NSJ9.c2lnbmF0dXJlLXZhbHVl";
-    const INSTALLATION_TOKEN: &str = "ghs_16C7e42F292c6912E7710c838347Ae178B4a";
+    const APP_JWT: &str = "app-jwt-test-only-not-a-credential";
+    const INSTALLATION_TOKEN: &str = "installation-token-test-only-not-a-credential";
 
     /// `message` is free upstream prose. These are three shapes no pattern
     /// scrubber catches: an opaque value with no key beside it, an assignment
@@ -351,8 +351,8 @@ mod tests {
             INSTALLATION_TOKEN,
             &INSTALLATION_TOKEN.to_ascii_lowercase(),
             APP_JWT,
-            "ghp_0123456789abcdefghij",
-            "github_pat_0123456789abcdefghij",
+            "personal-token-test-only-not-a-credential",
+            "fine-grained-token-test-only-not-a-credential",
             // Lowercase, hyphenated and short: indistinguishable from a
             // documented code by shape, which is why shape is not the test.
             "client-secret-do-not-expose",

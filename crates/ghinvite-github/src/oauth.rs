@@ -369,8 +369,9 @@ mod exchange_tests {
             response: Response {
                 status: 200,
                 headers: BTreeMap::new(),
-                body: br#"{"error":"token ghs_16C7e42F292c6912E7710c838347Ae178B4a rejected"}"#
-                    .to_vec(),
+                body:
+                    br#"{"error":"token installation-token-test-only-not-a-credential rejected"}"#
+                        .to_vec(),
             },
         }]);
         let err = exchange_code(&mock, &cfg(), "any").await.unwrap_err();
@@ -383,7 +384,7 @@ mod exchange_tests {
     /// The success-shape decode runs with the token payload in hand.
     #[tokio::test]
     async fn token_shape_mismatch_never_quotes_the_payload() {
-        let token = "gho_16C7e42F292c6912E7710c838347Ae178B4a";
+        let token = "user-token-test-only-not-a-credential";
         let mock = MockTransport::scripted(vec![Expectation {
             method: Method::Post,
             url: "https://github.com/login/oauth/access_token".into(),

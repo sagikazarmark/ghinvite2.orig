@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn decode_never_quotes_the_body() {
-        let body = r#"{"access_token":"ghs_16C7e42F292c6912E7710c838347Ae178B4a"}"#;
+        let body = r#"{"access_token":"installation-token-test-only-not-a-credential"}"#;
         let failure = serde_json::from_str::<u64>(body).unwrap_err();
         let error = Error::decode(&failure, body.len());
         let rendered = format!("{error} {error:?}");

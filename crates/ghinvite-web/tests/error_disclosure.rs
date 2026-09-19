@@ -18,7 +18,7 @@ use tower::ServiceExt;
 use wiremock::matchers::method as wm_method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const USER_TOKEN: &str = "gho_16C7e42F292c6912E7710c838347Ae178B4a";
+const USER_TOKEN: &str = "user-token-test-only-not-a-credential";
 const INGRESS_KEY: &str = "ingress-key-do-not-expose";
 
 /// A `tracing` sink that keeps everything written to it.
@@ -170,7 +170,7 @@ async fn oauth_callback_error_parameters_are_not_reflected() {
     let response = get(
         &app,
         "/oauth/callback?error=contact%20support%20at%20evil.test&\
-         error_description=your%20token%20gho_16C7e42F292c6912E7710c838347Ae178B4a%20expired",
+         error_description=your%20token%20user-token-test-only-not-a-credential%20expired",
         None,
     )
     .await;
@@ -250,12 +250,12 @@ async fn github_gateway_body_never_reaches_the_browser() {
 async fn unsupported_installation_fields_are_not_reflected() {
     for (account_type, repository_selection) in [
         (
-            "Mystery <b>type</b> gho_16C7e42F292c6912E7710c838347Ae178B4a",
+            "Mystery <b>type</b> user-token-test-only-not-a-credential",
             "all",
         ),
         (
             "Organization",
-            "mystery gho_16C7e42F292c6912E7710c838347Ae178B4a",
+            "mystery user-token-test-only-not-a-credential",
         ),
     ] {
         let (logs, _guard) = capture_logs();
