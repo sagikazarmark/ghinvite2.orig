@@ -166,6 +166,9 @@ jobs:
       - name: Document shell browser regressions
         working-directory: tests/browser
         run: npx playwright test --config document.config.mjs
+      - name: Console contrast and reflow regressions
+        working-directory: tests/browser
+        run: npx playwright test --config console-accessibility.config.mjs
       - name: Requester delivery browser regressions
         working-directory: tests/browser
         run: npx playwright test --config delivery.config.mjs

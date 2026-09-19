@@ -16,6 +16,27 @@ navigation and cancellation. Both modes reject forged CSRF submissions and
 confirm using one native document-navigation POST carrying the original token;
 the recovery UI then verifies the link stopped accepting new requests.
 
+## Console accessibility
+
+```bash
+npm ci --prefix crates/ghinvite-web
+npm run build:css --prefix crates/ghinvite-web
+npm ci --prefix tests/browser
+npm exec --prefix tests/browser -- playwright test --config tests/browser/console-accessibility.config.mjs
+```
+
+Uses the document-shell router fixture on port 4175 (no island bundle or external
+services). Overview, links, the populated request queue, detail, edit, and settings receive
+full axe scans, including AA text contrast, in light and dark themes at desktop
+and 320px widths. Navigation names and non-color current-section cues are checked.
+Text-range geometry catches clipping inside property panels and overlapping
+deadline badges, which document scroll-width checks alone miss. The fixture includes
+a past decision deadline and a long repository name. Keyboard traversal
+at 320 x 240 CSS pixels exercises the reflow viewport of 1280 x 960 at 400% zoom;
+this models layout reflow, not physical-device pinch zoom. A short desktop window
+also checks sidebar wheel scrolling and keyboard access to account/install actions.
+CI runs this suite and retains screenshots/traces for failures.
+
 ## Admin mutation recovery
 
 Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/mutation-recovery.config.mjs`

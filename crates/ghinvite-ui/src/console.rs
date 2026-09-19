@@ -47,7 +47,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                                         a { class: "flex items-center justify-between gap-3 px-4 py-3 hover:bg-base-200/60", href: "{href}",
                                             span { class: "min-w-0",
                                                 span { class: "block truncate text-sm font-medium", "{account.login}" }
-                                                span { class: "mt-0.5 block text-xs text-base-content/60", "{account.account_type}" }
+                                                span { class: "mt-0.5 block text-xs text-muted", "{account.account_type}" }
                                             }
                                             span { class: "text-sm text-primary", "Open" }
                                         }
@@ -58,7 +58,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                         },
                         ConsoleIndexState::Empty => rsx! {
                             div { class: "mac-panel p-6",
-                                p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-base-content/45", "Console" }
+                                p { class: "text-xs font-semibold uppercase tracking-[0.18em] text-muted", "Console" }
                                 h1 { class: "mt-3 text-2xl font-semibold tracking-tight", "No accounts connected" }
                                 p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating invitation links." }
                                 div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
@@ -328,7 +328,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                         href: "/console/accounts/{login}/links/{id_str}",
                         "{link.description}"
                     }
-                    p { class: "mt-0.5 font-mono text-xs text-base-content/55", "{slug_str}" }
+                    p { class: "mt-0.5 font-mono text-xs text-muted", "{slug_str}" }
                 }
                 td { span { class: "{badge} badge-sm", "{label}" } }
                 td { class: "text-right tabular-nums", "{link.uses_count}" }
@@ -347,7 +347,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                 header { class: "mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
                     div {
                         h1 { class: "text-xl font-semibold tracking-tight", "Console overview" }
-                        p { class: "mt-0.5 text-sm text-base-content/60", "{account_type}: {props.account_login}" }
+                        p { class: "mt-0.5 text-sm text-muted", "{account_type}: {props.account_login}" }
                     }
                     a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}/links/new", "New invitation link" }
                 }

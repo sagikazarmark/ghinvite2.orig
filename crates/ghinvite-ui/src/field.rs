@@ -168,7 +168,7 @@ pub fn Field(props: FieldProps) -> Element {
 
     rsx! {
         div { class: "form-control gap-2",
-            label { class: "label", r#for: "{props.id}",
+            label { class: "label text-base-content", r#for: "{props.id}",
                 span { class: "label-text font-medium", "{props.label}" }
             }
             {control}
@@ -551,7 +551,7 @@ mod tests {
         });
 
         assert!(html.contains("<div class=\"form-control gap-2\">"));
-        assert!(html.contains("<label class=\"label\" for=\"description\">"));
+        assert!(html.contains("<label class=\"label text-base-content\" for=\"description\">"));
         assert!(html.contains("<span class=\"label-text font-medium\">Description</span>"));
         assert!(html.contains("id=\"description\""));
         assert!(html.contains("type=\"text\""));

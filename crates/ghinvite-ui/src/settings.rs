@@ -67,14 +67,14 @@ pub fn SettingsPage(props: SettingsProps) -> Element {
                             dt { class: "property-label", "Account" }
                             dd {
                                 p { class: "text-sm font-medium", "{login}" }
-                                p { class: "mt-0.5 text-xs text-base-content/60", "{account_type}" }
+                                p { class: "mt-0.5 text-xs text-muted", "{account_type}" }
                             }
                         }
                         div { class: "property-row",
                             dt { class: "property-label", if historical { "Last recorded installation scope" } else { "Installation scope" } }
                             dd {
                                 p { class: "text-sm font-medium", "{repos_label}" }
-                                p { class: "mt-0.5 text-xs text-base-content/60", "Recorded repository selection. Review GitHub App settings for current access." }
+                                p { class: "mt-0.5 text-xs text-muted", "Recorded repository selection. Review GitHub App settings for current access." }
                             }
                         }
                     }

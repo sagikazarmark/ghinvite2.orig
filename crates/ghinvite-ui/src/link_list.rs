@@ -153,7 +153,7 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
                 header { class: "mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
                     div {
                         h1 { class: "text-xl font-semibold tracking-tight", "Invitation links" }
-                        p { class: "mt-0.5 text-sm text-base-content/60", "Manage invitation links for {props.account_login}." }
+                        p { class: "mt-0.5 text-sm text-muted", "Manage invitation links for {props.account_login}." }
                     }
                     a { class: "btn btn-primary btn-sm", href: "{base}/new", "New invitation link" }
                 }
@@ -218,7 +218,7 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
                                                 tr {
                                                     td {
                                                         a { class: "link link-primary font-medium", href: "{base}/{link.id}", "{link.description}" }
-                                                        p { class: "mt-0.5 text-xs text-base-content/60", "Invitation code: ", span { class: "font-mono", "{link.slug}" } }
+                                                        p { class: "mt-0.5 text-xs text-muted", "Invitation code: ", span { class: "font-mono", "{link.slug}" } }
                                                     }
                                                     td { span { class: "{badge}", "{status}" } }
                                                     td { class: "whitespace-nowrap tabular-nums", "{link.uses_count} / {max}" }

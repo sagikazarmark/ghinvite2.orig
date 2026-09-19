@@ -32,6 +32,7 @@ pub fn AppScript() -> Element {
 pub fn Nav(props: NavProps) -> Element {
     rsx! {
         nav {
+            aria_label: "Global",
             class: "app-header navbar min-h-0 gap-2 px-3 py-0 text-base-content sm:px-4",
             div { class: "min-w-0 flex-1",
                 a {
@@ -60,7 +61,7 @@ pub fn Nav(props: NavProps) -> Element {
                 {match props.signed_in_login.as_deref() {
                     Some(login) => rsx! {
                         a { class: "btn btn-primary btn-sm h-8 min-h-0 px-3", href: "/console", "Console" }
-                        span { class: "hidden max-w-32 truncate px-1 text-xs text-base-content/60 sm:inline-flex", "@{login}" }
+                        span { class: "hidden max-w-32 truncate px-1 text-xs text-muted sm:inline-flex", "@{login}" }
                         form { method: "post", action: "/logout",
                             crate::csrf::CsrfField {}
                             button { r#type: "submit", class: "btn btn-ghost btn-sm h-8 min-h-0 px-2", "Sign out" }
