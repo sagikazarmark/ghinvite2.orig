@@ -89,6 +89,7 @@ jobs:
       - run: npm ci --prefix tests/worker
       - run: npm test --prefix tests/worker
       - run: npm run test:queue --prefix tests/worker
+      - run: npm run test:history --prefix tests/worker
       - run: npm run test:deadlines --prefix tests/worker
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
@@ -172,6 +173,9 @@ jobs:
       - name: Requester delivery browser regressions
         working-directory: tests/browser
         run: npx playwright test --config delivery.config.mjs
+      - name: Request history browser regressions
+        working-directory: tests/browser
+        run: npx playwright test --config request-history.config.mjs
       - name: No-JavaScript read recovery regressions
         working-directory: tests/browser
         run: npx playwright test --config read-recovery.config.mjs
