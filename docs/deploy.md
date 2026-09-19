@@ -1,9 +1,51 @@
 # ghinvite Deployment Guide
 
+## Rollout status and order
+
+**Production rollout remains blocked under [#61](https://github.com/sagikazarmark/ghinvite2.orig/issues/61).**
+This procedure describes the target deployment and disposable remote rehearsal;
+documentation, passing local tests, and provisioning alone do not authorize rollout.
+#58/#59 completed native cutover tooling and local Worker/D1 verification. The
+installation-availability integration (#60) and authenticated web ingress (#77)
+are implemented; their remote deployment evidence is still required.
+
+Run commands from the repository root against an explicitly selected Cloudflare
+account and Restate environment. For an existing installation, use this order:
+
+1. Close web ingress (including alternate Worker URLs), webhooks and scheduled
+   producers; set web `GHINVITE_ADMISSION_MODE=maintenance`. Inventory pinned
+   invocations, artifacts, bindings and uncertain external effects.
+2. Prepare the coordinated checkpoints and old-writer fencing/isolation from
+   [admission cutover](admission-cutover.md). Drain old installation invocations
+   on their original code before isolating their endpoints. The cutover SQLite
+   CLI is **not** a live D1 export/adoption tool; the remote procedure must first
+   be implemented and rehearsed under #61.
+3. Apply and verify remote migrations, then register a new immutable workflow
+   endpoint. Include [installation availability](installation-availability.md):
+   `Installation`, `AccountInstallationV1` and `InstallationProjectionV1` must ship
+   together. Unchanged wire interfaces do not imply unchanged journals.
+4. Complete the [invitation settlement cutover](invitation-settlement.md#deployment-and-pinned-invocations),
+   including versioned webhook/scheduler callers and retained receipts. Select
+   `authoritative` for the new workflow endpoint only through the cutover process.
+5. Deploy web in maintenance with its matching bindings. Follow the cutover
+   runbook for projection adoption, import, verification and activation/handoff,
+   then verify authoritative web operations on restricted rehearsal ingress before
+   reopening producers. Both configs default to `legacy`; neither a migration nor
+   a deployment switches authority. A fresh empty environment has no legacy rows
+   to import, but still requires the remote gates before authoritative live traffic.
+
+After activation/new-authority writes, recovery is compatible forward repair or
+reviewed reverse reconciliation, never a switch to stale SQL. Preserve admission
+outcomes, uses, deadlines, dispatch/create/settlement receipts and historical audits.
+See [Worker recovery limits](worker-admission-gate.md#remaining-rollout-gates--fault-model-limits)
+and [rollback](#rollback) before any upgrade.
+
 ## Prerequisites
 
 - Cloudflare account with Workers paid plan (or free tier for testing)
-- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) installed: `npm install -g wrangler`
+- Node.js 20.20.2 or a compatible supported Node release.
+- [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) **4.71.0**: `npm install -g wrangler@4.71.0` (command-validation baseline for this guide).
+- Restate CLI **1.7.9**: `npm install -g @restatedev/restate@1.7.9`; configure the target environment's Admin URL and admin credential using the CLI/secret manager. Admin credentials are separate from the web ingress key.
 - [`worker-build`](https://crates.io/crates/worker-build) **0.8.1** installed: `cargo install worker-build --version 0.8.1 --locked`
 - wasm-bindgen CLI **0.2.120**, matching `Cargo.lock`: `cargo install wasm-bindgen-cli --version 0.2.120 --locked`.
   Export `WASM_BINDGEN_BIN=$(command -v wasm-bindgen)` when invoking Wrangler so
@@ -17,7 +59,7 @@
 Two Cloudflare Workers share one D1 database:
 
 - **ghinvite-web** (`crates/ghinvite-web-worker`) — handles HTTP requests, SSR, OAuth, webhooks
-- **ghinvite-restate-svc** (`crates/ghinvite-workflows`) — Restate durable workflow handlers
+- **ghinvite-restate-svc** (`crates/ghinvite-workflows-worker`, handlers in `crates/ghinvite-workflows`) — Restate durable workflow handlers
 
 Production requires protected HTTPS Restate ingress. The web server authenticates
 every ingress call/send with `Authorization: Bearer <API key>`, including setup,
@@ -37,6 +79,7 @@ in URLs, UI props, assets, `[vars]`, tracked configuration, or diagnostic logs.
 
 ```bash
 wrangler login
+wrangler whoami
 ```
 
 ### 2. Create D1 database
@@ -45,13 +88,42 @@ wrangler login
 wrangler d1 create ghinvite
 ```
 
-Copy the `database_id` from the output into `wrangler/web.toml` and `wrangler/restate-svc.toml`.
+Copy the `database_id` from the output into `wrangler/web.toml` and
+`wrangler/restate-svc.toml`. Both `DB` bindings must name the same intended remote
+database UUID in the selected account. Record that UUID in deployment evidence;
+the display name `ghinvite` alone is not sufficient identification. These examples
+use the top-level configs; if using named Wrangler environments, supply the same
+`--env` on every migration, verification, secret and deployment command and verify
+their environment-specific bindings.
 
-### 3. Apply database migrations
+### 3. Apply and verify remote database migrations
+
+For an existing database, close writers and retain the coordinated recovery point
+described above before applying changes. Rehearse on disposable D1 first. All
+commands in this section deliberately use **`--remote`** and the application's
+**`DB` binding**; local migration success is unrelated to remote schema state.
 
 ```bash
-wrangler d1 migrations apply ghinvite --config wrangler/web.toml
+wrangler d1 migrations list DB --remote --config wrangler/web.toml
+wrangler d1 migrations apply DB --remote --config wrangler/web.toml
+wrangler d1 migrations list DB --remote --config wrangler/web.toml
+
+# Verify the applied ledger AND schema through each intended binding:
+for config in wrangler/web.toml wrangler/restate-svc.toml; do
+  wrangler d1 execute DB --remote --config "$config" \
+    --command 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id;'
+  wrangler d1 execute DB --remote --config "$config" \
+    --command "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name; PRAGMA foreign_key_check;"
+done
 ```
+
+Expect no unapplied migrations and ledger entries matching every SQL file in
+`migrations/` for the release (currently 0001–0009). Compare the returned schema
+definitions with those migrations, including projection columns, delivery fences,
+settlement/member-webhook receipts, and the `admin_attempts_expiry` index. Expect
+no foreign-key violations. Stop on missing/mismatched schema, migration errors or
+an unexpected UUID in Wrangler output. Apply migrations only via the web config,
+which declares `migrations_dir`; the workflow config is used here for readback.
 
 > **Important:** Do not run `sqlx migrate run` against D1. sqlx manages the local SQLite dev database; Wrangler manages D1. The same SQL files in `migrations/` are shared, but tracking is separate.
 
@@ -98,9 +170,15 @@ base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PR
 
 # GitHub App ID is a var, not a secret — update GHINVITE_GITHUB_APP_ID in wrangler/restate-svc.toml [vars] directly.
 
-# Restate identity key (from Restate Cloud console → Deployments → Identity key):
+# Restate verification public key (Cloud → Developers → Security → HTTP endpoints):
 wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
 ```
+
+Configure both secret sets before creating the final release versions. The
+workflow Worker currently accepts unsigned requests when its identity binding is
+absent: a successful upload is not proof that request identity is enforced. Verify
+the exact version URL below. `RESTATE_IDENTITY_KEY` contains the verification
+**public** key; Restate retains the signing private key.
 
 ### 7. Build the island bundle
 
@@ -126,21 +204,71 @@ first so `rust-toolchain.toml` applies. Do not put anything else in
 serve for `/`. (The `ssr_fixture` example in `crates/ghinvite-island` writes
 one for local smoke tests; re-run the script before deploying.)
 
-### 8. Deploy
+### 8. Create the workflow version, then deploy web in maintenance
+
+Keep `preview_urls = true` in `wrangler/restate-svc.toml`. Provision secrets and
+the correct admission mode first. On first creation only, bootstrap the workflow
+Worker with `wrangler deploy --config wrangler/restate-svc.toml`; do not register
+its mutable hostname. For the release (and every subsequent upgrade):
+
+```bash
+export WASM_BINDGEN_BIN="$(command -v wasm-bindgen)"
+wrangler versions upload --config wrangler/restate-svc.toml
+```
+
+Record the full Worker version ID and its **version-prefixed Preview URL** from
+Wrangler output/Cloudflare Deployments, plus commit, artifact digest, SDK version,
+compatibility date, admission mode and binding identities. Use that exact URL for
+registration. An alias such as `staging-...` can move and is not version-specific.
+`versions upload` makes the preview endpoint available without moving production
+hostname traffic; it does not select Restate's deployment.
+
+Deploy web with `GHINVITE_ADMISSION_MODE=maintenance` in its config while the
+cutover/rehearsal is in progress (restore the approved target mode only at the
+activation/readiness step):
 
 ```bash
 scripts/build-island.sh   # always first: Static Assets pick up dist/public
 wrangler deploy --config wrangler/web.toml
-wrangler deploy --config wrangler/restate-svc.toml
 ```
 
 ### 9. Register with Restate Cloud
 
 ```bash
-restate deployments register https://ghinvite-restate-svc.YOUR_SUBDOMAIN.workers.dev
+export RESTATE_ENVIRONMENT=YOUR_CONFIGURED_ENVIRONMENT
+export WORKFLOW_VERSION_URL=https://VERSION_PREFIX-ghinvite-restate-svc.YOUR_SUBDOMAIN.workers.dev
+restate deployments register "$WORKFLOW_VERSION_URL"
+restate deployments list
 ```
 
-Re-register after any service interface changes.
+Verify the returned Restate deployment ID points to that exact version URL in the
+intended environment, and discovery exposes the expected services/handlers for
+the chosen admission mode. Registration changes routing for new invocations;
+keep producers closed until cutover and readiness are complete. Do not use
+`--force` to overwrite a deployment or bypass a compatibility refusal.
+
+Register a **new version URL on every workflow code/config release**, even if
+handler names and schemas are unchanged. Retained journals depend on code and SDK
+entry ordering, not just wire compatibility. Never register the bare Worker
+hostname, a mutable preview alias, or a redirect to "latest". In particular, do not
+replay in-flight SDK 0.10 journals against SDK 0.12 code.
+
+Retain each old version, exact endpoint, required compatible bindings/credentials
+and artifact while any invocation is pinned to it, including suspended workflows,
+retries and delayed timers. Inventory `pinned_deployment_id` using the
+[cutover inventory](admission-cutover.md#inventory-and-coordinated-checkpoint).
+Keep the original code reachable during an approved compatible drain, and verify
+provider version/URL retention covers the drain and recovery window. Shared D1
+schema changes must remain compatible with every still-running pinned version.
+Deleting a version, disabling preview URLs, changing routes or revoking a needed
+credential can strand pinned work; a new registration does not migrate it.
+
+For an incompatible writer cutover, drain first or capture obligations/effects,
+then permanently isolate the old URLs, controllers, DB access and outbound
+credentials before import/handoff. Preserve artifacts and journals for controlled
+recovery even after isolation. A runtime pause/kill or SQL fence cannot stop an
+already-issued GitHub request. Retire a deployment only after every pinned
+invocation and uncertain effect is accounted for; never repoint its URL at new code.
 
 Provision the ingress key in the same Restate Cloud environment as
 `GHINVITE_RESTATE_INGRESS`, with permission to invoke the web application's services.
@@ -150,21 +278,33 @@ Use the exact ingress URL; do not rely on redirecting gateways for authenticatio
 Authenticated remote URLs must use HTTPS; HTTP is accepted only for loopback
 development (`localhost`, loopback IPv4/IPv6).
 
-### 10. Smoke test
+### 10. Liveness and authenticated end-to-end readiness
+
+`/health` returns constant `ok`, including in maintenance: it does not query D1 or
+Restate. Maintenance returns 503 for other dynamic routes; static assets may
+still serve. After enabling the intended mode on restricted rehearsal
+ingress, these checks establish HTTP/asset liveness and webhook signature rejection:
 
 ```bash
-curl -s https://ghinvite.workers.dev/health           # → ok
-curl -s https://ghinvite.workers.dev/ | grep ghinvite # → HTML
-curl -s -o /dev/null -w "%{http_code}" \
-  -X POST https://ghinvite.workers.dev/webhooks/github \
+export WEB_BASE_URL=https://YOUR_WEB_HOST
+curl --fail-with-body --max-time 20 "$WEB_BASE_URL/health" # → ok
+curl --fail-with-body --max-time 20 "$WEB_BASE_URL/"       # → HTML
+curl -sS --max-time 20 -o /dev/null -w "%{http_code}" \
+  -X POST "$WEB_BASE_URL/webhooks/github" \
   -d '{}'                                             # → 401
-curl -s -o /dev/null -w "%{http_code}" \
-  https://ghinvite.workers.dev/assets/ghinvite-island.js  # → 200 (island loader)
+curl -sS --max-time 20 -o /dev/null -w "%{http_code}" \
+  "$WEB_BASE_URL/assets/ghinvite-island.js"             # → 200 (island loader)
 ```
 
-Health and HTML alone do not exercise ingress credentials. Complete the
-[authenticated production-binding verification](restate-ingress-gate.md) under
-the operator-owned remote gate (#61) before authorizing rollout.
+Readiness additionally requires the remote D1 readback in step 3, successful signed
+Restate discovery/invocation at the exact version URL, rejection of unsigned direct
+workflow requests, and the [authenticated production-binding verification](restate-ingress-gate.md).
+Use actual web secret bindings for setup, authoritative reads/mutations and durable
+webhook sends; verify invocation completion and projected results, not just queued
+acknowledgements. Exercise missing/revoked ingress keys and rotation as that gate
+requires. A direct operator curl with a valid key cannot substitute for web binding
+evidence. Publish redacted evidence and the remaining #61 gates with an explicit
+affirmative or blocked verdict before live producers are reopened.
 
 ## Local Development
 
@@ -197,7 +337,7 @@ Workers read it with `env.secret`, never from serialized application data.
 ### 2. Apply migrations to local D1 simulation
 
 ```bash
-wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
+wrangler d1 migrations apply DB --local --config wrangler/web.toml
 ```
 
 ### 3. Run web Worker locally
@@ -216,16 +356,21 @@ works as the plain server-rendered form.)
 In a separate terminal:
 
 ```bash
-wrangler dev --local --config wrangler/restate-svc.toml
+wrangler dev --local --port 8788 --config wrangler/restate-svc.toml
 ```
 
 Available at `http://localhost:8788`. Register with a local Restate server:
 
 ```bash
-restate deployments register http://localhost:8788
+restate deployments register --environment local --use-http1.1 http://host.docker.internal:8788
 ```
 
 Requires a local Restate server running at `http://localhost:8080` (see `compose.yaml`).
+The URL must be reachable from Restate: with Compose, bind Wrangler to an
+interface reachable from the container (for example `--ip 0.0.0.0` on a trusted
+development host) and use `host.docker.internal` as above. For a host-native Restate
+server, use `http://localhost:8788`. This local mutable endpoint is for disposable
+development state, not replay compatibility across production releases.
 
 ## Secrets Rotation
 
@@ -323,6 +468,8 @@ See [ADR 0002](adr/0002-session-protection-and-invalidation.md) and
 
 ### GitHub private key
 
+Provision the replacement before uploading/registering the next workflow version:
+
 ```bash
 # Linux:
 base64 -w0 new-private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
@@ -330,7 +477,21 @@ base64 -w0 new-private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE
 base64 new-private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
 ```
 
+Existing pinned version bindings must also retain working credentials until their
+approved drain completes. A secret update on the current deployment does not prove
+older version URLs use that replacement. Inventory and rehearse credential rotation
+for retained versions under #61; if a key must be revoked immediately, isolate and
+account for affected work using the cutover recovery procedure.
+
 ## Rollback
+
+Workflow recovery is governed by Restate deployment pinning, not by the Worker
+production hostname's traffic selection. Do not run a workflow `wrangler rollback`
+and assume it moves pinned invocations. Preserve their exact endpoints; select a
+compatible deployment for new work only after reviewing shared state/schema and
+the cutover phase. After activation or any new authoritative write, follow
+[forward repair/reconciliation](admission-cutover.md#recovery-restoration-and-audit-retention).
+Never hot-swap code behind a registered URL or purge journals to bypass a failure.
 
 After session-key rotation, redeploy the earlier compatible code with the **current
 key** rather than blindly restoring an old Worker version and its secret bindings.
@@ -340,12 +501,46 @@ current session key and record-protection contract.
 ```bash
 wrangler versions list --config wrangler/web.toml
 wrangler rollback --config wrangler/web.toml
-
-wrangler versions list --config wrangler/restate-svc.toml
-wrangler rollback --config wrangler/restate-svc.toml
 ```
 
-> **Warning:** Rolling back Worker code does not revert D1 schema migrations. Take a D1 backup snapshot before applying migrations to production.
+Web rollback must also preserve the current ingress key, admission mode, command
+contracts and session protection. Worker code rollback does not revert D1 schema
+or Restate authority. A D1 snapshot alone is not a coordinated recovery point;
+independent restore can lose receipts and repeat effects. Retain paired recovery
+evidence and historical audit archives as specified in the cutover runbook.
+
+## Command validation and operator-owned execution (#61)
+
+Command syntax was checked on 2026-09-18–19 with Wrangler **4.71.0**, Restate CLI
+**1.7.9**, and Node **20.20.2**, using CLI help for D1 `migrations list/apply`,
+`execute`, Worker `deploy`, `versions upload/list`, `rollback`, secrets, and
+Restate `deployments register/list`. The repository pins Restate runtime 1.7.9,
+SDK 0.12 with its Cargo patch, worker-build 0.8.1 and wasm-bindgen 0.2.120; use
+[the Worker gate's version inventory](worker-admission-gate.md#reproduce).
+
+References: [Cloudflare version-specific preview URLs](https://developers.cloudflare.com/workers/configuration/previews/),
+[Restate Worker registration](https://docs.restate.dev/services/deploy/cloudflare-workers),
+and [Restate versioning](https://docs.restate.dev/services/versioning).
+CLI help validates syntax, not remote execution or provider retention guarantees.
+On 2026-09-19, the `--local` equivalents were executed against disposable D1:
+all nine migrations applied, `migrations list` reported none pending, ledger and
+schema readback succeeded, and `foreign_key_check` returned no violations. This
+validates the SQL/readback syntax, not the intended remote bindings.
+
+The operator must record reproducible evidence under #61 for:
+
+- Intended remote account/DB UUID, complete migrations/schema and deployed bindings.
+- Immutable endpoint/Restate deployment identities, signatures, authenticated
+  ingress, discovery/routing, runtime compatibility and retained-version reachability.
+- Regional behavior and CPU/memory/subrequest/input/repository-scope limits.
+- Live D1 coordinated export/fence/adoption and restore rehearsal; old-writer and
+  issued-effect isolation; SDK 0.10 pinned-work inventory and compatible handoff.
+- Administrative kill/purge, coordinated and independent restore, forward recovery,
+  and preservation of operation/dispatch/create receipts and historical audits.
+- Installation availability and real GitHub effects/webhook evidence, remaining
+  fault-model limitations, and an explicit rollout verdict.
+
+These remote actions have **not** been executed by this documentation change.
 
 ## GitHub App Setup
 

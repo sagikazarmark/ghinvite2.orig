@@ -154,15 +154,15 @@ docker compose up
 wrangler dev --config wrangler/web.toml
 
 # Terminal 3
-wrangler dev --config wrangler/restate-svc.toml
+wrangler dev --ip 0.0.0.0 --port 8788 --config wrangler/restate-svc.toml
 ```
 
-Register restate-svc with Restate after it starts (port may differ — check Wrangler output):
+Register restate-svc with the local Restate server after it starts. Use a trusted
+development host: the explicit listen address permits the Compose container to
+reach Wrangler on port 8788.
 
 ```bash
-curl -X POST http://localhost:9070/restate/v1/deployments \
-  -H 'Content-Type: application/json' \
-  -d '{"uri": "http://localhost:8787"}'
+restate deployments register --environment local --use-http1.1 http://host.docker.internal:8788
 ```
 
 See `.dev.vars` (created during deploy setup — `docs/deploy.md`) for the full env var list.
@@ -173,7 +173,10 @@ See [`docs/local-testing.md`](docs/local-testing.md) for the full integration te
 
 ## Deploying to production
 
-See [`docs/deploy.md`](docs/deploy.md) for the full Cloudflare + Restate Cloud deployment guide.
+See [`docs/deploy.md`](docs/deploy.md) for remote D1 verification, immutable
+workflow endpoints and authenticated readiness. Production rollout remains blocked
+on the operator-owned remote/cutover gates in #61; local verification does not
+authorize deployment to live traffic.
 
 ## Project layout
 

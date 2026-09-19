@@ -5,20 +5,25 @@ Plain SQL files, one schema-change per file, applied in lexicographic order.
 The same files are applied by:
 - **Local dev (sqlx):** `sqlx migrate run --source migrations/ --database-url sqlite:./dev.sqlite`
   - sqlx tracks applied migrations in a table called `_sqlx_migrations`.
-- **Production (Cloudflare D1):** `wrangler d1 migrations apply ghinvite --remote`
+- **Local D1 simulation:** `wrangler d1 migrations apply DB --local --config wrangler/web.toml`
+- **Remote (Cloudflare D1):** `wrangler d1 migrations apply DB --remote --config wrangler/web.toml`
   - wrangler tracks applied migrations in a table called `d1_migrations`.
 
 **These are different tables.** Migrations applied via one tool are invisible to the other.
 Treat the migration history as advisory only across backends; the schema itself is the source of truth.
+Follow the [remote migration and binding verification procedure](../docs/deploy.md#3-apply-and-verify-remote-database-migrations).
+Both Workers must bind the intended shared database UUID. Local success and a
+passing `/health` do not establish that the remote schema exists. Production
+rollout remains blocked on the operator-owned #61 gates.
 
 ## Foreign keys
 
-SQLite (and therefore D1) requires `PRAGMA foreign_keys = ON` per-connection to actually
-enforce `REFERENCES` constraints. The crate sets this in `SqliteConnectOptions::foreign_keys(true)`
-for sqlx, but **D1 connections set `foreign_keys = OFF` by default**. Plan 7 (D1 implementation)
-must issue `PRAGMA foreign_keys = ON;` as the first statement on every connection.
-
-Without this PRAGMA, FK violations silently succeed and orphan rows accumulate.
+Native SQLite sets `SqliteConnectOptions::foreign_keys(true)` to enforce
+`REFERENCES` constraints. [D1 enforces foreign keys by default](https://developers.cloudflare.com/d1/sql-api/foreign-keys/),
+equivalent to `PRAGMA foreign_keys = ON`; queries/migrations run in implicit
+transactions and cannot toggle that enforcement. If a migration needs temporary
+deferral, use `PRAGMA defer_foreign_keys = ON` and resolve violations before the
+transaction ends. Verify deployed data with `PRAGMA foreign_key_check`.
 
 ## Conventions
 
@@ -71,4 +76,4 @@ See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 2. Write `NNNN_purpose.sql` containing only `CREATE TABLE`, `CREATE INDEX`, `ALTER TABLE ADD COLUMN`, and `DROP INDEX` statements that are SQLite-portable.
 3. **Avoid altering existing CHECK constraints** — SQLite cannot do this without a 12-step `ALTER TABLE` recreate. If unavoidable, write the recreate dance in plain SQL inside the migration file.
 4. Run `cargo test -p ghinvite-storage-sqlx` locally to verify migrations apply cleanly to a fresh in-memory DB.
-5. In Plan 7 (D1 deployment), `wrangler d1 migrations apply ghinvite --local` first; never go straight to `--remote`.
+5. Rehearse `wrangler d1 migrations apply DB --local --config wrangler/web.toml`, then the disposable remote D1 gate before the operator-owned production procedure.

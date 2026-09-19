@@ -114,4 +114,5 @@ two tabs, retry, reload, navigation and explicit editing. Real-Restate facade ca
 cover normalization, fresh-code resolution, projection outage, retained attempts,
 retry after revoke and requester confidentiality; the existing runtime cases cover
 deadlines, terminal replay, races and interrupted writes/sends. Both Worker targets
-are typechecked; actual Worker/D1 runtime acceptance remains #59.
+are typechecked; actual local Worker/D1 acceptance is covered by the
+[completed #59 gate](worker-admission-gate.md). Remote rollout remains blocked by #61.
