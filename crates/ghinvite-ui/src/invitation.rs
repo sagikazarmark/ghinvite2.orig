@@ -282,7 +282,7 @@ pub enum DeliveryStatus {
 }
 
 impl DeliveryStatus {
-    fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::Approved => "Approved — awaiting dispatch",
             Self::Planned => "Planned — awaiting dispatch",

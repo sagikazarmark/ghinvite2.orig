@@ -202,6 +202,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                     div { class: "grid gap-3 border-b border-base-300 px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(10rem,14rem)_minmax(0,1fr)_auto] lg:items-start",
                                         div { class: "min-w-0",
                                             p { class: "truncate text-sm font-medium", "@{requester}" }
+                                            a { class: "link text-sm", href: "/console/accounts/{login}/requests/{rid}", "Request details" }
                                             p { class: "mt-0.5 text-xs text-muted", "Requested at {created}" }
                                         }
                                         div { class: "min-w-0 space-y-2",

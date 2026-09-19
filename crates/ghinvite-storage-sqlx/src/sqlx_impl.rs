@@ -860,6 +860,28 @@ impl Storage for SqlxStorage {
         .map_err(crate::to_db_err)?;
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
+    async fn request_history(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+        before: Option<ghinvite_core::storage::request_history::Boundary>,
+    ) -> Result<ghinvite_core::storage::request_history::Page> {
+        use ghinvite_core::storage::request_history as history;
+        let rows: Vec<crate::records::InvitationRequestRow> =
+            sqlx::query_as(&history::query(before))
+                .bind(u64_to_i64(account_id))
+                .bind(link_id.to_string())
+                .bind(before.map(history::boundary_time))
+                .bind(before.map(|b| b.id.to_string()))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(crate::to_db_err)?;
+        Ok(history::page(
+            rows.into_iter()
+                .map(|r| r.try_into_domain())
+                .collect::<Result<_>>()?,
+        ))
+    }
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
         sqlx::query(
             r#"
@@ -1942,6 +1964,37 @@ mod tests {
                         assert!(plan.contains("<expr>"), "{plan}");
                     }
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_history_seeks_index_without_sorting_history() {
+        use ghinvite_core::storage::request_history::{self, Boundary};
+        let s = SqlxStorage::in_memory().await.unwrap();
+        for before in [
+            None,
+            Some(Boundary {
+                admitted_at: dt("2026-01-01T00:00:00Z"),
+                id: RequestId::new(),
+            }),
+        ] {
+            let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                request_history::query(before)
+            ))
+            .bind(42)
+            .bind(InvitationLinkId::new().to_string())
+            .bind(before.map(request_history::boundary_time))
+            .bind(before.map(|b| b.id.to_string()))
+            .fetch_all(&s.pool)
+            .await
+            .unwrap();
+            let plan = format!("{plan:?}");
+            assert!(plan.contains("idx_request_history"), "{plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+            if before.is_some() {
+                assert!(plan.contains("<expr><?"), "{plan}");
             }
         }
     }

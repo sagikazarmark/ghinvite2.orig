@@ -6,6 +6,7 @@
     "build": "node build.mjs",
     "test": "npm run build && node smoke.mjs",
     "test:queue": "node build.mjs && node decision-queue.mjs",
+    "test:history": "node build.mjs && node request-history.mjs",
     "test:deadlines": "node build.mjs && node deadlines.mjs && STALL_PHASE=body node deadlines.mjs",
     "test:admission": "node build.mjs && node build.mjs workflows && cargo build --locked -p ghinvite-github --features test-stub --example stub && node admission.mjs",
     "test:settlement": "SETTLEMENT_ONLY=1 npm run test:admission",

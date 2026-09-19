@@ -43,6 +43,12 @@ Do not replace it with SQLite `datetime`/`julianday` (millisecond precision), or
 raw text sorting. Keep the expression in `storage::audit_read` and 0003 identical.
 Non-UTC offsets are not a format emitted by either audit writer.
 
+Migration 0011 applies the same timestamp normalization to request admission
+history, indexed by `(invitation_link_id, normalized created_at DESC, id DESC)`.
+Keep its expression identical to `storage::request_history`. Both storage
+adapters use that shared query with an exclusive cursor and a 26-row limit (25
+displayed plus one lookahead); account authorization is independent of the cursor.
+
 The scalar seek bound plus exclusive `(time key, id)` boundary uses these indexes
 without a temporary sort. SQLite tests assert query-plan index/seek use; targeted
 D1 runtime tests execute the same query builder, including mixed encodings:

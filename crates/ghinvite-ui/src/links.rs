@@ -594,6 +594,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                     }
                     div { class: "flex items-center gap-3",
                         span { class: "{badge_class}", "{badge_label}" }
+                        a { class: "btn btn-outline btn-sm", href: "/console/accounts/{login}/links/{id_str}/requests", "Request history" }
                         a { class: "btn btn-outline btn-sm", href: "/console/accounts/{login}/links/{id_str}/edit", "Edit details" }
                     }
                 }

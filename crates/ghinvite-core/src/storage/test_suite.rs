@@ -104,11 +104,96 @@ where
     scenario_request_uses_and_uniqueness(make_storage().await).await;
     scenario_request_decision(make_storage().await).await;
     scenario_recorded_request_deadlines(make_storage().await).await;
+    scenario_request_history(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
     scenario_audit_appends(make_storage().await).await;
     scenario_audit_pages(make_storage().await).await;
     scenario_timestamp_precision(make_storage().await).await;
     scenario_delivery_audit(make_storage().await).await;
+}
+
+/// Equal timestamps, mixed precision, terminal rows and foreign cursors must not
+/// skip, duplicate or disclose records while traversing bounded pages.
+pub async fn scenario_request_history<S: Storage>(s: S) {
+    use super::request_history::Boundary;
+    s.insert_installation(&sample_account(1, 9001, "acme"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(701, "admin")).await.unwrap();
+    let link = sample_link(9001, 1, 701, 900);
+    s.insert_invitation_link(&link).await.unwrap();
+    assert!(
+        s.request_history(9001, link.id, None)
+            .await
+            .unwrap()
+            .requests
+            .is_empty()
+    );
+    let mut ids = Vec::new();
+    for i in 0..52 {
+        let mut request = sample_request(link.id, 701);
+        request.id = RequestId::from_ulid(ulid::Ulid::from(i + 1));
+        request.state = match i % 4 {
+            0 => RequestState::Approved,
+            1 => RequestState::Declined,
+            2 => RequestState::Expired,
+            _ => RequestState::Cancelled,
+        };
+        request.created_at = dt(if i == 51 {
+            "2026-05-04T12:30:00.000000001Z"
+        } else {
+            "2026-05-04T12:30:00Z"
+        });
+        s.insert_invitation_request_and_increment_uses(&request)
+            .await
+            .unwrap();
+        ids.push(request.id);
+    }
+    ids.reverse();
+    let first = s.request_history(9001, link.id, None).await.unwrap();
+    assert_eq!(
+        first.requests.iter().map(|r| r.id).collect::<Vec<_>>(),
+        ids[..25]
+    );
+    let second = s.request_history(9001, link.id, first.older).await.unwrap();
+    assert_eq!(
+        second.requests.iter().map(|r| r.id).collect::<Vec<_>>(),
+        ids[25..50]
+    );
+    let third = s
+        .request_history(9001, link.id, second.older)
+        .await
+        .unwrap();
+    assert_eq!(
+        third.requests.iter().map(|r| r.id).collect::<Vec<_>>(),
+        ids[50..]
+    );
+    assert!(third.older.is_none());
+    assert!(
+        s.request_history(9999, link.id, first.older)
+            .await
+            .unwrap()
+            .requests
+            .is_empty()
+    );
+    assert!(
+        s.request_history(9001, InvitationLinkId::new(), None)
+            .await
+            .unwrap()
+            .requests
+            .is_empty()
+    );
+    assert!(
+        s.request_history(
+            9001,
+            link.id,
+            Some(Boundary::from(third.requests.last().unwrap()))
+        )
+        .await
+        .unwrap()
+        .requests
+        .is_empty()
+    );
 }
 
 /// Historical deadlines survive every request read, including after a decision.
