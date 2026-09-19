@@ -1,13 +1,21 @@
 # crates/ghinvite-workflows
 
-Restate handler services for ghinvite. The `_v1` services own every durable
-state change in the system: `InvitationRequestV1` and the request lifecycle,
-`GithubCreateV1` and settlement, `AccountInstallationV1` and
-`InstallationProjectionV1`, and the projection service they all write through.
-The services they replaced — `Installation`, `InvitationLink`,
-`InvitationRequest`, `GithubInvitation`, `Reconcile` — stay bound for
-deployments pinned before the cutover. Built on the upstream
-`restate-sdk = "0.12"` Rust SDK (patched; see the workspace `Cargo.toml`).
+Restate handler services for ghinvite. Which services own durable state depends
+on the endpoint mode (`GHINVITE_ADMISSION_MODE`):
+
+- **`legacy` (the default)** — `build_endpoint` binds `InvitationLink`,
+  `InvitationRequest`, `GithubInvitation` and `Reconcile` as their real
+  implementations, and they still own their state. Installations are the
+  exception: they cut over ahead of the rest, so `AccountInstallationV1` and
+  `InstallationProjectionV1` own them in both modes.
+- **`authoritative`** — `build_cutover_endpoint` gives the `_v1` services
+  ownership of every durable state change: `InvitationRequestV1` and the request
+  lifecycle, `GithubCreateV1` and settlement, and the projection service they all
+  write through. The four writers above stay bound only for deployments pinned
+  before the cutover.
+
+Built on the upstream `restate-sdk = "0.12"` Rust SDK (patched; see the
+workspace `Cargo.toml`).
 
 The library contains handler logic shared by the native binary and the
 `ghinvite-workflows-worker` entry point. Native tests use `SqlxStorage`; the
@@ -50,13 +58,18 @@ the native endpoint and registering it with Restate.
 
 ## Architecture notes
 
-Each handler delegates to a pure-async function (e.g. `create_logic`,
-`project_installation`). The `#[restate_sdk::object|service|workflow]` impl
-wraps the pure function inside `ctx.run(|| async {...}).name("step_name").await`
-so Restate captures it as a durable step. Pure functions take `&AppState`
-(`Arc<dyn Storage>` + `Arc<InstallationClient>`) and return a failure their
-caller can classify — usually `Result<T, HandlerError>`. Unit tests call them
-directly, without a Restate runtime.
+A handler that owns a storage effect delegates it to a pure-async function
+(e.g. `create_logic`, `project_installation`). The
+`#[restate_sdk::object|service|workflow]` impl wraps that function inside
+`ctx.run(|| async {...}).name("step_name").await` so Restate captures it as a
+durable step. Pure functions take `&AppState` (`Arc<dyn Storage>` +
+`Arc<InstallationClient>`) and return a failure their caller can classify —
+usually `Result<T, HandlerError>`. Unit tests call them directly, without a
+Restate runtime.
+
+Handlers that only route do not follow this shape: `Installation` works on its
+`ObjectContext` directly (`ctx.get`/`ctx.set`, then a call to the account
+object) and is covered by the integration tests rather than by unit tests.
 
 `HandlerError::is_terminal()` distinguishes failures Restate should NOT retry
 (constraint violations, 4xx) from transient ones (5xx, network) — the

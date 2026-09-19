@@ -1,19 +1,31 @@
-//! Restate handler services for ghinvite. The `_v1` services own every durable
-//! state change: [`admission_v1`] and [`request_lifecycle_v1`] for invitation
-//! requests, [`delivery_v1`] and [`settlement_v1`] for GitHub invitations,
-//! [`availability`] for installations, and [`projection_v1`] for the queryable
-//! records all of them project into.
+//! Restate handler services for ghinvite. Which services own durable state
+//! depends on which of the two endpoints is bound.
 //!
-//! The services they replaced — [`installation::Installation`],
-//! [`invitation_link::InvitationLink`], [`invitation_request::InvitationRequest`],
-//! [`github_invitation::GithubInvitation`], [`reconcile::Reconcile`] — stay bound:
-//! deployments pinned before the cutover still address them, and their handlers
-//! either forward to the current authority or answer 410 (see `obsolete_writers`).
+//! [`build_endpoint`] is the pre-cutover default (`GHINVITE_ADMISSION_MODE`
+//! unset or `legacy`). It binds [`invitation_link::InvitationLink`],
+//! [`invitation_request::InvitationRequest`],
+//! [`github_invitation::GithubInvitation`] and [`reconcile::Reconcile`] as their
+//! real implementations, so those still own the state they always did.
+//! Installations are the exception: they were cut over ahead of the rest, so
+//! both endpoints route them through [`availability::AccountInstallationV1`] and
+//! [`availability::InstallationProjectionV1`].
 //!
-//! Each handler journals its work through `ctx.run`, delegating to a function
-//! over [`state::AppState`] that a unit test can call without a Restate runtime.
-//! Tests that need the real thing run against the local `restate-server`
-//! (compose.yaml) behind the `integration` feature; see `scripts/test-restate.sh`.
+//! [`build_cutover_endpoint`] (`GHINVITE_ADMISSION_MODE=authoritative`) is the
+//! shape after cutover. There the `_v1` services own every durable state change
+//! — [`admission_v1`] and [`request_lifecycle_v1`] for invitation requests,
+//! [`delivery_v1`] and [`settlement_v1`] for GitHub invitations,
+//! [`projection_v1`] for the queryable records — and the four writers above stay
+//! bound only for deployments pinned before the cutover, forwarding to the
+//! current authority or answering 410 (see `obsolete_writers`).
+//!
+//! A handler that owns a storage effect journals it through `ctx.run`,
+//! delegating to a function over [`state::AppState`] that a unit test can call
+//! without a Restate runtime. A handler that only routes works on its
+//! `ObjectContext` directly — [`installation::Installation`] resolves an account
+//! and calls the account object, and keeps no state of its own beyond that
+//! binding. Tests that need the real runtime go against the local
+//! `restate-server` (compose.yaml) behind the `integration` feature; see
+//! `scripts/test-restate.sh`.
 
 // SDK 0.12 retains the trait-based service API. Preserve these deployed contracts
 // during the clock compatibility upgrade; migrating macro style is separate work.
