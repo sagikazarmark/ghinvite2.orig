@@ -136,8 +136,11 @@ production capacity or billing estimates. The runner prints measurements each ru
 6. GitHub stub results only establish the consumed fixture contract. They make no
    live GitHub exactly-once, authorization or webhook availability guarantee.
 
-Keep #59 open until the remaining production-target checks have reproducible
-results and an explicit affirmative rollout verdict.
+#59 is closed for its completed local gate; the maintainer moved these deferred
+production-target checks to #61. Keep the blocked rollout verdict until #61 has
+reproducible results and an explicit affirmative verdict. Use the
+[deployment guide](deploy.md) for remote migrations, immutable endpoint registration
+and readiness ordering.
 
 ## Verification commands
 

@@ -3,14 +3,16 @@
 Native cutover tooling and endpoint/routing activation are now available under
 [#58's maintenance procedure](admission-cutover.md). The original isolated-path
 description below documents the earlier slices; defaults remain legacy until an
-operator performs cutover. Worker/D1 activation is still gated by #59.
+operator performs cutover. #59 completed local Worker/D1 verification; production
+activation remains blocked by the operator-owned remote gates in #61.
 
 `ghinvite_workflows::admission_v1::bind(builder)` registers `InvitationLinkV1`
-with lazy state. The existing native/Worker endpoint and browser writers still
-use the legacy services. An isolated endpoint must also bind implementations of
+with lazy state. The default native/Worker endpoint and browser writers use legacy
+services; `authoritative` mode now selects the integrated cutover path. An isolated
+endpoint must also bind implementations of
 the `InvitationProjectionV1` and `InvitationRequestV1` consumer contracts.
 `projection_v1::bind(builder, Arc<dyn ProjectionStorage>)` supplies the durable
-SQLx/D1 projector (#54); the request lifecycle consumer is tracked in #55.
+SQLx/D1 projector (#54); #55 supplies the request lifecycle consumer.
 Do not enable legacy and authoritative writers for the
 same link before #58's cutover.
 
@@ -113,8 +115,9 @@ consumers. Tests verify creation conflicts/guardrails, final-use races, pending
 and approved suppression, revoke ordering, queued expiry, interruption around
 the full decision and every touched write/send, consumer outage, canonical input
 and confidentiality, cross-link operation reuse, actual runtime retention cleanup,
-and bounded transport after accumulating retained history. Worker/D1 verification
-is deferred to #59.
+and bounded transport after accumulating retained history. Local actual Worker/D1
+verification is covered by the [completed #59 gate](worker-admission-gate.md);
+remote rollout verification remains #61.
 
 ## Durable query projection (#54)
 
@@ -190,4 +193,5 @@ late historical audit, conflicting identities/content with atomic rollback,
 parent recovery, SQL failure/repair, retained invariant failures, and lost commit
 acknowledgement before Restate run completion. The real runtime binds production
 admission and projector code; a fixture receives #55's workflow startup.
-Actual Worker/D1 runtime verification remains explicitly deferred to #59.
+Actual local Worker/D1 runtime verification is covered by the
+[Worker gate](worker-admission-gate.md); remote rollout verification remains #61.

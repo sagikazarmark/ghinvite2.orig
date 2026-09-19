@@ -1,10 +1,12 @@
 # Authoritative admission writer cutover (#58)
 
 This is a **native maintenance procedure**, rehearsed with disposable SQLite and
-Restate 1.7.9. It does not authorize a live deployment. Worker/D1 rollout remains
-blocked on #59: actual clock/endpoint execution, D1 batch/fence conformance,
-identity verification, routing, capacity, backup/restore, and deployment isolation
-must be exercised there. Native binaries retain `legacy` as their default mode.
+Restate 1.7.9. It does not authorize a live deployment. #58/#59 are complete for
+native tooling and local actual Worker/D1 bindings. Production rollout remains
+blocked on #61: remote identity verification, routing, capacity, live D1
+export/fence/adoption, backup/restore, and deployment isolation. Native binaries
+retain `legacy` as their default mode. Follow the [deployment order](deploy.md#rollout-status-and-order)
+for the remote rehearsal and rollout evidence.
 
 The [#59 Worker/D1 gate](worker-admission-gate.md) now rehearses the adopted
 checkpoint/import path against actual local bindings. Its remote deployment and
@@ -17,8 +19,8 @@ Only trusted operators can reach migration handlers. Private ingress and the
 maintenance window are mandatory. Migration IDs/checksums detect accidental
 conflicts; they are not credentials or proof of infrastructure isolation.
 
-`GHINVITE_ADMISSION_MODE=maintenance` on the native web binary closes all dynamic
-routes, including automatic webhook ingress, with 503/Retry-After. Stop scheduled
+`GHINVITE_ADMISSION_MODE=maintenance` on web closes dynamic routes other than
+`/health`, including automatic webhook ingress, with 503/Retry-After. Stop scheduled
 reconciliation and other producers too. Let short commands complete. Inventory
 the still-pending workflows and every pinned deployment before stopping endpoints.
 
