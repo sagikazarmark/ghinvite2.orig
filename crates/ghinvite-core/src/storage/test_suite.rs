@@ -152,6 +152,10 @@ pub async fn scenario_request_history<S: Storage>(s: S) {
     ids.reverse();
     let first = s.request_history(9001, link.id, None).await.unwrap();
     assert_eq!(
+        first.requester_logins.get(&701).map(String::as_str),
+        Some("admin")
+    );
+    assert_eq!(
         first.requests.iter().map(|r| r.id).collect::<Vec<_>>(),
         ids[..25]
     );

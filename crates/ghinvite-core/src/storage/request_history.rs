@@ -24,41 +24,59 @@ impl From<&InvitationRequest> for Boundary {
 #[derive(Clone, Debug)]
 pub struct Page {
     pub requests: Vec<InvitationRequest>,
+    /// Optional profile enrichment fetched with the bounded page, keyed by the
+    /// immutable requester ID. Missing profiles do not hide historical requests.
+    pub requester_logins: std::collections::HashMap<u64, String>,
     pub older: Option<Boundary>,
 }
 
-// Match migration 0011. Preserve nanoseconds and equivalent Z/+00:00 encodings.
-const TIME_KEY: &str = "(substr(created_at,1,19) || '.' || substr(CASE WHEN substr(created_at,20,1) = '.' THEN replace(replace(substr(created_at,21),'+00:00',''),'Z','') ELSE '' END || '000000000',1,9))";
+// Match migration 0011. A single fixed-width time/ID key seeks past even a
+// large equal-timestamp prefix; SQLite tuple comparisons only seek the time.
+const SEEK_KEY: &str = "(substr(created_at,1,19) || '.' || substr(CASE WHEN substr(created_at,20,1) = '.' THEN replace(replace(substr(created_at,21),'+00:00',''),'Z','') ELSE '' END || '000000000',1,9) || '/' || id)";
 
-pub fn boundary_time(boundary: Boundary) -> String {
-    boundary
+pub fn boundary_key(boundary: Boundary) -> String {
+    let time = boundary
         .admitted_at
         .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
         .trim_end_matches('Z')
-        .to_owned()
+        .to_owned();
+    format!("{time}/{}", boundary.id)
 }
 
-/// Bind account, link, nullable time key, nullable request ID. Fetch one extra
+/// Bind account, link, nullable seek key. Fetch one extra
 /// row to determine whether another page exists without a count or history scan.
 pub fn query(before: Option<Boundary>) -> String {
     let bound = if before.is_some() {
-        format!("{TIME_KEY} <= ?3 AND ({TIME_KEY}, id) < (?3, ?4)")
+        format!("{SEEK_KEY} < ?3")
     } else {
-        "?3 IS NULL AND ?4 IS NULL".into()
+        "?3 IS NULL".into()
     };
     format!(
-        "SELECT id, invitation_link_id, requester_id, justification, state, decided_by, decided_at, decline_reason, created_at, decision_deadline FROM invitation_requests WHERE invitation_link_id = ?2 AND EXISTS (SELECT 1 FROM invitation_links WHERE id = ?2 AND account_id = ?1) AND {bound} ORDER BY {TIME_KEY} DESC, id DESC LIMIT {}",
+        "SELECT id, invitation_link_id, requester_id, justification, state, decided_by, decided_at, decline_reason, created_at, decision_deadline, (SELECT login FROM users WHERE user_id = invitation_requests.requester_id) AS requester_login FROM invitation_requests WHERE invitation_link_id = ?2 AND EXISTS (SELECT 1 FROM invitation_links WHERE id = ?2 AND account_id = ?1) AND {bound} ORDER BY {SEEK_KEY} DESC LIMIT {}",
         PAGE_SIZE + 1
     )
 }
 
-pub fn page(mut requests: Vec<InvitationRequest>) -> Page {
-    let more = requests.len() > PAGE_SIZE;
-    requests.truncate(PAGE_SIZE);
+pub fn page(mut rows: Vec<(InvitationRequest, Option<String>)>) -> Page {
+    let more = rows.len() > PAGE_SIZE;
+    rows.truncate(PAGE_SIZE);
+    let requester_logins = rows
+        .iter()
+        .filter_map(|(request, login)| {
+            login
+                .as_ref()
+                .map(|login| (request.requester_id, login.clone()))
+        })
+        .collect();
+    let requests: Vec<_> = rows.into_iter().map(|(request, _)| request).collect();
     let older = if more {
         requests.last().map(Boundary::from)
     } else {
         None
     };
-    Page { requests, older }
+    Page {
+        requests,
+        older,
+        requester_logins,
+    }
 }

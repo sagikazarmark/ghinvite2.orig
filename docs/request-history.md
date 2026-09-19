@@ -15,6 +15,11 @@ whose owning link cannot be established are concealed. Both pages are private,
 non-cacheable reads. Requester profiles are optional enrichment; immutable user
 IDs remain visible when a profile cannot be loaded.
 
+History loads requester logins in its single bounded SQL statement. Its index
+uses a fixed-width normalized-time/ID key, so deep pages seek past even large
+equal-timestamp groups. A database-work regression checks a 10,000-row group;
+query-count coverage checks that profile enrichment adds no round trips.
+
 Details show projected admission/deadline/decision facts, admin-only justification
 and decline reason, and the owning link's immutable repository scope and
 permission. Delivery receipts and later GitHub invitation lifecycle records are

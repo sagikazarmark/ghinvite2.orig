@@ -44,10 +44,14 @@ raw text sorting. Keep the expression in `storage::audit_read` and 0003 identica
 Non-UTC offsets are not a format emitted by either audit writer.
 
 Migration 0011 applies the same timestamp normalization to request admission
-history, indexed by `(invitation_link_id, normalized created_at DESC, id DESC)`.
+history, indexed by `(invitation_link_id, normalized-time/ID DESC)`. The single
+fixed-width key seeks past large equal-timestamp groups without scanning their
+earlier IDs.
 Keep its expression identical to `storage::request_history`. Both storage
 adapters use that shared query with an exclusive cursor and a 26-row limit (25
 displayed plus one lookahead); account authorization is independent of the cursor.
+Requester logins are optional enrichment in that same statement, with indexed
+user-ID lookups for the bounded page rather than separate per-request queries.
 
 The scalar seek bound plus exclusive `(time key, id)` boundary uses these indexes
 without a temporary sort. SQLite tests assert query-plan index/seek use; targeted

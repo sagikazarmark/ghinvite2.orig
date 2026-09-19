@@ -64,6 +64,8 @@ try {
     const html = await get(path);
     const page = [...html.matchAll(/href="\/console\/accounts\/octocat\/requests\/([A-Z0-9]+)"/g)].map(m => m[1]);
     assert.equal(page.length, size);
+    assert.equal((html.match(/@octocat · GitHub user ID 42/g) || []).length, size,
+      'requester profiles are included by the D1 history query');
     found.push(...page);
     path = html.match(/href="([^"]+\?before=[^"]+)"/)?.[1];
   }
@@ -77,6 +79,8 @@ try {
   assert.doesNotMatch(await get(`/console/accounts/octocat/requests/${ids[52]}`, 404), /private decision/);
   await get(`/console/accounts/octocat/links/${foreign}/requests`, 404);
   await db.prepare("UPDATE users SET last_seen_at='broken'").run();
+  assert.match(await get(base), /@octocat · GitHub user ID 42/,
+    'history enrichment reads the display login without loading unrelated profile fields');
   assert.match(await get(detail), /GitHub user ID 42 · Profile unavailable/);
   await db.exec('DROP TABLE delivery_outcomes');
   assert.match(await get(detail), /Delivery information unavailable/);

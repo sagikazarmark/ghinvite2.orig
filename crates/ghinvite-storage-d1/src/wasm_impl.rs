@@ -1032,6 +1032,12 @@ impl Storage for D1Storage {
         before: Option<ghinvite_core::storage::request_history::Boundary>,
     ) -> Result<ghinvite_core::storage::request_history::Page> {
         use ghinvite_core::storage::request_history as history;
+        #[derive(serde::Deserialize)]
+        struct Row {
+            #[serde(flatten)]
+            request: InvitationRequestRow,
+            requester_login: Option<String>,
+        }
         wasm_send(async {
             let rows = self
                 .db
@@ -1040,21 +1046,18 @@ impl Storage for D1Storage {
                     JsValue::from_f64(account_id as f64),
                     JsValue::from_str(&link_id.to_string()),
                     before
-                        .map(|b| JsValue::from_str(&history::boundary_time(b)))
-                        .unwrap_or(JsValue::NULL),
-                    before
-                        .map(|b| JsValue::from_str(&b.id.to_string()))
+                        .map(|b| JsValue::from_str(&history::boundary_key(b)))
                         .unwrap_or(JsValue::NULL),
                 ])
                 .map_err(bind_err)?
                 .all()
                 .await
                 .map_err(classify_d1_error)?
-                .results::<InvitationRequestRow>()
+                .results::<Row>()
                 .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
             Ok(history::page(
                 rows.into_iter()
-                    .map(|r| r.try_into_domain())
+                    .map(|r| Ok((r.request.try_into_domain()?, r.requester_login)))
                     .collect::<Result<_>>()?,
             ))
         })

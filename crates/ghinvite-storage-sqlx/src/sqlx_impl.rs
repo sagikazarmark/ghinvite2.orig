@@ -867,18 +867,22 @@ impl Storage for SqlxStorage {
         before: Option<ghinvite_core::storage::request_history::Boundary>,
     ) -> Result<ghinvite_core::storage::request_history::Page> {
         use ghinvite_core::storage::request_history as history;
-        let rows: Vec<crate::records::InvitationRequestRow> =
-            sqlx::query_as(&history::query(before))
-                .bind(u64_to_i64(account_id))
-                .bind(link_id.to_string())
-                .bind(before.map(history::boundary_time))
-                .bind(before.map(|b| b.id.to_string()))
-                .fetch_all(&self.pool)
-                .await
-                .map_err(crate::to_db_err)?;
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            #[sqlx(flatten)]
+            request: crate::records::InvitationRequestRow,
+            requester_login: Option<String>,
+        }
+        let rows: Vec<Row> = sqlx::query_as(&history::query(before))
+            .bind(u64_to_i64(account_id))
+            .bind(link_id.to_string())
+            .bind(before.map(history::boundary_key))
+            .fetch_all(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
         Ok(history::page(
             rows.into_iter()
-                .map(|r| r.try_into_domain())
+                .map(|r| Ok((r.request.try_into_domain()?, r.requester_login)))
                 .collect::<Result<_>>()?,
         ))
     }
@@ -1985,8 +1989,7 @@ mod tests {
             ))
             .bind(42)
             .bind(InvitationLinkId::new().to_string())
-            .bind(before.map(request_history::boundary_time))
-            .bind(before.map(|b| b.id.to_string()))
+            .bind(before.map(request_history::boundary_key))
             .fetch_all(&s.pool)
             .await
             .unwrap();
@@ -1997,6 +2000,78 @@ mod tests {
                 assert!(plan.contains("<expr><?"), "{plan}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn request_history_deep_equal_timestamp_page_has_bounded_database_work() {
+        use ghinvite_core::storage::request_history::Boundary;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let s = SqlxStorage::in_memory().await.unwrap();
+        s.insert_installation(&sample_account(1, 42, "acme"))
+            .await
+            .unwrap();
+        s.upsert_user(&sample_user(7, "requester")).await.unwrap();
+        let link = sample_link(42, 1, 7, 1);
+        s.insert_invitation_link(&link).await.unwrap();
+        // A large imported history can share one admission timestamp. The deep
+        // cursor must seek past that prefix, not examine it row by row.
+        sqlx::query("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at) SELECT printf('%026d',i),?,7,'declined','2026-01-01T00:00:00Z' FROM n")
+            .bind(link.id.to_string()).execute(&s.pool).await.unwrap();
+        let work = Arc::new(AtomicUsize::new(0));
+        let count = work.clone();
+        let mut connection = s.pool.acquire().await.unwrap();
+        connection
+            .lock_handle()
+            .await
+            .unwrap()
+            .set_progress_handler(100, move || {
+                count.fetch_add(100, Ordering::Relaxed);
+                true
+            });
+        drop(connection);
+        let page = s
+            .request_history(
+                42,
+                link.id,
+                Some(Boundary {
+                    admitted_at: dt("2026-01-01T00:00:00Z"),
+                    id: "00000000000000000000000100".parse().unwrap(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.requests.len(), 25);
+        assert_eq!(
+            page.requests[0].id.to_string(),
+            "00000000000000000000000099"
+        );
+        assert!(
+            work.load(Ordering::Relaxed) < 10000,
+            "page scanned the timestamp prefix: {} VM operations",
+            work.load(Ordering::Relaxed)
+        );
+        assert_eq!(page.requester_logins.len(), 1);
+        assert_eq!(
+            page.requester_logins.get(&7).map(String::as_str),
+            Some("requester")
+        );
+        let mut connection = s.pool.acquire().await.unwrap();
+        connection
+            .lock_handle()
+            .await
+            .unwrap()
+            .remove_progress_handler();
+        sqlx::raw_sql("PRAGMA foreign_keys=OFF; DELETE FROM users;")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        let missing = s.request_history(42, link.id, None).await.unwrap();
+        assert_eq!(missing.requests.len(), 25);
+        assert!(missing.requester_logins.is_empty());
     }
 
     #[tokio::test]

@@ -32,8 +32,13 @@ fn cursor(uri: &Uri, link: InvitationLinkId) -> Option<Boundary> {
 }
 
 async fn user_label(state: &AppState, id: u64) -> String {
-    match state.storage.get_user(id).await.ok().flatten() {
-        Some(user) => format!("@{} · GitHub user ID {id}", user.login),
+    let user = state.storage.get_user(id).await.ok().flatten();
+    profile_label(id, user.as_ref().map(|user| user.login.as_str()))
+}
+
+fn profile_label(id: u64, login: Option<&str>) -> String {
+    match login {
+        Some(login) => format!("@{login} · GitHub user ID {id}"),
         None => format!("GitHub user ID {id} · Profile unavailable"),
     }
 }
@@ -87,7 +92,12 @@ pub(super) async fn history(
             }
             let mut rows = Vec::with_capacity(page.requests.len());
             for request in page.requests {
-                let requester = user_label(&state, request.requester_id).await;
+                let requester = profile_label(
+                    request.requester_id,
+                    page.requester_logins
+                        .get(&request.requester_id)
+                        .map(String::as_str),
+                );
                 rows.push(HistoryRow { request, requester });
             }
             (StatusCode::OK, Some(rows))
