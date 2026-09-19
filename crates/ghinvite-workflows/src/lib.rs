@@ -1,13 +1,19 @@
-//! Restate handler services for ghinvite. Five services own every durable
-//! state change: [`installation::Installation`] (Virtual Object),
-//! [`invitation_link::InvitationLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
-//! (Workflow), [`github_invitation::GithubInvitation`] (Virtual Object),
-//! [`reconcile::Reconcile`] (Service).
+//! Restate handler services for ghinvite. The `_v1` services own every durable
+//! state change: [`admission_v1`] and [`request_lifecycle_v1`] for invitation
+//! requests, [`delivery_v1`] and [`settlement_v1`] for GitHub invitations,
+//! [`availability`] for installations, and [`projection_v1`] for the queryable
+//! records all of them project into.
 //!
-//! Each handler delegates to a pure-async function that takes [`state::AppState`]
-//! and returns [`error::HandlerError`]. Unit tests exercise the pure functions
-//! without a Restate runtime; full workflow integration tests against the local
-//! `restate-server` (compose.yaml) are deferred to Plan 8.
+//! The services they replaced — [`installation::Installation`],
+//! [`invitation_link::InvitationLink`], [`invitation_request::InvitationRequest`],
+//! [`github_invitation::GithubInvitation`], [`reconcile::Reconcile`] — stay bound:
+//! deployments pinned before the cutover still address them, and their handlers
+//! either forward to the current authority or answer 410 (see `obsolete_writers`).
+//!
+//! Each handler journals its work through `ctx.run`, delegating to a function
+//! over [`state::AppState`] that a unit test can call without a Restate runtime.
+//! Tests that need the real thing run against the local `restate-server`
+//! (compose.yaml) behind the `integration` feature; see `scripts/test-restate.sh`.
 
 // SDK 0.12 retains the trait-based service API. Preserve these deployed contracts
 // during the clock compatibility upgrade; migrating macro style is separate work.
@@ -92,7 +98,8 @@ pub fn build_cutover_endpoint(
     Ok(builder.build())
 }
 
-/// Build a fully-bound Restate endpoint with all five ghinvite services.
+/// Build the pre-cutover endpoint: the legacy writers still serving their own
+/// state alongside the installation services that replaced theirs.
 ///
 /// `identity_key` is the Restate Cloud identity public key
 /// (`publickeyv1_...`). When `Some`, the endpoint will reject any request not

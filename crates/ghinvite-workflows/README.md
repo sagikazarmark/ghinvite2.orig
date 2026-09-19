@@ -1,9 +1,13 @@
 # crates/ghinvite-workflows
 
-Restate handler services for ghinvite. Five services own every durable state
-change in the system: `Installation`, `InvitationLink`, `InvitationRequest`
-(workflow), `GithubInvitation`, `Reconcile`. Built on the upstream
-`restate-sdk = "0.10"` Rust SDK.
+Restate handler services for ghinvite. The `_v1` services own every durable
+state change in the system: `InvitationRequestV1` and the request lifecycle,
+`GithubCreateV1` and settlement, `AccountInstallationV1` and
+`InstallationProjectionV1`, and the projection service they all write through.
+The services they replaced — `Installation`, `InvitationLink`,
+`InvitationRequest`, `GithubInvitation`, `Reconcile` — stay bound for
+deployments pinned before the cutover. Built on the upstream
+`restate-sdk = "0.12"` Rust SDK (patched; see the workspace `Cargo.toml`).
 
 The library contains handler logic shared by the native binary and the
 `ghinvite-workflows-worker` entry point. Native tests use `SqlxStorage`; the
@@ -19,7 +23,9 @@ cargo test -p ghinvite-workflows
 
 Each handler module has tests in the same file:
 
-- `crates/ghinvite-workflows/src/installation.rs::tests`
+- `crates/ghinvite-workflows/src/availability.rs::tests`
+- `crates/ghinvite-workflows/src/delivery_v1.rs::tests`
+- `crates/ghinvite-workflows/src/settlement_v1.rs::tests`
 - `crates/ghinvite-workflows/src/invitation_link.rs::tests`
 - `crates/ghinvite-workflows/src/github_invitation.rs::tests`
 - `crates/ghinvite-workflows/src/invitation_request.rs::tests`
@@ -50,12 +56,13 @@ the native endpoint and registering it with Restate.
 
 ## Architecture notes
 
-Each handler delegates to a pure-async function (e.g. `onboard_logic`,
-`create_logic`). The `#[restate_sdk::object|service|workflow]` impl wraps the
-pure function inside `ctx.run(|| async {...}).name("step_name").await` so
-Restate captures it as a durable step. Pure functions take `&AppState`
-(`Arc<dyn Storage>` + `Arc<InstallationClient>`) and return
-`Result<T, HandlerError>`.
+Each handler delegates to a pure-async function (e.g. `create_logic`,
+`project_installation`). The `#[restate_sdk::object|service|workflow]` impl
+wraps the pure function inside `ctx.run(|| async {...}).name("step_name").await`
+so Restate captures it as a durable step. Pure functions take `&AppState`
+(`Arc<dyn Storage>` + `Arc<InstallationClient>`) and return a failure their
+caller can classify — usually `Result<T, HandlerError>`. Unit tests call them
+directly, without a Restate runtime.
 
 `HandlerError::is_terminal()` distinguishes failures Restate should NOT retry
 (constraint violations, 4xx) from transient ones (5xx, network) — the
