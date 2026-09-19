@@ -181,22 +181,6 @@ impl InvitationLinkJoinRow {
 }
 
 #[derive(FromRow, Debug)]
-pub struct InvitationLinkRepoRow {
-    pub invitation_link_id: String,
-    pub repo_id: i64,
-    pub repo_full_name: String,
-}
-
-impl InvitationLinkRepoRow {
-    pub fn into_domain(self) -> InvitationLinkRepo {
-        InvitationLinkRepo {
-            repo_id: self.repo_id as u64,
-            repo_full_name: self.repo_full_name,
-        }
-    }
-}
-
-#[derive(FromRow, Debug)]
 pub struct InvitationRequestRow {
     pub id: String,
     pub invitation_link_id: String,

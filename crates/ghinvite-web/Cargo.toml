@@ -14,7 +14,6 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
-cookie.workspace = true
 # Runs the shared form model's validators on the server (ADR 0001). Dioxus-free;
 # the `dioform` facade must never appear here.
 dioform-core.workspace = true
@@ -25,7 +24,6 @@ ghinvite-github.workspace = true
 ghinvite-ui.workspace = true
 hex = "0.4"
 octoevents.workspace = true
-parking_lot.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -57,7 +55,6 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync
 # feature pulls tokio's filesystem support, which the Workers build must not
 # see; on Workers, Static Assets serve `/assets/*` instead.
 tower-http = { workspace = true, features = ["fs"] }
-tower-sessions-sqlx-store.workspace = true
 
 # Wasm32 / Workers build: same axum, minus the `tokio` feature.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

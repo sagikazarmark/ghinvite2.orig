@@ -1,13 +1,31 @@
-//! Restate handler services for ghinvite. Five services own every durable
-//! state change: [`installation::Installation`] (Virtual Object),
-//! [`invitation_link::InvitationLink`] (Virtual Object), [`invitation_request::InvitationRequest`]
-//! (Workflow), [`github_invitation::GithubInvitation`] (Virtual Object),
-//! [`reconcile::Reconcile`] (Service).
+//! Restate handler services for ghinvite. Which services own durable state
+//! depends on which of the two endpoints is bound.
 //!
-//! Each handler delegates to a pure-async function that takes [`state::AppState`]
-//! and returns [`error::HandlerError`]. Unit tests exercise the pure functions
-//! without a Restate runtime; full workflow integration tests against the local
-//! `restate-server` (compose.yaml) are deferred to Plan 8.
+//! [`build_endpoint`] is the pre-cutover default (`GHINVITE_ADMISSION_MODE`
+//! unset or `legacy`). It binds [`invitation_link::InvitationLink`],
+//! [`invitation_request::InvitationRequest`],
+//! [`github_invitation::GithubInvitation`] and [`reconcile::Reconcile`] as their
+//! real implementations, so those still own the state they always did.
+//! Installations are the exception: they were cut over ahead of the rest, so
+//! both endpoints route them through [`availability::AccountInstallationV1`] and
+//! [`availability::InstallationProjectionV1`].
+//!
+//! [`build_cutover_endpoint`] (`GHINVITE_ADMISSION_MODE=authoritative`) is the
+//! shape after cutover. There the `_v1` services own every durable state change
+//! — [`admission_v1`] and [`request_lifecycle_v1`] for invitation requests,
+//! [`delivery_v1`] and [`settlement_v1`] for GitHub invitations,
+//! [`projection_v1`] for the queryable records — and the four writers above stay
+//! bound only for deployments pinned before the cutover, forwarding to the
+//! current authority or answering 410 (see `obsolete_writers`).
+//!
+//! A handler that owns a storage effect journals it through `ctx.run`,
+//! delegating to a function over [`state::AppState`] that a unit test can call
+//! without a Restate runtime. A handler that only routes works on its
+//! `ObjectContext` directly — [`installation::Installation`] resolves an account
+//! and calls the account object, and keeps no state of its own beyond that
+//! binding. Tests that need the real runtime go against the local
+//! `restate-server` (compose.yaml) behind the `integration` feature; see
+//! `scripts/test-restate.sh`.
 
 // SDK 0.12 retains the trait-based service API. Preserve these deployed contracts
 // during the clock compatibility upgrade; migrating macro style is separate work.
@@ -92,7 +110,8 @@ pub fn build_cutover_endpoint(
     Ok(builder.build())
 }
 
-/// Build a fully-bound Restate endpoint with all five ghinvite services.
+/// Build the pre-cutover endpoint: the legacy writers still serving their own
+/// state alongside the installation services that replaced theirs.
 ///
 /// `identity_key` is the Restate Cloud identity public key
 /// (`publickeyv1_...`). When `Some`, the endpoint will reject any request not

@@ -28,8 +28,9 @@ impl Actor {
 }
 
 /// Description of what the change was about. `id` is the natural string id
-/// for the target type (ulid for invitation_links, requests, github_invitations;
-/// stringified u64 for installations).
+/// for the target type (ulid for invitation_links, requests, github_invitations).
+/// Installation targets are built by
+/// [`crate::availability`], which owns installation audit history.
 #[derive(Clone, Debug)]
 pub struct Target {
     pub kind: TargetKind,
@@ -37,13 +38,6 @@ pub struct Target {
 }
 
 impl Target {
-    pub fn installation(installation_id: u64) -> Self {
-        Self {
-            kind: TargetKind::Installation,
-            id: installation_id.to_string(),
-        }
-    }
-
     pub fn invitation_link(link_id: ghinvite_core::InvitationLinkId) -> Self {
         Self {
             kind: TargetKind::InvitationLink,

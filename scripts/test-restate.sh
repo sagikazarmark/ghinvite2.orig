@@ -4,8 +4,8 @@ set -euo pipefail
 # Run from the repository root. GNU timeout is `gtimeout` on macOS (coreutils).
 target=${1:-integration_test}
 case "$target" in
-  integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability) ;;
-  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability]' >&2; exit 2 ;;
+  integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability|installation_audit_replay) ;;
+  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability|installation_audit_replay]' >&2; exit 2 ;;
 esac
 if [[ "$target" != integration_test ]]; then
   export RESTATE_PROOF_CLEANUP_INTERVAL=1s

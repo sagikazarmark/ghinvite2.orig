@@ -81,8 +81,11 @@ cargo test -p ghinvite-web
 `web::build_app(state, session_store) -> axum::Router` is the single entry
 point. `state` carries `Arc<dyn Storage>`, `Arc<dyn HttpTransport>`,
 `Arc<RestateClient>`, and `WebConfig`. `session_store` is any
-`tower_sessions::SessionStore` impl — `MemoryStore` for tests, `SqliteStore`
-for native dev, `D1Store` for production (Plan 7).
+`tower_sessions::SessionStore` impl. In practice it is this crate's own
+`session_store::ProtectedStore`, which encrypts every record before it reaches
+a `Backend`: `SqliteBackend` for native dev, the Workers KV backend in
+`ghinvite-web-worker` for production. Tests use `MemoryStore` directly where
+the protection layer is not what is under test.
 
 Every route handler that touches Restate calls
 `state.restate.send::<Input>("Service", "key", "method", &input)`. The web

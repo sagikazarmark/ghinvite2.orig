@@ -232,30 +232,6 @@ impl InstallationClient {
             .header("x-github-api-version", "2022-11-28"))
     }
 
-    /// `GET /installation/repositories` — paginated upstream; v1 only follows
-    /// page 1 (per_page=100). If GitHub ever ships a customer with > 100 repos
-    /// per install, Plan 3's `Reconcile::sweep` adds pagination there.
-    #[tracing::instrument(skip(self), fields(installation_id, owner = tracing::field::Empty, repo = tracing::field::Empty))]
-    pub async fn list_installation_repos(
-        &self,
-        installation_id: u64,
-    ) -> Result<GhInstallationRepos> {
-        let req = self
-            .auth_request(
-                installation_id,
-                Method::Get,
-                "/installation/repositories?per_page=100",
-            )
-            .await?;
-        match self.transport.send(req).await?.ensure_success() {
-            Ok(resp) => resp.json(),
-            Err(err) => {
-                tracing::warn!(status = ?err.status(), "github request failed");
-                Err(err)
-            }
-        }
-    }
-
     /// `GET /repos/{owner}/{repo}` — small surface for display + access
     /// confirmation.
     ///
@@ -544,7 +520,7 @@ mod read_tests {
     }
 
     #[tokio::test]
-    async fn list_installation_repos_decodes_envelope() {
+    async fn a_single_page_of_repositories_is_read_without_a_second_request() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation::ok_json(
@@ -558,9 +534,10 @@ mod read_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let r = client.list_installation_repos(9).await.unwrap();
-        assert_eq!(r.total_count, 1);
-        assert_eq!(r.repositories[0].full_name, "acme/api");
+
+        assert_eq!(client.all_installation_repo_ids(9).await.unwrap(), vec![5]);
+        // The count the first page reported is already accounted for, so asking
+        // for a second page would be asking GitHub a question it answered.
         mock.assert_exhausted();
     }
 

@@ -214,5 +214,7 @@ jobs:
         run: bash scripts/test-restate.sh writer_cutover
       - name: Verify installation convergence and admission availability
         run: bash scripts/test-restate.sh installation_availability
+      - name: Verify one audit event survives a retried installation projection
+        run: bash scripts/test-restate.sh installation_audit_replay
       - name: Verify durable projection acknowledgement loss, invariant repair, and complete audit recovery
         run: bash scripts/test-restate.sh durable_projection
