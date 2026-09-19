@@ -20,6 +20,7 @@ pub mod test_suite;
 pub mod admin_attempts;
 pub mod audit_read;
 pub mod delivery_projection;
+pub mod pending_queue;
 pub mod projection;
 pub mod settlement;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
@@ -375,13 +376,25 @@ pub trait Storage: Send + Sync + 'static {
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>>;
 
     /// List all pending requests for any link belonging to the given account.
-    /// Used by the admin approval queue.
+    /// Legacy unbounded read (overview count and compatibility callers).
     ///
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
     async fn list_pending_requests_for_account(
         &self,
         account_id: u64,
     ) -> Result<Vec<InvitationRequest>>;
+
+    /// Oldest-first, account-authorized, bounded decision queue with joined
+    /// context. A cursor is a value boundary, not a reference to a live row;
+    /// terminal transitions between reads cannot shift subsequent pages.
+    /// Pending rows are not filtered by deadline or link expiration/revocation.
+    async fn pending_request_page(
+        &self,
+        _account_id: u64,
+        _after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage> {
+        Err(Error::Database("pending queue read unsupported".into()))
+    }
 
     /// List every request (any state) for a given invitation link, newest first.
     ///

@@ -966,6 +966,37 @@ impl Storage for D1Storage {
         .await
     }
 
+    async fn pending_request_page(
+        &self,
+        account_id: u64,
+        after: Option<ghinvite_core::storage::pending_queue::PendingBoundary>,
+    ) -> Result<ghinvite_core::storage::pending_queue::PendingPage> {
+        use ghinvite_core::storage::pending_queue::{self, PendingPage};
+        #[derive(serde::Deserialize)]
+        struct Row {
+            row_json: String,
+        }
+        wasm_send(async {
+            let rows = self
+                .db
+                .prepare(&pending_queue::query(after.is_some()))
+                .bind(&[
+                    JsValue::from_f64(account_id as f64),
+                    after
+                        .map(|b| JsValue::from_str(&b.seek_key()))
+                        .unwrap_or(JsValue::NULL),
+                ])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<Row>()
+                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            PendingPage::from_json(rows.into_iter().map(|r| r.row_json).collect())
+        })
+        .await
+    }
+
     async fn list_requests_for_link(
         &self,
         link_id: InvitationLinkId,

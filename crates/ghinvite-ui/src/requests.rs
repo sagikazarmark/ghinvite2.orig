@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 pub struct PendingRequestRow {
     pub request_id: String,
     pub link_slug: String,
+    pub link_description: Option<String>,
     pub link_id: String,
     pub requester_login: String,
     pub justification: Option<String>,
@@ -41,6 +42,7 @@ mod tests {
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                         link_slug: "QueueSlug0000006".into(),
+                        link_description: Some("Workshop".into()),
                         link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA".into(),
                         requester_login: "octocat".into(),
                         justification: Some("Need access for launch".into()),
@@ -84,6 +86,7 @@ mod tests {
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
                         link_slug: "(deleted link)".into(),
+                        link_description: None,
                         link_id: "".into(),
                         requester_login: "octocat".into(),
                         justification: None,
@@ -120,11 +123,16 @@ pub struct RequestsQueueProps {
     pub flash: Option<Flash>,
     pub account_login: String,
     pub rows: Vec<PendingRequestRow>,
+    #[props(default)]
+    pub next_href: Option<String>,
+    #[props(default)]
+    pub is_continuation: bool,
 }
 
 #[component]
 pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
     let login = props.account_login.clone();
+    let page_size = ghinvite_core::storage::pending_queue::PENDING_PAGE_SIZE;
     rsx! {
         ConsoleLayout {
             signed_in_login: props.signed_in_login.clone(),
@@ -141,8 +149,10 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                 {if props.rows.is_empty() {
                     rsx! {
                         div { class: "mac-panel p-5 text-base-content/70",
-                            h2 { class: "font-medium text-base-content", "No pending requests" }
-                            p { class: "mt-1 text-sm", "Invitation requests that need an account admin decision will appear here." }
+                            h2 { class: "font-medium text-base-content",
+                                if props.is_continuation { "No more pending requests on this page" } else { "No pending requests" }
+                            }
+                            p { class: "mt-1 text-sm", "Invitation requests that need an account admin decision will appear here. The queue may change as requests are decided." }
                         }
                     }
                 } else {
@@ -155,10 +165,14 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let just = r.justification.clone();
                                 let link_id = r.link_id.clone();
                                 let link_slug = r.link_slug.clone();
+                                let description = r.link_description.clone().unwrap_or_else(|| link_slug.clone());
                                 let link_label = if link_id.is_empty() {
                                     rsx! { span { "{link_slug}" } }
                                 } else {
-                                    rsx! { a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{link_slug}" } }
+                                    rsx! {
+                                        a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{description}" }
+                                        span { class: "ml-2 text-xs text-base-content/55", "Code: {link_slug}" }
+                                    }
                                 };
                                 let requester = r.requester_login.clone();
                                 let created = r.created_at;
@@ -245,6 +259,15 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                         }
                     }
                 }}
+                nav { class: "mt-4 flex items-center gap-4", aria_label: "Request queue pages",
+                    if props.is_continuation {
+                        a { href: "/console/accounts/{login}/requests", class: "link", "Back to oldest requests" }
+                    }
+                    if let Some(href) = props.next_href {
+                        a { rel: "next", href, class: "btn btn-sm", "Next requests" }
+                    }
+                    p { class: "text-sm text-base-content/65", "Oldest first · Up to {page_size} requests per page" }
+                }
             },
         }
     }

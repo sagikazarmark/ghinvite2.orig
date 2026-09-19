@@ -1,8 +1,6 @@
 //! `/console/accounts/{login}/...` routes. Plan 5.
 
-use crate::account_admin_reads::{
-    find_account_admin_invitation_link, find_account_admin_request, pending_request_queue,
-};
+use crate::account_admin_reads::{find_account_admin_invitation_link, find_account_admin_request};
 use crate::commands::{
     CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink,
     UpdateInvitationLinkMetadata,
@@ -911,26 +909,62 @@ async fn revoke_link(
 async fn requests_queue(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
+    axum::extract::Query(query): axum::extract::Query<QueueQuery>,
 ) -> impl IntoResponse {
-    let rows = match pending_request_queue(state.storage.as_ref(), admin.account.account_id).await {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|row| crate::views::requests::PendingRequestRow {
-                request_id: row.request_id.to_string(),
-                link_slug: row.link_slug,
-                link_id: row.link_id.map(|id| id.to_string()).unwrap_or_default(),
-                requester_login: row.requester_login,
-                justification: row.justification,
-                created_at: row.created_at,
-                decision_deadline: row.decision_deadline,
-                permission: row.permission.map(|permission| permission.to_string()),
-                repos: row.repos,
-                expires_at: row.expires_at,
-                approval_required: row.approval_required,
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => return e.into_response(),
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let after = match query.after.as_deref().map(|token| {
+        if token.len() > 512 {
+            return None;
+        }
+        let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+        let boundary: ghinvite_core::storage::pending_queue::PendingBoundary =
+            serde_json::from_slice(&bytes).ok()?;
+        (1..=9999)
+            .contains(&chrono::Datelike::year(&boundary.created_at))
+            .then_some(boundary)
+    }) {
+        Some(Some(boundary)) => Some(boundary),
+        None => None,
+        Some(None) => {
+            return crate::error::WebError::BadRequest(
+                "Invalid queue cursor. Return to the oldest requests.".into(),
+            )
+            .into_response();
+        }
     };
+    let page = match state
+        .storage
+        .pending_request_page(admin.account.account_id, after)
+        .await
+    {
+        Ok(page) => page,
+        Err(e) => return crate::error::WebError::from(e).into_response(),
+    };
+    let next_href = page.next.map(|boundary| {
+        format!(
+            "/console/accounts/{}/requests?after={}",
+            admin.account.account_login,
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&boundary).expect("queue cursor serializes"))
+        )
+    });
+    let rows = page
+        .rows
+        .into_iter()
+        .map(|row| crate::views::requests::PendingRequestRow {
+            request_id: row.request_id.to_string(),
+            link_slug: row.link_slug,
+            link_description: row.link_description,
+            link_id: row.link_id.map(|id| id.to_string()).unwrap_or_default(),
+            requester_login: row.requester_login,
+            justification: row.justification,
+            created_at: row.created_at,
+            decision_deadline: row.decision_deadline,
+            permission: row.permission.map(|permission| permission.to_string()),
+            repos: row.repos,
+            expires_at: row.expires_at,
+            approval_required: row.approval_required,
+        })
+        .collect::<Vec<_>>();
 
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let signed_in_login = Some(admin.session.login.clone());
@@ -944,10 +978,17 @@ async fn requests_queue(
                 flash: flash.clone(),
                 account_login: account_login.clone(),
                 rows: rows.clone(),
+                next_href: next_href.clone(),
+                is_continuation: after.is_some(),
             }
         }
     });
     Html(html).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct QueueQuery {
+    after: Option<String>,
 }
 
 async fn approve_request(

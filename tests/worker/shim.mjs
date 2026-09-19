@@ -5,6 +5,43 @@ initSync({ module: wasmModule });
 
 export default {
   async fetch(request, env, ctx) {
+    if (request.headers.has('x-test-observe-d1')) {
+      let queries = 0;
+      let rowsRead = 0;
+      const plans = [];
+      const observe = (statement, sql, values = []) => new Proxy(statement, {
+        get(target, property) {
+          if (property === 'constructor') return target.constructor;
+          if (property === 'bind') return (...args) => observe(target.bind(...args), sql, args);
+          if (['all', 'first', 'run', 'raw'].includes(property)) return async (...args) => {
+            queries++;
+            if (sql.startsWith('WITH page')) {
+              if (request.headers.has('x-test-fail-queue')) throw new Error('private injected queue read failure');
+              const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values).all();
+              plans.push(...plan.results.map(row => row.detail));
+            }
+            const result = await target[property](...args);
+            rowsRead += result?.meta?.rows_read ?? 0;
+            return result;
+          };
+          const value = target[property];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const db = new Proxy(env.DB, {
+        get(target, property) {
+          if (property === 'constructor') return target.constructor;
+          if (property === 'prepare') return sql => observe(target.prepare(sql), sql);
+          const value = target[property];
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      const response = await workerFetch(request, { ...env, DB: db }, ctx);
+      response.headers.set('x-test-d1-queries', String(queries));
+      response.headers.set('x-test-d1-rows-read', String(rowsRead));
+      response.headers.set('x-test-d1-plans', JSON.stringify(plans));
+      return response;
+    }
     if (!request.headers.has('x-test-fail-kv-read')) {
       return workerFetch(request, env, ctx);
     }

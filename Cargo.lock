@@ -2057,6 +2057,8 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "ulid",
 ]
 
