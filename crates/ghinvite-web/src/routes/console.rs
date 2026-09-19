@@ -23,6 +23,7 @@ use dioxus::prelude::*;
 
 mod attempts;
 mod audit;
+mod request_history;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -50,6 +51,24 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(revoke_link),
         )
         .route("/console/accounts/{login}/requests", get(requests_queue))
+        .route(
+            "/console/accounts/{login}/links/{link_id}/requests",
+            get(request_history::history).layer(
+                tower_http::set_header::SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("private, no-store"),
+                ),
+            ),
+        )
+        .route(
+            "/console/accounts/{login}/requests/{request_id}",
+            get(request_history::detail).layer(
+                tower_http::set_header::SetResponseHeaderLayer::overriding(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("private, no-store"),
+                ),
+            ),
+        )
         .route("/console/accounts/{login}/attempts", get(attempts::index))
         .route(
             "/console/accounts/{login}/attempts/{attempt_id}",

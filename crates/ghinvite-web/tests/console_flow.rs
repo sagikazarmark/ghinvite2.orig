@@ -27,6 +27,9 @@ mod read_recovery;
 #[path = "console_flow/mutation_recovery.rs"]
 mod mutation_recovery;
 
+#[path = "console_flow/request_history.rs"]
+mod request_history;
+
 async fn deadline_queue_app(
     expires_at: Option<&str>,
 ) -> (

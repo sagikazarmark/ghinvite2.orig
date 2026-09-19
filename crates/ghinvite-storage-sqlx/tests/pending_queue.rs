@@ -99,6 +99,19 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
         1,
         "one SQL statement regardless of page size"
     );
+    count.0.store(0, std::sync::atomic::Ordering::Relaxed);
+    let history = storage.request_history(42, link.id, None).await.unwrap();
+    assert_eq!(
+        count.0.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "history includes requester profiles in one SQL statement"
+    );
+    assert_eq!(history.requests.len(), 25);
+    assert_eq!(history.requester_logins.len(), 25);
+    assert_eq!(
+        history.requester_logins.get(&53).map(String::as_str),
+        Some("user-53")
+    );
     assert_eq!(
         first.rows.iter().map(|r| r.request_id).collect::<Vec<_>>(),
         ids[..25]

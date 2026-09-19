@@ -1025,6 +1025,45 @@ impl Storage for D1Storage {
 
     // -------- github invitations --------
 
+    async fn request_history(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+        before: Option<ghinvite_core::storage::request_history::Boundary>,
+    ) -> Result<ghinvite_core::storage::request_history::Page> {
+        use ghinvite_core::storage::request_history as history;
+        #[derive(serde::Deserialize)]
+        struct Row {
+            #[serde(flatten)]
+            request: InvitationRequestRow,
+            requester_login: Option<String>,
+        }
+        wasm_send(async {
+            let rows = self
+                .db
+                .prepare(&history::query(before))
+                .bind(&[
+                    JsValue::from_f64(account_id as f64),
+                    JsValue::from_str(&link_id.to_string()),
+                    before
+                        .map(|b| JsValue::from_str(&history::boundary_key(b)))
+                        .unwrap_or(JsValue::NULL),
+                ])
+                .map_err(bind_err)?
+                .all()
+                .await
+                .map_err(classify_d1_error)?
+                .results::<Row>()
+                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
+            Ok(history::page(
+                rows.into_iter()
+                    .map(|r| Ok((r.request.try_into_domain()?, r.requester_login)))
+                    .collect::<Result<_>>()?,
+            ))
+        })
+        .await
+    }
+
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
         let id_str = invitation.id.to_string();
         let request_id_str = invitation.invitation_request_id.to_string();

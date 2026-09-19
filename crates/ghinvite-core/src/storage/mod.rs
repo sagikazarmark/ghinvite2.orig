@@ -22,6 +22,7 @@ pub mod audit_read;
 pub mod delivery_projection;
 pub mod pending_queue;
 pub mod projection;
+pub mod request_history;
 pub mod settlement;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
@@ -337,6 +338,18 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Vec<InvitationLink>>;
 
     // -------- invitation requests --------
+
+    /// At most 25 requests, ordered by admission time then ID descending. Account
+    /// scope is checked independently of the exclusive cursor. Never loads all
+    /// requests to paginate in memory. Missing projections are not absence proof.
+    async fn request_history(
+        &self,
+        _account_id: u64,
+        _link_id: InvitationLinkId,
+        _before: Option<request_history::Boundary>,
+    ) -> Result<request_history::Page> {
+        Err(Error::Database("request history unavailable".into()))
+    }
 
     /// Insert a new `InvitationRequest` row and atomically increment
     /// `invitation_links.uses_count` for the link this request was filed against.
