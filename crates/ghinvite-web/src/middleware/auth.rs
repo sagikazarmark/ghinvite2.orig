@@ -1,7 +1,7 @@
 //! Session-validation tower layer + admin recheck cache.
 
 use crate::error::WebError;
-use crate::session::{self, AdminCheck, Session};
+use crate::session::{AdminCheck, Session};
 use crate::state::AppState;
 use axum::extract::FromRef;
 use axum::extract::FromRequestParts;
@@ -12,29 +12,6 @@ use dioxus::prelude::*;
 use ghinvite_github::oauth::UserApiClient;
 
 const ADMIN_CACHE_TTL_SECS: i64 = 60;
-
-/// Extractor: returns the Session from request extensions or a 302→/login.
-/// Routes that require authentication take this as a parameter.
-pub struct RequireSession(pub Session);
-
-impl<S: Send + Sync> FromRequestParts<S> for RequireSession {
-    type Rejection = WebError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let tower: tower_sessions::Session = parts
-            .extensions
-            .get::<tower_sessions::Session>()
-            .cloned()
-            .ok_or_else(|| WebError::Session("no tower session in request extensions".into()))?;
-        let session = session::load(&tower)
-            .await
-            .map_err(|e| WebError::Session(e.to_string()))?;
-        if !session.is_authenticated() {
-            return Err(WebError::Unauthenticated);
-        }
-        Ok(RequireSession(session))
-    }
-}
 
 /// Check the signed-in user's authority over an installed account.
 /// Personal ownership is bound to the authenticated GitHub user ID.
