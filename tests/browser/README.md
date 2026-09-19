@@ -1,5 +1,21 @@
 # Browser Regression Tests
 
+## Invitation-link revocation confirmation
+
+Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/revocation.config.mjs`
+from the repository root after installing browser dependencies and building CSS.
+This suite reuses the admin mutation recovery server on port 4175: production
+Console routes, CSRF middleware, sessions, shared JavaScript, and CSS, with the
+HTTP Restate fixture described below. No island bundle is required.
+
+Chromium verifies keyboard-only opening, accessible name/description, initial
+Cancel focus, forward/backward Tab wrapping, inert background, Escape/Cancel
+dismissal, and restored opener focus. With JavaScript disabled, confirmation is
+an ordinary inline region reached by a fragment link, with native keyboard
+navigation and cancellation. Both modes reject forged CSRF submissions and
+confirm using one native document-navigation POST carrying the original token;
+the recovery UI then verifies the link stopped accepting new requests.
+
 ## Admin mutation recovery
 
 Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/mutation-recovery.config.mjs`

@@ -101,6 +101,11 @@
 }
 
 @layer components {
+  /* Without JavaScript, confirmation is an ordinary in-page region. */
+  .revoke-confirmation:not(:target) {
+    display: none;
+  }
+
   .app-header {
     min-height: 3rem;
     height: 3rem;
