@@ -280,7 +280,16 @@ def fence(args):
                 ("UPDATE", "NEW.projection_revision IS NULL OR NEW.projection_revision IS OLD.projection_revision"),
                 ("DELETE", "1"),
             ):
-                db.execute(f"""CREATE TRIGGER IF NOT EXISTS cutover_{table}_{op} BEFORE {op} ON {table}
+                # Derived queue-index maintenance does not change domain state
+                # or advance a projection revision. Fence every domain column,
+                # but allow the queue key's triggers to maintain that index.
+                operation = op
+                if table == "invitation_requests" and op == "UPDATE":
+                    columns = [row[1] for row in db.execute("PRAGMA table_info(invitation_requests)")
+                               if row[1] != "queue_account_id"]
+                    operation = "UPDATE OF " + ",".join('"' + name.replace('"', '""') + '"' for name in columns)
+                    db.execute("DROP TRIGGER IF EXISTS cutover_invitation_requests_UPDATE")
+                db.execute(f"""CREATE TRIGGER IF NOT EXISTS cutover_{table}_{op} BEFORE {operation} ON {table}
                     WHEN {condition} BEGIN SELECT RAISE(ABORT,'obsolete writer: admission cutover'); END""")
         for op in ("UPDATE", "DELETE"):
             db.execute(f"""CREATE TRIGGER IF NOT EXISTS cutover_repos_{op} BEFORE {op} ON invitation_link_repos
