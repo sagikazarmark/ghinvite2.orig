@@ -639,7 +639,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                         h2 { class: "text-sm font-semibold", "Repositories" }
                     }
                     div { class: "p-4",
-                        ul { class: "space-y-1 text-sm", {repos} }
+                        ul { class: "space-y-1 text-sm wrap-anywhere", {repos} }
                     }
                 }
                 {match props.link.internal_note.as_deref() {

@@ -345,9 +345,7 @@ fn active_link(code: &str, link_id: &str) -> InvitationLink {
         revoked_by: None,
         repos: vec![InvitationLinkRepo {
             repo_id: 10,
-            repo_full_name: format!(
-                "{USER_LOGIN}/repository-with-a-long-name-for-accessibility-reflow"
-            ),
+            repo_full_name: format!("{USER_LOGIN}/{}", "r".repeat(60)),
         }],
     }
 }
