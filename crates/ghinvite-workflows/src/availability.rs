@@ -166,6 +166,9 @@ fn installation_audit(
                 "account_type": input.account_type.to_string(),
             }),
         ),
+        // Always a subset: a refresh retains exact repository IDs even for an
+        // installation configured for all repositories, so there is no `all`
+        // selection left to report (docs/installation-availability.md).
         InstallationProjection::Repos { input } => (
             input.installation_id,
             EventType::InstallationReposChanged,
@@ -213,12 +216,15 @@ enum ProjectionFailure {
 
 impl From<ProjectionFailure> for HandlerError {
     fn from(failure: ProjectionFailure) -> Self {
+        // `Classified` is this crate's error, not the SDK's `HandlerError` this
+        // returns: only it knows which storage failures are worth a retry.
+        use crate::error::HandlerError as Classified;
         match failure {
             ProjectionFailure::IdentityConflict => {
                 TerminalError::new_with_code(409, "installation projection conflict").into()
             }
             ProjectionFailure::Storage(error) => {
-                crate::error::to_sdk_handler_error(crate::HandlerError::Storage(error))
+                crate::error::to_sdk_handler_error(Classified::Storage(error))
             }
         }
     }
@@ -735,7 +741,7 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_state};
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
     use ghinvite_core::AccountType;
     use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
     use ghinvite_core::storage::{ConflictKind, Error as StorageError};
@@ -844,7 +850,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_repository_change_for_an_unknown_installation_has_nothing_to_change() {
+    async fn a_repository_change_for_an_unknown_installation_is_refused() {
         let state = fixture_state().await;
 
         let failure = project_installation(
@@ -852,7 +858,7 @@ mod tests {
             &InstallationProjection::Repos {
                 input: crate::installation::ReposChangedInput {
                     installation_id: 999,
-                    selected_repos: SelectedRepos::All,
+                    selected_repos: SelectedRepos::Subset(vec![10]),
                 },
             },
         )
@@ -974,6 +980,66 @@ mod tests {
             event.metadata.get("uninstalled_at"),
             Some(&serde_json::json!(uninstalled_at.to_rfc3339()))
         );
+    }
+
+    #[tokio::test]
+    async fn a_replayed_installation_audit_leaves_one_event_behind() {
+        let (state, storage) = fixture_state_with_storage().await;
+        project_installation(&state, &onboarding()).await.unwrap();
+        let event = installation_audit(
+            100,
+            &onboarding(),
+            ghinvite_core::AuditEventId::new(),
+            dt("2026-05-04T12:00:00Z"),
+            "inv-1".into(),
+        );
+
+        // A retry replays the event the first attempt retained rather than
+        // minting a second one, so writing it again has to be the same write.
+        // This is what keeps one onboarding to one audit event now that the
+        // projection audits unconditionally.
+        state.storage.audit(&event).await.unwrap();
+        state.storage.audit(&event).await.unwrap();
+
+        let created = storage
+            .debug_list_audit(100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::InstallationCreated)
+            .count();
+        assert_eq!(created, 1);
+    }
+
+    /// Restate's `HandlerError` keeps its classification private; the error it
+    /// renders is the only place a caller reads it back.
+    fn rendered(failure: ProjectionFailure) -> String {
+        let error = HandlerError::from(failure);
+        <HandlerError as AsRef<dyn std::error::Error>>::as_ref(&error).to_string()
+    }
+
+    #[test]
+    fn a_conflicting_identity_is_refused_rather_than_retried() {
+        assert_eq!(
+            rendered(ProjectionFailure::IdentityConflict),
+            "Terminal error [409]: installation projection conflict"
+        );
+    }
+
+    #[test]
+    fn a_storage_conflict_no_retry_converges_on_is_terminal() {
+        let rendered = rendered(ProjectionFailure::Storage(StorageError::Conflict(
+            ConflictKind::DuplicateActiveInstallation,
+        )));
+        assert!(rendered.starts_with("Terminal error"), "{rendered}");
+    }
+
+    #[test]
+    fn a_storage_outage_is_left_for_restate_to_retry() {
+        let rendered = rendered(ProjectionFailure::Storage(StorageError::Database(
+            "fixture: connection lost".into(),
+        )));
+        assert!(rendered.starts_with("Retryable error"), "{rendered}");
     }
 
     #[test]

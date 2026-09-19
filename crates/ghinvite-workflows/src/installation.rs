@@ -1,8 +1,14 @@
 //! `Installation` Virtual Object: the installation-keyed entry point GitHub's
-//! webhooks still address. It owns no installation history of its own — every
-//! handler resolves the account and hands the transition to
+//! webhooks still address. It owns no installation history of its own — each
+//! handler resolves the account and calls
 //! [`crate::availability::AccountInstallationV1`], which is where installation
 //! facts and their projections live.
+//!
+//! `onboard` and `uninstall` pass their input on. `repos_changed` does not: a
+//! repository-change payload keeps its old wire shape for compatibility, but
+//! its selection is ignored and the handler asks for a refresh instead, so the
+//! stored scope comes from what GitHub currently shows rather than from what an
+//! event claimed (docs/installation-availability.md).
 
 use crate::state::AppState;
 use chrono::{DateTime, Utc};

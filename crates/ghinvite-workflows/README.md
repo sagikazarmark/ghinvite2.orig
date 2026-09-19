@@ -21,15 +21,9 @@ Run unit tests without infrastructure:
 cargo test -p ghinvite-workflows
 ```
 
-Each handler module has tests in the same file:
-
-- `crates/ghinvite-workflows/src/availability.rs::tests`
-- `crates/ghinvite-workflows/src/delivery_v1.rs::tests`
-- `crates/ghinvite-workflows/src/settlement_v1.rs::tests`
-- `crates/ghinvite-workflows/src/invitation_link.rs::tests`
-- `crates/ghinvite-workflows/src/github_invitation.rs::tests`
-- `crates/ghinvite-workflows/src/invitation_request.rs::tests`
-- `crates/ghinvite-workflows/src/reconcile.rs::tests`
+Each handler module keeps its tests in the same file, in a `mod tests` at the
+bottom; `grep -l 'mod tests' src/*.rs` lists them. They call the module's pure
+functions directly, so none of them needs a Restate runtime.
 
 The durable timer path requires the real Restate runtime. From the repository
 root, run `bash scripts/test-restate.sh` to register the current endpoint and
