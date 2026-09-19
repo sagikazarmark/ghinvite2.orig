@@ -306,7 +306,7 @@ async fn document_fixture() -> (axum::Router, String) {
                     decided_at: None,
                     decline_reason: None,
                     created_at: Utc::now(),
-                    decision_deadline: None,
+                    decision_deadline: Some(Utc::now() - chrono::Duration::minutes(1)),
                 })
                 .await
                 .unwrap();
@@ -345,7 +345,9 @@ fn active_link(code: &str, link_id: &str) -> InvitationLink {
         revoked_by: None,
         repos: vec![InvitationLinkRepo {
             repo_id: 10,
-            repo_full_name: format!("{USER_LOGIN}/api"),
+            repo_full_name: format!(
+                "{USER_LOGIN}/repository-with-a-long-name-for-accessibility-reflow"
+            ),
         }],
     }
 }

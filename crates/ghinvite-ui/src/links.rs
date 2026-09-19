@@ -600,7 +600,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "border-b border-base-300 px-4 py-3",
                         h2 { class: "text-sm font-semibold", "Invitation link" }
-                        p { class: "mt-0.5 text-xs text-base-content/60", "Share this invitation link with GitHub users who should request access." }
+                        p { class: "mt-0.5 text-xs text-muted", "Share this invitation link with GitHub users who should request access." }
                     }
                     div { class: "p-4",
                         input {

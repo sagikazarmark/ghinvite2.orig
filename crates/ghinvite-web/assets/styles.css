@@ -21,7 +21,7 @@
   --color-base-300: oklch(88.4% 0.012 250);
   --color-base-content: oklch(23.5% 0.02 250);
 
-  --color-primary: oklch(54% 0.15 255);
+  --color-primary: oklch(49% 0.15 255);
   --color-primary-content: oklch(98% 0.006 255);
   --color-secondary: oklch(58% 0.065 260);
   --color-secondary-content: oklch(98% 0.006 260);
@@ -32,7 +32,7 @@
 
   --color-info: oklch(58% 0.12 245);
   --color-info-content: oklch(98% 0.006 245);
-  --color-success: oklch(56% 0.11 155);
+  --color-success: oklch(49% 0.11 155);
   --color-success-content: oklch(98% 0.006 155);
   --color-warning: oklch(72% 0.13 82);
   --color-warning-content: oklch(24% 0.03 82);
@@ -170,8 +170,13 @@
     width: 15rem;
     height: 100%;
     min-height: 0;
+    overflow-y: auto;
     border-right: 1px solid color-mix(in oklch, var(--color-base-content) 12%, transparent);
     background: color-mix(in oklch, var(--color-base-100) 56%, var(--color-base-200));
+  }
+
+  .console-sidebar > * {
+    flex-shrink: 0;
   }
 
   .console-main {
@@ -198,6 +203,8 @@
     background: color-mix(in oklch, var(--color-primary) 13%, var(--color-base-100));
     color: var(--color-primary);
     font-weight: 600;
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
   }
 
   .mac-panel {
@@ -213,10 +220,22 @@
 
   .property-row {
     display: grid;
-    grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr);
-    gap: 1rem;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
     border-top: 1px solid color-mix(in oklch, var(--color-base-content) 10%, transparent);
     padding: 0.75rem 1rem;
+  }
+
+  @media (min-width: 40rem) {
+    .property-row {
+      grid-template-columns: minmax(8rem, 12rem) minmax(0, 1fr);
+      gap: 1rem;
+    }
+  }
+
+  .property-row > * {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .property-row:first-child {
@@ -224,7 +243,7 @@
   }
 
   .property-label {
-    color: color-mix(in oklch, var(--color-base-content) 58%, transparent);
+    color: color-mix(in oklch, var(--color-base-content) 70%, var(--color-base-100));
     font-size: 0.8125rem;
     font-weight: 500;
   }
@@ -235,11 +254,55 @@
   }
 
   .compact-table :where(th) {
-    color: color-mix(in oklch, var(--color-base-content) 55%, transparent);
+    color: color-mix(in oklch, var(--color-base-content) 70%, var(--color-base-100));
     font-size: 0.6875rem;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
 
+  /* At reflow sizes use document scrolling, so fixed chrome cannot consume the
+     entire short/zoomed viewport or conceal a focused form control. */
+  @media (max-width: 47.999rem) {
+    .console-page .app-header {
+      position: static;
+      height: auto;
+      flex-wrap: wrap;
+    }
+
+    .console-page .app-header > :first-child {
+      min-width: max-content;
+    }
+
+    .console-frame {
+      height: auto;
+      min-height: calc(100dvh - 3rem);
+      overflow: visible;
+    }
+
+    .console-main {
+      overflow: visible;
+    }
+  }
+}
+
+/* Opaque secondary text stays readable on both panel and workspace surfaces. */
+@utility text-muted {
+  color: color-mix(in oklch, var(--color-base-content) 70%, var(--color-base-100));
+}
+
+/* Override utility-layer dimensions where the narrow layout needs to reflow. */
+@layer utilities {
+  .mobile-console-nav .app-nav-row {
+    width: auto;
+  }
+
+  .request-decision-list .badge {
+    /* Wrapped deadlines must occupy their full height instead of overlapping. */
+    height: auto;
+    min-height: var(--size);
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
 }

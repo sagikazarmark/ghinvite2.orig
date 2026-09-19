@@ -94,7 +94,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
             Nav { signed_in_login: props.signed_in_login.clone() }
             div { class: "console-frame",
                 aside { class: "console-sidebar hidden shrink-0 flex-col md:flex",
-                    nav { class: "flex-1 space-y-1 p-3 text-sm",
+                    nav { class: "flex-1 space-y-1 p-3 text-sm", aria_label: "Console",
                         a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                         a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
                         a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
@@ -102,7 +102,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                         a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                     }
                     div { class: "sidebar-account-switcher border-t border-base-300 p-3",
-                        p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Active account" }
+                        p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-muted", "Active account" }
                         a { class: "mt-2 flex min-w-0 items-center gap-2 rounded-box px-2 py-2 text-sm hover:bg-base-100", href: "/console/accounts/{login}/settings",
                             span { class: "grid size-7 shrink-0 place-items-center rounded-lg bg-base-300 text-xs font-semibold", "@" }
                             span { class: "min-w-0 flex-1 truncate font-medium", "{login}" }
@@ -111,14 +111,18 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                     }
                 }
                 div { class: "console-content min-w-0 flex flex-1 flex-col",
-                    nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden",
-                        div { class: "flex gap-1 overflow-x-auto whitespace-nowrap text-sm",
+                    nav { class: "mobile-console-nav border-b border-base-300 bg-base-100 px-3 py-2 md:hidden", aria_label: "Console",
+                        div { class: "flex flex-wrap gap-1 text-sm",
                             a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                             a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
                             a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
                             a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
                             a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
                         }
+                    }
+                    nav { class: "flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-300 bg-base-100 px-3 py-2 text-xs md:hidden", aria_label: "Account",
+                        a { class: "link min-w-0 break-all", href: "/console/accounts/{login}/settings", "Account: {login}" }
+                        a { class: "link", href: "/install", "Install another account" }
                     }
                     main { class: "console-main",
                         {match &props.flash {

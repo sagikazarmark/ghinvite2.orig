@@ -202,7 +202,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                     div { class: "grid gap-3 border-b border-base-300 px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(10rem,14rem)_minmax(0,1fr)_auto] lg:items-start",
                                         div { class: "min-w-0",
                                             p { class: "truncate text-sm font-medium", "@{requester}" }
-                                            p { class: "mt-0.5 text-xs text-base-content/55", "Requested at {created}" }
+                                            p { class: "mt-0.5 text-xs text-muted", "Requested at {created}" }
                                         }
                                         div { class: "min-w-0 space-y-2",
                                             p { class: "text-sm",
@@ -217,10 +217,10 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                             }
                                             p { class: "text-xs text-base-content/65", "The decision deadline shown is the recorded deadline for this request." }
                                             if r.decision_deadline.is_some_and(|deadline| deadline <= props.now) {
-                                                p { class: "text-xs text-warning", "Decision deadline passed. Queue updates may be delayed." }
+                                                p { class: "rounded-box bg-warning px-2 py-1 text-xs font-medium text-warning-content", "Decision deadline passed. Queue updates may be delayed." }
                                             }
                                             div {
-                                                p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-base-content/45", "Repositories" }
+                                                p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-muted", "Repositories" }
                                                 {repos}
                                             }
                                             {match just {
@@ -251,7 +251,7 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 }
                                             }
                                         } else {
-                                            rsx! { p { class: "text-sm font-medium text-base-content/60", "Decision unavailable" } }
+                                            rsx! { p { class: "text-sm font-medium text-muted", "Decision unavailable" } }
                                         }}
                                     }
                                 }
