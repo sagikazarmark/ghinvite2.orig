@@ -626,12 +626,21 @@ async fn create_link(
         .await
     {
         Ok(v) => v,
-        Err(_) => {
-            tracing::warn!("create invitation link command failed");
+        Err(error) => {
+            tracing::warn!(
+                kind = error.kind(),
+                upstream_status = ?error.upstream_status(),
+                "create invitation link command failed"
+            );
             let mut errors = crate::views::links::LinkFormErrors::default();
-            errors
-                .summary
-                .push("Failed to create invitation link. Please try again.".into());
+            errors.summary.push(
+                if error.outcome_unknown() {
+                    "Creation outcome unknown. Check the invitation links list before creating another with these values."
+                } else {
+                    "Failed to create invitation link. Please try again."
+                }
+                .into(),
+            );
             return (
                 axum::http::StatusCode::BAD_GATEWAY,
                 link_form_response(&admin, None, Ok(repos), form.into_view_values(errors), now),
@@ -750,7 +759,7 @@ async fn save_link_details(
             ),
         };
     }
-    if state
+    if let Err(error) = state
         .commands
         .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
             account_id: admin.account.account_id,
@@ -760,19 +769,21 @@ async fn save_link_details(
             internal_note,
         })
         .await
-        .is_err()
     {
         // Ingress errors may include command payloads; do not log private metadata.
-        tracing::warn!("update invitation link metadata command failed");
+        tracing::warn!(
+            kind = error.kind(),
+            upstream_status = ?error.upstream_status(),
+            "update invitation link metadata command failed"
+        );
+        let message = if error.outcome_unknown() {
+            "Save outcome unknown. Check the link details before retrying these values."
+        } else {
+            "Failed to save invitation link details. Please try again."
+        };
         return (
             axum::http::StatusCode::BAD_GATEWAY,
-            edit_link_response(
-                &admin,
-                id,
-                values,
-                None,
-                Some("Failed to save invitation link details. Please try again.".into()),
-            ),
+            edit_link_response(&admin, id, values, None, Some(message.into())),
         )
             .into_response();
     }
@@ -917,7 +928,12 @@ async fn revoke_link(
             &admin.tower,
             session::Flash {
                 level: session::FlashLevel::Error,
-                message: "Could not stop this invitation link. Please try again.".into(),
+                message: if e.outcome_unknown() {
+                    "Revocation outcome unknown. Check the link details before retrying revocation."
+                } else {
+                    "Could not stop this invitation link. Please try again."
+                }
+                .into(),
             },
         )
         .await;
@@ -1049,7 +1065,12 @@ async fn approve_request(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: "Failed to approve request. Please try again.".into(),
+                    message: if e.outcome_unknown() {
+                        "Approval outcome unknown. Check the request status before deciding again."
+                    } else {
+                        "Failed to approve request. Please try again."
+                    }
+                    .into(),
                 },
             )
             .await;
@@ -1128,7 +1149,12 @@ async fn decline_request(
                 &admin.tower,
                 session::Flash {
                     level: session::FlashLevel::Error,
-                    message: "Failed to decline request. Please try again.".into(),
+                    message: if e.outcome_unknown() {
+                        "Decline outcome unknown. Check the request status before deciding again."
+                    } else {
+                        "Failed to decline request. Please try again."
+                    }
+                    .into(),
                 },
             )
             .await;
