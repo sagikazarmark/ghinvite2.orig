@@ -62,6 +62,9 @@ impl Storage for LostAuditAcknowledgement {
     async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
         self.inner.get_active_installation_by_login(login).await
     }
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        self.inner.get_latest_installation_by_login(login).await
+    }
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         self.inner.list_active_installations().await
     }

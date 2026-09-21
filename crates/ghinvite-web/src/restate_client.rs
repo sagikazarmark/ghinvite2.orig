@@ -2,15 +2,23 @@
 //!
 //! Restate exposes a simple HTTP surface for invoking services from outside
 //! the Restate runtime: `POST <ingress>/<ServiceName>/<Key>/<Method>` with a
-//! JSON body that matches the handler's `input` parameter. Send-style
-//! invocations (fire-and-forget) use a `?op=send` query parameter or a
-//! distinct endpoint; this wrapper exposes both `call` (request-response)
-//! and `send` (fire-and-forget) variants.
+//! JSON body that matches the handler's `input` parameter. Appending `/send`
+//! turns the request into a fire-and-forget invocation.
 //!
-//! The web binary uses `send` for every state-changing handler call so the
-//! HTTP request returns quickly (Restate handles retries / durability).
-//! `call` is reserved for the rare cases where the web wants the handler's
-//! return value before responding to the user.
+//! Three invocation styles, chosen by what the caller must know before it
+//! responds:
+//!
+//! - [`RestateClient::send`] enqueues the invocation and returns once Restate
+//!   has accepted it. Used where only durable hand-off matters, such as
+//!   webhook-driven commands that must acknowledge GitHub quickly.
+//! - [`RestateClient::call`] waits for the handler to finish and decodes its
+//!   output. Used when the web must observe completion before responding
+//!   (e.g. the installation setup return). Any non-success status is reported
+//!   as a rejection.
+//! - [`RestateClient::authoritative_call`] also waits for completion, but for
+//!   handlers whose answer is the decision itself (invitation-link admission
+//!   and lifecycle). Their documented terminal statuses (400, 404, 409) map to
+//!   definitive errors; every other failure leaves the outcome unknown.
 
 use crate::error::{IngressFailure, Result, WebError};
 use reqwest::Client;
@@ -175,8 +183,8 @@ impl RestateClient {
         .await
     }
 
-    /// Request-response invocation. Use sparingly — most state changes use
-    /// `send`. Returns the handler's deserialized output type.
+    /// Request-response invocation: waits for the handler and returns its
+    /// deserialized output.
     pub async fn call<I: Serialize, O: DeserializeOwned>(
         &self,
         service: &str,

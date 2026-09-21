@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ghinvite_core::storage::Storage;
 use octoevents::{Action, Dispatcher, EventKind, Payload};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -25,55 +24,13 @@ pub trait GhinviteCommands: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-#[async_trait]
-pub(crate) trait RestateCommandAdapter: Send + Sync + 'static {
-    async fn send<I: Serialize + Send + Sync>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-    ) -> Result<()>;
-
-    async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-    ) -> Result<O>;
-}
-
-#[async_trait]
-impl RestateCommandAdapter for RestateClient {
-    async fn send<I: Serialize + Send + Sync>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-    ) -> Result<()> {
-        RestateClient::send(self, service, key, method, input).await
-    }
-
-    async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-    ) -> Result<O> {
-        RestateClient::call(self, service, key, method, input).await
-    }
-}
-
 #[derive(Clone, Debug)]
-pub struct RestateCommands<R = RestateClient> {
-    restate: Arc<R>,
+pub struct RestateCommands {
+    restate: Arc<RestateClient>,
 }
 
-impl<R> RestateCommands<R> {
-    pub fn new(restate: Arc<R>) -> Self {
+impl RestateCommands {
+    pub fn new(restate: Arc<RestateClient>) -> Self {
         Self { restate }
     }
 }
@@ -93,10 +50,7 @@ fn mutation_outcome(error: crate::WebError) -> crate::WebError {
 }
 
 #[async_trait]
-impl<R> GhinviteCommands for RestateCommands<R>
-where
-    R: RestateCommandAdapter,
-{
+impl GhinviteCommands for RestateCommands {
     async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
         self.restate
             .call(

@@ -220,7 +220,9 @@ pub trait Storage: Send + Sync + 'static {
     /// Console history lookup after uninstall. Never grants authority: callers
     /// must validate the returned numeric account against current GitHub identity.
     async fn get_latest_installation_by_login(&self, _login: &str) -> Result<Option<Account>> {
-        Ok(None)
+        Err(Error::Database(
+            "installation history read unavailable".into(),
+        ))
     }
 
     /// List every active installation, ordered by `installed_at` ascending.

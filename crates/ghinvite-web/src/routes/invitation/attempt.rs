@@ -328,8 +328,9 @@ async fn save_local(
     let id = String::from(command.operation_id.clone());
     let key = local_key(tower, user, code, &id)
         .ok_or_else(|| WebError::Session("missing session".into()))?;
-    let store = state.attempt_store.as_ref().unwrap();
-    let failure = |_| WebError::Session("Attempt recovery temporarily unavailable.".into());
+    let unavailable = || WebError::Session("Attempt recovery temporarily unavailable.".into());
+    let store = state.attempt_store.as_ref().ok_or_else(unavailable)?;
+    let failure = |_| unavailable();
     if let Some(old) = store.load(&key).await.map_err(failure)? {
         let old: Admit = serde_json::from_value(old.data["attempt"].clone())
             .map_err(|_| WebError::Internal("invalid continuation".into()))?;
