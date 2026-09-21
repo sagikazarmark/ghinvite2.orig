@@ -40,9 +40,15 @@ fn wasm_send<F: Future>(f: F) -> WasmSend<F> {
     WasmSend(f)
 }
 
-/// Map a `worker::Error` from `.bind()` to `ghinvite_core::storage::Error`.
+/// Map a `worker::Error` to an unclassified, retryable database error, as the
+/// SQLx adapter reports every failure it does not classify as a conflict.
 fn bind_err(e: worker::Error) -> ghinvite_core::storage::Error {
     ghinvite_core::storage::Error::Database(e.to_string())
+}
+
+/// A row this call just wrote could not be read back.
+fn unreadable_write(what: &str) -> ghinvite_core::storage::Error {
+    ghinvite_core::storage::Error::Database(format!("{what} missing after write"))
 }
 
 /// Extract the number of changed rows from a D1Result.
@@ -138,7 +144,7 @@ impl Storage for D1Storage {
                 .first::<StoredAttempt>(None)
                 .await
                 .map_err(classify_d1_error)?
-                .ok_or(ghinvite_core::storage::Error::NotFound)
+                .ok_or_else(|| unreadable_write("admin attempt"))
         })
         .await
     }
@@ -209,7 +215,7 @@ impl Storage for D1Storage {
                         .map_err(bind_err)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            self.db.batch(statements).await.map_err(classify_d1_error)?;
+            self.db.batch(statements).await.map_err(bind_err)?;
             Ok(())
         })
         .await
@@ -240,17 +246,17 @@ impl Storage for D1Storage {
         wasm_send(async {
             #[derive(serde::Deserialize)]
             struct Row {
-                invitation_id: String,
+                present: i64,
             }
             Ok(self
                 .db
-                .prepare("SELECT invitation_id FROM delivery_attempts WHERE invitation_id = ?1 AND retryable = 0")
+                .prepare("SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE invitation_id = ?1 AND retryable = 0) AS present")
                 .bind(&[JsValue::from_str(&id.to_string())])
                 .map_err(bind_err)?
                 .first::<Row>(None)
                 .await
                 .map_err(classify_d1_error)?
-                .is_some_and(|row| !row.invitation_id.is_empty()))
+                .is_some_and(|row| row.present == 1))
         })
         .await
     }
@@ -270,7 +276,7 @@ impl Storage for D1Storage {
             let old = self.db.prepare("SELECT command FROM delivery_attempts WHERE invitation_id = ?1")
                 .bind(&[JsValue::from_str(&command.invitation_id.to_string())]).map_err(bind_err)?
                 .first::<Row>(None).await.map_err(classify_d1_error)?
-                .ok_or(ghinvite_core::storage::Error::ProjectionDependency)?;
+                .ok_or_else(|| unreadable_write("delivery attempt"))?;
             if old.command != encoded { return Err(ghinvite_core::storage::Error::ProjectionInvariant("delivery attempt conflict".into())); }
             Ok(result.map(|r| r.generation))
         }).await
@@ -887,7 +893,7 @@ impl Storage for D1Storage {
             let row = self.db.prepare("SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1")
                 .bind(&[JsValue::from_str(payload_sha256)]).map_err(bind_err)?
                 .first::<Binding>(None).await.map_err(classify_d1_error)?
-                .ok_or(ghinvite_core::storage::Error::NotFound)?;
+                .ok_or_else(|| unreadable_write("member webhook binding"))?;
             row.invitation_id.map(|id| id.parse().map_err(|_| ghinvite_core::storage::Error::Corrupt("member webhook invitation ID".into()))).transpose()
         }).await
     }
@@ -1037,7 +1043,7 @@ impl Storage for D1Storage {
                 .map_err(bind_err)?
                 .run()
                 .await
-                .map_err(classify_d1_error)?;
+                .map_err(bind_err)?;
             Ok(())
         })
         .await

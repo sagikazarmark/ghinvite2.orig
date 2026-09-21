@@ -130,6 +130,10 @@ scenarios![
     scenario_audit_pages,
     scenario_timestamp_precision,
     scenario_delivery_audit,
+    scenario_admin_attempts,
+    scenario_delivery_attempt_fence,
+    scenario_member_webhook_binding,
+    scenario_settlement_audit_conflict,
 ];
 
 /// Run the full cross-cutting suite against any `Storage` impl.
@@ -695,8 +699,8 @@ async fn scenario_audit_appends<S: Storage>(s: S) {
     };
     s.audit(&e).await.unwrap();
     assert!(
-        s.audit(&e).await.is_err(),
-        "existing audit types still reject duplicate IDs"
+        matches!(s.audit(&e).await, Err(super::Error::Database(_))),
+        "existing audit types still reject duplicate IDs as storage failures"
     );
     let metadata = AuditEvent {
         id: AuditEventId::new(),
@@ -724,5 +728,248 @@ async fn scenario_timestamp_precision<S: Storage + ProjectionStorage>(s: S) {
     assert_eq!(
         got.created_at, link.created_at,
         "microsecond precision lost in round-trip"
+    );
+}
+
+/// Browser continuations: the first writer wins by ID and by logical binding,
+/// per scope; expired records are invisible and reclaimed; release forgets one.
+async fn scenario_admin_attempts<S: Storage>(s: S) {
+    let retained = |id: &'static str, binding: &'static str, payload: &'static str| {
+        s.retain_admin_attempt("scope", id, binding, payload, 200, 100)
+    };
+    let first = retained("a1", "bind", "p1").await.unwrap();
+    assert_eq!((first.id.as_str(), first.payload.as_str()), ("a1", "p1"));
+    let same_id = retained("a1", "other", "p2").await.unwrap();
+    assert_eq!(
+        (same_id.id.as_str(), same_id.payload.as_str()),
+        ("a1", "p1")
+    );
+    let same_binding = retained("a2", "bind", "p3").await.unwrap();
+    assert_eq!(
+        (same_binding.id.as_str(), same_binding.payload.as_str()),
+        ("a1", "p1")
+    );
+    let other_scope = s
+        .retain_admin_attempt("other", "a1", "bind", "p4", 200, 100)
+        .await
+        .unwrap();
+    assert_eq!(other_scope.payload, "p4");
+    assert_eq!(
+        s.get_admin_attempt("scope", "a1", 100)
+            .await
+            .unwrap()
+            .map(|a| a.payload),
+        Some("p1".into())
+    );
+    assert!(
+        s.get_admin_attempt("scope", "a2", 100)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let listed = s.list_admin_attempts("scope", 100).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
+        ["a1"]
+    );
+    assert!(
+        s.get_admin_attempt("scope", "a1", 200)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        s.list_admin_attempts("scope", 200)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let reclaimed = s
+        .retain_admin_attempt("scope", "a3", "bind", "p5", 300, 200)
+        .await
+        .unwrap();
+    assert_eq!(
+        (reclaimed.id.as_str(), reclaimed.payload.as_str()),
+        ("a3", "p5")
+    );
+    s.release_admin_attempt("scope", "a3").await.unwrap();
+    s.release_admin_attempt("scope", "a3").await.unwrap();
+    assert!(
+        s.get_admin_attempt("scope", "a3", 200)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // A record that is already expired cannot be read back after its write:
+    // a retryable storage failure, not a missing resource.
+    assert!(matches!(
+        s.retain_admin_attempt("scope", "a4", "b4", "p6", 200, 200)
+            .await,
+        Err(super::Error::Database(_))
+    ));
+}
+
+/// One PUT per generation: replay after acknowledgement loss stays fenced, only
+/// rejecting the current generation reopens it, and the fence is input-bound.
+async fn scenario_delivery_attempt_fence<S: Storage>(s: S) {
+    let id = GithubInvitationId::new();
+    let command: crate::delivery::CreateCommand = serde_json::from_value(serde_json::json!({
+        "invitation_id":id,"link_id":InvitationLinkId::new(),"request_id":RequestId::new(),
+        "approval_id":"approval-1","account_id":100,"installation_id":1,"requester_id":8,
+        "repo_id":10,"repo_full_name":"acme/api","permission":"pull",
+        "approved_at":"2026-05-04T12:30:00Z"
+    }))
+    .unwrap();
+    assert!(!s.delivery_attempt_exists(id).await.unwrap());
+    assert_eq!(s.claim_delivery_attempt(&command).await.unwrap(), Some(1));
+    assert!(s.delivery_attempt_exists(id).await.unwrap());
+    assert_eq!(s.claim_delivery_attempt(&command).await.unwrap(), None);
+    s.reject_delivery_attempt(id, 1).await.unwrap();
+    assert!(!s.delivery_attempt_exists(id).await.unwrap());
+    assert_eq!(s.claim_delivery_attempt(&command).await.unwrap(), Some(2));
+    s.reject_delivery_attempt(id, 1).await.unwrap();
+    assert!(s.delivery_attempt_exists(id).await.unwrap());
+    assert_eq!(s.claim_delivery_attempt(&command).await.unwrap(), None);
+    let changed = crate::delivery::CreateCommand {
+        repo_id: 11,
+        ..command
+    };
+    assert!(matches!(
+        s.claim_delivery_attempt(&changed).await,
+        Err(super::Error::ProjectionInvariant(_))
+    ));
+}
+
+/// The first match (including none) retained for a webhook body is final.
+async fn scenario_member_webhook_binding<S: Storage + ProjectionStorage>(s: S) {
+    s.insert_installation(&sample_account(1, 9010, "acme10"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(710, "creator")).await.unwrap();
+    s.upsert_user(&sample_user(810, "asker")).await.unwrap();
+    let link = sample_link(9010, 1, 710, 1000);
+    let request = sample_request(link.id, 810);
+    seed(&s, &link, std::slice::from_ref(&request), 1).await;
+    let invitation = GithubInvitation {
+        id: GithubInvitationId::new(),
+        invitation_request_id: request.id,
+        repo_id: 10,
+        github_invitation_id: Some(99010),
+        state: InvitationState::Sent,
+        error_message: None,
+        created_at: dt("2026-05-04T13:00:00Z"),
+        updated_at: dt("2026-05-04T13:00:00Z"),
+    };
+    s.insert_github_invitation(&invitation).await.unwrap();
+    let unmatched = "a".repeat(64);
+    let matched = "b".repeat(64);
+    assert_eq!(s.bind_member_webhook(&unmatched, None).await.unwrap(), None);
+    assert_eq!(
+        s.bind_member_webhook(&unmatched, Some(invitation.id))
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        s.bind_member_webhook(&matched, Some(invitation.id))
+            .await
+            .unwrap(),
+        Some(invitation.id)
+    );
+    assert_eq!(
+        s.bind_member_webhook(&matched, None).await.unwrap(),
+        Some(invitation.id)
+    );
+}
+
+/// A settlement whose audit ID holds different content is a retryable storage
+/// failure that changes nothing; stale evidence after settling is a no-op.
+async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S) {
+    use super::AuditPosition;
+    s.insert_installation(&sample_account(1, 9011, "acme11"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(711, "creator")).await.unwrap();
+    s.upsert_user(&sample_user(811, "asker")).await.unwrap();
+    let link = sample_link(9011, 1, 711, 1100);
+    let request = sample_request(link.id, 811);
+    seed(&s, &link, std::slice::from_ref(&request), 1).await;
+    let sent = GithubInvitation {
+        id: GithubInvitationId::new(),
+        invitation_request_id: request.id,
+        repo_id: 10,
+        github_invitation_id: Some(99011),
+        state: InvitationState::Sent,
+        error_message: None,
+        created_at: dt("2026-05-04T13:00:00Z"),
+        updated_at: dt("2026-05-04T13:00:00Z"),
+    };
+    s.insert_github_invitation(&sent).await.unwrap();
+    let event = AuditEvent {
+        id: AuditEventId::new(),
+        account_id: 9011,
+        occurred_at: dt("2026-05-04T13:05:00Z"),
+        event_type: EventType::InvitationAccepted,
+        actor_kind: ActorKind::Github,
+        actor_id: None,
+        target_kind: TargetKind::GithubInvitation,
+        target_id: sent.id.to_string(),
+        metadata: serde_json::Value::Null,
+        request_id: None,
+    };
+    s.audit(&AuditEvent {
+        target_id: "someone-else".into(),
+        ..event.clone()
+    })
+    .await
+    .unwrap();
+    let settlement = |event: AuditEvent| super::settlement::Settlement {
+        expected: sent.clone(),
+        state: InvitationState::Accepted,
+        event,
+    };
+    assert!(matches!(
+        s.settle_github_invitation(&settlement(event.clone())).await,
+        Err(super::Error::Database(_))
+    ));
+    assert_eq!(
+        s.get_github_invitation(sent.id).await.unwrap(),
+        Some(sent.clone())
+    );
+    let winner = AuditEvent {
+        id: AuditEventId::new(),
+        ..event.clone()
+    };
+    s.settle_github_invitation(&settlement(winner.clone()))
+        .await
+        .unwrap();
+    s.settle_github_invitation(&settlement(winner.clone()))
+        .await
+        .unwrap();
+    s.settle_github_invitation(&settlement(AuditEvent {
+        id: AuditEventId::new(),
+        ..winner.clone()
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        s.get_github_invitation(sent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InvitationState::Accepted
+    );
+    let history = s
+        .list_audit_events(9011, None, AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    assert_eq!(
+        history
+            .iter()
+            .filter(|e| e.target_id == sent.id.to_string())
+            .collect::<Vec<_>>(),
+        [&winner]
     );
 }
