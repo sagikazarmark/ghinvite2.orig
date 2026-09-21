@@ -584,7 +584,7 @@ async fn create_link(
         }
     };
 
-    let mut command = ghinvite_core::storage::projection::CreateLink {
+    let command = ghinvite_core::storage::projection::CreateLink {
         link_id,
         admin: admin_assertion(&admin),
         account_id: admin.account.account_id,
@@ -597,7 +597,6 @@ async fn create_link(
         approval_required: validated.approval_required,
         repos: validated.repos,
     };
-    command.repos.sort_by_key(|repo| repo.repo_id);
     match attempts::submit(&state, &admin, attempts::Command::Create(command)).await {
         Ok(response) => response,
         Err(attempts::CreateRejected) => {
@@ -655,7 +654,7 @@ async fn edit_link_form(
             description: link.description,
             internal_note: link.internal_note.unwrap_or_default(),
         },
-        None,
+        Default::default(),
         None,
     )
 }
@@ -678,7 +677,7 @@ async fn save_link_details(
                     &admin,
                     id,
                     values,
-                    None,
+                    Default::default(),
                     Some("Failed to load invitation link details. Please try again.".into()),
                 ),
             )
@@ -687,7 +686,7 @@ async fn save_link_details(
     }
     let (description, internal_note) = match link_edit::validate(&values) {
         Ok(metadata) => metadata,
-        Err(error) => return edit_link_response(&admin, id, values, Some(error), None),
+        Err(errors) => return edit_link_response(&admin, id, values, errors, None),
     };
     match state
         .admission
@@ -722,7 +721,7 @@ async fn save_link_details(
                 "invitation link metadata save outcome unknown"
             );
             (axum::http::StatusCode::BAD_GATEWAY,
-            edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
+            edit_link_response(&admin, id, values, Default::default(), Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
         }
         Err(error) => error.into_response_with_recovery(
             format!(
@@ -738,7 +737,7 @@ fn edit_link_response(
     admin: &RequireConsoleAdminOf,
     link_id: ghinvite_core::InvitationLinkId,
     values: LinkEditValues,
-    description_error: Option<String>,
+    errors: link_edit::LinkEditErrors,
     form_error: Option<String>,
 ) -> axum::response::Response {
     let signed_in_login = Some(admin.session.login.clone());
@@ -750,7 +749,8 @@ fn edit_link_response(
                 account_login: account_login.clone(),
                 link_id,
                 values: values.clone(),
-                description_error: description_error.clone(),
+                description_error: errors.description.clone(),
+                internal_note_error: errors.internal_note.clone(),
                 form_error: form_error.clone(),
             }
         }

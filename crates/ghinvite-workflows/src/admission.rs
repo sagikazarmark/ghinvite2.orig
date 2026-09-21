@@ -11,8 +11,8 @@ use crate::request_lifecycle::InvitationRequestClient;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::{
-    InvitationLinkId, InvitationLinkRepo, Permission, RepositoryIdentity, RequestId, RequestState,
-    Slug,
+    Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
+    RequestId, RequestState, Slug,
 };
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
@@ -433,16 +433,8 @@ fn local_rejection(
     request: Option<&RequestSnapshot>,
     now: DateTime<Utc>,
 ) -> Option<Rejection> {
-    if link.revoked_at.is_some() {
-        Some(Rejection::Revoked)
-    } else if link.creation.expires_at.is_some_and(|at| now >= at) {
-        Some(Rejection::Expired)
-    } else if link
-        .creation
-        .max_uses
-        .is_some_and(|max| link.uses >= u64::from(max))
-    {
-        Some(Rejection::Exhausted)
+    if let Some(inactive) = link.inactive(now) {
+        Some(inactive.into())
     } else if request
         .is_some_and(|r| matches!(r.state, RequestState::Pending | RequestState::Approved))
     {
@@ -508,34 +500,27 @@ fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError
 
 fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError> {
     validate_admin(&input.admin, input.account_id)?;
-    input.description = input.description.trim().into();
-    if input.installation_id == 0
-        || input.description.is_empty()
-        || input.description.chars().count() > 120
-        || input.description.contains(['\r', '\n'])
-        || input.max_uses == Some(0)
-        || input.repos.is_empty()
-        || input.repos.len() > 100
-        || input
-            .internal_note
-            .as_ref()
-            .is_some_and(|s| s.len() > 16_384)
-    {
+    if input.installation_id == 0 || input.max_uses == Some(0) {
         return Err(invalid());
     }
-    input.repos.sort_by_key(|repo| repo.repo_id);
-    let mut previous = None;
-    for repo in &input.repos {
-        if repo.repo_id == 0
-            || previous == Some(repo.repo_id)
-            || repo.repo_full_name.len() > 256
-            || RepositoryIdentity::parse(repo.repo_full_name.clone()).is_err()
-        {
-            return Err(invalid());
-        }
-        previous = Some(repo.repo_id);
-    }
+    (input.description, input.internal_note) =
+        normalize_metadata(&input.description, input.internal_note)?;
+    input.repos = RepositoryScope::parse(input.repos)
+        .map_err(|_| invalid())?
+        .into();
     Ok(input)
+}
+
+fn normalize_metadata(
+    description: &str,
+    internal_note: Option<String>,
+) -> Result<(String, Option<String>), TerminalError> {
+    let description = Description::parse(description).map_err(|_| invalid())?;
+    let internal_note = match internal_note {
+        Some(note) => InternalNote::parse(&note).map_err(|_| invalid())?,
+        None => None,
+    };
+    Ok((description.into(), internal_note.map(String::from)))
 }
 
 #[restate_sdk::object]
@@ -552,21 +537,8 @@ impl InvitationLink {
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
-        input.description = input.description.trim().into();
-        input.internal_note = input
-            .internal_note
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        if input.description.is_empty()
-            || input.description.chars().count() > 120
-            || input.description.contains(['\r', '\n'])
-            || input
-                .internal_note
-                .as_ref()
-                .is_some_and(|s| s.len() > 16_384)
-        {
-            return Err(invalid());
-        }
+        (input.description, input.internal_note) =
+            normalize_metadata(&input.description, input.internal_note)?;
         if link.description() == input.description
             && link.internal_note() == input.internal_note.as_deref()
         {
@@ -601,13 +573,7 @@ impl InvitationLink {
         Json(mut input): Json<Admit>,
     ) -> Result<Json<Attempt>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
-        input.normalize();
-        if input.requester_id == 0
-            || input
-                .justification
-                .as_ref()
-                .is_some_and(|s| s.len() > ghinvite_core::admission::MAX_JUSTIFICATION_BYTES)
-        {
+        if input.normalize().is_err() || input.requester_id == 0 {
             return Err(invalid());
         }
         ctx.get::<Json<LinkSnapshot>>("link")
@@ -964,17 +930,7 @@ impl InvitationLink {
         if input.requester_id == 0 {
             return Err(missing());
         }
-        input.justification = input
-            .justification
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        if input
-            .justification
-            .as_ref()
-            .is_some_and(|s| s.len() > ghinvite_core::admission::MAX_JUSTIFICATION_BYTES)
-        {
-            return Err(invalid());
-        }
+        input.normalize().map_err(|_| invalid())?;
         let operation_key = format!("op/{}", String::from(input.operation_id.clone()));
         if let Some(Json(previous)) = ctx.get::<Json<OperationRecord>>(&operation_key).await? {
             if previous.input != input {
@@ -1013,16 +969,7 @@ impl InvitationLink {
         };
         self.checkpoint(&ctx, "before-decision").await?;
         let check_availability = ctx
-            .run(|| async {
-                Ok::<_, HandlerError>(
-                    link.revoked_at.is_none()
-                        && link.creation.expires_at.is_none_or(|at| self.now() < at)
-                        && link
-                            .creation
-                            .max_uses
-                            .is_none_or(|max| link.uses < u64::from(max)),
-                )
-            })
+            .run(|| async { Ok::<_, HandlerError>(link.inactive(self.now()).is_none()) })
             .name("needs_availability")
             .await?;
         #[cfg(feature = "integration")]

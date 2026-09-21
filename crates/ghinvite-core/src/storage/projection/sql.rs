@@ -1,6 +1,7 @@
 //! The same fixed batch runs in SQLx and D1. One JSON parameter avoids lossy
 //! JavaScript number bindings. All validation and writes share one transaction.
 use super::*;
+use crate::invitation_link::{DESCRIPTION_MAX_CHARS, INTERNAL_NOTE_MAX_BYTES};
 use crate::storage::{Error, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -25,31 +26,21 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         || link.revoked_by.is_some_and(|id| !valid_id(id))
         || link.revoked_at.is_some() != link.revoked_by.is_some()
         || crate::Slug::from_string(link.invitation_code.clone()).is_err()
-        || creation.repos.is_empty()
-        || creation.repos.len() > 100
-        || creation.description.chars().count() > 120
-        || link.description().is_empty()
-        || link.description().chars().count() > 120
-        || link.description().contains(['\r', '\n'])
-        || link.internal_note().is_some_and(|s| s.len() > 16_384)
+        || creation.description.chars().count() > DESCRIPTION_MAX_CHARS
+        || crate::Description::parse(link.description()).is_err()
+        || link
+            .internal_note()
+            .is_some_and(|s| s.len() > INTERNAL_NOTE_MAX_BYTES)
         || creation
             .internal_note
             .as_ref()
-            .is_some_and(|s| s.len() > 16_384)
+            .is_some_and(|s| s.len() > INTERNAL_NOTE_MAX_BYTES)
+        || crate::RepositoryScope::parse(creation.repos.clone()).is_err()
+        || creation.repos.iter().any(|repo| !valid_id(repo.repo_id))
         || envelope.requests.len() > 2
         || envelope.events.len() > 8
     {
         return Err(invalid());
-    }
-    let mut repos = std::collections::BTreeSet::new();
-    for repo in &creation.repos {
-        if !valid_id(repo.repo_id)
-            || repo.repo_full_name.len() > 256
-            || !repos.insert(repo.repo_id)
-            || crate::RepositoryIdentity::parse(repo.repo_full_name.clone()).is_err()
-        {
-            return Err(invalid());
-        }
     }
     let mut value = serde_json::to_value(envelope).map_err(|_| invalid())?;
     value["link"]["current_description"] = json!(link.description());

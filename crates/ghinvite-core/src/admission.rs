@@ -29,13 +29,27 @@ pub struct Admit {
     pub requester_id: u64,
     pub justification: Option<String>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("justification is too long")]
+pub struct JustificationTooLong;
+
 impl Admit {
-    pub fn normalize(&mut self) {
+    /// Trim the justification (blank means none) and bound it to
+    /// [`MAX_JUSTIFICATION_BYTES`].
+    pub fn normalize(&mut self) -> Result<(), JustificationTooLong> {
         self.justification = self
             .justification
             .take()
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
+        if self
+            .justification
+            .as_ref()
+            .is_some_and(|s| s.len() > MAX_JUSTIFICATION_BYTES)
+        {
+            return Err(JustificationTooLong);
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -64,6 +78,15 @@ pub enum Rejection {
     ExistingRequest,
     InstallationUnavailable,
     RepositoryUnavailable,
+}
+impl From<crate::Inactive> for Rejection {
+    fn from(inactive: crate::Inactive) -> Self {
+        match inactive {
+            crate::Inactive::Revoked => Self::Revoked,
+            crate::Inactive::Expired => Self::Expired,
+            crate::Inactive::Exhausted => Self::Exhausted,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

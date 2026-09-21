@@ -261,6 +261,7 @@ pub fn LinkCreateForm(
                         value: form.internal_note.clone(),
                         placeholder: "Why this link exists",
                         help: "Optional admin-only notes. Not visible in the invitation request flow.",
+                        error: form.errors.internal_note.clone(),
                         oninput: handlers.internal_note.oninput,
                         onchange: handlers.internal_note.onchange,
                         onblur: handlers.internal_note.onblur,
@@ -1063,6 +1064,7 @@ mod tests {
             internal_note: "Keep this note".to_string(),
             selected_repo_ids: vec![11],
             errors: LinkFormErrors {
+                internal_note: None,
                 summary: vec![
                     "Fix the highlighted fields before creating this invitation link.".to_string(),
                 ],
@@ -1103,6 +1105,7 @@ mod tests {
             internal_note: "Keep this note".to_string(),
             selected_repo_ids: vec![11, 999],
             errors: LinkFormErrors {
+                internal_note: None,
                 summary: vec![
                     "Fix the highlighted fields before creating this invitation link.".to_string(),
                 ],

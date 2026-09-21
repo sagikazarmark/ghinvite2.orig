@@ -256,22 +256,17 @@ async fn handle(
             if command.admin.account_id != link.creation.account_id {
                 return status(404);
             }
-            let description = command.description.trim().to_owned();
-            let internal_note = command
-                .internal_note
-                .as_deref()
-                .map(str::trim)
-                .filter(|note| !note.is_empty())
-                .map(str::to_owned);
-            if description.is_empty()
-                || description.chars().count() > 120
-                || description.contains(['\r', '\n'])
-            {
+            let Ok(description) = ghinvite_core::Description::parse(&command.description) else {
                 return status(400);
-            }
+            };
+            let Ok(internal_note) =
+                ghinvite_core::InternalNote::parse(command.internal_note.as_deref().unwrap_or(""))
+            else {
+                return status(400);
+            };
             link.metadata = Some(LinkMetadata {
-                description,
-                internal_note,
+                description: description.into(),
+                internal_note: internal_note.map(String::from),
             });
             link.revision += 1;
             let link = link.clone();

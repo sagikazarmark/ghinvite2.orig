@@ -63,6 +63,15 @@ impl LinkSnapshot {
             None => self.creation.internal_note.as_deref(),
         }
     }
+    pub fn inactive(&self, now: DateTime<Utc>) -> Option<crate::Inactive> {
+        crate::Inactive::check(
+            self.revoked_at.is_some(),
+            self.creation.expires_at,
+            self.uses,
+            self.creation.max_uses,
+            now,
+        )
+    }
     pub fn as_link(&self) -> crate::InvitationLink {
         crate::InvitationLink {
             id: self.link_id,

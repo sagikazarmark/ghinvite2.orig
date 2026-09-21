@@ -78,14 +78,9 @@ impl RestateAdmission {
             requester_id,
             justification,
         };
-        command.normalize();
-        if command
-            .justification
-            .as_ref()
-            .is_some_and(|s| s.len() > MAX_JUSTIFICATION_BYTES)
-        {
-            return Err(WebError::BadRequest("Justification is too long.".into()));
-        }
+        command
+            .normalize()
+            .map_err(|_| WebError::BadRequest("Justification is too long.".into()))?;
         Ok(command)
     }
     pub async fn resolve(&self, code: &str) -> Result<InvitationLinkId> {

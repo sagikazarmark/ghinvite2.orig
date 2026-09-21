@@ -270,6 +270,9 @@ fn submit_errors_from(errors: &LinkFormErrors) -> Vec<SubmitError<CreateLinkForm
     if let Some(message) = &errors.description {
         submit_errors.push(SubmitError::field(fields.description(), message.clone()));
     }
+    if let Some(message) = &errors.internal_note {
+        submit_errors.push(SubmitError::field(fields.internal_note(), message.clone()));
+    }
     if let Some(message) = &errors.permission {
         submit_errors.push(SubmitError::field(fields.permission(), message.clone()));
     }
@@ -511,6 +514,7 @@ mod tests {
     fn submit_errors_map_slots_to_fields_and_extra_summary_lines_to_the_form() {
         let fields = CreateLinkForm::fields();
         let errors = LinkFormErrors {
+            internal_note: None,
             summary: vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()],
             description: Some("d".to_string()),
             permission: None,

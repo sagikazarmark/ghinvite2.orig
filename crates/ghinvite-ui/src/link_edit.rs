@@ -2,10 +2,11 @@
 
 use crate::field::{Field, FieldKind};
 use crate::layouts::ConsoleLayout;
-use dioform_core::{Form, FormCore};
+use crate::link_form;
+use dioform_core::Form;
 use dioform_derive::Form;
 use dioxus::prelude::*;
-use ghinvite_core::InvitationLinkId;
+use ghinvite_core::{Description, InternalNote, InvitationLinkId};
 use serde::{Deserialize, Serialize};
 
 /// Submitted metadata, kept verbatim for redisplay after a failed save.
@@ -18,29 +19,30 @@ pub struct LinkEditValues {
     pub internal_note: String,
 }
 
-/// Validate with the creation description rule and return trimmed metadata.
+/// Field-level messages for a failed metadata save.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LinkEditErrors {
+    pub description: Option<String>,
+    pub internal_note: Option<String>,
+}
+
+/// Validate with the creation metadata rules and return trimmed metadata.
 /// Blank notes become absent; raw values remain unchanged for failed saves.
-pub fn validate(values: &LinkEditValues) -> Result<(String, Option<String>), String> {
-    let mut core = FormCore::new(values.clone());
-    core.register_sync_field_validator(
-        LinkEditValues::fields().description(),
-        "description",
-        |value, _| {
-            crate::link_form::description_problem(value)
-                .map(str::to_string)
-                .into_iter()
-                .collect()
-        },
-    );
-    core.validate_for_submit();
-    if let Some(error) = core.validation_errors().first() {
-        return Err(error.error().clone());
+pub fn validate(values: &LinkEditValues) -> Result<(String, Option<String>), LinkEditErrors> {
+    match (
+        Description::parse(&values.description),
+        InternalNote::parse(&values.internal_note),
+    ) {
+        (Ok(description), Ok(note)) => Ok((description.into(), note.map(String::from))),
+        (description, note) => Err(LinkEditErrors {
+            description: description
+                .err()
+                .map(|error| link_form::description_message(error).to_string()),
+            internal_note: note
+                .err()
+                .map(|_| link_form::INTERNAL_NOTE_TOO_LONG.to_string()),
+        }),
     }
-    let note = values.internal_note.trim();
-    Ok((
-        values.description.trim().to_string(),
-        (!note.is_empty()).then(|| note.to_string()),
-    ))
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -50,6 +52,8 @@ pub struct LinkEditPageProps {
     pub link_id: InvitationLinkId,
     pub values: LinkEditValues,
     pub description_error: Option<String>,
+    #[props(default)]
+    pub internal_note_error: Option<String>,
     pub form_error: Option<String>,
 }
 
@@ -75,7 +79,7 @@ pub fn LinkEditPage(props: LinkEditPageProps) -> Element {
                 }
                 form { method: "post", action: "{detail_href}/edit", class: "max-w-3xl space-y-5",
                     crate::csrf::CsrfField {}
-                    if props.description_error.is_some() || props.form_error.is_some() {
+                    if props.description_error.is_some() || props.internal_note_error.is_some() || props.form_error.is_some() {
                         div { id: "link-edit-errors", class: "alert alert-error items-start", role: "alert", aria_live: "polite",
                             div {
                                 h2 { class: "font-semibold", "Unable to save invitation link details" }
@@ -85,6 +89,9 @@ pub fn LinkEditPage(props: LinkEditPageProps) -> Element {
                                     }
                                     if let Some(message) = &props.description_error {
                                         li { a { class: "link", href: "#description", "{message}" } }
+                                    }
+                                    if let Some(message) = &props.internal_note_error {
+                                        li { a { class: "link", href: "#internal_note", "{message}" } }
                                     }
                                 }
                             }
@@ -110,6 +117,7 @@ pub fn LinkEditPage(props: LinkEditPageProps) -> Element {
                                 kind: FieldKind::Textarea { rows: Some(4) },
                                 value: props.values.internal_note.clone(),
                                 help: "Optional admin-only notes. Not visible in the invitation request flow. Leave blank to clear the note.",
+                                error: props.internal_note_error.clone(),
                             }
                         }
                     }
@@ -146,7 +154,7 @@ mod tests {
                         account_login: "acme",
                         link_id: InvitationLinkId::new(),
                         values: values.clone(),
-                        description_error: result.clone().err(),
+                        description_error: result.clone().err().and_then(|errors| errors.description),
                         form_error: None,
                     }
                 }
@@ -257,7 +265,10 @@ mod tests {
                 description: description.clone(),
                 internal_note: "  Keep <this>\n note  ".into(),
             };
-            let error = validate(&values).expect_err("invalid description must fail");
+            let error = validate(&values)
+                .expect_err("invalid description must fail")
+                .description
+                .expect("description message");
             let html = crate::testing::render(move || {
                 rsx! {
                     LinkEditPage {
@@ -282,6 +293,48 @@ mod tests {
             assert!(html.contains("role=\"alert\" aria-live=\"polite\""));
             assert!(html.contains(&format!("href=\"#description\">{message}</a>")));
         }
+    }
+
+    #[test]
+    fn internal_note_over_16384_bytes_is_a_field_error_with_raw_values_preserved() {
+        let at_limit = LinkEditValues {
+            description: "Workshop".into(),
+            internal_note: format!("  {}  ", "x".repeat(16_384)),
+        };
+        assert!(validate(&at_limit).is_ok());
+
+        let values = LinkEditValues {
+            description: "   ".into(),
+            internal_note: "x".repeat(16_385),
+        };
+        let errors = validate(&values).expect_err("oversized note must fail");
+        assert_eq!(
+            errors.internal_note.as_deref(),
+            Some("Internal note must be 16384 UTF-8 bytes or fewer.")
+        );
+        assert!(errors.description.is_some(), "every field reports at once");
+        let html = crate::testing::render(move || {
+            rsx! {
+                LinkEditPage {
+                    signed_in_login: Some("admin".to_string()),
+                    account_login: "acme",
+                    link_id: InvitationLinkId::new(),
+                    values: values.clone(),
+                    description_error: errors.description.clone(),
+                    internal_note_error: errors.internal_note.clone(),
+                    form_error: None,
+                }
+            }
+        });
+
+        assert!(html.contains(&format!(">{}</textarea>", "x".repeat(16_385))));
+        assert!(html.contains("aria-describedby=\"internal_note-help internal_note-error\""));
+        assert!(html.contains(
+            "<p id=\"internal_note-error\" class=\"text-sm font-medium text-error\">Internal note must be 16384 UTF-8 bytes or fewer.</p>"
+        ));
+        assert!(html.contains(
+            "href=\"#internal_note\">Internal note must be 16384 UTF-8 bytes or fewer.</a>"
+        ));
     }
 
     #[test]

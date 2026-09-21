@@ -17,7 +17,7 @@ use crate::views::link_form::{
 use crate::views::links::LinkFormValues;
 use chrono::{DateTime, Utc};
 use dioform_core::{FieldIdentity, Form, FormCore};
-use ghinvite_core::{InvitationLinkRepo, Permission};
+use ghinvite_core::{Description, InternalNote, InvitationLinkRepo, Permission, RepositoryScope};
 use serde::Deserialize;
 use std::str::FromStr;
 
@@ -123,7 +123,7 @@ pub struct ValidatedCreateLink {
     /// Otherwise `now` plus the submitted whole number of days.
     pub expires_at: Option<DateTime<Utc>>,
     /// The repository scope: a non-empty subset of the available
-    /// repositories, in the order the account makes them available.
+    /// repositories, ordered by repository ID.
     pub repos: Vec<InvitationLinkRepo>,
 }
 
@@ -169,25 +169,30 @@ pub fn validate(
         None => Some(None),
         Some(days) => link_form::expiration_after(now, days).map(Some),
     };
-    let repos = link_form::repository_scope(&model.repo_ids, available_repos);
-    match (permission, expires_at, repos.is_empty()) {
-        (Some(permission), Some(expires_at), false) => Ok(ValidatedCreateLink {
-            description: model.description.trim().to_string(),
-            internal_note: normalize_internal_note(&model.internal_note),
-            permission,
-            approval_required: model.approval_required,
-            max_uses: model.max_uses,
-            expires_at,
-            repos,
-        }),
+    let repos = RepositoryScope::parse(link_form::repository_scope(
+        &model.repo_ids,
+        available_repos,
+    ));
+    match (
+        Description::parse(&model.description),
+        InternalNote::parse(&model.internal_note),
+        permission,
+        expires_at,
+        repos,
+    ) {
+        (Ok(description), Ok(internal_note), Some(permission), Some(expires_at), Ok(repos)) => {
+            Ok(ValidatedCreateLink {
+                description: description.into(),
+                internal_note: internal_note.map(String::from),
+                permission,
+                approval_required: model.approval_required,
+                max_uses: model.max_uses,
+                expires_at,
+                repos: repos.into(),
+            })
+        }
         _ => Err(Box::new(errors)),
     }
-}
-
-/// Internal note is optional and unvalidated: trimmed, and blank means none.
-fn normalize_internal_note(raw: &str) -> Option<String> {
-    let note = raw.trim();
-    (!note.is_empty()).then(|| note.to_string())
 }
 
 #[cfg(test)]
@@ -247,6 +252,7 @@ mod tests {
         assert_eq!(errors.summary, vec![SUMMARY.to_string()]);
         let filled = [
             &errors.description,
+            &errors.internal_note,
             &errors.permission,
             &errors.max_uses,
             &errors.expires_in_days,
@@ -618,13 +624,11 @@ mod tests {
     }
 
     #[test]
-    fn repo_scope_follows_available_order_and_ignores_duplicates() {
-        let validated = validate(
-            &with_repo_ids(vec![12, 10, 12, 11, 10]),
-            &available_repos(),
-            now(),
-        )
-        .unwrap();
+    fn repo_scope_is_ordered_by_repository_id_and_ignores_duplicates() {
+        let mut available = available_repos();
+        available.reverse();
+        let validated =
+            validate(&with_repo_ids(vec![12, 10, 12, 11, 10]), &available, now()).unwrap();
 
         assert_eq!(
             validated.repos,
@@ -633,6 +637,45 @@ mod tests {
                 scope_repo(11, "acme/web"),
                 scope_repo(12, "acme/docs"),
             ]
+        );
+    }
+
+    #[test]
+    fn repo_scope_over_100_repositories_is_a_field_error() {
+        let available: Vec<_> = (1..=101)
+            .map(|id| repo(id, &format!("acme/repo-{id}")))
+            .collect();
+
+        let validated = validate(&with_repo_ids((1..=100).collect()), &available, now()).unwrap();
+        assert_eq!(validated.repos.len(), 100);
+
+        let errors = validate(&with_repo_ids((1..=101).collect()), &available, now()).unwrap_err();
+        assert_eq!(
+            single_field_errors(&errors).repo_scope.as_deref(),
+            Some(link_form::REPO_SCOPE_TOO_MANY)
+        );
+    }
+
+    #[test]
+    fn internal_note_over_16384_bytes_is_a_field_error() {
+        let with_note = |note: String| CreateLinkSubmission {
+            internal_note: Some(note),
+            ..valid_form()
+        };
+
+        let validated = validate(
+            &with_note(format!(" {} ", "x".repeat(16_384))),
+            &available_repos(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(validated.internal_note, Some("x".repeat(16_384)));
+
+        let errors =
+            validate(&with_note("x".repeat(16_385)), &available_repos(), now()).unwrap_err();
+        assert_eq!(
+            single_field_errors(&errors).internal_note.as_deref(),
+            Some(link_form::INTERNAL_NOTE_TOO_LONG)
         );
     }
 }

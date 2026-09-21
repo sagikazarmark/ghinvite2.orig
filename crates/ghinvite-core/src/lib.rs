@@ -22,7 +22,10 @@ pub mod user;
 pub use account::{Account, AccountType, SelectedRepos};
 pub use github_invitation::{GithubInvitation, InvitationState};
 pub use ids::{AuditEventId, GithubInvitationId, InvitationLinkId, RequestId};
-pub use invitation_link::{InvitationLink, InvitationLinkRepo};
+pub use invitation_link::{
+    Description, DescriptionError, Inactive, InternalNote, InternalNoteTooLong, InvitationLink,
+    InvitationLinkRepo, RepositoryScope, RepositoryScopeError,
+};
 pub use invitation_request::{InvitationRequest, RequestState};
 pub use permission::Permission;
 pub use repository_identity::{RepositoryIdentity, RepositoryIdentityError};

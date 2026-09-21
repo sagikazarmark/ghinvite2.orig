@@ -16,7 +16,11 @@ use dioform_derive::Form;
 // The `Props` derive expands to paths under `dioxus_core`, which `dioxus`'s
 // prelude normally brings in; this module only needs the derive itself.
 use dioxus::{dioxus_core, prelude::Props};
-use ghinvite_core::{InvitationLinkRepo, Permission};
+use ghinvite_core::invitation_link::REPOSITORY_SCOPE_MAX_REPOS;
+use ghinvite_core::{
+    Description, DescriptionError, InternalNote, InternalNoteTooLong, InvitationLinkRepo,
+    Permission,
+};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -68,6 +72,7 @@ pub struct LinkFormErrors {
     /// form-level messages that have no control of their own.
     pub summary: Vec<String>,
     pub description: Option<String>,
+    pub internal_note: Option<String>,
     pub permission: Option<String>,
     pub max_uses: Option<String>,
     pub expires_in_days: Option<String>,
@@ -214,6 +219,7 @@ impl LinkFormErrors {
     /// Some control carries a message of its own.
     fn has_field_message(&self) -> bool {
         self.description.is_some()
+            || self.internal_note.is_some()
             || self.permission.is_some()
             || self.max_uses.is_some()
             || self.expires_in_days.is_some()
@@ -225,6 +231,8 @@ impl LinkFormErrors {
         let fields = CreateLinkForm::fields();
         if *field == fields.description().identity() {
             Some(&mut self.description)
+        } else if *field == fields.internal_note().identity() {
+            Some(&mut self.internal_note)
         } else if *field == fields.permission().identity() {
             Some(&mut self.permission)
         } else if *field == fields.max_uses().identity() {
@@ -251,6 +259,7 @@ pub const DESCRIPTION_REQUIRED: &str =
     "Description is required. Use short, single-line admin-only context for this invitation link.";
 pub const DESCRIPTION_SINGLE_LINE: &str = "Description must be a single line.";
 pub const DESCRIPTION_TOO_LONG: &str = "Description must be 120 characters or fewer.";
+pub const INTERNAL_NOTE_TOO_LONG: &str = "Internal note must be 16384 UTF-8 bytes or fewer.";
 pub const PERMISSION_UNSUPPORTED: &str =
     "Choose a supported permission level: pull, triage, push, maintain, or admin.";
 pub const MAX_USES_NOT_POSITIVE: &str = "Max use must be a whole number of 1 or more.";
@@ -260,6 +269,7 @@ pub const EXPIRES_IN_DAYS_NOT_POSITIVE: &str =
 pub const EXPIRES_IN_DAYS_TOO_FAR: &str =
     "Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.";
 pub const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
+pub const REPO_SCOPE_TOO_MANY: &str = "Repository scope is limited to 100 repositories. Select fewer repositories, or create another invitation link for the rest.";
 
 // --- parsers ----------------------------------------------------------------
 //
@@ -320,12 +330,15 @@ fn parse_optional_count(
 /// rules are pure and the browser can supply its own clock.
 ///
 /// Rules, one sync field validator each, in form order:
-/// - `description`: required after trimming, single line, at most 120 chars.
+/// - `description`: a [`Description`].
+/// - `internal_note`: blank or an [`InternalNote`].
 /// - `permission`: exactly one of the supported collaborator levels.
 /// - `max_uses`: blank or at least 1.
 /// - `expires_in_days`: blank or at least 1, and `now` must be advanceable by
 ///   that many days to a representable timestamp.
-/// - `repo_ids`: at least one selected id must be an available repository.
+/// - `repo_ids`: at least one selected id must be an available repository,
+///   every selected id must still be available, and at most
+///   [`REPOSITORY_SCOPE_MAX_REPOS`] may be selected.
 ///
 /// The `>= 1` checks on the numeric guardrails are deliberately duplicated
 /// from the parsers: the parsers reject `0` at the text boundary (so the
@@ -341,6 +354,13 @@ pub fn register_validators(
 
     core.register_sync_field_validator(fields.description(), "description", |value, _| {
         description_problem(value)
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    });
+
+    core.register_sync_field_validator(fields.internal_note(), "internal_note", |value, _| {
+        internal_note_problem(value)
             .map(str::to_string)
             .into_iter()
             .collect()
@@ -377,10 +397,13 @@ pub fn register_validators(
 
     let available = available_repos.to_vec();
     core.register_sync_field_validator(fields.repo_ids(), "repo_scope", move |selected, _| {
-        if repository_scope(selected, &available).is_empty() {
+        let scope = repository_scope(selected, &available);
+        if scope.is_empty() {
             vec![REPO_SCOPE_REQUIRED.to_string()]
         } else if let Some(message) = missing_repository_notice(selected, &available) {
             vec![message]
+        } else if scope.len() > REPOSITORY_SCOPE_MAX_REPOS {
+            vec![REPO_SCOPE_TOO_MANY.to_string()]
         } else {
             vec![]
         }
@@ -388,19 +411,24 @@ pub fn register_validators(
 }
 
 /// Why a typed description is not a usable one, if it is not.
-pub(crate) fn description_problem(raw: &str) -> Option<&'static str> {
-    const DESCRIPTION_MAX_CHARS: usize = 120;
+fn description_problem(raw: &str) -> Option<&'static str> {
+    Description::parse(raw).err().map(description_message)
+}
 
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        Some(DESCRIPTION_REQUIRED)
-    } else if raw.contains('\n') || raw.contains('\r') {
-        Some(DESCRIPTION_SINGLE_LINE)
-    } else if trimmed.chars().count() > DESCRIPTION_MAX_CHARS {
-        Some(DESCRIPTION_TOO_LONG)
-    } else {
-        None
+/// The field-level message for a description the admin must correct.
+pub(crate) fn description_message(error: DescriptionError) -> &'static str {
+    match error {
+        DescriptionError::Required => DESCRIPTION_REQUIRED,
+        DescriptionError::MultiLine => DESCRIPTION_SINGLE_LINE,
+        DescriptionError::TooLong => DESCRIPTION_TOO_LONG,
     }
+}
+
+/// Why a typed internal note is not a usable one, if it is not.
+fn internal_note_problem(raw: &str) -> Option<&'static str> {
+    InternalNote::parse(raw)
+        .err()
+        .map(|InternalNoteTooLong| INTERNAL_NOTE_TOO_LONG)
 }
 
 // --- shared derivations -----------------------------------------------------
@@ -687,6 +715,32 @@ mod tests {
     }
 
     #[test]
+    fn internal_note_is_limited_to_16384_bytes_after_trimming() {
+        let padded_limit = CreateLinkForm {
+            internal_note: format!("  {}\n", "x".repeat(16_384)),
+            ..valid_model()
+        };
+        assert_eq!(submit_errors(padded_limit, &available_repos()), vec![]);
+
+        let too_long = CreateLinkForm {
+            internal_note: "x".repeat(16_385),
+            ..valid_model()
+        };
+        assert_eq!(
+            only_error_on(too_long, CreateLinkForm::fields().internal_note()),
+            "Internal note must be 16384 UTF-8 bytes or fewer."
+        );
+    }
+
+    #[test]
+    fn limit_messages_name_the_core_limits() {
+        use ghinvite_core::invitation_link::{DESCRIPTION_MAX_CHARS, INTERNAL_NOTE_MAX_BYTES};
+        assert!(DESCRIPTION_TOO_LONG.contains(&DESCRIPTION_MAX_CHARS.to_string()));
+        assert!(INTERNAL_NOTE_TOO_LONG.contains(&INTERNAL_NOTE_MAX_BYTES.to_string()));
+        assert!(REPO_SCOPE_TOO_MANY.contains(&REPOSITORY_SCOPE_MAX_REPOS.to_string()));
+    }
+
+    #[test]
     fn permission_accepts_every_supported_level() {
         for raw in ["pull", "triage", "push", "maintain", "admin"] {
             let model = CreateLinkForm {
@@ -839,9 +893,30 @@ mod tests {
     }
 
     #[test]
+    fn repo_scope_is_limited_to_100_repositories() {
+        let many: Vec<_> = (1..=101)
+            .map(|id| repo(id, &format!("acme/repo-{id}")))
+            .collect();
+        let selecting = |count: u64| CreateLinkForm {
+            repo_ids: (1..=count).collect(),
+            ..valid_model()
+        };
+
+        assert_eq!(submit_errors(selecting(100), &many), vec![]);
+        assert_eq!(
+            submit_errors(selecting(101), &many),
+            vec![(
+                Some(CreateLinkForm::fields().repo_ids().identity()),
+                "Repository scope is limited to 100 repositories. Select fewer repositories, or create another invitation link for the rest.".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn every_rule_can_fail_at_once_and_each_error_is_on_its_own_field() {
         let model = CreateLinkForm {
             description: "".into(),
+            internal_note: "x".repeat(16_385),
             permission: "owner".into(),
             max_uses: Some(0),
             expires_in_days: Some(0),
@@ -858,6 +933,7 @@ mod tests {
             failed,
             vec![
                 Some(fields.description().identity()),
+                Some(fields.internal_note().identity()),
                 Some(fields.permission().identity()),
                 Some(fields.max_uses().identity()),
                 Some(fields.expires_in_days().identity()),
@@ -915,6 +991,7 @@ mod tests {
         assert!(errors.is_empty());
 
         errors.attach(Some(&fields.description().identity()), "d".to_string());
+        errors.attach(Some(&fields.internal_note().identity()), "n".to_string());
         errors.attach(Some(&fields.permission().identity()), "p".to_string());
         errors.attach(Some(&fields.max_uses().identity()), "m".to_string());
         errors.attach(Some(&fields.expires_in_days().identity()), "e".to_string());
@@ -927,6 +1004,7 @@ mod tests {
                     "Fix the highlighted fields before creating this invitation link.".to_string()
                 ],
                 description: Some("d".to_string()),
+                internal_note: Some("n".to_string()),
                 permission: Some("p".to_string()),
                 max_uses: Some("m".to_string()),
                 expires_in_days: Some("e".to_string()),
@@ -954,8 +1032,8 @@ mod tests {
 
         errors.attach(None, "whole form".to_string());
         errors.attach(
-            Some(&CreateLinkForm::fields().internal_note().identity()),
-            "note".to_string(),
+            Some(&CreateLinkForm::fields().approval_required().identity()),
+            "approval".to_string(),
         );
 
         assert_eq!(
@@ -963,7 +1041,7 @@ mod tests {
             vec![
                 "Fix the highlighted fields before creating this invitation link.".to_string(),
                 "whole form".to_string(),
-                "note".to_string(),
+                "approval".to_string(),
             ]
         );
         assert_eq!(errors.description, None);
@@ -1011,7 +1089,7 @@ mod tests {
         errors.attach(Some(&fields.max_uses().identity()), "m".to_string());
         let before = errors.clone();
 
-        errors.retire(&fields.internal_note().identity());
+        errors.retire(&fields.approval_required().identity());
         errors.retire(&fields.description().identity());
 
         assert_eq!(errors, before);

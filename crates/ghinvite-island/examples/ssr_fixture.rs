@@ -212,6 +212,7 @@ fn failed_submission() -> LinkFormValues {
         internal_note: "Keep this note".to_string(),
         selected_repo_ids: vec![999],
         errors: LinkFormErrors {
+            internal_note: None,
             summary: vec![SUMMARY_MESSAGE.to_string()],
             description: Some(DESCRIPTION_REQUIRED.to_string()),
             permission: Some(PERMISSION_UNSUPPORTED.to_string()),
