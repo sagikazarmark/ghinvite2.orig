@@ -281,7 +281,6 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
         },
         revision: 1,
         confirmed_at: None,
-        recovered: false,
     };
     for (outcome, label) in [
         (

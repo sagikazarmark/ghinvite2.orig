@@ -158,9 +158,6 @@ pub fn RequestDetailPage(
                                 for receipt in row.receipts {
                                     p { class: "text-sm break-words", "Delivery ID: {receipt.command.invitation_id}" }
                                     p { class: "text-sm", "Create outcome recorded: {time(receipt.confirmed_at)}" }
-                                    if receipt.recovered {
-                                        p { class: "text-sm", "Outcome first observed during recovery; not the original effect time." }
-                                    }
                                     if let ghinvite_core::delivery::CreateOutcome::Created { upstream_id } = receipt.outcome {
                                         p { class: "text-sm", "GitHub invitation ID: {upstream_id}" }
                                     }

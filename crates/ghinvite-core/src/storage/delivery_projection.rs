@@ -36,9 +36,6 @@ pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
             command.invitation_id
         ));
         let bytes: [u8; 16] = digest[..16].try_into().unwrap();
-        if receipt.recovered {
-            metadata["recovered"] = json!(true);
-        }
         json!({"id":ulid::Ulid::from_bytes(bytes).to_string(),"account_id":command.account_id,
             "occurred_at":at,"event_type":kind,"actor_kind":actor,"target_id":command.invitation_id,
             "metadata":metadata})

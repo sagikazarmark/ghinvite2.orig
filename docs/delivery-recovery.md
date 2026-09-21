@@ -51,12 +51,6 @@ beyond Sending; identical event content replays, conflicting content fails the
 whole projection. Ordinary retry and `DeliveryRecovery/recover` repair missing
 history without another GitHub write, including after workflow retention cleanup.
 
-A create outcome reconstructed from a SQL `Sent` row with an upstream ID (rather
-than observed from GitHub) is retained with `recovered: true`, and its
-`confirmed_at` is the recovery time. Console history labels these entries
-**Confirmed outcome observed during recovery**; their time is not the original
-send time. Existing audit history is preserved.
-
 The fence must be backed up alongside Restate and must never be reset or expired.
 Independent database restore requires closing writes and reconciling all
 unfinished attempts before writes reopen. A Restate backup alone cannot recover
@@ -83,8 +77,10 @@ failed read, not absence. Absence or failed reads retain unknown. Current collab
 current access, not the historical provenance of an invitation. No distributed
 exactly-once HTTP transaction is claimed.
 
-Existing SQL Sent rows with upstream IDs are affirmative create evidence;
-ambiguous rows are fenced before reconciliation. Never infer a successful
+A `github_invitations` row is never create evidence: only the receiving object's
+own projection writes it, after the receipt it projects is retained, so it never
+knows more than `v1/receipt`. Without a confirmed receipt, the write fence alone
+decides between one PUT and read-only reconciliation. Never infer a successful
 original create from decline/expiry alone.
 
 ## GitHub throttling

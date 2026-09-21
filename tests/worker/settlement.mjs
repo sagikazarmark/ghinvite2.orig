@@ -44,7 +44,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.deepEqual(events, [transition.event]);
   await assert.rejects(db.prepare("UPDATE github_invitations SET state='accepted', github_invitation_id=NULL WHERE id=?").bind(row.id).run(), /settled invitation writer conflict/);
   assert.equal((await storage('invitation', row.id)).state, 'cancelled');
-  // Existing Sent rows need no create receipt or backfill before settlement.
+  // Settlement reads only the SQL row, so fixture-seeded Sent rows need no create receipt.
   const cancelled = { ...row, id: id(), github_invitation_id: 987655 };
   await storage('insert_invitation', cancelled);
   assert.equal((await storage('member-candidates', [100, sent.repo_id, requester])).length, 2, 'ambiguous lookup returns at most two rows');
@@ -119,5 +119,5 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   console.log('PASS #65 real Restate + D1 historical delivery through replacement, account mismatch and missed-webhook recovery');
   pause(false);
-  console.log('PASS #63 real Restate + D1 settlement races, atomic audit rollback, lost batch acknowledgement, legacy Sent rows and blocked-create recovery');
+  console.log('PASS #63 real Restate + D1 settlement races, atomic audit rollback, lost batch acknowledgement, fixture-seeded Sent rows and blocked-create recovery');
 }

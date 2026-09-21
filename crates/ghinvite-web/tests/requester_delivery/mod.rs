@@ -108,7 +108,6 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
                 confirmed_at: outcome.confirmed().then(Utc::now),
                 outcome,
                 revision: 1,
-                recovered: false,
             })
             .await
             .unwrap();

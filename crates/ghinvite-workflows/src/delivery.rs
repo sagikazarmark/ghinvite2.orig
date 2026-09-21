@@ -200,7 +200,7 @@ impl GithubCreate for GithubCreateImpl {
             throttled_for_secs,
         }) = ctx
             .run(|| async {
-                let attempted = attempt(&self.state, &command, previous.is_none()).await?;
+                let attempted = attempt(&self.state, &command).await?;
                 #[cfg(feature = "integration")]
                 if let Some(faults) = &self.faults {
                     use std::sync::atomic::Ordering;
@@ -310,11 +310,7 @@ impl Attempt {
 /// caps, so an unexplained block never rechecks more slowly than a named one.
 const BLOCKED_RECHECK_INTERVAL: std::time::Duration = crate::throttle::MAXIMUM;
 
-async fn attempt(
-    state: &AppState,
-    command: &CreateCommand,
-    has_no_retained_receipt: bool,
-) -> Result<Attempt, HandlerError> {
+async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, HandlerError> {
     let dependency = || Error::ProjectionDependency;
     let request = state
         .storage
@@ -345,33 +341,11 @@ async fn attempt(
     if request.state != ghinvite_core::RequestState::Approved {
         return Err(Error::ProjectionDependency.into());
     }
-    if let Some(existing) = state
-        .storage
-        .get_github_invitation(command.invitation_id)
-        .await?
-    {
-        if existing.invitation_request_id != command.request_id
-            || existing.repo_id != command.repo_id
-        {
-            return Err(TerminalError::new_with_code(409, "imported invitation conflict").into());
-        }
-        // Historical Sent + upstream ID is affirmative create evidence. Other
-        // lifecycle states alone cannot reconstruct an original create outcome.
-        if let Some(upstream_id) = existing.github_invitation_id {
-            return Ok(CreateReceipt {
-                command: command.clone(),
-                outcome: CreateOutcome::Created { upstream_id },
-                revision: 1,
-                confirmed_at: Some(chrono::Utc::now()),
-                recovered: true,
-            }
-            .into());
-        }
-        // Fence ambiguous Sending/terminal rows before reconciliation.
-        if has_no_retained_receipt {
-            state.storage.claim_delivery_attempt(command).await?;
-        }
-    }
+    // An existing `github_invitations` row is not create evidence. Only this
+    // object's own projection writes it, after the receipt it projects is
+    // already retained, so the row never knows more than `v1/receipt`. Every
+    // PUT is preceded by a durable claim on the fence below, which is what
+    // keeps a retry — even one without a retained receipt — from writing twice.
     let attempted = state
         .storage
         .delivery_attempt_exists(command.invitation_id)
@@ -387,7 +361,6 @@ async fn attempt(
         },
         revision: 1,
         confirmed_at: None,
-        recovered: false,
     };
     let Some(account) = state
         .storage
@@ -542,7 +515,6 @@ async fn attempt(
     let receipt = CreateReceipt {
         command: command.clone(),
         confirmed_at: outcome.confirmed().then(chrono::Utc::now),
-        recovered: false,
         outcome,
         revision: 1,
     };
@@ -702,7 +674,7 @@ mod tests {
         ));
         let (state, command) = state_with_pending_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, true).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(
             attempted.receipt.outcome,
@@ -726,7 +698,7 @@ mod tests {
         ));
         let (state, command) = state_with_pending_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, true).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(
             attempted.receipt.outcome,
@@ -748,7 +720,7 @@ mod tests {
         let mock = MockTransport::scripted(put_collaborator(502, &[], "Bad gateway"));
         let (state, command) = state_with_pending_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, true).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
         assert_eq!(attempted.throttled_for_secs, None);
@@ -770,7 +742,7 @@ mod tests {
         ]);
         let (state, command) = state_with_pending_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, true).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(
             attempted.receipt.outcome,
@@ -798,8 +770,6 @@ mod tests {
         let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let command = CreateCommand {
             version: 1,
-            // A create whose invitation row was never projected: the recovery
-            // path has no stored upstream ID to short-circuit on.
             invitation_id: GithubInvitationId::new(),
             link_id: seeded.link_id,
             request_id: seeded.request_id,
@@ -841,7 +811,7 @@ mod tests {
         let mock = MockTransport::scripted(script);
         let (state, command) = state_with_retained_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, false).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(
             attempted.receipt.outcome,
@@ -868,7 +838,7 @@ mod tests {
         let mock = MockTransport::scripted(script);
         let (state, command) = state_with_retained_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, false).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         // Half a listing is not evidence of absence, so the collaborator probe
         // never runs and the create stays unknown.
@@ -892,7 +862,7 @@ mod tests {
         let mock = MockTransport::scripted(script);
         let (state, command) = state_with_retained_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, false).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         // The fence stays burned and the outcome stays unknown — a limit is no
         // evidence about the original PUT — but rereading is safe, so this one
@@ -925,7 +895,7 @@ mod tests {
         let mock = MockTransport::scripted(script);
         let (state, command) = state_with_retained_create(mock.clone()).await;
 
-        let attempted = attempt(&state, &command, false).await.unwrap();
+        let attempted = attempt(&state, &command).await.unwrap();
 
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
         assert_eq!(attempted.throttled_for_secs, Some(20));

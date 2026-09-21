@@ -47,7 +47,7 @@ The native and Worker runtime scenarios cover a blocked create, intervening swee
 successful retry and preserved upstream ID; accepted webhook versus delayed
 reconciliation evidence; concurrent reconciliation; atomic rollback on audit
 failure; and one terminal audit. The D1 test executes the real batch and loses its
-acknowledgement before retry, and exercises historical Sent rows, cancellation,
+acknowledgement before retry, and exercises fixture-seeded Sent rows, cancellation,
 and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
 rejection of a late write after settlement.
 

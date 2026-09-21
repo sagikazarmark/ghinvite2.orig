@@ -49,11 +49,6 @@ pub struct CreateReceipt {
     /// workflow retention. Present exactly when the outcome is confirmed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_at: Option<DateTime<Utc>>,
-    /// The outcome was reconstructed from retained SQL evidence (a `Sent` row
-    /// with an upstream ID) rather than observed from GitHub; `confirmed_at` is
-    /// then the recovery time, not the original GitHub effect time.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub recovered: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
