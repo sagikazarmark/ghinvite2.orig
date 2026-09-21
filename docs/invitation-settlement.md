@@ -5,7 +5,7 @@ settlement handlers on the existing `GithubInvitation/<invitation_id>`
 Virtual Object:
 
 - `on_webhook`, `reconcile`, `cancel`, and `tick_expire` share object
-  exclusivity and one `Storage::settle_github_invitation` transition boundary.
+  exclusivity and one `DeliveryStorage::settle_github_invitation` transition boundary.
 - `Reconcile/daily_run` journals read-only GitHub evidence, then calls the
   invitation owner with the observed invitation identity, state, and upstream ID.
   Concurrent sweeps can observe the same row; only the first valid settlement wins.

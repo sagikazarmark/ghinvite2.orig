@@ -3,8 +3,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ghinvite_core::storage::Storage;
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{AuditStorage, ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
@@ -1016,7 +1016,7 @@ impl GhinviteCommands for UnusedCommands {
 
 async fn build_test_app() -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -1055,7 +1055,7 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
         .await
         .unwrap();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(oauth_expectations()));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
@@ -1123,7 +1123,7 @@ async fn build_signed_in_admin_app_with_authority(
         .await
         .unwrap();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
     let authority = FakeLinkAuthority::start().await;
@@ -1289,7 +1289,7 @@ async fn build_signed_in_admin_app_with_console_installations(
         ));
     }
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
@@ -1308,7 +1308,7 @@ async fn build_signed_in_admin_app_with_console_installations(
 }
 
 async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Router, String) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -1343,7 +1343,7 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
 }
 
 async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),

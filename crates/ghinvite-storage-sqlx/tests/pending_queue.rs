@@ -1,5 +1,6 @@
+use ghinvite_core::storage::pending_queue::PendingBoundary;
 use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
-use ghinvite_core::storage::{Storage, pending_queue::PendingBoundary};
+use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, Permission,
     RequestId, RequestState, SelectedRepos, Slug, User,

@@ -1,5 +1,7 @@
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{AuditPosition, Storage};
+use ghinvite_core::storage::{
+    AuditPosition, ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage,
+};
 use ghinvite_core::{Account, AccountType, SelectedRepos, User};
 use ghinvite_storage_sqlx::SqlxStorage;
 use serde_json::json;

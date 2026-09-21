@@ -1,5 +1,6 @@
 use super::*;
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 
 #[tokio::test]
 async fn history_and_detail_require_current_account_admin_authority() {

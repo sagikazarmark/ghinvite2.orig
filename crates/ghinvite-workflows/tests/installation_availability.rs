@@ -1,7 +1,7 @@
 //! #60: availability through public commands and a real GitHub HTTP boundary.
 #![cfg(feature = "integration")]
 use ghinvite_core::RequestId;
-use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::{AuditStorage, ConsoleStorage, InstallationStorage, RecordStorage};
 use restate_sdk::http_server::HttpServer;
 use serde_json::{Value, json};
 use std::{

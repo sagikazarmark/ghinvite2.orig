@@ -7,9 +7,10 @@ use axum::{
 use chrono::Utc;
 use common::link_authority::{self, CODE_SERVICE, LINK_SERVICE};
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
-    Permission, RequestId, RequestState, SelectedRepos, Slug, storage::Storage,
+    Permission, RequestId, RequestState, SelectedRepos, Slug,
 };
 use ghinvite_github::{
     mocks::{Expectation, MockTransport},

@@ -3,6 +3,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use ghinvite_core::storage::InstallationStorage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
@@ -33,7 +34,7 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
     mock: MockTransport,
     session_store: S,
 ) -> axum::Router {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),

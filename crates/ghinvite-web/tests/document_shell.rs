@@ -15,9 +15,9 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use common::link_authority::FakeLinkAuthority;
 use ghinvite_core::admission::RequesterPage;
-use ghinvite_core::storage::Storage;
 use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
@@ -325,7 +325,7 @@ async fn document_fixture() -> (axum::Router, String) {
         }
     }
 
-    let storage: Arc<dyn Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let restate = authority.client();
     let state = AppState::new(
         storage,

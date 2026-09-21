@@ -37,7 +37,7 @@ async fn build_test_app() -> axum::Router {
 
 async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -644,7 +644,7 @@ async fn webhook_rejects_body_over_two_mib() {
 
 async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf>) -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),

@@ -4,9 +4,8 @@ use crate::views::request_history::{
 };
 use axum::{extract::Path, http::StatusCode};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ghinvite_core::{
-    InvitationLinkId, RequestId, RequestState, storage::request_history::Boundary,
-};
+use ghinvite_core::storage::{RecordStorage, request_history::Boundary};
+use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, RequestState};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +30,33 @@ fn cursor(uri: &Uri, link: InvitationLinkId) -> Option<Boundary> {
     .then_some(value.boundary)
 }
 
+/// The account's own invitation link. Another account's link is concealed as missing.
+async fn owned_link(
+    storage: &dyn RecordStorage,
+    account_id: u64,
+    id: InvitationLinkId,
+) -> crate::Result<InvitationLink> {
+    match storage.get_invitation_link_by_id(id).await? {
+        Some(link) if link.account_id == account_id => Ok(link),
+        _ => Err(crate::WebError::NotFound),
+    }
+}
+
+/// The account's own invitation request with its invitation link. A request
+/// whose link is missing or belongs to another account is concealed as missing.
+async fn owned_request(
+    storage: &dyn RecordStorage,
+    account_id: u64,
+    id: RequestId,
+) -> crate::Result<(InvitationRequest, InvitationLink)> {
+    let request = storage
+        .get_invitation_request(id)
+        .await?
+        .ok_or(crate::WebError::NotFound)?;
+    let link = owned_link(storage, account_id, request.invitation_link_id).await?;
+    Ok((request, link))
+}
+
 async fn user_label(state: &AppState, id: u64) -> String {
     let user = state.storage.get_user(id).await.ok().flatten();
     profile_label(id, user.as_ref().map(|user| user.login.as_str()))
@@ -52,13 +78,7 @@ pub(super) async fn history(
     let Ok(id) = id.parse::<InvitationLinkId>() else {
         return console_not_found_response(&admin);
     };
-    let link = match find_account_admin_invitation_link(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        id,
-    )
-    .await
-    {
+    let link = match owned_link(state.storage.as_ref(), admin.account.account_id, id).await {
         Ok(link) => link,
         Err(crate::WebError::NotFound) => return console_not_found_response(&admin),
         Err(error) => {
@@ -127,24 +147,17 @@ pub(super) async fn detail(
     let Ok(id) = id.parse::<RequestId>() else {
         return console_not_found_response(&admin);
     };
-    let record = match find_account_admin_request(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        id,
-    )
-    .await
-    {
-        Ok(record) => record,
-        Err(crate::WebError::NotFound) => return console_not_found_response(&admin),
-        Err(error) => {
-            return error.into_response_with_recovery(
-                format!("/console/accounts/{}/requests", admin.account.account_login),
-                "Back to requests",
-            );
-        }
-    };
-    let request = record.request;
-    let link = record.invitation_link;
+    let (request, link) =
+        match owned_request(state.storage.as_ref(), admin.account.account_id, id).await {
+            Ok(record) => record,
+            Err(crate::WebError::NotFound) => return console_not_found_response(&admin),
+            Err(error) => {
+                return error.into_response_with_recovery(
+                    format!("/console/accounts/{}/requests", admin.account.account_login),
+                    "Back to requests",
+                );
+            }
+        };
     let requester = user_label(&state, request.requester_id).await;
     let decision_actor = match request.decided_by {
         Some(id) => user_label(&state, id).await,
@@ -193,4 +206,178 @@ pub(super) async fn detail(
         }
     });
     Html(html).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{owned_link, owned_request};
+    use chrono::{DateTime, Utc};
+    use ghinvite_core::storage::projection::fixture::Seed;
+    use ghinvite_core::storage::{InstallationStorage, RecordStorage, Result};
+    use ghinvite_core::{
+        Account, AccountType, GithubInvitation, GithubInvitationId, InvitationLink,
+        InvitationLinkId, InvitationLinkRepo, InvitationRequest, Permission, RequestId,
+        RequestState, SelectedRepos, Slug, User,
+    };
+
+    fn dt(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn account(installation_id: u64, account_id: u64, login: &str) -> Account {
+        Account {
+            installation_id,
+            account_id,
+            account_login: login.into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        }
+    }
+
+    fn user(user_id: u64, login: &str) -> User {
+        User {
+            user_id,
+            login: login.into(),
+            avatar_url: None,
+            last_seen_at: dt("2026-05-04T12:00:00Z"),
+        }
+    }
+
+    fn link(account_id: u64, installation_id: u64, slug: &str) -> InvitationLink {
+        InvitationLink {
+            id: InvitationLinkId::new(),
+            slug: Slug::from_string(slug.to_string()).unwrap(),
+            installation_id,
+            account_id,
+            created_by: 701,
+            created_at: dt("2026-05-04T12:00:00Z"),
+            expires_at: None,
+            max_uses: None,
+            uses_count: 0,
+            permission: Permission::Pull,
+            approval_required: true,
+            description: "AI coding workshop".into(),
+            internal_note: None,
+            revoked_at: None,
+            revoked_by: None,
+            repos: vec![InvitationLinkRepo {
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+            }],
+        }
+    }
+
+    fn request(invitation_link_id: InvitationLinkId) -> InvitationRequest {
+        InvitationRequest {
+            id: RequestId::new(),
+            invitation_link_id,
+            requester_id: 802,
+            justification: Some("need repository access".into()),
+            state: RequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            decline_reason: None,
+            decision_deadline: None,
+            created_at: dt("2026-05-04T12:30:00Z"),
+        }
+    }
+
+    async fn storage() -> ghinvite_storage_sqlx::SqlxStorage {
+        let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap();
+        for (installation, account_id, login) in [(1, 9001, "acme"), (2, 9002, "other")] {
+            storage
+                .insert_installation(&account(installation, account_id, login))
+                .await
+                .unwrap();
+        }
+        for (id, login) in [(701, "creator"), (802, "requester")] {
+            storage.upsert_user(&user(id, login)).await.unwrap();
+        }
+        storage
+    }
+
+    #[tokio::test]
+    async fn owned_link_returns_the_accounts_link_and_conceals_others() {
+        let storage = storage().await;
+        let own = link(9001, 1, "QueueSlug0000001");
+        let foreign = link(9002, 2, "QueueSlug0000002");
+        storage.seed_link(&own).await.unwrap();
+        storage.seed_link(&foreign).await.unwrap();
+
+        assert_eq!(owned_link(&storage, 9001, own.id).await.unwrap(), own);
+        assert!(matches!(
+            owned_link(&storage, 9001, foreign.id).await,
+            Err(crate::WebError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn owned_request_returns_request_and_link_and_conceals_others() {
+        let storage = storage().await;
+        let own = link(9001, 1, "QueueSlug0000003");
+        let foreign = link(9002, 2, "QueueSlug0000004");
+        storage.seed_link(&own).await.unwrap();
+        storage.seed_link(&foreign).await.unwrap();
+        let own_request = request(own.id);
+        let foreign_request = request(foreign.id);
+        storage.seed_request(&own_request).await.unwrap();
+        storage.seed_request(&foreign_request).await.unwrap();
+
+        let (request, link) = owned_request(&storage, 9001, own_request.id).await.unwrap();
+        assert_eq!((request.id, link.id), (own_request.id, own.id));
+        for id in [foreign_request.id, RequestId::new()] {
+            assert!(matches!(
+                owned_request(&storage, 9001, id).await,
+                Err(crate::WebError::NotFound)
+            ));
+        }
+    }
+
+    /// Projections admit no request without its link, so a fake presents one.
+    struct OrphanedRequest(InvitationRequest);
+
+    #[async_trait::async_trait]
+    impl RecordStorage for OrphanedRequest {
+        async fn get_invitation_request(&self, _: RequestId) -> Result<Option<InvitationRequest>> {
+            Ok(Some(self.0.clone()))
+        }
+        async fn get_invitation_link_by_id(
+            &self,
+            _: InvitationLinkId,
+        ) -> Result<Option<InvitationLink>> {
+            Ok(None)
+        }
+        async fn get_installation(&self, _: u64) -> Result<Option<Account>> {
+            unreachable!()
+        }
+        async fn get_active_installation_by_account_id(&self, _: u64) -> Result<Option<Account>> {
+            unreachable!()
+        }
+        async fn upsert_user(&self, _: &User) -> Result<()> {
+            unreachable!()
+        }
+        async fn get_user(&self, _: u64) -> Result<Option<User>> {
+            unreachable!()
+        }
+        async fn get_github_invitation(
+            &self,
+            _: GithubInvitationId,
+        ) -> Result<Option<GithubInvitation>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_request_conceals_a_request_whose_link_is_missing() {
+        let orphan = request(InvitationLinkId::new());
+        let storage = OrphanedRequest(orphan.clone());
+        assert!(matches!(
+            owned_request(&storage, 9001, orphan.id).await,
+            Err(crate::WebError::NotFound)
+        ));
+    }
 }

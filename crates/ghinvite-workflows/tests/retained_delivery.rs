@@ -1,5 +1,6 @@
 //! Public ingress + real SQL + GitHub HTTP boundary acceptance for #56.
 #![cfg(feature = "integration")]
+use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{RequestId, storage::Storage};
 use restate_sdk::{endpoint::Endpoint, http_server::HttpServer};
 use serde_json::{Value, json};

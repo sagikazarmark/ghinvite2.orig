@@ -1,6 +1,9 @@
+use ghinvite_core::storage::{
+    AuditStorage, ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage,
+};
 use ghinvite_core::{
     audit::*,
-    storage::{AuditPosition, Storage, projection::ProjectionStorage, settlement::Settlement},
+    storage::{AuditPosition, projection::ProjectionStorage, settlement::Settlement},
     *,
 };
 use ghinvite_storage_sqlx::SqlxStorage;

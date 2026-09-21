@@ -1,8 +1,8 @@
 use crate::error::Result;
 use crate::restate_client::RestateClient;
+use crate::state::WebStorage;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ghinvite_core::storage::Storage;
 use octoevents::{Action, Dispatcher, EventKind, Payload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -268,7 +268,7 @@ enum RepositorySelection {
 
 /// Builds routes for one delivery, using its receipt time for emitted commands.
 pub fn github_webhook_dispatcher(
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn WebStorage>,
     commands: Arc<dyn GhinviteCommands>,
     received_at: DateTime<Utc>,
 ) -> Dispatcher {
@@ -394,7 +394,8 @@ mod tests {
     use axum::response::IntoResponse;
     use axum::routing::post;
     use chrono::Utc;
-    use ghinvite_core::storage::Storage;
+    use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
+
     use ghinvite_core::storage::projection::fixture::Seed;
     use octoevents::{Envelope, Match};
     use serde_json::Value;

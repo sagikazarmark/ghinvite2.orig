@@ -1,5 +1,8 @@
 //! Test-only access to the public storage boundary inside workerd.
-use ghinvite_core::storage::{Storage, projection::ProjectionStorage, test_suite};
+use ghinvite_core::storage::{
+    ConsoleStorage, DeliveryStorage, RecordStorage, WebhookStorage, projection::ProjectionStorage,
+    test_suite,
+};
 use http_body_util::BodyExt;
 use worker::{Body, Env, HttpRequest, wasm_bindgen::JsValue};
 

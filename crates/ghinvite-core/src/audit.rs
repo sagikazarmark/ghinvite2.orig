@@ -1,4 +1,4 @@
-//! Append-only audit event types. The Storage trait exposes `audit(&AuditEvent)`
+//! Append-only audit event types. `AuditStorage` exposes `audit(&AuditEvent)`
 //! and no update/delete; this module defines the event payload.
 
 use crate::AuditEventId;

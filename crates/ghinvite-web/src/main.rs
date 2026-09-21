@@ -12,9 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = WebConfig::for_local_dev()?;
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = match std::env::var(
-        "GHINVITE_DATABASE_PATH",
-    ) {
+    let storage: Arc<dyn ghinvite_web::WebStorage> = match std::env::var("GHINVITE_DATABASE_PATH") {
         Ok(path) => {
             let s =
                 ghinvite_storage_sqlx::SqlxStorage::at_path(std::path::Path::new(&path)).await?;

@@ -79,7 +79,7 @@ cargo test -p ghinvite-web
 ## Architecture
 
 `web::build_app(state, session_store) -> axum::Router` is the single entry
-point. `state` carries `Arc<dyn Storage>`, `Arc<dyn HttpTransport>`,
+point. `state` carries `Arc<dyn WebStorage>`, `Arc<dyn HttpTransport>`,
 `Arc<RestateClient>`, and `WebConfig`. `session_store` is any
 `tower_sessions::SessionStore` impl. In practice it is this crate's own
 `session_store::ProtectedStore`, which encrypts every record before it reaches

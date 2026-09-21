@@ -1,4 +1,5 @@
 use super::*;
+use ghinvite_core::storage::InstallationStorage;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 struct MembershipFailureTransport {

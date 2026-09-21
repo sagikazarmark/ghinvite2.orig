@@ -6,6 +6,7 @@
 
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
+use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_github::jwt::AppJwtSigner;
 use ghinvite_github::{HttpTransport, InstallationClient};
 use std::sync::Arc;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 const TEST_KEY_PEM: &str = include_str!("../../ghinvite-github/src/jwt_test_key.pem");
 
 /// Build an in-memory `SqlxStorage`.
-pub(crate) async fn fixture_storage() -> Arc<dyn ghinvite_core::storage::Storage> {
+pub(crate) async fn fixture_storage() -> Arc<dyn crate::WorkflowStorage> {
     Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -52,7 +53,7 @@ pub(crate) async fn fixture_state_with_storage()
             .await
             .unwrap(),
     );
-    let storage_for_state: Arc<dyn ghinvite_core::storage::Storage> = storage.clone();
+    let storage_for_state: Arc<dyn crate::WorkflowStorage> = storage.clone();
     let transport = Arc::new(MockTransport::scripted(vec![]));
     let state = AppState::new(storage_for_state, fixture_github_client(transport));
 
@@ -121,7 +122,7 @@ pub(crate) async fn seed_pending_invitation(
     storage: &ghinvite_storage_sqlx::SqlxStorage,
     repo_full_name: &str,
 ) -> SeededInvitation {
-    use ghinvite_core::storage::{Storage, projection::ProjectionStorage};
+    use ghinvite_core::storage::projection::ProjectionStorage;
     use ghinvite_core::{
         AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
         InvitationState, Permission, RequestId, RequestState, SelectedRepos, Slug,

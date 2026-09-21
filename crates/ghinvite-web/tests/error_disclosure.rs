@@ -63,7 +63,7 @@ fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
 }
 
 async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),

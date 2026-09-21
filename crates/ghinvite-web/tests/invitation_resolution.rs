@@ -1,8 +1,8 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
-use ghinvite_core::storage::Storage;
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,

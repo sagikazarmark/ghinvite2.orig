@@ -2,7 +2,7 @@
 #![cfg(feature = "integration")]
 
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{AuditPosition, Storage};
+use ghinvite_core::storage::{AuditPosition, ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{Account, AccountType, InvitationLinkId, SelectedRepos, User};
 use ghinvite_storage_sqlx::SqlxStorage;
 use ghinvite_workflows::{admission, projection};

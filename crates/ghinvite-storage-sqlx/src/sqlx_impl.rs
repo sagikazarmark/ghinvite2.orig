@@ -8,10 +8,11 @@ use ghinvite_core::audit::{AuditEvent, EventType};
 use ghinvite_core::delivery::{CreateCommand, CreateReceipt};
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use ghinvite_core::storage::{
-    AuditPage, AuditPosition, Error, Result, Storage, attempt_continuations, audit_read,
-    audit_write, classify_insert, delivery_attempts, delivery_projection, github_invitations,
-    installations, invitation_links, invitation_requests, pending_queue, request_history,
-    settlement, users,
+    AuditPage, AuditPosition, AuditStorage, ConsoleStorage, ContinuationStorage, DeliveryStorage,
+    Error, InstallationStorage, RecordStorage, Result, WebhookStorage, attempt_continuations,
+    audit_read, audit_write, classify_insert, delivery_attempts, delivery_projection,
+    github_invitations, installations, invitation_links, invitation_requests, pending_queue,
+    request_history, settlement, users,
 };
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
@@ -209,7 +210,169 @@ impl SqlxStorage {
 }
 
 #[async_trait]
-impl Storage for SqlxStorage {
+impl RecordStorage for SqlxStorage {
+    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
+        let query = sqlx::query(installations::GET).bind(u64_to_i64(installation_id));
+        self.installation(query).await
+    }
+
+    async fn get_active_installation_by_account_id(
+        &self,
+        account_id: u64,
+    ) -> Result<Option<Account>> {
+        let query = sqlx::query(installations::ACTIVE_BY_ACCOUNT).bind(u64_to_i64(account_id));
+        self.installation(query).await
+    }
+
+    async fn upsert_user(&self, user: &User) -> Result<()> {
+        let query = sqlx::query(users::UPSERT)
+            .bind(u64_to_i64(user.user_id))
+            .bind(&user.login)
+            .bind(user.avatar_url.as_deref())
+            .bind(user.last_seen_at);
+        self.execute(query).await?;
+        Ok(())
+    }
+
+    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
+        self.optional(sqlx::query(users::GET).bind(u64_to_i64(user_id)))
+            .await
+    }
+
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>> {
+        let query = sqlx::query(invitation_links::GET).bind(id.to_string());
+        Ok(invitation_links::fold(self.all(query).await?)?.pop())
+    }
+
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
+        self.optional(sqlx::query(invitation_requests::GET).bind(id.to_string()))
+            .await
+    }
+
+    async fn get_github_invitation(
+        &self,
+        id: GithubInvitationId,
+    ) -> Result<Option<GithubInvitation>> {
+        self.optional(sqlx::query(github_invitations::GET).bind(id.to_string()))
+            .await
+    }
+}
+
+#[async_trait]
+impl ConsoleStorage for SqlxStorage {
+    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        self.installation(sqlx::query(installations::ACTIVE_BY_LOGIN).bind(login))
+            .await
+    }
+
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        self.installation(sqlx::query(installations::LATEST_BY_LOGIN).bind(login))
+            .await
+    }
+
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool> {
+        let query = sqlx::query(invitation_links::BELONGS_TO_ACCOUNT)
+            .bind(id.to_string())
+            .bind(u64_to_i64(account_id));
+        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
+    }
+
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>> {
+        let query = sqlx::query(invitation_links::FOR_ACCOUNT).bind(u64_to_i64(account_id));
+        invitation_links::fold(self.all(query).await?)
+    }
+
+    async fn request_history(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+        before: Option<request_history::Boundary>,
+    ) -> Result<request_history::Page> {
+        let sql = request_history::query(before);
+        let query = sqlx::query(&sql)
+            .bind(u64_to_i64(account_id))
+            .bind(link_id.to_string())
+            .bind(before.map(request_history::boundary_key));
+        Ok(request_history::page(self.all(query).await?))
+    }
+
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
+        let query = sqlx::query(pending_queue::COUNT_QUERY).bind(u64_to_i64(account_id));
+        let row: pending_queue::CountRow = self.one(query).await?;
+        Ok(row.pending)
+    }
+
+    async fn pending_request_page(
+        &self,
+        account_id: u64,
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage> {
+        let sql = pending_queue::query(after.is_some());
+        let query = sqlx::query(&sql)
+            .bind(u64_to_i64(account_id))
+            .bind(after.map(|b| b.seek_key()));
+        pending_queue::PendingPage::from_json(self.all(query).await?)
+    }
+
+    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
+        let query = sqlx::query(delivery_projection::FOR_REQUEST).bind(id.to_string());
+        let rows: Vec<delivery_projection::ReceiptRow> = self.all(query).await?;
+        rows.into_iter().map(|row| row.decode()).collect()
+    }
+
+    async fn list_github_invitations_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<GithubInvitation>> {
+        let query = sqlx::query(github_invitations::FOR_REQUEST);
+        self.all(query.bind(id.to_string())).await
+    }
+
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage> {
+        fn query(
+            sql: &str,
+            account_id: u64,
+            event: Option<EventType>,
+            position: AuditPosition,
+        ) -> Query<'_> {
+            let boundary = position.boundary();
+            sqlx::query(sql)
+                .bind(u64_to_i64(account_id))
+                .bind(event.map(|e| e.as_str()))
+                .bind(boundary.map(audit_read::boundary_time))
+                .bind(boundary.map(|b| b.id.to_string()))
+        }
+        let sql = audit_read::query(event, position, false);
+        let rows = self.all(query(&sql, account_id, event, position)).await?;
+        let mut page = AuditPage::from_rows(rows, position)?;
+        if let Some([newer, older]) = page.probes() {
+            for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
+                let sql = audit_read::query(event, seek, true);
+                let probe = query(&sql, account_id, event, seek);
+                *flag = self.optional::<IgnoredAny>(probe).await?.is_some();
+            }
+        }
+        Ok(page)
+    }
+}
+
+#[async_trait]
+impl ContinuationStorage for SqlxStorage {
     async fn retain_attempt_continuation(
         &self,
         scope: &str,
@@ -239,6 +402,7 @@ impl Storage for SqlxStorage {
         )
         .await
     }
+
     async fn get_attempt_continuation(
         &self,
         scope: &str,
@@ -248,6 +412,7 @@ impl Storage for SqlxStorage {
         let query = sqlx::query(attempt_continuations::GET);
         self.optional(query.bind(scope).bind(id).bind(now)).await
     }
+
     async fn list_attempt_continuations(
         &self,
         scope: &str,
@@ -256,67 +421,54 @@ impl Storage for SqlxStorage {
         let query = sqlx::query(attempt_continuations::LIST);
         self.all(query.bind(scope).bind(now)).await
     }
+
     async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
         let query = sqlx::query(attempt_continuations::RELEASE);
         self.execute(query.bind(scope).bind(id)).await?;
         Ok(())
     }
-    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
-        let input = settlement::encode(transition)?;
-        self.transaction(settlement::STATEMENTS, &input, Error::Database)
-            .await
-    }
-    async fn list_github_invitations_for_request(
+}
+
+#[async_trait]
+impl WebhookStorage for SqlxStorage {
+    async fn get_github_invitation_by_github_id(
         &self,
-        id: RequestId,
+        github_id: u64,
+    ) -> Result<Option<GithubInvitation>> {
+        let query = sqlx::query(github_invitations::BY_GITHUB_ID).bind(u64_to_i64(github_id));
+        self.optional(query).await
+    }
+
+    async fn member_invitation_candidates(
+        &self,
+        account_id: u64,
+        repo_id: u64,
+        requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::FOR_REQUEST);
-        self.all(query.bind(id.to_string())).await
-    }
-    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
-        let query = sqlx::query(delivery_attempts::FENCED).bind(id.to_string());
-        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
-    }
-    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
-        let encoded = delivery_attempts::encode(command)?;
-        let id = command.invitation_id.to_string();
-        let generation = self
-            .optional(
-                sqlx::query(delivery_attempts::CLAIM)
-                    .bind(&id)
-                    .bind(&encoded),
-            )
-            .await?;
-        let retained = self
-            .one(sqlx::query(delivery_attempts::COMMAND).bind(&id))
-            .await?;
-        delivery_attempts::claimed(generation, retained, &encoded)
+        let query = sqlx::query(github_invitations::MEMBER_CANDIDATES)
+            .bind(u64_to_i64(account_id))
+            .bind(u64_to_i64(repo_id))
+            .bind(u64_to_i64(requester_id));
+        self.all(query).await
     }
 
-    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
-        let query = sqlx::query(delivery_attempts::REJECT)
-            .bind(id.to_string())
-            .bind(u64_to_i64(generation));
+    async fn bind_member_webhook(
+        &self,
+        payload_sha256: &str,
+        invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>> {
+        let query = sqlx::query(github_invitations::BIND_MEMBER_WEBHOOK)
+            .bind(payload_sha256)
+            .bind(invitation_id.map(|id| id.to_string()));
         self.execute(query).await?;
-        Ok(())
+        let query = sqlx::query(github_invitations::MEMBER_WEBHOOK_BINDING).bind(payload_sha256);
+        let binding: github_invitations::MemberWebhookBinding = self.one(query).await?;
+        Ok(binding.invitation_id)
     }
+}
 
-    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
-        let encoded = delivery_projection::encode(receipt)?;
-        self.transaction(
-            &delivery_projection::statements(),
-            &encoded,
-            Error::Database,
-        )
-        .await
-    }
-
-    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
-        let query = sqlx::query(delivery_projection::FOR_REQUEST).bind(id.to_string());
-        let rows: Vec<delivery_projection::ReceiptRow> = self.all(query).await?;
-        rows.into_iter().map(|row| row.decode()).collect()
-    }
-
+#[async_trait]
+impl InstallationStorage for SqlxStorage {
     async fn insert_installation(&self, account: &Account) -> Result<()> {
         sqlx::query(installations::INSERT)
             .bind(u64_to_i64(account.installation_id))
@@ -362,101 +514,52 @@ impl Storage for SqlxStorage {
         }
     }
 
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        let query = sqlx::query(installations::GET).bind(u64_to_i64(installation_id));
-        self.installation(query).await
-    }
-
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>> {
-        let query = sqlx::query(installations::ACTIVE_BY_ACCOUNT).bind(u64_to_i64(account_id));
-        self.installation(query).await
-    }
-
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        self.installation(sqlx::query(installations::ACTIVE_BY_LOGIN).bind(login))
-            .await
-    }
-
-    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        self.installation(sqlx::query(installations::LATEST_BY_LOGIN).bind(login))
-            .await
-    }
-
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         let rows: Vec<installations::InstallationRow> =
             self.all(sqlx::query(installations::LIST_ACTIVE)).await?;
         rows.into_iter().map(|row| row.into_account()).collect()
     }
+}
 
-    async fn upsert_user(&self, user: &User) -> Result<()> {
-        let query = sqlx::query(users::UPSERT)
-            .bind(u64_to_i64(user.user_id))
-            .bind(&user.login)
-            .bind(user.avatar_url.as_deref())
-            .bind(user.last_seen_at);
+#[async_trait]
+impl DeliveryStorage for SqlxStorage {
+    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
+        let encoded = delivery_attempts::encode(command)?;
+        let id = command.invitation_id.to_string();
+        let generation = self
+            .optional(
+                sqlx::query(delivery_attempts::CLAIM)
+                    .bind(&id)
+                    .bind(&encoded),
+            )
+            .await?;
+        let retained = self
+            .one(sqlx::query(delivery_attempts::COMMAND).bind(&id))
+            .await?;
+        delivery_attempts::claimed(generation, retained, &encoded)
+    }
+
+    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
+        let query = sqlx::query(delivery_attempts::REJECT)
+            .bind(id.to_string())
+            .bind(u64_to_i64(generation));
         self.execute(query).await?;
         Ok(())
     }
 
-    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
-        self.optional(sqlx::query(users::GET).bind(u64_to_i64(user_id)))
-            .await
+    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
+        let query = sqlx::query(delivery_attempts::FENCED).bind(id.to_string());
+        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
     }
 
-    async fn get_invitation_link_by_id(
-        &self,
-        id: InvitationLinkId,
-    ) -> Result<Option<InvitationLink>> {
-        let query = sqlx::query(invitation_links::GET).bind(id.to_string());
-        Ok(invitation_links::fold(self.all(query).await?)?.pop())
-    }
-
-    async fn list_invitation_links_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationLink>> {
-        let query = sqlx::query(invitation_links::FOR_ACCOUNT).bind(u64_to_i64(account_id));
-        invitation_links::fold(self.all(query).await?)
-    }
-
-    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
-        self.optional(sqlx::query(invitation_requests::GET).bind(id.to_string()))
-            .await
-    }
-
-    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
-        let query = sqlx::query(pending_queue::COUNT_QUERY).bind(u64_to_i64(account_id));
-        let row: pending_queue::CountRow = self.one(query).await?;
-        Ok(row.pending)
-    }
-
-    async fn pending_request_page(
-        &self,
-        account_id: u64,
-        after: Option<pending_queue::PendingBoundary>,
-    ) -> Result<pending_queue::PendingPage> {
-        let sql = pending_queue::query(after.is_some());
-        let query = sqlx::query(&sql)
-            .bind(u64_to_i64(account_id))
-            .bind(after.map(|b| b.seek_key()));
-        pending_queue::PendingPage::from_json(self.all(query).await?)
-    }
-
-    async fn request_history(
-        &self,
-        account_id: u64,
-        link_id: InvitationLinkId,
-        before: Option<request_history::Boundary>,
-    ) -> Result<request_history::Page> {
-        let sql = request_history::query(before);
-        let query = sqlx::query(&sql)
-            .bind(u64_to_i64(account_id))
-            .bind(link_id.to_string())
-            .bind(before.map(request_history::boundary_key));
-        Ok(request_history::page(self.all(query).await?))
+    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
+        let encoded = delivery_projection::encode(receipt)?;
+        self.transaction(
+            &delivery_projection::statements(),
+            &encoded,
+            Error::Database,
+        )
+        .await
     }
 
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
@@ -475,47 +578,10 @@ impl Storage for SqlxStorage {
         Ok(())
     }
 
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>> {
-        self.optional(sqlx::query(github_invitations::GET).bind(id.to_string()))
+    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
+        let input = settlement::encode(transition)?;
+        self.transaction(settlement::STATEMENTS, &input, Error::Database)
             .await
-    }
-
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::BY_GITHUB_ID).bind(u64_to_i64(github_id));
-        self.optional(query).await
-    }
-
-    async fn member_invitation_candidates(
-        &self,
-        account_id: u64,
-        repo_id: u64,
-        requester_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::MEMBER_CANDIDATES)
-            .bind(u64_to_i64(account_id))
-            .bind(u64_to_i64(repo_id))
-            .bind(u64_to_i64(requester_id));
-        self.all(query).await
-    }
-
-    async fn bind_member_webhook(
-        &self,
-        payload_sha256: &str,
-        invitation_id: Option<GithubInvitationId>,
-    ) -> Result<Option<GithubInvitationId>> {
-        let query = sqlx::query(github_invitations::BIND_MEMBER_WEBHOOK)
-            .bind(payload_sha256)
-            .bind(invitation_id.map(|id| id.to_string()));
-        self.execute(query).await?;
-        let query = sqlx::query(github_invitations::MEMBER_WEBHOOK_BINDING).bind(payload_sha256);
-        let binding: github_invitations::MemberWebhookBinding = self.one(query).await?;
-        Ok(binding.invitation_id)
     }
 
     async fn list_pending_github_invitations_for_account(
@@ -526,50 +592,10 @@ impl Storage for SqlxStorage {
             sqlx::query(github_invitations::PENDING_FOR_ACCOUNT).bind(u64_to_i64(account_id));
         self.all(query).await
     }
+}
 
-    async fn invitation_link_belongs_to_account(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-    ) -> Result<bool> {
-        let query = sqlx::query(invitation_links::BELONGS_TO_ACCOUNT)
-            .bind(id.to_string())
-            .bind(u64_to_i64(account_id));
-        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
-    }
-
-    async fn list_audit_events(
-        &self,
-        account_id: u64,
-        event: Option<EventType>,
-        position: AuditPosition,
-    ) -> Result<AuditPage> {
-        fn query(
-            sql: &str,
-            account_id: u64,
-            event: Option<EventType>,
-            position: AuditPosition,
-        ) -> Query<'_> {
-            let boundary = position.boundary();
-            sqlx::query(sql)
-                .bind(u64_to_i64(account_id))
-                .bind(event.map(|e| e.as_str()))
-                .bind(boundary.map(audit_read::boundary_time))
-                .bind(boundary.map(|b| b.id.to_string()))
-        }
-        let sql = audit_read::query(event, position, false);
-        let rows = self.all(query(&sql, account_id, event, position)).await?;
-        let mut page = AuditPage::from_rows(rows, position)?;
-        if let Some([newer, older]) = page.probes() {
-            for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
-                let sql = audit_read::query(event, seek, true);
-                let probe = query(&sql, account_id, event, seek);
-                *flag = self.optional::<IgnoredAny>(probe).await?.is_some();
-            }
-        }
-        Ok(page)
-    }
-
+#[async_trait]
+impl AuditStorage for SqlxStorage {
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
         let sql = audit_write::insert(event.event_type);
         let query = sqlx::query(&sql)

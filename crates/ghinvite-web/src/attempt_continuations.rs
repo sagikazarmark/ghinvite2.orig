@@ -10,7 +10,7 @@ use chacha20poly1305::{
     aead::{Aead, Payload},
 };
 use chrono::Utc;
-use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::ContinuationStorage;
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use rand::RngCore;
 use serde::{Serialize, de::DeserializeOwned};
@@ -89,7 +89,7 @@ pub(crate) enum Retention<T> {
 
 /// Continuation storage for one app, sealed with its session secret.
 pub(crate) struct AttemptContinuations<'a> {
-    storage: &'a dyn Storage,
+    storage: &'a dyn ContinuationStorage,
     secret: &'a [u8; 32],
 }
 

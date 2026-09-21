@@ -34,7 +34,7 @@ pub mod throttle;
 pub(crate) mod test_support;
 
 pub use error::{HandlerError, Result};
-pub use state::AppState;
+pub use state::{AppState, WorkflowStorage};
 
 use restate_sdk::endpoint::Endpoint;
 

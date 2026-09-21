@@ -1,5 +1,6 @@
-//! Persistence boundary for ghinvite. The `Storage` trait is the single seam
-//! between domain logic and the database. Two impls: `SqlxStorage`
+//! Persistence boundary for ghinvite. The storage traits, one per caller role
+//! and combined as [`Storage`], are the seam between domain logic and the
+//! database. Two impls: `SqlxStorage`
 //! (`ghinvite-storage-sqlx`, native dev & tests) and `D1Storage`
 //! (`ghinvite-storage-d1`, production on Cloudflare Workers).
 
@@ -98,88 +99,233 @@ pub(crate) fn unique_violation(message: &str) -> bool {
     message.contains("UNIQUE constraint failed")
 }
 
+/// Every storage port. Adapters implement each part; the conformance suite and
+/// composition roots use the whole. Callers depend on the parts they use.
+pub trait Storage:
+    RecordStorage
+    + ConsoleStorage
+    + ContinuationStorage
+    + WebhookStorage
+    + InstallationStorage
+    + DeliveryStorage
+    + AuditStorage
+{
+}
+
+impl<T> Storage for T where
+    T: RecordStorage
+        + ConsoleStorage
+        + ContinuationStorage
+        + WebhookStorage
+        + InstallationStorage
+        + DeliveryStorage
+        + AuditStorage
+{
+}
+
+/// Point lookups both the web app and the workflows read, plus the user
+/// profile refreshed at sign-in.
 #[async_trait]
-pub trait Storage: Send + Sync + 'static {
+pub trait RecordStorage: Send + Sync + 'static {
+    /// Look up an installation by primary key. Returns the row whether or not it's
+    /// active — callers needing only active rows should filter with `uninstalled_at`.
+    ///
+    /// **Errors:** [`Error::Database`] only.
+    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>>;
+
+    /// Look up the *active* installation for a GitHub account id, if any.
+    /// Equivalent to `WHERE account_id = ? AND uninstalled_at IS NULL`.
+    ///
+    /// **Errors:** [`Error::Database`] only.
+    async fn get_active_installation_by_account_id(
+        &self,
+        account_id: u64,
+    ) -> Result<Option<Account>>;
+
+    /// Insert-or-replace a user row keyed on `user_id`. Updates `login`,
+    /// `avatar_url`, `last_seen_at` on conflict. Used on every successful sign-in.
+    ///
+    /// **Errors:** [`Error::Database`] only.
+    /// **Idempotency:** safe to call repeatedly; always lands the supplied state.
+    async fn upsert_user(&self, user: &User) -> Result<()>;
+
+    /// Look up a user by GitHub user id.
+    ///
+    /// **Errors:** [`Error::Database`] only.
+    async fn get_user(&self, user_id: u64) -> Result<Option<User>>;
+
+    /// Read an invitation link plus its repo set by primary key.
+    ///
+    /// **Errors:**
+    /// - [`Error::Corrupt`] if the row contains an unparseable enum/slug/ulid.
+    /// - [`Error::Database`] otherwise.
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>>;
+
+    /// Look up a single invitation request by id.
+    ///
+    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>>;
+
+    /// Look up a github_invitations row by primary key.
+    ///
+    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
+    async fn get_github_invitation(
+        &self,
+        id: GithubInvitationId,
+    ) -> Result<Option<GithubInvitation>>;
+}
+
+/// Bounded, eventually consistent reads behind Console pages, Console sign-in
+/// and the Invitation Request Flow's status. Never authority.
+#[async_trait]
+pub trait ConsoleStorage: Send + Sync + 'static {
+    /// Look up the *active* installation by GitHub login (org or user name).
+    /// Logins are mutable upstream — fall back to id-based lookup whenever possible.
+    ///
+    /// **Errors:** [`Error::Database`] only.
+    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
+
+    /// Console history lookup after uninstall. Never grants authority: callers
+    /// must validate the returned numeric account against current GitHub identity.
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
+
+    /// Bounded identity-only lookup for safe Console resource links. Does not
+    /// load private metadata or the link's (potentially large) repository scope.
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool>;
+
+    /// List every invitation link belonging to an account, newest first. Each link
+    /// includes its repo set (single LEFT JOIN — no N+1).
+    ///
+    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`] as above.
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>>;
+
+    /// At most 25 requests, ordered by admission time then ID descending. Account
+    /// scope is checked independently of the exclusive cursor. Never loads all
+    /// requests to paginate in memory. Missing projections are not absence proof.
+    async fn request_history(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+        before: Option<request_history::Boundary>,
+    ) -> Result<request_history::Page>;
+
+    /// Number of pending requests in the account's decision queue: exactly the
+    /// rows [`ConsoleStorage::pending_request_page`] pages through, counted by
+    /// one statement without loading them.
+    ///
+    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64>;
+
+    /// Oldest-first, account-authorized, bounded decision queue with joined
+    /// context. A cursor is a value boundary, not a reference to a live row;
+    /// terminal transitions between reads cannot shift subsequent pages.
+    /// Pending rows are not filtered by deadline or link expiration/revocation.
+    async fn pending_request_page(
+        &self,
+        account_id: u64,
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage>;
+
+    /// Query projection of the receiving object's receipts, separate from lifecycle.
+    async fn list_delivery_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<crate::delivery::CreateReceipt>>;
+
+    async fn list_github_invitations_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<GithubInvitation>>;
+
+    /// Read at most 25 account events in (occurred_at DESC, id DESC) order.
+    /// Exact event filtering precedes limiting. Boundaries are exclusive; After
+    /// returns the nearest newer rows. Navigation uses bounded existence probes.
+    /// Account scope is independent of cursors and includes all installations.
+    /// Malformed rows fail the read rather than silently producing partial pages.
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<crate::audit::EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage>;
+}
+
+/// Browser attempt continuations, retained until the authority answers.
+#[async_trait]
+pub trait ContinuationStorage: Send + Sync + 'static {
     /// First writer wins atomically by ID and logical binding; return that record.
     async fn retain_attempt_continuation(
         &self,
-        _scope: &str,
-        _id: &str,
-        _binding: &str,
-        _payload: &str,
-        _expires_at: i64,
-        _now: i64,
-    ) -> Result<attempt_continuations::StoredContinuation> {
-        Err(Error::Database("attempt storage unavailable".into()))
-    }
+        scope: &str,
+        id: &str,
+        binding: &str,
+        payload: &str,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<attempt_continuations::StoredContinuation>;
     async fn get_attempt_continuation(
         &self,
-        _scope: &str,
-        _id: &str,
-        _now: i64,
-    ) -> Result<Option<attempt_continuations::StoredContinuation>> {
-        Err(Error::Database("attempt storage unavailable".into()))
-    }
+        scope: &str,
+        id: &str,
+        now: i64,
+    ) -> Result<Option<attempt_continuations::StoredContinuation>>;
     /// Live continuations of one scope, oldest retained first.
     async fn list_attempt_continuations(
         &self,
-        _scope: &str,
-        _now: i64,
-    ) -> Result<Vec<attempt_continuations::StoredContinuation>> {
-        Err(Error::Database("attempt storage unavailable".into()))
-    }
+        scope: &str,
+        now: i64,
+    ) -> Result<Vec<attempt_continuations::StoredContinuation>>;
     /// Forget a continuation the authority definitively rejected (nothing was
     /// applied). Releasing a missing record succeeds.
-    async fn release_attempt_continuation(&self, _scope: &str, _id: &str) -> Result<()> {
-        Err(Error::Database("attempt storage unavailable".into()))
-    }
-    /// Atomically settle the observed Sent invitation and publish its audit.
-    /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
-    async fn settle_github_invitation(&self, _transition: &settlement::Settlement) -> Result<()> {
-        Err(Error::Database("settlement storage unavailable".into()))
-    }
-    /// Atomic input-bound HTTP attempt fence. Returns a generation authorizing
-    /// one PUT; None means uncertain/confirmed prior effect. Only an explicitly
-    /// rejected generation may permit a new attempt; acknowledgement loss fences it.
-    async fn claim_delivery_attempt(
-        &self,
-        _command: &crate::delivery::CreateCommand,
-    ) -> Result<Option<u64>> {
-        Err(Error::Database("delivery storage unavailable".into()))
-    }
-    async fn reject_delivery_attempt(
-        &self,
-        _id: GithubInvitationId,
-        _generation: u64,
-    ) -> Result<()> {
-        Err(Error::Database("delivery storage unavailable".into()))
-    }
-    async fn delivery_attempt_exists(&self, _id: GithubInvitationId) -> Result<bool> {
-        Err(Error::Database("delivery storage unavailable".into()))
-    }
+    async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()>;
+}
 
-    /// Query projection of the receiving object's receipt, separate from lifecycle.
-    async fn project_delivery(&self, _receipt: &crate::delivery::CreateReceipt) -> Result<()> {
-        Err(Error::Database("delivery storage unavailable".into()))
-    }
-
-    async fn list_delivery_for_request(
+/// Webhook ingress routing: which GitHub invitation an upstream event names.
+#[async_trait]
+pub trait WebhookStorage: Send + Sync + 'static {
+    /// Look up a github_invitations row by GitHub's invitation id (the integer
+    /// surfaced in webhook payloads). Returns `None` if we never persisted such
+    /// an id (e.g. row never reached `Sent`).
+    ///
+    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
+    async fn get_github_invitation_by_github_id(
         &self,
-        _id: RequestId,
-    ) -> Result<Vec<crate::delivery::CreateReceipt>> {
-        Err(Error::Database("delivery storage unavailable".into()))
-    }
-    async fn list_github_invitations_for_request(
+        github_id: u64,
+    ) -> Result<Option<GithubInvitation>>;
+
+    /// At most two historical matches for verified member-event identities.
+    /// Exactly one Sent row with an upstream ID permits webhook settlement;
+    /// ambiguity requires invitation-specific reconciliation instead.
+    async fn member_invitation_candidates(
         &self,
-        _id: RequestId,
-    ) -> Result<Vec<GithubInvitation>> {
-        Err(Error::Database(
-            "invitation history read unavailable".into(),
-        ))
-    }
+        account_id: u64,
+        repo_id: u64,
+        requester_id: u64,
+    ) -> Result<Vec<GithubInvitation>>;
 
-    // -------- installations --------
+    /// Retain the first matching result (including None) for a verified body hash.
+    /// Returns the retained binding on replay/concurrency, never a new match.
+    /// This is ingress routing identity; lifecycle settlement remains owner-only.
+    async fn bind_member_webhook(
+        &self,
+        payload_sha256: &str,
+        invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>>;
+}
 
+/// Installation writers, driven by the installation workflows.
+#[async_trait]
+pub trait InstallationStorage: Send + Sync + 'static {
     /// Insert a brand-new installation row.
     ///
     /// **Errors:**
@@ -218,125 +364,28 @@ pub trait Storage: Send + Sync + 'static {
         selected: &SelectedRepos,
     ) -> Result<()>;
 
-    /// Look up an installation by primary key. Returns the row whether or not it's
-    /// active — callers needing only active rows should filter with `uninstalled_at`.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>>;
-
-    /// Look up the *active* installation for a GitHub account id, if any.
-    /// Equivalent to `WHERE account_id = ? AND uninstalled_at IS NULL`.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>>;
-
-    /// Look up the *active* installation by GitHub login (org or user name).
-    /// Logins are mutable upstream — fall back to id-based lookup whenever possible.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
-
-    /// Console history lookup after uninstall. Never grants authority: callers
-    /// must validate the returned numeric account against current GitHub identity.
-    async fn get_latest_installation_by_login(&self, _login: &str) -> Result<Option<Account>> {
-        Err(Error::Database(
-            "installation history read unavailable".into(),
-        ))
-    }
-
     /// List every active installation, ordered by `installed_at` ascending.
     /// Used by the daily reconcile sweep.
     ///
     /// **Errors:** [`Error::Database`] only.
     async fn list_active_installations(&self) -> Result<Vec<Account>>;
+}
 
-    // -------- users --------
-
-    /// Insert-or-replace a user row keyed on `user_id`. Updates `login`,
-    /// `avatar_url`, `last_seen_at` on conflict. Used on every successful sign-in.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    /// **Idempotency:** safe to call repeatedly; always lands the supplied state.
-    async fn upsert_user(&self, user: &User) -> Result<()>;
-
-    /// Look up a user by GitHub user id.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_user(&self, user_id: u64) -> Result<Option<User>>;
-
-    // -------- invitation links --------
-
-    /// Read an invitation link plus its repo set by primary key.
-    ///
-    /// **Errors:**
-    /// - [`Error::Corrupt`] if the row contains an unparseable enum/slug/ulid.
-    /// - [`Error::Database`] otherwise.
-    async fn get_invitation_link_by_id(
+/// GitHub invitation delivery and settlement, driven by the workflows.
+#[async_trait]
+pub trait DeliveryStorage: Send + Sync + 'static {
+    /// Atomic input-bound HTTP attempt fence. Returns a generation authorizing
+    /// one PUT; None means uncertain/confirmed prior effect. Only an explicitly
+    /// rejected generation may permit a new attempt; acknowledgement loss fences it.
+    async fn claim_delivery_attempt(
         &self,
-        id: InvitationLinkId,
-    ) -> Result<Option<InvitationLink>>;
+        command: &crate::delivery::CreateCommand,
+    ) -> Result<Option<u64>>;
+    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()>;
+    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool>;
 
-    /// Bounded identity-only lookup for safe Console resource links. Does not
-    /// load private metadata or the link's (potentially large) repository scope.
-    async fn invitation_link_belongs_to_account(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-    ) -> Result<bool>;
-
-    /// List every invitation link belonging to an account, newest first. Each link
-    /// includes its repo set (single LEFT JOIN — no N+1).
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`] as above.
-    async fn list_invitation_links_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationLink>>;
-
-    // -------- invitation requests --------
-
-    /// At most 25 requests, ordered by admission time then ID descending. Account
-    /// scope is checked independently of the exclusive cursor. Never loads all
-    /// requests to paginate in memory. Missing projections are not absence proof.
-    async fn request_history(
-        &self,
-        _account_id: u64,
-        _link_id: InvitationLinkId,
-        _before: Option<request_history::Boundary>,
-    ) -> Result<request_history::Page> {
-        Err(Error::Database("request history unavailable".into()))
-    }
-
-    /// Look up a single invitation request by id.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>>;
-
-    /// Number of pending requests in the account's decision queue: exactly the
-    /// rows [`Storage::pending_request_page`] pages through, counted by one
-    /// statement without loading them.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn count_pending_requests_for_account(&self, _account_id: u64) -> Result<u64> {
-        Err(Error::Database("pending request count unsupported".into()))
-    }
-
-    /// Oldest-first, account-authorized, bounded decision queue with joined
-    /// context. A cursor is a value boundary, not a reference to a live row;
-    /// terminal transitions between reads cannot shift subsequent pages.
-    /// Pending rows are not filtered by deadline or link expiration/revocation.
-    async fn pending_request_page(
-        &self,
-        _account_id: u64,
-        _after: Option<pending_queue::PendingBoundary>,
-    ) -> Result<pending_queue::PendingPage> {
-        Err(Error::Database("pending queue read unsupported".into()))
-    }
-
-    // -------- github invitations --------
+    /// Query projection of the receiving object's receipt, separate from lifecycle.
+    async fn project_delivery(&self, receipt: &crate::delivery::CreateReceipt) -> Result<()>;
 
     /// Insert a new github_invitations row in `Sending` state. Caller is the
     /// Restate handler that's about to call GitHub.
@@ -348,75 +397,22 @@ pub trait Storage: Send + Sync + 'static {
     /// - [`Error::Database`] for any other failure.
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
 
-    /// Look up a github_invitations row by primary key.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>>;
-
-    /// Look up a github_invitations row by GitHub's invitation id (the integer
-    /// surfaced in webhook payloads). Returns `None` if we never persisted such
-    /// an id (e.g. row never reached `Sent`).
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>>;
-
-    /// At most two historical matches for verified member-event identities.
-    /// Exactly one Sent row with an upstream ID permits webhook settlement;
-    /// ambiguity requires invitation-specific reconciliation instead.
-    async fn member_invitation_candidates(
-        &self,
-        _account_id: u64,
-        _repo_id: u64,
-        _requester_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        Err(Error::Database(
-            "member invitation lookup unavailable".into(),
-        ))
-    }
-
-    /// Retain the first matching result (including None) for a verified body hash.
-    /// Returns the retained binding on replay/concurrency, never a new match.
-    /// This is ingress routing identity; lifecycle settlement remains owner-only.
-    async fn bind_member_webhook(
-        &self,
-        _payload_sha256: &str,
-        _invitation_id: Option<GithubInvitationId>,
-    ) -> Result<Option<GithubInvitationId>> {
-        Err(Error::Database("member webhook binding unavailable".into()))
-    }
+    /// Atomically settle the observed Sent invitation and publish its audit.
+    /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
+    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()>;
 
     /// In-flight GitHub invitations across all historical installations of an
     /// immutable account. Installation IDs on links remain original provenance.
     async fn list_pending_github_invitations_for_account(
         &self,
-        _account_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        Err(Error::Database(
-            "account invitation history read unavailable".into(),
-        ))
-    }
-
-    // -------- audit --------
-
-    /// Read at most 25 account events in (occurred_at DESC, id DESC) order.
-    /// Exact event filtering precedes limiting. Boundaries are exclusive; After
-    /// returns the nearest newer rows. Navigation uses bounded existence probes.
-    /// Account scope is independent of cursors and includes all installations.
-    /// Malformed rows fail the read rather than silently producing partial pages.
-    async fn list_audit_events(
-        &self,
         account_id: u64,
-        event: Option<crate::audit::EventType>,
-        position: AuditPosition,
-    ) -> Result<AuditPage>;
+    ) -> Result<Vec<GithubInvitation>>;
+}
 
-    /// Append an audit event. No update/delete surface is exposed.
+/// Audit Log appends. No update/delete surface is exposed.
+#[async_trait]
+pub trait AuditStorage: Send + Sync + 'static {
+    /// Append an audit event.
     ///
     /// **Errors:** [`Error::Database`] only.
     /// **Idempotency:** safe to retry on transient failure as long as the caller

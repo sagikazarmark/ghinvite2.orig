@@ -218,7 +218,7 @@ async fn fetch(
 
     let config = config_from_env(&env)?;
     let db = env.d1("DB")?;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> =
+    let storage: Arc<dyn ghinvite_web::WebStorage> =
         Arc::new(ghinvite_storage_d1::D1Storage::new(db));
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);

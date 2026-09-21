@@ -220,6 +220,7 @@ mod tests {
     use super::*;
     use crate::HandlerError;
     use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    use ghinvite_core::storage::{InstallationStorage, RecordStorage};
     use ghinvite_core::{
         AccountType, InvitationLinkId, InvitationState, Permission, RequestState, SelectedRepos,
         Slug,
@@ -230,7 +231,6 @@ mod tests {
         storage: &ghinvite_storage_sqlx::SqlxStorage,
         repos: Vec<ghinvite_core::InvitationLinkRepo>,
     ) -> (RequestId, InvitationLinkId) {
-        use ghinvite_core::storage::Storage;
         storage
             .insert_installation(&ghinvite_core::Account {
                 installation_id: 9,

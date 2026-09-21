@@ -1,4 +1,5 @@
 use super::*;
+use ghinvite_core::storage::{ContinuationStorage, InstallationStorage, RecordStorage};
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
 async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {

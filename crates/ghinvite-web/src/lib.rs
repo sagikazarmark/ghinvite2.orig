@@ -1,7 +1,6 @@
 //! Web binary core. axum app builder + tower-sessions + OAuth flow + Dioxus
 //! layouts. `ghinvite-web-worker` serves `build_app()` on Cloudflare Workers.
 
-pub(crate) mod account_admin_reads;
 pub(crate) mod attempt_continuations;
 pub mod commands;
 pub mod config;
@@ -23,7 +22,7 @@ pub use config::WebConfig;
 pub use error::{IngressFailure, OAuthFailure, Result, WebError};
 pub use link_authority::{AuthorityError, LinkAuthority};
 pub use restate_client::RestateClient;
-pub use state::AppState;
+pub use state::{AppState, WebStorage};
 
 use axum::Router;
 

@@ -82,7 +82,7 @@ impl GhinviteCommands for RecordingCommands {
 }
 
 async fn build_app_with(mock: MockTransport) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),

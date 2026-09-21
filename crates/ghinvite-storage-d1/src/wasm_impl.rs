@@ -8,8 +8,9 @@ use ghinvite_core::delivery::{CreateCommand, CreateReceipt};
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
 use ghinvite_core::storage::{
-    AuditPage, AuditPosition, Error, Result, Storage, attempt_continuations, audit_read,
-    audit_write, classify_insert, decode_row, delivery_attempts, delivery_projection,
+    AuditPage, AuditPosition, AuditStorage, ConsoleStorage, ContinuationStorage, DeliveryStorage,
+    Error, InstallationStorage, RecordStorage, Result, WebhookStorage, attempt_continuations,
+    audit_read, audit_write, classify_insert, decode_row, delivery_attempts, delivery_projection,
     github_invitations, installations, invitation_links, invitation_requests, pending_queue,
     projection, request_history, settlement, users,
 };
@@ -162,7 +163,222 @@ impl ProjectionStorage for D1Storage {
 }
 
 #[async_trait]
-impl Storage for D1Storage {
+impl RecordStorage for D1Storage {
+    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
+        wasm_send(async {
+            let values = [int(installation_id)?];
+            self.installation(installations::GET, &values).await
+        })
+        .await
+    }
+
+    async fn get_active_installation_by_account_id(
+        &self,
+        account_id: u64,
+    ) -> Result<Option<Account>> {
+        wasm_send(async {
+            let values = [int(account_id)?];
+            self.installation(installations::ACTIVE_BY_ACCOUNT, &values)
+                .await
+        })
+        .await
+    }
+
+    async fn upsert_user(&self, user: &User) -> Result<()> {
+        wasm_send(async {
+            let values = [
+                int(user.user_id)?,
+                text(&user.login),
+                nullable(user.avatar_url.as_deref().map(text)),
+                time(user.last_seen_at),
+            ];
+            self.run(users::UPSERT, &values).await?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
+        wasm_send(async { self.first(users::GET, &[int(user_id)?]).await }).await
+    }
+
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>> {
+        wasm_send(async {
+            let values = [text(&id.to_string())];
+            let rows = self.all(invitation_links::GET, &values).await?;
+            Ok(invitation_links::fold(rows)?.pop())
+        })
+        .await
+    }
+
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
+        wasm_send(async {
+            let values = [text(&id.to_string())];
+            self.first(invitation_requests::GET, &values).await
+        })
+        .await
+    }
+
+    async fn get_github_invitation(
+        &self,
+        id: GithubInvitationId,
+    ) -> Result<Option<GithubInvitation>> {
+        wasm_send(async {
+            let values = [text(&id.to_string())];
+            self.first(github_invitations::GET, &values).await
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl ConsoleStorage for D1Storage {
+    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        wasm_send(async {
+            self.installation(installations::ACTIVE_BY_LOGIN, &[text(login)])
+                .await
+        })
+        .await
+    }
+
+    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
+        wasm_send(async {
+            self.installation(installations::LATEST_BY_LOGIN, &[text(login)])
+                .await
+        })
+        .await
+    }
+
+    async fn invitation_link_belongs_to_account(
+        &self,
+        account_id: u64,
+        id: InvitationLinkId,
+    ) -> Result<bool> {
+        wasm_send(async {
+            let values = [text(&id.to_string()), int(account_id)?];
+            let row: Option<IgnoredAny> = self
+                .first(invitation_links::BELONGS_TO_ACCOUNT, &values)
+                .await?;
+            Ok(row.is_some())
+        })
+        .await
+    }
+
+    async fn list_invitation_links_for_account(
+        &self,
+        account_id: u64,
+    ) -> Result<Vec<InvitationLink>> {
+        wasm_send(async {
+            let values = [int(account_id)?];
+            invitation_links::fold(self.all(invitation_links::FOR_ACCOUNT, &values).await?)
+        })
+        .await
+    }
+
+    async fn request_history(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+        before: Option<request_history::Boundary>,
+    ) -> Result<request_history::Page> {
+        wasm_send(async {
+            let values = [
+                int(account_id)?,
+                text(&link_id.to_string()),
+                nullable(before.map(|b| text(&request_history::boundary_key(b)))),
+            ];
+            let sql = request_history::query(before);
+            Ok(request_history::page(self.all(&sql, &values).await?))
+        })
+        .await
+    }
+
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
+        wasm_send(async {
+            let values = [int(account_id)?];
+            let row: Option<pending_queue::CountRow> =
+                self.first(pending_queue::COUNT_QUERY, &values).await?;
+            row.map(|r| r.pending)
+                .ok_or_else(|| Error::Corrupt("pending count returned no row".into()))
+        })
+        .await
+    }
+
+    async fn pending_request_page(
+        &self,
+        account_id: u64,
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage> {
+        wasm_send(async {
+            let values = [
+                int(account_id)?,
+                nullable(after.map(|b| text(&b.seek_key()))),
+            ];
+            let sql = pending_queue::query(after.is_some());
+            pending_queue::PendingPage::from_json(self.all(&sql, &values).await?)
+        })
+        .await
+    }
+
+    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
+        wasm_send(async {
+            let values = [text(&id.to_string())];
+            let rows: Vec<delivery_projection::ReceiptRow> =
+                self.all(delivery_projection::FOR_REQUEST, &values).await?;
+            rows.into_iter().map(|row| row.decode()).collect()
+        })
+        .await
+    }
+
+    async fn list_github_invitations_for_request(
+        &self,
+        id: RequestId,
+    ) -> Result<Vec<GithubInvitation>> {
+        wasm_send(async {
+            let values = [text(&id.to_string())];
+            self.all(github_invitations::FOR_REQUEST, &values).await
+        })
+        .await
+    }
+
+    async fn list_audit_events(
+        &self,
+        account_id: u64,
+        event: Option<EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage> {
+        wasm_send(async {
+            let account = int(account_id)?;
+            let values = |position: AuditPosition| {
+                let boundary = position.boundary();
+                [
+                    account.clone(),
+                    nullable(event.map(|e| text(e.as_str()))),
+                    nullable(boundary.map(|b| text(&audit_read::boundary_time(b)))),
+                    nullable(boundary.map(|b| text(&b.id.to_string()))),
+                ]
+            };
+            let sql = audit_read::query(event, position, false);
+            let rows = self.all(&sql, &values(position)).await?;
+            let mut page = AuditPage::from_rows(rows, position)?;
+            if let Some([newer, older]) = page.probes() {
+                for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
+                    let sql = audit_read::query(event, seek, true);
+                    let row: Option<IgnoredAny> = self.first(&sql, &values(seek)).await?;
+                    *flag = row.is_some();
+                }
+            }
+            Ok(page)
+        })
+        .await
+    }
+}
+
+#[async_trait]
+impl ContinuationStorage for D1Storage {
     async fn retain_attempt_continuation(
         &self,
         scope: &str,
@@ -191,6 +407,7 @@ impl Storage for D1Storage {
         })
         .await
     }
+
     async fn get_attempt_continuation(
         &self,
         scope: &str,
@@ -203,6 +420,7 @@ impl Storage for D1Storage {
         })
         .await
     }
+
     async fn list_attempt_continuations(
         &self,
         scope: &str,
@@ -214,6 +432,7 @@ impl Storage for D1Storage {
         })
         .await
     }
+
     async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
         wasm_send(async {
             let values = [text(scope), text(id)];
@@ -222,70 +441,62 @@ impl Storage for D1Storage {
         })
         .await
     }
-    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
-        let input = settlement::encode(transition)?;
-        wasm_send(self.batch(settlement::STATEMENTS, &input, Error::Database)).await
-    }
-    async fn list_github_invitations_for_request(
+}
+
+#[async_trait]
+impl WebhookStorage for D1Storage {
+    async fn get_github_invitation_by_github_id(
         &self,
-        id: RequestId,
+        github_id: u64,
+    ) -> Result<Option<GithubInvitation>> {
+        wasm_send(async {
+            let values = [int(github_id)?];
+            self.first(github_invitations::BY_GITHUB_ID, &values).await
+        })
+        .await
+    }
+
+    async fn member_invitation_candidates(
+        &self,
+        account_id: u64,
+        repo_id: u64,
+        requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
         wasm_send(async {
-            let values = [text(&id.to_string())];
-            self.all(github_invitations::FOR_REQUEST, &values).await
+            let values = [int(account_id)?, int(repo_id)?, int(requester_id)?];
+            self.all(github_invitations::MEMBER_CANDIDATES, &values)
+                .await
         })
         .await
     }
-    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
+
+    async fn bind_member_webhook(
+        &self,
+        payload_sha256: &str,
+        invitation_id: Option<GithubInvitationId>,
+    ) -> Result<Option<GithubInvitationId>> {
         wasm_send(async {
-            let values = [text(&id.to_string())];
-            let row: Option<IgnoredAny> = self.first(delivery_attempts::FENCED, &values).await?;
-            Ok(row.is_some())
-        })
-        .await
-    }
-    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
-        let encoded = delivery_attempts::encode(command)?;
-        wasm_send(async {
-            let id = text(&command.invitation_id.to_string());
-            let values = [id.clone(), text(&encoded)];
-            let generation = self.first(delivery_attempts::CLAIM, &values).await?;
-            let retained = self
-                .first(delivery_attempts::COMMAND, &[id])
+            let values = [
+                text(payload_sha256),
+                nullable(invitation_id.map(|id| text(&id.to_string()))),
+            ];
+            self.run(github_invitations::BIND_MEMBER_WEBHOOK, &values)
+                .await?;
+            let binding: github_invitations::MemberWebhookBinding = self
+                .first(
+                    github_invitations::MEMBER_WEBHOOK_BINDING,
+                    &[text(payload_sha256)],
+                )
                 .await?
-                .ok_or_else(|| unreadable_write("delivery attempt"))?;
-            delivery_attempts::claimed(generation, retained, &encoded)
+                .ok_or_else(|| unreadable_write("member webhook binding"))?;
+            Ok(binding.invitation_id)
         })
         .await
     }
+}
 
-    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
-        wasm_send(async {
-            let values = [text(&id.to_string()), int(generation)?];
-            self.run(delivery_attempts::REJECT, &values).await?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
-        let encoded = delivery_projection::encode(receipt)?;
-        let statements = delivery_projection::statements();
-        wasm_send(self.batch(&statements, &encoded, Error::Database)).await
-    }
-
-    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
-        wasm_send(async {
-            let values = [text(&id.to_string())];
-            let rows: Vec<delivery_projection::ReceiptRow> =
-                self.all(delivery_projection::FOR_REQUEST, &values).await?;
-            rows.into_iter().map(|row| row.decode()).collect()
-        })
-        .await
-    }
-
-    // -------- installations --------
-
+#[async_trait]
+impl InstallationStorage for D1Storage {
     async fn insert_installation(&self, account: &Account) -> Result<()> {
         wasm_send(async {
             let values = [
@@ -341,42 +552,6 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        wasm_send(async {
-            let values = [int(installation_id)?];
-            self.installation(installations::GET, &values).await
-        })
-        .await
-    }
-
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>> {
-        wasm_send(async {
-            let values = [int(account_id)?];
-            self.installation(installations::ACTIVE_BY_ACCOUNT, &values)
-                .await
-        })
-        .await
-    }
-
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        wasm_send(async {
-            self.installation(installations::ACTIVE_BY_LOGIN, &[text(login)])
-                .await
-        })
-        .await
-    }
-
-    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        wasm_send(async {
-            self.installation(installations::LATEST_BY_LOGIN, &[text(login)])
-                .await
-        })
-        .await
-    }
-
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         wasm_send(async {
             let rows: Vec<installations::InstallationRow> =
@@ -385,108 +560,48 @@ impl Storage for D1Storage {
         })
         .await
     }
+}
 
-    // -------- users --------
-
-    async fn upsert_user(&self, user: &User) -> Result<()> {
+#[async_trait]
+impl DeliveryStorage for D1Storage {
+    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
+        let encoded = delivery_attempts::encode(command)?;
         wasm_send(async {
-            let values = [
-                int(user.user_id)?,
-                text(&user.login),
-                nullable(user.avatar_url.as_deref().map(text)),
-                time(user.last_seen_at),
-            ];
-            self.run(users::UPSERT, &values).await?;
+            let id = text(&command.invitation_id.to_string());
+            let values = [id.clone(), text(&encoded)];
+            let generation = self.first(delivery_attempts::CLAIM, &values).await?;
+            let retained = self
+                .first(delivery_attempts::COMMAND, &[id])
+                .await?
+                .ok_or_else(|| unreadable_write("delivery attempt"))?;
+            delivery_attempts::claimed(generation, retained, &encoded)
+        })
+        .await
+    }
+
+    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
+        wasm_send(async {
+            let values = [text(&id.to_string()), int(generation)?];
+            self.run(delivery_attempts::REJECT, &values).await?;
             Ok(())
         })
         .await
     }
 
-    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
-        wasm_send(async { self.first(users::GET, &[int(user_id)?]).await }).await
-    }
-
-    // -------- invitation links --------
-
-    async fn get_invitation_link_by_id(
-        &self,
-        id: InvitationLinkId,
-    ) -> Result<Option<InvitationLink>> {
+    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
         wasm_send(async {
             let values = [text(&id.to_string())];
-            let rows = self.all(invitation_links::GET, &values).await?;
-            Ok(invitation_links::fold(rows)?.pop())
+            let row: Option<IgnoredAny> = self.first(delivery_attempts::FENCED, &values).await?;
+            Ok(row.is_some())
         })
         .await
     }
 
-    async fn list_invitation_links_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationLink>> {
-        wasm_send(async {
-            let values = [int(account_id)?];
-            invitation_links::fold(self.all(invitation_links::FOR_ACCOUNT, &values).await?)
-        })
-        .await
+    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
+        let encoded = delivery_projection::encode(receipt)?;
+        let statements = delivery_projection::statements();
+        wasm_send(self.batch(&statements, &encoded, Error::Database)).await
     }
-
-    // -------- invitation requests --------
-
-    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
-        wasm_send(async {
-            let values = [text(&id.to_string())];
-            self.first(invitation_requests::GET, &values).await
-        })
-        .await
-    }
-
-    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
-        wasm_send(async {
-            let values = [int(account_id)?];
-            let row: Option<pending_queue::CountRow> =
-                self.first(pending_queue::COUNT_QUERY, &values).await?;
-            row.map(|r| r.pending)
-                .ok_or_else(|| Error::Corrupt("pending count returned no row".into()))
-        })
-        .await
-    }
-
-    async fn pending_request_page(
-        &self,
-        account_id: u64,
-        after: Option<pending_queue::PendingBoundary>,
-    ) -> Result<pending_queue::PendingPage> {
-        wasm_send(async {
-            let values = [
-                int(account_id)?,
-                nullable(after.map(|b| text(&b.seek_key()))),
-            ];
-            let sql = pending_queue::query(after.is_some());
-            pending_queue::PendingPage::from_json(self.all(&sql, &values).await?)
-        })
-        .await
-    }
-
-    async fn request_history(
-        &self,
-        account_id: u64,
-        link_id: InvitationLinkId,
-        before: Option<request_history::Boundary>,
-    ) -> Result<request_history::Page> {
-        wasm_send(async {
-            let values = [
-                int(account_id)?,
-                text(&link_id.to_string()),
-                nullable(before.map(|b| text(&request_history::boundary_key(b)))),
-            ];
-            let sql = request_history::query(before);
-            Ok(request_history::page(self.all(&sql, &values).await?))
-        })
-        .await
-    }
-
-    // -------- github invitations --------
 
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
         wasm_send(async {
@@ -509,26 +624,9 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>> {
-        wasm_send(async {
-            let values = [text(&id.to_string())];
-            self.first(github_invitations::GET, &values).await
-        })
-        .await
-    }
-
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>> {
-        wasm_send(async {
-            let values = [int(github_id)?];
-            self.first(github_invitations::BY_GITHUB_ID, &values).await
-        })
-        .await
+    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
+        let input = settlement::encode(transition)?;
+        wasm_send(self.batch(settlement::STATEMENTS, &input, Error::Database)).await
     }
 
     async fn list_pending_github_invitations_for_account(
@@ -542,94 +640,10 @@ impl Storage for D1Storage {
         })
         .await
     }
+}
 
-    async fn member_invitation_candidates(
-        &self,
-        account_id: u64,
-        repo_id: u64,
-        requester_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        wasm_send(async {
-            let values = [int(account_id)?, int(repo_id)?, int(requester_id)?];
-            self.all(github_invitations::MEMBER_CANDIDATES, &values)
-                .await
-        })
-        .await
-    }
-
-    async fn bind_member_webhook(
-        &self,
-        payload_sha256: &str,
-        invitation_id: Option<GithubInvitationId>,
-    ) -> Result<Option<GithubInvitationId>> {
-        wasm_send(async {
-            let values = [
-                text(payload_sha256),
-                nullable(invitation_id.map(|id| text(&id.to_string()))),
-            ];
-            self.run(github_invitations::BIND_MEMBER_WEBHOOK, &values)
-                .await?;
-            let binding: github_invitations::MemberWebhookBinding = self
-                .first(
-                    github_invitations::MEMBER_WEBHOOK_BINDING,
-                    &[text(payload_sha256)],
-                )
-                .await?
-                .ok_or_else(|| unreadable_write("member webhook binding"))?;
-            Ok(binding.invitation_id)
-        })
-        .await
-    }
-
-    async fn invitation_link_belongs_to_account(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-    ) -> Result<bool> {
-        wasm_send(async {
-            let values = [text(&id.to_string()), int(account_id)?];
-            let row: Option<IgnoredAny> = self
-                .first(invitation_links::BELONGS_TO_ACCOUNT, &values)
-                .await?;
-            Ok(row.is_some())
-        })
-        .await
-    }
-
-    // -------- audit --------
-
-    async fn list_audit_events(
-        &self,
-        account_id: u64,
-        event: Option<EventType>,
-        position: AuditPosition,
-    ) -> Result<AuditPage> {
-        wasm_send(async {
-            let account = int(account_id)?;
-            let values = |position: AuditPosition| {
-                let boundary = position.boundary();
-                [
-                    account.clone(),
-                    nullable(event.map(|e| text(e.as_str()))),
-                    nullable(boundary.map(|b| text(&audit_read::boundary_time(b)))),
-                    nullable(boundary.map(|b| text(&b.id.to_string()))),
-                ]
-            };
-            let sql = audit_read::query(event, position, false);
-            let rows = self.all(&sql, &values(position)).await?;
-            let mut page = AuditPage::from_rows(rows, position)?;
-            if let Some([newer, older]) = page.probes() {
-                for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
-                    let sql = audit_read::query(event, seek, true);
-                    let row: Option<IgnoredAny> = self.first(&sql, &values(seek)).await?;
-                    *flag = row.is_some();
-                }
-            }
-            Ok(page)
-        })
-        .await
-    }
-
+#[async_trait]
+impl AuditStorage for D1Storage {
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
         wasm_send(async {
             let values = [

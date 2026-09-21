@@ -1,6 +1,7 @@
 use super::*;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
 use ghinvite_storage_sqlx::SqlxStorage;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
