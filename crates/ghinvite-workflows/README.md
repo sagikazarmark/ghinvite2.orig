@@ -85,9 +85,9 @@ and call `Storage::audit` directly so retries reuse the same identity. Storage
 deduplicates this event type by ID; unchanged metadata produces no event. Audit
 metadata includes field names only, never description or internal-note values.
 
-See `docs/superpowers/plans/2026-05-04-ghinvite-restate-handlers.md` for the
-implementation plan, and `docs/superpowers/specs/2026-05-04-ghinvite-v1-design.md`
-§9 for the workflow specifications.
+See [the request lifecycle](../../docs/request-lifecycle-v1.md) and
+[ADR 0003](../../docs/adr/0003-restate-authoritative-admission.md) for the
+workflow contracts.
 
 ## Authoritative admission
 
