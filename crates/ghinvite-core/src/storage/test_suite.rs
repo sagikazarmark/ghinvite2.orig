@@ -130,7 +130,7 @@ scenarios![
     scenario_audit_pages,
     scenario_timestamp_precision,
     scenario_delivery_audit,
-    scenario_admin_attempts,
+    scenario_attempt_continuations,
     scenario_delivery_attempt_fence,
     scenario_member_webhook_binding,
     scenario_settlement_audit_conflict,
@@ -732,10 +732,11 @@ async fn scenario_timestamp_precision<S: Storage + ProjectionStorage>(s: S) {
 }
 
 /// Browser continuations: the first writer wins by ID and by logical binding,
-/// per scope; expired records are invisible and reclaimed; release forgets one.
-async fn scenario_admin_attempts<S: Storage>(s: S) {
+/// per scope, and a scope lists in retention order; expired records are
+/// invisible and reclaimed; release forgets one.
+async fn scenario_attempt_continuations<S: Storage>(s: S) {
     let retained = |id: &'static str, binding: &'static str, payload: &'static str| {
-        s.retain_admin_attempt("scope", id, binding, payload, 200, 100)
+        s.retain_attempt_continuation("scope", id, binding, payload, 200, 100)
     };
     let first = retained("a1", "bind", "p1").await.unwrap();
     assert_eq!((first.id.as_str(), first.payload.as_str()), ("a1", "p1"));
@@ -750,52 +751,54 @@ async fn scenario_admin_attempts<S: Storage>(s: S) {
         ("a1", "p1")
     );
     let other_scope = s
-        .retain_admin_attempt("other", "a1", "bind", "p4", 200, 100)
+        .retain_attempt_continuation("other", "a1", "bind", "p4", 200, 100)
         .await
         .unwrap();
     assert_eq!(other_scope.payload, "p4");
     assert_eq!(
-        s.get_admin_attempt("scope", "a1", 100)
+        s.get_attempt_continuation("scope", "a1", 100)
             .await
             .unwrap()
             .map(|a| a.payload),
         Some("p1".into())
     );
     assert!(
-        s.get_admin_attempt("scope", "a2", 100)
+        s.get_attempt_continuation("scope", "a2", 100)
             .await
             .unwrap()
             .is_none()
     );
-    let listed = s.list_admin_attempts("scope", 100).await.unwrap();
+    retained("0-later", "later", "p7").await.unwrap();
+    let listed = s.list_attempt_continuations("scope", 100).await.unwrap();
     assert_eq!(
         listed.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(),
-        ["a1"]
+        ["a1", "0-later"],
+        "listed in retention order, not by ID"
     );
     assert!(
-        s.get_admin_attempt("scope", "a1", 200)
+        s.get_attempt_continuation("scope", "a1", 200)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        s.list_admin_attempts("scope", 200)
+        s.list_attempt_continuations("scope", 200)
             .await
             .unwrap()
             .is_empty()
     );
     let reclaimed = s
-        .retain_admin_attempt("scope", "a3", "bind", "p5", 300, 200)
+        .retain_attempt_continuation("scope", "a3", "bind", "p5", 300, 200)
         .await
         .unwrap();
     assert_eq!(
         (reclaimed.id.as_str(), reclaimed.payload.as_str()),
         ("a3", "p5")
     );
-    s.release_admin_attempt("scope", "a3").await.unwrap();
-    s.release_admin_attempt("scope", "a3").await.unwrap();
+    s.release_attempt_continuation("scope", "a3").await.unwrap();
+    s.release_attempt_continuation("scope", "a3").await.unwrap();
     assert!(
-        s.get_admin_attempt("scope", "a3", 200)
+        s.get_attempt_continuation("scope", "a3", 200)
             .await
             .unwrap()
             .is_none()
@@ -803,7 +806,7 @@ async fn scenario_admin_attempts<S: Storage>(s: S) {
     // A record that is already expired cannot be read back after its write:
     // a retryable storage failure, not a missing resource.
     assert!(matches!(
-        s.retain_admin_attempt("scope", "a4", "b4", "p6", 200, 200)
+        s.retain_attempt_continuation("scope", "a4", "b4", "p6", 200, 200)
             .await,
         Err(super::Error::Database(_))
     ));

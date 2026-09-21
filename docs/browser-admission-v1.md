@@ -40,12 +40,13 @@ same-attempt recovery is offered. If preparation never reached ingress, a separa
 current-page lookup restores the fresh action once authority is available again.
 The fresh form explicitly allocates a
 new ID and retains a link to the exact original, including across tabs. Before
-contacting ingress, the web caller explicitly saves normalized input in a separate
-protected session-backend record keyed by session, user, code and operation. These
-30-minute continuations are not login sessions and cannot confer authentication.
-Independent keys prevent concurrent tabs or session saves from erasing each
-other's input. A separate latest pointer is only a navigation aid; exact attempt
-URLs remain independent. This supplies reload/navigation recovery even if
+contacting ingress, the web caller retains normalized input as a sealed attempt
+continuation in SQL, scoped to session, user and code and identified by operation.
+Continuations expire with the browser session, are not login sessions and cannot
+confer authentication. One immutable record per operation prevents concurrent
+tabs or session saves from erasing each other's input. The most recently retained
+continuation is only a navigation aid; exact attempt URLs remain independent.
+This supplies reload/navigation recovery even if
 preparation never reaches Restate. Retained link-owned state provides permanent
 cross-session recovery once input reaches authority.
 No acceptance is claimed for locally saved or prepared input.

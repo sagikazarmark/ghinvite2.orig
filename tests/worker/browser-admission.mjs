@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 import { stalledResponse } from './deadline-recovery.mjs';
@@ -66,6 +67,11 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     assert.ok(authenticatedIngressCalls > 0, 'browser status must call authenticated ingress');
     assert.equal(page.headers.get('cache-control'), 'private, no-store');
     console.log('PASS browser Worker Bearer ingress binding and authoritative status with empty D1');
+    // Submissions retain their pre-ingress continuation in D1.
+    const schema = readFileSync(new URL('../../migrations/0001_initial.sql', import.meta.url), 'utf8');
+    for (const statement of schema.match(/CREATE (TABLE|INDEX) attempt_continuations[^;]*;/g)) {
+      await db.exec(statement.replaceAll('\n', ' '));
+    }
     if (recovery) for (const phase of ['headers', 'body']) {
       const input = recovery.creation();
       const created = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/create`, input);

@@ -1,17 +1,12 @@
 //! Session-bound continuations persisted before ingress, including on a lost
 //! acknowledgement. Current account authorization is required on every access.
 use super::*;
+use crate::attempt_continuations::{AttemptContinuations, Retention, Scope};
 use axum::http::StatusCode;
 use axum::response::{Redirect, Response};
-use base64::Engine;
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
 use ghinvite_core::admission::AdminLinkCommand;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
 use ghinvite_core::storage::projection::CreateLink;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 const CREATED: &str = "Invitation link created.";
@@ -71,65 +66,12 @@ impl Command {
     }
 }
 
-fn scope(admin: &RequireConsoleAdminOf) -> crate::Result<String> {
-    use sha2::{Digest, Sha256};
-    let session_id = admin.tower.id().ok_or_else(|| failure("missing session"))?;
-    let digest = Sha256::digest(format!(
-        "ghinvite/admin-attempt/v2/{session_id}/{}/{}",
-        admin.session.user_id, admin.account.account_id
-    ));
-    Ok(hex::encode(digest))
-}
-
-fn failure(_: impl std::fmt::Display) -> crate::WebError {
-    crate::WebError::Session("Attempt recovery temporarily unavailable.".into())
-}
-
-fn seal(state: &AppState, scope: &str, command: &Command) -> crate::Result<String> {
-    let mut nonce = [0; 24];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(failure)?;
-    let cipher = XChaCha20Poly1305::new((&state.config.session_secret).into());
-    let aad = format!("admin-attempt/v1/{scope}/{}", command.id());
-    let plaintext = serde_json::to_vec(command).map_err(failure)?;
-    let encrypted = cipher
-        .encrypt(
-            &XNonce::try_from(nonce.as_slice()).map_err(failure)?,
-            Payload {
-                msg: &plaintext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(failure)?;
-    let mut bytes = nonce.to_vec();
-    bytes.extend(encrypted);
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-}
-
-fn open(
-    state: &AppState,
-    scope: &str,
-    stored: ghinvite_core::storage::admin_attempts::StoredAttempt,
-) -> crate::Result<Command> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(stored.payload)
-        .map_err(failure)?;
-    if bytes.len() < 24 {
-        return Err(failure("invalid continuation"));
-    }
-    let cipher = XChaCha20Poly1305::new((&state.config.session_secret).into());
-    let aad = format!("admin-attempt/v1/{scope}/{}", stored.id);
-    let plaintext = cipher
-        .decrypt(
-            &XNonce::try_from(&bytes[..24]).map_err(failure)?,
-            Payload {
-                msg: &bytes[24..],
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(failure)?;
-    serde_json::from_slice(&plaintext).map_err(failure)
+fn scope(admin: &RequireConsoleAdminOf) -> crate::Result<Scope> {
+    Scope::console(
+        &admin.tower,
+        admin.session.user_id,
+        admin.account.account_id,
+    )
 }
 
 pub(super) async fn load(
@@ -137,40 +79,27 @@ pub(super) async fn load(
     admin: &RequireConsoleAdminOf,
     id: &str,
 ) -> crate::Result<Option<Command>> {
-    let scope = scope(admin)?;
-    state
-        .storage
-        .get_admin_attempt(&scope, id, Utc::now().timestamp())
-        .await?
-        .map(|r| open(state, &scope, r))
-        .transpose()
+    AttemptContinuations::new(state)
+        .load(&scope(admin)?, id)
+        .await
 }
 
 // An immutable record per attempt prevents request-local session snapshots from
 // overwriting each other's submitted input. A collision never authorizes ingress.
+// A decision is also bound to its request, so only one original decision
+// attempt per request is retained.
 async fn retain(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     command: &Command,
-) -> crate::Result<Command> {
-    let scope = scope(admin)?;
+) -> crate::Result<Retention<Command>> {
     let binding = match command {
-        Command::Decision(c) => format!("request-{}-{}", c.link_id, c.request_id),
-        _ => command.id(),
+        Command::Decision(c) => Some(format!("request-{}-{}", c.link_id, c.request_id)),
+        _ => None,
     };
-    let payload = seal(state, &scope, command)?;
-    let stored = state
-        .storage
-        .retain_admin_attempt(
-            &scope,
-            &command.id(),
-            &binding,
-            &payload,
-            admin.tower.expiry_date().unix_timestamp(),
-            Utc::now().timestamp(),
-        )
-        .await?;
-    open(state, &scope, stored)
+    AttemptContinuations::new(state)
+        .retain(&scope(admin)?, &command.id(), binding.as_deref(), command)
+        .await
 }
 
 fn url(admin: &RequireConsoleAdminOf, command: &Command) -> String {
@@ -183,15 +112,9 @@ fn url(admin: &RequireConsoleAdminOf, command: &Command) -> String {
 
 pub(super) async fn index(State(state): State<AppState>, admin: RequireConsoleAdminOf) -> Response {
     let result = async {
-        let scope = scope(&admin)?;
-        let records = state
-            .storage
-            .list_admin_attempts(&scope, Utc::now().timestamp())
-            .await?;
-        records
-            .into_iter()
-            .map(|r| open(&state, &scope, r))
-            .collect::<crate::Result<Vec<_>>>()
+        AttemptContinuations::new(&state)
+            .list::<Command>(&scope(&admin)?)
+            .await
     }
     .await;
     match result {
@@ -320,14 +243,12 @@ async fn flash(admin: &RequireConsoleAdminOf, level: session::FlashLevel, messag
 /// A definitive rejection applied nothing, so its continuation must neither
 /// read as an unknown outcome nor bind the identity to the rejected input.
 async fn release(state: &AppState, admin: &RequireConsoleAdminOf, command: &Command) {
-    let released = match scope(admin) {
-        Ok(scope) => state
-            .storage
-            .release_admin_attempt(&scope, &command.id())
+    let released = async {
+        AttemptContinuations::new(state)
+            .release(&scope(admin)?, &command.id())
             .await
-            .map_err(|_| ()),
-        Err(_) => Err(()),
-    };
+    }
+    .await;
     if released.is_err() {
         // Retained input then keeps binding the identity; resubmitting changed
         // values reports a conflict rather than applying anything.
@@ -342,26 +263,24 @@ pub(super) async fn submit(
     admin: &RequireConsoleAdminOf,
     command: Command,
 ) -> Result<Response, CreateRejected> {
-    let original = match retain(state, admin, &command).await {
-        Ok(c) => c,
-        Err(e) => return Ok(back_to_link(admin, &command, e)),
-    };
-    if original.id() != command.id() {
-        if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
-            && old.action != new.action
-        {
-            return Ok(render_attempt(
-                admin,
-                &original,
-                StatusCode::CONFLICT,
-                "The requested decision was not applied. A different original decision attempt is retained. Check its status before deciding what to do next.",
-                false,
-            ));
+    match retain(state, admin, &command).await {
+        Ok(Retention::Retained) => {}
+        Ok(Retention::Bound(original)) => {
+            if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
+                && old.action != new.action
+            {
+                return Ok(render_attempt(
+                    admin,
+                    &original,
+                    StatusCode::CONFLICT,
+                    "The requested decision was not applied. A different original decision attempt is retained. Check its status before deciding what to do next.",
+                    false,
+                ));
+            }
+            return Ok(Redirect::to(&url(admin, &original)).into_response());
         }
-        return Ok(Redirect::to(&url(admin, &original)).into_response());
-    }
-    if serde_json::to_value(&original).unwrap() != serde_json::to_value(&command).unwrap() {
-        return Ok(conflict(admin, &original));
+        Ok(Retention::Conflict(original)) => return Ok(conflict(admin, &original)),
+        Err(e) => return Ok(back_to_link(admin, &command, e)),
     }
     let (result, completed) = match &command {
         Command::Decision(c) => {

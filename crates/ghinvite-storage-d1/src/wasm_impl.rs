@@ -106,7 +106,7 @@ impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
 
 #[async_trait]
 impl Storage for D1Storage {
-    async fn retain_admin_attempt(
+    async fn retain_attempt_continuation(
         &self,
         scope: &str,
         id: &str,
@@ -114,8 +114,8 @@ impl Storage for D1Storage {
         payload: &str,
         expires_at: i64,
         now: i64,
-    ) -> Result<ghinvite_core::storage::admin_attempts::StoredAttempt> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<ghinvite_core::storage::attempt_continuations::StoredContinuation> {
+        use ghinvite_core::storage::attempt_continuations::*;
         wasm_send(async {
             self.db
                 .prepare(CLEANUP)
@@ -141,37 +141,37 @@ impl Storage for D1Storage {
                 .prepare(BY_BINDING)
                 .bind(&[scope.into(), binding.into(), id.into(), (now as f64).into()])
                 .map_err(bind_err)?
-                .first::<StoredAttempt>(None)
+                .first::<StoredContinuation>(None)
                 .await
                 .map_err(classify_d1_error)?
-                .ok_or_else(|| unreadable_write("admin attempt"))
+                .ok_or_else(|| unreadable_write("attempt continuation"))
         })
         .await
     }
-    async fn get_admin_attempt(
+    async fn get_attempt_continuation(
         &self,
         scope: &str,
         id: &str,
         now: i64,
-    ) -> Result<Option<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<Option<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
+        use ghinvite_core::storage::attempt_continuations::*;
         wasm_send(async {
             self.db
                 .prepare(GET)
                 .bind(&[scope.into(), id.into(), (now as f64).into()])
                 .map_err(bind_err)?
-                .first::<StoredAttempt>(None)
+                .first::<StoredContinuation>(None)
                 .await
                 .map_err(classify_d1_error)
         })
         .await
     }
-    async fn list_admin_attempts(
+    async fn list_attempt_continuations(
         &self,
         scope: &str,
         now: i64,
-    ) -> Result<Vec<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<Vec<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
+        use ghinvite_core::storage::attempt_continuations::*;
         wasm_send(async {
             self.db
                 .prepare(LIST)
@@ -180,13 +180,13 @@ impl Storage for D1Storage {
                 .all()
                 .await
                 .map_err(classify_d1_error)?
-                .results::<StoredAttempt>()
+                .results::<StoredContinuation>()
                 .map_err(bind_err)
         })
         .await
     }
-    async fn release_admin_attempt(&self, scope: &str, id: &str) -> Result<()> {
-        use ghinvite_core::storage::admin_attempts::*;
+    async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
+        use ghinvite_core::storage::attempt_continuations::*;
         wasm_send(async {
             self.db
                 .prepare(RELEASE)

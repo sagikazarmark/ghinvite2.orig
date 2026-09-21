@@ -204,7 +204,7 @@ fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -
 
 #[async_trait]
 impl Storage for SqlxStorage {
-    async fn retain_admin_attempt(
+    async fn retain_attempt_continuation(
         &self,
         scope: &str,
         id: &str,
@@ -212,8 +212,8 @@ impl Storage for SqlxStorage {
         payload: &str,
         expires_at: i64,
         now: i64,
-    ) -> Result<ghinvite_core::storage::admin_attempts::StoredAttempt> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<ghinvite_core::storage::attempt_continuations::StoredContinuation> {
+        use ghinvite_core::storage::attempt_continuations::*;
         sqlx::query(CLEANUP)
             .bind(now)
             .execute(&self.pool)
@@ -236,15 +236,15 @@ impl Storage for SqlxStorage {
             .fetch_one(&self.pool)
             .await
             .map_err(crate::to_db_err)?;
-        Ok(StoredAttempt { id, payload })
+        Ok(StoredContinuation { id, payload })
     }
-    async fn get_admin_attempt(
+    async fn get_attempt_continuation(
         &self,
         scope: &str,
         id: &str,
         now: i64,
-    ) -> Result<Option<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<Option<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
+        use ghinvite_core::storage::attempt_continuations::*;
         let row: Option<(String, String)> = sqlx::query_as(GET)
             .bind(scope)
             .bind(id)
@@ -252,14 +252,14 @@ impl Storage for SqlxStorage {
             .fetch_optional(&self.pool)
             .await
             .map_err(crate::to_db_err)?;
-        Ok(row.map(|(id, payload)| StoredAttempt { id, payload }))
+        Ok(row.map(|(id, payload)| StoredContinuation { id, payload }))
     }
-    async fn list_admin_attempts(
+    async fn list_attempt_continuations(
         &self,
         scope: &str,
         now: i64,
-    ) -> Result<Vec<ghinvite_core::storage::admin_attempts::StoredAttempt>> {
-        use ghinvite_core::storage::admin_attempts::*;
+    ) -> Result<Vec<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
+        use ghinvite_core::storage::attempt_continuations::*;
         let rows: Vec<(String, String)> = sqlx::query_as(LIST)
             .bind(scope)
             .bind(now)
@@ -268,11 +268,11 @@ impl Storage for SqlxStorage {
             .map_err(crate::to_db_err)?;
         Ok(rows
             .into_iter()
-            .map(|(id, payload)| StoredAttempt { id, payload })
+            .map(|(id, payload)| StoredContinuation { id, payload })
             .collect())
     }
-    async fn release_admin_attempt(&self, scope: &str, id: &str) -> Result<()> {
-        use ghinvite_core::storage::admin_attempts::*;
+    async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
+        use ghinvite_core::storage::attempt_continuations::*;
         sqlx::query(RELEASE)
             .bind(scope)
             .bind(id)

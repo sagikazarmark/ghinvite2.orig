@@ -109,7 +109,7 @@ done
 Expect no unapplied migrations and ledger entries matching every SQL file in
 `migrations/` for the release (currently only `0001_initial.sql`). Compare the returned schema
 definitions with those migrations, including projection columns, delivery fences,
-settlement/member-webhook receipts, and the `admin_attempts_expiry` index. Expect
+settlement/member-webhook receipts, and the `attempt_continuations_expiry` index. Expect
 no foreign-key violations. Stop on missing/mismatched schema, migration errors or
 an unexpected UUID in Wrangler output. Apply migrations only via the web config,
 which declares `migrations_dir`; the workflow config is used here for readback.

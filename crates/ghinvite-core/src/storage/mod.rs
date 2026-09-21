@@ -17,7 +17,7 @@ use thiserror::Error;
 #[cfg(feature = "test-suite")]
 pub mod test_suite;
 
-pub mod admin_attempts;
+pub mod attempt_continuations;
 pub mod audit_read;
 pub mod delivery_projection;
 pub mod pending_queue;
@@ -80,7 +80,7 @@ pub enum Error {
 #[async_trait]
 pub trait Storage: Send + Sync + 'static {
     /// First writer wins atomically by ID and logical binding; return that record.
-    async fn retain_admin_attempt(
+    async fn retain_attempt_continuation(
         &self,
         _scope: &str,
         _id: &str,
@@ -88,27 +88,28 @@ pub trait Storage: Send + Sync + 'static {
         _payload: &str,
         _expires_at: i64,
         _now: i64,
-    ) -> Result<admin_attempts::StoredAttempt> {
+    ) -> Result<attempt_continuations::StoredContinuation> {
         Err(Error::Database("attempt storage unavailable".into()))
     }
-    async fn get_admin_attempt(
+    async fn get_attempt_continuation(
         &self,
         _scope: &str,
         _id: &str,
         _now: i64,
-    ) -> Result<Option<admin_attempts::StoredAttempt>> {
+    ) -> Result<Option<attempt_continuations::StoredContinuation>> {
         Err(Error::Database("attempt storage unavailable".into()))
     }
-    async fn list_admin_attempts(
+    /// Live continuations of one scope, oldest retained first.
+    async fn list_attempt_continuations(
         &self,
         _scope: &str,
         _now: i64,
-    ) -> Result<Vec<admin_attempts::StoredAttempt>> {
+    ) -> Result<Vec<attempt_continuations::StoredContinuation>> {
         Err(Error::Database("attempt storage unavailable".into()))
     }
     /// Forget a continuation the authority definitively rejected (nothing was
     /// applied). Releasing a missing record succeeds.
-    async fn release_admin_attempt(&self, _scope: &str, _id: &str) -> Result<()> {
+    async fn release_attempt_continuation(&self, _scope: &str, _id: &str) -> Result<()> {
         Err(Error::Database("attempt storage unavailable".into()))
     }
     /// Atomically settle the observed Sent invitation and publish its audit.

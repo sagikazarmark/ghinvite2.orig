@@ -104,12 +104,8 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         .respond_with(ResponseTemplate::new(503))
         .mount(&ingress)
         .await;
-    let database = std::env::temp_dir().join(format!(
-        "ghinvite-cleanup-{}.sqlite",
-        ghinvite_core::RequestId::new()
-    ));
     let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::at_path(&database)
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
@@ -117,13 +113,8 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         .insert_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let pool = sqlx::SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::new().filename(&database),
-    )
-    .await
-    .unwrap();
     let state = AppState::new(
-        storage,
+        storage.clone(),
         Arc::new(BrowserGithub),
         Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
@@ -142,13 +133,14 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
     let original = ingress.received_requests().await.unwrap()[0].body.clone();
     // Seed expired records after the initial submission so the retry drives cleanup.
     for i in 0..205 {
-        sqlx::query("INSERT INTO admin_attempts VALUES ('expired-session',?1,?1,'ciphertext',1)")
-            .bind(format!("expired-{i}"))
-            .execute(&pool)
+        let id = format!("expired-{i}");
+        // Retained before its deadline, so the write reads back.
+        storage
+            .retain_attempt_continuation("expired-session", &id, &id, "ciphertext", 1, 0)
             .await
             .unwrap();
     }
-    for remaining in [105_i64, 5, 0] {
+    for remaining in [105, 5, 0] {
         let response = post(
             &app,
             &cookie,
@@ -157,12 +149,12 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM admin_attempts WHERE scope='expired-session'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(count, remaining);
+        // Read as of before the deadline: what cleanup has not yet reclaimed.
+        let unreclaimed = storage
+            .list_attempt_continuations("expired-session", 0)
+            .await
+            .unwrap();
+        assert_eq!(unreclaimed.len(), remaining);
         assert_eq!(
             ingress
                 .received_requests()
@@ -179,9 +171,6 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
     )
     .await;
     assert!(html.contains(&format!("revoke-{link}")));
-    drop(app);
-    pool.close().await;
-    std::fs::remove_file(database).unwrap();
 }
 
 #[tokio::test]

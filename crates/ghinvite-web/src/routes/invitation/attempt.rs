@@ -1,4 +1,5 @@
 //! Native forms for admission attempts, with optional SQL delivery observations.
+use crate::attempt_continuations::{AttemptContinuations, Retention, Scope};
 use crate::link_authority::AuthorityError;
 use crate::{WebError, session::Session};
 use axum::{
@@ -26,6 +27,23 @@ impl From<InvalidInput> for WebError {
             InvalidInput::OperationId => "Missing or invalid operation ID. Return to the invitation link to start a fresh attempt.".into(),
             InvalidInput::Justification => "Justification is too long.".into(),
         })
+    }
+}
+
+/// Submitted input retained as a continuation before ingress. The requester
+/// is implied by the continuation scope; the link is resolved later.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AttemptInput {
+    operation_id: AdmissionOperationId,
+    justification: Option<String>,
+}
+
+impl From<&Admit> for AttemptInput {
+    fn from(command: &Admit) -> Self {
+        Self {
+            operation_id: command.operation_id.clone(),
+            justification: command.justification.clone(),
+        }
     }
 }
 
@@ -66,7 +84,7 @@ pub async fn page(
         Ok(id) => id,
         Err(_) => return safe_error(code, WebError::BadRequest("Invalid operation ID.".into())),
     };
-    let local = load_local(state, tower, session.user_id, code, operation).await;
+    let local = load_local(state, tower, session, code, operation).await;
     let page = match authority
         .requester_page(code, session.user_id, operation_id)
         .await
@@ -252,14 +270,19 @@ pub async fn submit(
         }
         Err(invalid) => return safe_error(code, invalid.into()),
     };
-    // Save a separate protected record before ingress. Each attempt has its own
-    // key, so concurrent request-local session snapshots cannot erase it.
-    if let Err(error) = save_local(state, tower, session.user_id, code, &command).await {
-        return match error {
-            WebError::Conflict => conflict(session, code, &command),
-            WebError::Session(_) => safe_error(code, error),
-            _ => unknown(session, code, &command),
-        };
+    // Retain the input before ingress: if the request never reaches the
+    // authority, this is all that recovers the attempt.
+    let input = AttemptInput::from(&command);
+    let id = String::from(input.operation_id.clone());
+    let retained = async {
+        AttemptContinuations::new(state)
+            .retain(&scope(tower, session, code)?, &id, None, &input)
+            .await
+    };
+    match retained.await {
+        Ok(Retention::Retained) => {}
+        Ok(Retention::Conflict(_) | Retention::Bound(_)) => return conflict(session, code, &input),
+        Err(error) => return safe_error(code, error),
     }
     command.link_id = match authority.resolve(code).await {
         Ok(id) => id,
@@ -303,19 +326,19 @@ pub async fn submit(
 fn failed(session: &Session, code: &str, command: &Admit, error: AuthorityError) -> Response {
     match error {
         AuthorityError::Invalid | AuthorityError::Missing => safe_error(code, error.into()),
-        AuthorityError::Conflict => conflict(session, code, command),
-        AuthorityError::Unknown(_) => unknown(session, code, command),
+        AuthorityError::Conflict => conflict(session, code, &command.into()),
+        AuthorityError::Unknown(_) => unknown(session, code, &command.into()),
     }
 }
 
 /// The attempt's operation ID is bound to different input.
-fn conflict(session: &Session, code: &str, command: &Admit) -> Response {
-    let id = String::from(command.operation_id.clone());
+fn conflict(session: &Session, code: &str, input: &AttemptInput) -> Response {
+    let id = String::from(input.operation_id.clone());
     render(
         session,
         code,
         &id,
-        command.justification.as_deref(),
+        input.justification.as_deref(),
         None,
         "Operation conflict. This ID is bound to different input. Recover the original attempt to check its result and whether a fresh attempt is available.",
         Some(&attempt_url(code, &id)),
@@ -326,13 +349,13 @@ fn conflict(session: &Session, code: &str, command: &Admit) -> Response {
 }
 
 /// Whether the attempt was admitted is unknown; offer only the same attempt.
-fn unknown(session: &Session, code: &str, command: &Admit) -> Response {
-    let id = String::from(command.operation_id.clone());
+fn unknown(session: &Session, code: &str, input: &AttemptInput) -> Response {
+    let id = String::from(input.operation_id.clone());
     render(
         session,
         code,
         &id,
-        command.justification.as_deref(),
+        input.justification.as_deref(),
         None,
         "Outcome unknown. Your request may have been accepted. Retry this same attempt or check its status.",
         Some(&attempt_url(code, &id)),
@@ -342,100 +365,28 @@ fn unknown(session: &Session, code: &str, command: &Admit) -> Response {
     )
 }
 
-fn local_key(
-    tower: &tower_sessions::Session,
-    user: u64,
-    code: &str,
-    operation: &str,
-) -> Option<tower_sessions::session::Id> {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!(
-        "ghinvite/attempt/v1/{}/{user}/{code}/{operation}",
-        tower.id()?
-    ));
-    Some(tower_sessions::session::Id(i128::from_be_bytes(
-        digest[..16].try_into().unwrap(),
-    )))
+fn scope(tower: &tower_sessions::Session, session: &Session, code: &str) -> crate::Result<Scope> {
+    Scope::invitation(tower, session.user_id, code)
 }
-async fn save_local(
-    state: &crate::AppState,
-    tower: &tower_sessions::Session,
-    user: u64,
-    code: &str,
-    command: &Admit,
-) -> crate::Result<()> {
-    let id = String::from(command.operation_id.clone());
-    let key = local_key(tower, user, code, &id)
-        .ok_or_else(|| WebError::Session("missing session".into()))?;
-    let unavailable = || WebError::Session("Attempt recovery temporarily unavailable.".into());
-    let store = state.attempt_store.as_ref().ok_or_else(unavailable)?;
-    let failure = |_| unavailable();
-    if let Some(old) = store.load(&key).await.map_err(failure)? {
-        let old: Admit = serde_json::from_value(old.data["attempt"].clone())
-            .map_err(|_| WebError::Internal("invalid continuation".into()))?;
-        if old.justification != command.justification
-            || old.requester_id != command.requester_id
-            || old.operation_id != command.operation_id
-        {
-            return Err(WebError::Conflict);
-        }
-    } else {
-        let mut record = continuation(key);
-        record
-            .data
-            .insert("attempt".into(), serde_json::to_value(command).unwrap());
-        store.create(&mut record).await.map_err(failure)?;
-        if record.id != key {
-            return Err(WebError::Conflict);
-        }
-    }
-    let pointer = local_key(tower, user, code, "latest").unwrap();
-    let existing = store.load(&pointer).await.map_err(failure)?;
-    let is_new = existing.is_none();
-    let mut record = existing.unwrap_or_else(|| continuation(pointer));
-    record
-        .data
-        .insert("operation".into(), serde_json::json!(id));
-    if is_new {
-        store.create(&mut record).await.map_err(failure)?;
-    } else {
-        store.save(&record).await.map_err(failure)?;
-    }
-    Ok(())
-}
-fn continuation(id: tower_sessions::session::Id) -> tower_sessions::session::Record {
-    tower_sessions::session::Record {
-        id,
-        data: Default::default(),
-        expiry_date: tower_sessions::cookie::time::OffsetDateTime::now_utc()
-            + tower_sessions::cookie::time::Duration::minutes(30),
-    }
-}
+
+/// The recovery input for an attempt that may never have reached the
+/// authority, which also retains attempts once they do.
 async fn load_local(
     state: &crate::AppState,
     tower: &tower_sessions::Session,
-    user: u64,
+    session: &Session,
     code: &str,
     operation: Option<&str>,
-) -> Option<Admit> {
-    let store = state.attempt_store.as_ref()?;
-    let id = match operation {
-        Some(id) => String::from(
-            ghinvite_core::admission::AdmissionOperationId::try_from(id.to_owned()).ok()?,
-        ),
-        None => store
-            .load(&local_key(tower, user, code, "latest")?)
-            .await
-            .ok()??
-            .data["operation"]
-            .as_str()?
-            .to_owned(),
-    };
-    let record = store
-        .load(&local_key(tower, user, code, &id)?)
-        .await
-        .ok()??;
-    serde_json::from_value(record.data["attempt"].clone()).ok()
+) -> Option<AttemptInput> {
+    let scope = scope(tower, session, code).ok()?;
+    let continuations = AttemptContinuations::new(state);
+    match operation {
+        Some(id) => {
+            let id = String::from(AdmissionOperationId::try_from(id.to_owned()).ok()?);
+            continuations.load(&scope, &id).await.ok()?
+        }
+        None => continuations.latest(&scope).await.ok()?,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]

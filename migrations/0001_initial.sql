@@ -229,7 +229,7 @@ CREATE TABLE member_webhook_receipts (
 );
 
 -- Opaque, encrypted browser continuations. Never session authentication records.
-CREATE TABLE admin_attempts (
+CREATE TABLE attempt_continuations (
   scope       TEXT    NOT NULL,
   id          TEXT    NOT NULL,
   binding     TEXT    NOT NULL,
@@ -239,4 +239,4 @@ CREATE TABLE admin_attempts (
   UNIQUE (scope, binding)
 );
 
-CREATE INDEX admin_attempts_expiry ON admin_attempts(expires_at);
+CREATE INDEX attempt_continuations_expiry ON attempt_continuations(expires_at);

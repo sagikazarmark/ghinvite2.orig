@@ -91,15 +91,17 @@ one `COUNT(*)` statement with the same scoping (pending state, the
 `queue_account_id` seek, and the current owning link's account), so it counts
 exactly the rows the queue pages through without loading any of them.
 
-### Admin attempts
+### Attempt continuations
 
-`admin_attempts` stores encrypted admin browser continuations separately from
-authentication sessions. A unique session/account scope plus logical binding
-atomically retains the first submitted input, including on D1. These are
+`attempt_continuations` stores encrypted browser continuations of in-flight
+console mutations and invitation requests separately from authentication
+sessions. A unique session-derived scope plus logical binding atomically retains
+the first submitted input, including on D1. A scope lists in retention (rowid)
+order. These are
 recovery records, not authoritative business receipts. Their `expires_at`
 integer is a Unix-second browser-session deadline (like session storage), not a
 domain timestamp. Reads exclude expired records. Each retention call deletes at
-most 100 expired continuations across all sessions, using the `admin_attempts_expiry`
+most 100 expired continuations across all sessions, using the `attempt_continuations_expiry`
 index, in both SQLite and D1. Cleanup runs with mutation traffic and
 does not affect authoritative Restate receipts or extend live session deadlines.
 

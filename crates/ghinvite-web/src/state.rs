@@ -15,7 +15,6 @@ pub struct AppState {
     pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
     pub link_authority: LinkAuthority,
-    pub(crate) attempt_store: Option<Arc<dyn tower_sessions::SessionStore>>,
 }
 
 impl AppState {
@@ -34,7 +33,6 @@ impl AppState {
             commands,
             config,
             link_authority: LinkAuthority::new(restate),
-            attempt_store: None,
         }
     }
 }
