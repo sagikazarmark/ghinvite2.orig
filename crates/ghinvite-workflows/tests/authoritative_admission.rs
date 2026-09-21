@@ -7,12 +7,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use admission_v1::{
-    InvitationProjectionV1, InvitationRequestV1, ProjectionEnvelope, WorkflowEnvelope,
-};
+use admission::{InvitationProjection, InvitationRequest, ProjectionEnvelope, WorkflowEnvelope};
 use ghinvite_core::InvitationLinkId;
-use ghinvite_workflows::admission_v1;
-use restate_sdk::context::{Context, ContextSideEffects, RunFuture, WorkflowContext};
+use ghinvite_workflows::admission;
+use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture, WorkflowContext};
 use restate_sdk::endpoint::{
     Endpoint, HandleOptions, HandlerOptions, ProtocolMode, ServiceOptions,
 };
@@ -27,10 +25,10 @@ struct Runtime {
     admin: String,
     server: tokio::task::JoinHandle<()>,
     received: Arc<Mutex<Received>>,
-    faults: Arc<admission_v1::Faults>,
+    faults: Arc<admission::Faults>,
     transport: Arc<Transport>,
     offline: Arc<AtomicBool>,
-    workflow_faults: Arc<ghinvite_workflows::request_lifecycle_v1::WorkflowFaults>,
+    workflow_faults: Arc<ghinvite_workflows::request_lifecycle::WorkflowFaults>,
 }
 
 #[derive(Default)]
@@ -45,7 +43,7 @@ async fn serve(
     request: Request,
 ) -> axum::response::Response {
     let (parts, body) = request.into_parts();
-    if parts.uri.path().ends_with("/InvitationRequestV1/run")
+    if parts.uri.path().ends_with("/InvitationRequest/run")
         && transport.pause_workflows.load(Ordering::SeqCst)
     {
         return axum::response::Response::builder()
@@ -54,7 +52,7 @@ async fn serve(
             .unwrap();
     }
     let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
-    if parts.uri.path().contains("/InvitationLinkV1/") {
+    if parts.uri.path().contains("/InvitationLink/") {
         transport.max_body.fetch_max(bytes.len(), Ordering::SeqCst);
     }
     let task = tokio::spawn(async move {
@@ -85,10 +83,10 @@ struct Received {
 
 struct Consumer(Arc<Mutex<Received>>, Arc<AtomicBool>);
 
-impl InvitationProjectionV1 for Consumer {
+impl InvitationProjection for Consumer {
     async fn apply_transition(
         &self,
-        ctx: Context<'_>,
+        ctx: ObjectContext<'_>,
         Json(envelope): Json<ProjectionEnvelope>,
     ) -> Result<(), TerminalError> {
         ctx.run(|| async {
@@ -108,17 +106,17 @@ impl InvitationProjectionV1 for Consumer {
     }
 }
 
-impl InvitationRequestV1 for Consumer {
+impl InvitationRequest for Consumer {
     async fn notification_status(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
-    ) -> Result<Json<Option<admission_v1::TerminalSignal>>, TerminalError> {
+    ) -> Result<Json<Option<admission::TerminalSignal>>, TerminalError> {
         Ok(Json(None))
     }
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
-        _: Json<admission_v1::TerminalSignal>,
+        _: Json<admission::TerminalSignal>,
     ) -> Result<(), TerminalError> {
         Ok(())
     }
@@ -126,11 +124,11 @@ impl InvitationRequestV1 for Consumer {
         &self,
         ctx: WorkflowContext<'_>,
         Json(envelope): Json<WorkflowEnvelope>,
-    ) -> Result<Json<ghinvite_workflows::request_lifecycle_v1::WorkflowResult>, TerminalError> {
+    ) -> Result<Json<ghinvite_workflows::request_lifecycle::WorkflowResult>, TerminalError> {
         ctx.run(|| async {
             self.0.lock().unwrap().workflows.push(envelope.clone());
             Ok::<_, HandlerError>(Json(
-                ghinvite_workflows::request_lifecycle_v1::WorkflowResult {
+                ghinvite_workflows::request_lifecycle::WorkflowResult {
                     state: envelope.request.state,
                     dispatch: None,
                 },
@@ -182,15 +180,15 @@ impl Runtime {
         .await
         .expect("Restate admin unavailable");
         let received = Arc::new(Mutex::new(Received::default()));
-        let faults = Arc::new(admission_v1::Faults::default());
+        let faults = Arc::new(admission::Faults::default());
         let offline = Arc::new(AtomicBool::new(true));
         let workflow_faults =
-            Arc::new(ghinvite_workflows::request_lifecycle_v1::WorkflowFaults::default());
-        let builder = admission_v1::bind_with_faults(Endpoint::builder(), faults.clone()).bind(
-            InvitationProjectionV1::serve(Consumer(received.clone(), offline.clone())),
+            Arc::new(ghinvite_workflows::request_lifecycle::WorkflowFaults::default());
+        let builder = admission::bind_with_faults(Endpoint::builder(), faults.clone()).bind(
+            InvitationProjection::serve(Consumer(received.clone(), offline.clone())),
         );
         let builder = if real_workflow {
-            let builder = ghinvite_workflows::request_lifecycle_v1::bind_with_faults(
+            let builder = ghinvite_workflows::request_lifecycle::bind_with_faults(
                 builder,
                 workflow_faults.clone(),
             );
@@ -211,13 +209,13 @@ impl Runtime {
                 )
                 .unwrap(),
             ));
-            ghinvite_workflows::delivery_v1::bind(
+            ghinvite_workflows::delivery::bind(
                 builder,
                 ghinvite_workflows::AppState::new(storage.clone(), github),
             )
         } else {
             builder.bind_with_options(
-                InvitationRequestV1::serve(Consumer(received.clone(), offline.clone())),
+                InvitationRequest::serve(Consumer(received.clone(), offline.clone())),
                 ServiceOptions::new().handler(
                     "run",
                     HandlerOptions::new().workflow_retention(Duration::from_secs(2)),
@@ -260,7 +258,7 @@ impl Runtime {
 
     async fn command(&self, id: &str, handler: &str, input: &Value) -> reqwest::Response {
         self.client
-            .post(format!("{}/InvitationLinkV1/{id}/{handler}", self.ingress))
+            .post(format!("{}/InvitationLink/{id}/{handler}", self.ingress))
             .json(input)
             .send()
             .await
@@ -278,7 +276,7 @@ impl Runtime {
     async fn invocations(&self, id: &str) -> Vec<Value> {
         let response = self.client.post(format!("{}/query", self.admin))
             .header("accept", "application/json")
-            .json(&json!({"query": format!("SELECT id, status FROM sys_invocation WHERE target_service_key = '{id}'")}))
+            .json(&json!({"query": format!("SELECT id, status FROM sys_invocation WHERE target_service_key = '{id}' AND target_service_name <> 'InvitationProjection'")}))
             .send().await.unwrap();
         let status = response.status();
         let text = response.text().await.unwrap();
@@ -313,7 +311,7 @@ async fn authoritative_workflow_contract() {
         let response = runtime
             .client
             .get(format!(
-                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                "{}/restate/workflow/InvitationRequest/{request_id}/attach",
                 runtime.ingress
             ))
             .send()
@@ -354,7 +352,7 @@ async fn authoritative_workflow_contract() {
         let notify = runtime
             .client
             .post(format!(
-                "{}/InvitationRequestV1/{request_id}/notify",
+                "{}/InvitationRequest/{request_id}/notify",
                 runtime.ingress
             ))
             .json(&signal)
@@ -371,7 +369,7 @@ async fn authoritative_workflow_contract() {
         }).await.expect("notification interrupted after resolve");
         runtime.workflow_faults.interrupt_notification.store(false, Ordering::SeqCst);
         for task in runtime.transport.tasks.lock().unwrap().drain(..) { if !task.is_finished() { task.abort(); } }
-        let notified = runtime.client.post(format!("{}/InvitationRequestV1/{request_id}/notify", runtime.ingress)).json(&signal).send().await.unwrap();
+        let notified = runtime.client.post(format!("{}/InvitationRequest/{request_id}/notify", runtime.ingress)).json(&signal).send().await.unwrap();
         assert!(notified.status().is_success());
         runtime
             .transport
@@ -380,7 +378,7 @@ async fn authoritative_workflow_contract() {
         let result: Value = runtime
             .client
             .get(format!(
-                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                "{}/restate/workflow/InvitationRequest/{request_id}/attach",
                 runtime.ingress
             ))
             .send()
@@ -423,7 +421,7 @@ async fn authoritative_workflow_contract() {
         let result: Value = runtime
             .client
             .get(format!(
-                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                "{}/restate/workflow/InvitationRequest/{request_id}/attach",
                 runtime.ingress
             ))
             .send()
@@ -518,7 +516,7 @@ async fn interrupted_timer_setup(runtime: &Runtime) {
         runtime
             .client
             .get(format!(
-                "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                "{}/restate/workflow/InvitationRequest/{request_id}/attach",
                 runtime.ingress
             ))
             .send(),
@@ -575,7 +573,7 @@ async fn waiting_notification_and_timer_races(runtime: &Runtime) {
             runtime
                 .client
                 .get(format!(
-                    "{}/restate/workflow/InvitationRequestV1/{request_id}/attach",
+                    "{}/restate/workflow/InvitationRequest/{request_id}/attach",
                     runtime.ingress
                 ))
                 .send(),
@@ -1346,7 +1344,7 @@ async fn interruption_recovery(runtime: &Runtime) {
         runtime.faults.arm(stage);
         let attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 41});
         let client = runtime.client.clone();
-        let url = format!("{}/InvitationLinkV1/{id}/admit", runtime.ingress);
+        let url = format!("{}/InvitationLink/{id}/admit", runtime.ingress);
         let payload = attempt.clone();
         let admission = tokio::spawn(async move {
             let response = client.post(url).json(&payload).send().await.unwrap();
@@ -1478,7 +1476,7 @@ async fn imported_terminal_requests(runtime: &Runtime) {
         }
         let response = runtime
             .client
-            .post(format!("{}/services/InvitationLinkV1/state", runtime.admin))
+            .post(format!("{}/services/InvitationLink/state", runtime.admin))
             .json(&json!({"object_key": id, "new_state": state}))
             .send()
             .await

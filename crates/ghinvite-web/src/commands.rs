@@ -10,17 +10,6 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait GhinviteCommands: Send + Sync + 'static {
-    async fn create_invitation_link(
-        &self,
-        command: CreateInvitationLink,
-    ) -> Result<CreateInvitationLinkOutput>;
-    async fn update_invitation_link_metadata(
-        &self,
-        command: UpdateInvitationLinkMetadata,
-    ) -> Result<()>;
-    async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()>;
-    async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()>;
-    async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()>;
     async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()>;
     async fn record_repository_selection_change(
         &self,
@@ -35,14 +24,6 @@ pub trait GhinviteCommands: Send + Sync + 'static {
         command: RouteGithubInvitationWebhook,
     ) -> Result<()>;
 }
-
-const INVITATION_LINK_SERVICE: &str = "InvitationLink";
-const CREATE_INVITATION_LINK_METHOD: &str = "create";
-const UPDATE_INVITATION_LINK_METADATA_METHOD: &str = "update_metadata";
-const REVOKE_INVITATION_LINK_METHOD: &str = "revoke";
-const INVITATION_REQUEST_SERVICE: &str = "InvitationRequest";
-const SUBMIT_INVITATION_REQUEST_METHOD: &str = "submit";
-const DECIDE_INVITATION_REQUEST_METHOD: &str = "decide";
 
 #[async_trait]
 pub(crate) trait RestateCommandAdapter: Send + Sync + 'static {
@@ -97,14 +78,6 @@ impl<R> RestateCommands<R> {
     }
 }
 
-fn invitation_link_command_key(account_id: u64) -> String {
-    account_id.to_string()
-}
-
-fn invitation_request_command_key(request_id: ghinvite_core::RequestId) -> String {
-    request_id.to_string()
-}
-
 /// Every handler behind [`GhinviteCommands`] changes state, and none of these
 /// call sites can cheaply re-read the result. A refused or unreachable ingress
 /// therefore leaves the command's effect in doubt — the invocation may have
@@ -124,81 +97,6 @@ impl<R> GhinviteCommands for RestateCommands<R>
 where
     R: RestateCommandAdapter,
 {
-    async fn create_invitation_link(
-        &self,
-        command: CreateInvitationLink,
-    ) -> Result<CreateInvitationLinkOutput> {
-        let key = invitation_link_command_key(command.account_id);
-        self.restate
-            .call(
-                INVITATION_LINK_SERVICE,
-                &key,
-                CREATE_INVITATION_LINK_METHOD,
-                &command,
-            )
-            .await
-            .map_err(mutation_outcome)
-    }
-
-    async fn update_invitation_link_metadata(
-        &self,
-        command: UpdateInvitationLinkMetadata,
-    ) -> Result<()> {
-        let key = invitation_link_command_key(command.account_id);
-        self.restate
-            .call(
-                INVITATION_LINK_SERVICE,
-                &key,
-                UPDATE_INVITATION_LINK_METADATA_METHOD,
-                &command,
-            )
-            .await
-            .map_err(mutation_outcome)
-    }
-
-    async fn revoke_invitation_link(&self, command: RevokeInvitationLink) -> Result<()> {
-        let key = invitation_link_command_key(command.account_id);
-        self.restate
-            .send(
-                INVITATION_LINK_SERVICE,
-                &key,
-                REVOKE_INVITATION_LINK_METHOD,
-                &command,
-            )
-            .await
-            .map_err(mutation_outcome)
-    }
-
-    async fn submit_invitation_request(&self, command: SubmitInvitationRequest) -> Result<()> {
-        let key = invitation_request_command_key(command.request_id);
-        let payload = SubmitInvitationRequestPayload::from(command);
-        self.restate
-            .send(
-                INVITATION_REQUEST_SERVICE,
-                &key,
-                SUBMIT_INVITATION_REQUEST_METHOD,
-                &payload,
-            )
-            .await
-            .map_err(mutation_outcome)
-    }
-
-    async fn decide_invitation_request(&self, command: DecideInvitationRequest) -> Result<()> {
-        let key = invitation_request_command_key(command.request_id);
-        let payload = InvitationRequestDecisionPayload::from(command.decision);
-        let _: serde_json::Value = self
-            .restate
-            .call(
-                INVITATION_REQUEST_SERVICE,
-                &key,
-                DECIDE_INVITATION_REQUEST_METHOD,
-                &payload,
-            )
-            .await
-            .map_err(mutation_outcome)?;
-        Ok(())
-    }
-
     async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
         self.restate
             .call(
@@ -262,219 +160,11 @@ where
             .send(
                 "GithubInvitation",
                 &command.invitation_id.to_string(),
-                "on_webhook_v1",
+                "on_webhook",
                 &command,
             )
             .await
             .map_err(mutation_outcome)
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CreateInvitationLink {
-    pub installation_id: u64,
-    pub account_id: u64,
-    pub created_by: u64,
-    pub created_at: DateTime<Utc>,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub max_uses: Option<u32>,
-    pub permission: ghinvite_core::Permission,
-    pub approval_required: bool,
-    pub description: String,
-    pub internal_note: Option<String>,
-    pub repos: Vec<ghinvite_core::InvitationLinkRepo>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-pub struct CreateInvitationLinkOutput {
-    pub link_id: ghinvite_core::InvitationLinkId,
-    pub slug: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct UpdateInvitationLinkMetadata {
-    pub account_id: u64,
-    pub link_id: ghinvite_core::InvitationLinkId,
-    pub by_user: u64,
-    pub description: String,
-    pub internal_note: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct RevokeInvitationLink {
-    #[serde(skip)]
-    pub account_id: u64,
-    pub link_id: ghinvite_core::InvitationLinkId,
-    pub by_user: u64,
-    pub when: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SubmitInvitationRequest {
-    pub request_id: ghinvite_core::RequestId,
-    pub invitation_link_id: ghinvite_core::InvitationLinkId,
-    pub requester_id: u64,
-    pub justification: Option<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl SubmitInvitationRequest {
-    pub fn new(
-        request_id: ghinvite_core::RequestId,
-        invitation_link_id: ghinvite_core::InvitationLinkId,
-        requester_id: u64,
-        justification: Option<String>,
-        created_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            request_id,
-            invitation_link_id,
-            requester_id,
-            justification,
-            created_at,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SubmitInvitationRequestPayload {
-    request_id: ghinvite_core::RequestId,
-    invitation_link_id: ghinvite_core::InvitationLinkId,
-    requester_id: u64,
-    justification: Option<String>,
-    created_at: DateTime<Utc>,
-}
-
-impl From<SubmitInvitationRequest> for SubmitInvitationRequestPayload {
-    fn from(command: SubmitInvitationRequest) -> Self {
-        Self {
-            request_id: command.request_id,
-            invitation_link_id: command.invitation_link_id,
-            requester_id: command.requester_id,
-            justification: command.justification,
-            created_at: command.created_at,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct DecideInvitationRequest {
-    pub request_id: ghinvite_core::RequestId,
-    decision: InvitationRequestDecision,
-}
-
-impl DecideInvitationRequest {
-    pub fn approve(
-        request_id: ghinvite_core::RequestId,
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            request_id,
-            decision: InvitationRequestDecision::Approve {
-                decided_by,
-                decided_at,
-            },
-        }
-    }
-
-    pub fn decline(
-        request_id: ghinvite_core::RequestId,
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-        reason: Option<String>,
-    ) -> Self {
-        Self {
-            request_id,
-            decision: InvitationRequestDecision::Decline {
-                decided_by,
-                decided_at,
-                reason,
-            },
-        }
-    }
-
-    pub fn decision(&self) -> InvitationRequestDecisionView<'_> {
-        match &self.decision {
-            InvitationRequestDecision::Approve {
-                decided_by,
-                decided_at,
-            } => InvitationRequestDecisionView::Approve {
-                decided_by: *decided_by,
-                decided_at: decided_at.to_owned(),
-            },
-            InvitationRequestDecision::Decline {
-                decided_by,
-                decided_at,
-                reason,
-            } => InvitationRequestDecisionView::Decline {
-                decided_by: *decided_by,
-                decided_at: decided_at.to_owned(),
-                reason: reason.as_deref(),
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InvitationRequestDecisionView<'a> {
-    Approve {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-    },
-    Decline {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-        reason: Option<&'a str>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-enum InvitationRequestDecision {
-    Approve {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-    },
-    Decline {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-        reason: Option<String>,
-    },
-}
-
-#[derive(Clone, Debug, Serialize)]
-enum InvitationRequestDecisionPayload {
-    Approve {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-    },
-    Decline {
-        decided_by: u64,
-        decided_at: DateTime<Utc>,
-        reason: Option<String>,
-    },
-}
-
-impl From<InvitationRequestDecision> for InvitationRequestDecisionPayload {
-    fn from(decision: InvitationRequestDecision) -> Self {
-        match decision {
-            InvitationRequestDecision::Approve {
-                decided_by,
-                decided_at,
-            } => Self::Approve {
-                decided_by,
-                decided_at,
-            },
-            InvitationRequestDecision::Decline {
-                decided_by,
-                decided_at,
-                reason,
-            } => Self::Decline {
-                decided_by,
-                decided_at,
-                reason,
-            },
-        }
     }
 }
 
@@ -746,14 +436,12 @@ pub fn github_webhook_dispatcher(
 mod tests {
     use super::*;
     use crate::RestateClient;
-    use crate::error::WebError;
     use axum::extract::Path;
     use axum::response::IntoResponse;
     use axum::routing::post;
     use chrono::Utc;
     use ghinvite_core::storage::Storage;
     use octoevents::{Envelope, Match};
-    use serde::de::DeserializeOwned;
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
@@ -764,86 +452,6 @@ mod tests {
         method: String,
         send: bool,
         body: Value,
-    }
-
-    #[derive(Clone, Debug)]
-    struct RecordingRestateClient {
-        calls: Arc<Mutex<Vec<RecordedCall>>>,
-        response: Value,
-    }
-
-    impl RecordingRestateClient {
-        fn new(response: Value) -> (Self, Arc<Mutex<Vec<RecordedCall>>>) {
-            let calls = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    calls: calls.clone(),
-                    response,
-                },
-                calls,
-            )
-        }
-
-        async fn send<I: Serialize + Send + Sync>(
-            &self,
-            service: &str,
-            key: &str,
-            method: &str,
-            input: &I,
-        ) -> Result<()> {
-            self.calls.lock().unwrap().push(RecordedCall {
-                service: service.into(),
-                key: key.into(),
-                method: method.into(),
-                send: true,
-                body: serde_json::to_value(input).unwrap(),
-            });
-            Ok(())
-        }
-
-        async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
-            &self,
-            service: &str,
-            key: &str,
-            method: &str,
-            input: &I,
-        ) -> Result<O> {
-            self.calls.lock().unwrap().push(RecordedCall {
-                service: service.into(),
-                key: key.into(),
-                method: method.into(),
-                send: false,
-                body: serde_json::to_value(input).unwrap(),
-            });
-            serde_json::from_value(self.response.clone()).map_err(|_| {
-                WebError::Restate(crate::error::IngressFailure::unreachable(
-                    "fake response could not be decoded",
-                ))
-            })
-        }
-    }
-
-    #[async_trait]
-    impl RestateCommandAdapter for RecordingRestateClient {
-        async fn send<I: Serialize + Send + Sync>(
-            &self,
-            service: &str,
-            key: &str,
-            method: &str,
-            input: &I,
-        ) -> Result<()> {
-            RecordingRestateClient::send(self, service, key, method, input).await
-        }
-
-        async fn call<I: Serialize + Send + Sync, O: DeserializeOwned + Send>(
-            &self,
-            service: &str,
-            key: &str,
-            method: &str,
-            input: &I,
-        ) -> Result<O> {
-            RecordingRestateClient::call(self, service, key, method, input).await
-        }
     }
 
     async fn spawn_restate_recorder(response: Value) -> (String, Arc<Mutex<Vec<RecordedCall>>>) {
@@ -974,32 +582,6 @@ mod tests {
 
     #[async_trait]
     impl GhinviteCommands for RecordingCommands {
-        async fn create_invitation_link(
-            &self,
-            _command: CreateInvitationLink,
-        ) -> Result<CreateInvitationLinkOutput> {
-            panic!("unexpected create_invitation_link command")
-        }
-
-        async fn update_invitation_link_metadata(
-            &self,
-            _command: UpdateInvitationLinkMetadata,
-        ) -> Result<()> {
-            panic!("unexpected update_invitation_link_metadata command")
-        }
-
-        async fn revoke_invitation_link(&self, _command: RevokeInvitationLink) -> Result<()> {
-            panic!("unexpected revoke_invitation_link command")
-        }
-
-        async fn submit_invitation_request(&self, _command: SubmitInvitationRequest) -> Result<()> {
-            panic!("unexpected submit_invitation_request command")
-        }
-
-        async fn decide_invitation_request(&self, _command: DecideInvitationRequest) -> Result<()> {
-            panic!("unexpected decide_invitation_request command")
-        }
-
         async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
             self.calls
                 .lock()
@@ -1326,6 +908,7 @@ mod tests {
             Arc::new(RestateCommands::new(Arc::new(
                 RestateClient::new(base).unwrap(),
             ))),
+            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1359,7 +942,7 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].service, "GithubInvitation");
         assert_eq!(calls[0].key, invitation_id.to_string());
-        assert_eq!(calls[0].method, "on_webhook_v1");
+        assert_eq!(calls[0].method, "on_webhook");
         assert!(calls[0].send);
         assert_eq!(calls[0].body["action"], "accepted");
     }
@@ -1388,6 +971,7 @@ mod tests {
             Arc::new(RestateCommands::new(Arc::new(
                 RestateClient::new(base).unwrap(),
             ))),
+            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1516,6 +1100,7 @@ mod tests {
                 Arc::new(RestateCommands::new(Arc::new(
                     RestateClient::new("http://127.0.0.1:1").unwrap(),
                 ))),
+                std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
                 crate::WebConfig {
                     webhook_secret: secret.to_vec(),
                     ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1597,6 +1182,7 @@ mod tests {
             Arc::new(RestateCommands::new(Arc::new(
                 RestateClient::new(base).unwrap(),
             ))),
+            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1665,6 +1251,7 @@ mod tests {
             Arc::new(storage),
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
             Arc::new(commands),
+            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -2120,227 +1707,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_invitation_link_calls_restate_create_and_returns_output() {
-        let link_id = ghinvite_core::InvitationLinkId::new();
-        let (restate, calls) = RecordingRestateClient::new(serde_json::json!({
-            "link_id": link_id,
-            "slug": "0123456789abcdef"
-        }));
-        let commands = RestateCommands::new(Arc::new(restate));
-
-        let output = commands
-            .create_invitation_link(CreateInvitationLink {
-                installation_id: 77,
-                account_id: 9001,
-                created_by: 42,
-                created_at: at("2026-05-20T10:00:00Z"),
-                expires_at: None,
-                max_uses: Some(3),
-                permission: ghinvite_core::Permission::Push,
-                approval_required: true,
-                description: "AI coding workshop".into(),
-                internal_note: Some("team onboarding".into()),
-                repos: vec![ghinvite_core::InvitationLinkRepo {
-                    repo_id: 10,
-                    repo_full_name: "acme/api".into(),
-                }],
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(output.link_id, link_id);
-        assert_eq!(output.slug, "0123456789abcdef");
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        assert_eq!(call.service, "InvitationLink");
-        assert_eq!(call.key, "9001");
-        assert_eq!(call.method, "create");
-        assert!(!call.send);
-        assert_eq!(call.body["installation_id"], 77);
-        assert_eq!(call.body["account_id"], 9001);
-        assert_eq!(call.body["permission"], "push");
-        assert_eq!(call.body["description"], "AI coding workshop");
-        assert_eq!(call.body["repos"][0]["repo_full_name"], "acme/api");
-    }
-
-    #[tokio::test]
-    async fn submit_invitation_request_uses_invitation_request_command_adapter() {
-        let (restate, calls) = RecordingRestateClient::new(Value::Null);
-        let commands = RestateCommands::new(Arc::new(restate));
-        let request_id = ghinvite_core::RequestId::new();
-        let invitation_link_id = ghinvite_core::InvitationLinkId::new();
-
-        commands
-            .submit_invitation_request(SubmitInvitationRequest::new(
-                request_id,
-                invitation_link_id,
-                42,
-                Some("need access".into()),
-                at("2026-05-20T11:00:00Z"),
-            ))
-            .await
-            .unwrap();
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        assert_eq!(call.service, "InvitationRequest");
-        assert_eq!(call.key, request_id.to_string());
-        assert_eq!(call.method, "submit");
-        assert!(call.send);
-        assert_eq!(
-            call.body,
-            serde_json::json!({
-                "request_id": request_id.to_string(),
-                "invitation_link_id": invitation_link_id.to_string(),
-                "requester_id": 42,
-                "justification": "need access",
-                "created_at": "2026-05-20T11:00:00Z"
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn update_invitation_link_metadata_calls_restate_with_all_fields_and_unit_output() {
-        let (base, calls) = spawn_restate_empty_call_recorder().await;
-        let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
-        let link_id = ghinvite_core::InvitationLinkId::new();
-
-        for internal_note in [Some("team onboarding\nupdated context"), None] {
-            let () = commands
-                .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
-                    account_id: 9001,
-                    link_id,
-                    by_user: 42,
-                    description: "Updated workshop".into(),
-                    internal_note: internal_note.map(str::to_owned),
-                })
-                .await
-                .unwrap();
-        }
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 2);
-        for (call, internal_note) in calls
-            .iter()
-            .zip([Some("team onboarding\nupdated context"), None])
-        {
-            assert_eq!(call.service, "InvitationLink");
-            assert_eq!(call.key, "9001");
-            assert_eq!(call.method, "update_metadata");
-            assert!(!call.send);
-            assert_eq!(
-                call.body,
-                serde_json::json!({
-                    "account_id": 9001,
-                    "link_id": link_id.to_string(),
-                    "by_user": 42,
-                    "description": "Updated workshop",
-                    "internal_note": internal_note,
-                })
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn revoke_invitation_link_sends_restate_revoke_without_account_id_payload() {
-        let (restate, calls) = RecordingRestateClient::new(Value::Null);
-        let commands = RestateCommands::new(Arc::new(restate));
-        let link_id = ghinvite_core::InvitationLinkId::new();
-
-        commands
-            .revoke_invitation_link(RevokeInvitationLink {
-                account_id: 9001,
-                link_id,
-                by_user: 42,
-                when: at("2026-05-20T11:30:00Z"),
-            })
-            .await
-            .unwrap();
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        assert_eq!(call.service, "InvitationLink");
-        assert_eq!(call.key, "9001");
-        assert_eq!(call.method, "revoke");
-        assert!(call.send);
-        assert_eq!(call.body["link_id"], link_id.to_string());
-        assert_eq!(call.body["by_user"], 42);
-        assert!(call.body.get("account_id").is_none());
-    }
-
-    #[tokio::test]
-    async fn approve_invitation_request_uses_decision_payload() {
-        let (restate, calls) = RecordingRestateClient::new(Value::Null);
-        let commands = RestateCommands::new(Arc::new(restate));
-        let request_id = ghinvite_core::RequestId::new();
-
-        commands
-            .decide_invitation_request(DecideInvitationRequest::approve(
-                request_id,
-                7,
-                at("2026-05-20T11:45:00Z"),
-            ))
-            .await
-            .unwrap();
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        assert_eq!(call.service, "InvitationRequest");
-        assert_eq!(call.key, request_id.to_string());
-        assert_eq!(call.method, "decide");
-        assert!(!call.send);
-        assert_eq!(
-            call.body,
-            serde_json::json!({
-                "Approve": {
-                    "decided_by": 7,
-                    "decided_at": "2026-05-20T11:45:00Z"
-                }
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn decline_invitation_request_uses_decision_payload() {
-        let (restate, calls) = RecordingRestateClient::new(Value::Null);
-        let commands = RestateCommands::new(Arc::new(restate));
-        let request_id = ghinvite_core::RequestId::new();
-
-        commands
-            .decide_invitation_request(DecideInvitationRequest::decline(
-                request_id,
-                8,
-                at("2026-05-20T12:15:00Z"),
-                Some("not enough context".into()),
-            ))
-            .await
-            .unwrap();
-
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let call = &calls[0];
-        assert_eq!(call.service, "InvitationRequest");
-        assert_eq!(call.key, request_id.to_string());
-        assert_eq!(call.method, "decide");
-        assert!(!call.send);
-        assert_eq!(
-            call.body,
-            serde_json::json!({
-                "Decline": {
-                    "decided_by": 8,
-                    "decided_at": "2026-05-20T12:15:00Z",
-                    "reason": "not enough context"
-                }
-            })
-        );
-    }
-
-    #[tokio::test]
     async fn onboard_installation_calls_restate_onboard() {
         let (base, calls) = spawn_restate_recorder(Value::Null).await;
         let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
@@ -2489,7 +1855,7 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].service, "GithubInvitation");
         assert_eq!(calls[0].key, accepted_id.to_string());
-        assert_eq!(calls[0].method, "on_webhook_v1");
+        assert_eq!(calls[0].method, "on_webhook");
         assert!(calls[0].send);
         assert_eq!(calls[0].body["action"], "accepted");
         assert_eq!(calls[1].body["action"], "declined");

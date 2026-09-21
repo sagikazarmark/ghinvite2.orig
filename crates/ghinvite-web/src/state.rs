@@ -13,21 +13,19 @@ pub struct AppState {
     pub github_transport: Arc<dyn HttpTransport>,
     pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
-    pub request_lifecycle: Option<Arc<dyn crate::lifecycle::RequestLifecycle>>,
-    pub admission: Option<Arc<crate::admission::RestateAdmission>>,
-    pub write_maintenance: bool,
+    pub request_lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
+    pub admission: Arc<crate::admission::RestateAdmission>,
     pub(crate) attempt_store: Option<Arc<dyn tower_sessions::SessionStore>>,
 }
 
 impl AppState {
-    pub fn with_write_maintenance(mut self) -> Self {
-        self.write_maintenance = true;
-        self
-    }
+    /// `restate` serves the authoritative link and request commands; SQL only
+    /// answers eventually consistent reads.
     pub fn new(
         storage: Arc<dyn Storage>,
         github_transport: Arc<dyn HttpTransport>,
         commands: Arc<dyn GhinviteCommands>,
+        restate: Arc<crate::RestateClient>,
         config: WebConfig,
     ) -> Self {
         Self {
@@ -35,29 +33,20 @@ impl AppState {
             github_transport,
             commands,
             config,
-            request_lifecycle: None,
-            admission: None,
-            write_maintenance: false,
+            request_lifecycle: Arc::new(crate::lifecycle::RestateRequestLifecycle::new(
+                restate.clone(),
+            )),
+            admission: Arc::new(crate::admission::RestateAdmission::new(restate)),
             attempt_store: None,
         }
     }
 
-    /// For an isolated deployment whose requests are owned by InvitationLinkV1.
-    /// Rollout/migration decides when this is enabled; no per-row fallback.
+    /// Replace the request lifecycle client, e.g. with a test double.
     pub fn with_request_lifecycle(
         mut self,
         lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
     ) -> Self {
-        self.request_lifecycle = Some(lifecycle);
-        self
-    }
-
-    /// Native v1 deployment after the controlled writer cutover.
-    pub fn with_admission(mut self, client: Arc<crate::RestateClient>) -> Self {
-        self.request_lifecycle = Some(Arc::new(crate::lifecycle::RestateRequestLifecycle::new(
-            client.clone(),
-        )));
-        self.admission = Some(Arc::new(crate::admission::RestateAdmission::new(client)));
+        self.request_lifecycle = lifecycle;
         self
     }
 }

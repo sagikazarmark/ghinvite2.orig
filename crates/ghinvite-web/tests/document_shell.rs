@@ -13,17 +13,22 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
+use common::link_authority::FakeLinkAuthority;
+use ghinvite_core::admission::RequesterPage;
 use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
 };
 use ghinvite_github::transport::{HttpTransport, Method, Request as GithubRequest, Response};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, RestateCommands, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+mod common;
 
 /// The signed-in GitHub user, who also owns the personal account the Console
 /// pages below belong to (`check_admin` derives personal authority from the
@@ -291,13 +296,19 @@ async fn document_fixture() -> (axum::Router, String) {
         })
         .await
         .unwrap();
+    // The authority answers link and invitation request reads; SQL holds the
+    // projection the Console lists.
+    let authority = FakeLinkAuthority::start().await;
     for (code, link_id) in [(FORM_CODE, FORM_LINK_ID), (STATUS_CODE, STATUS_LINK_ID)] {
         let link = active_link(code, link_id);
         storage.insert_invitation_link(&link).await.unwrap();
+        authority.seed_link(&link);
         if code == STATUS_CODE {
+            let request = RequestId::new();
+            authority.set_requester_page(pending_page(&link, request));
             storage
                 .insert_invitation_request_and_increment_uses(&InvitationRequest {
-                    id: RequestId::new(),
+                    id: request,
                     invitation_link_id: link.id,
                     requester_id: USER_ID,
                     justification: None,
@@ -314,11 +325,12 @@ async fn document_fixture() -> (axum::Router, String) {
     }
 
     let storage: Arc<dyn Storage> = storage;
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
+    let restate = authority.client();
     let state = AppState::new(
         storage,
         Arc::new(FixtureGithub),
-        Arc::new(RestateCommands::new(restate)),
+        Arc::new(RestateCommands::new(restate.clone())),
+        restate,
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
@@ -347,6 +359,32 @@ fn active_link(code: &str, link_id: &str) -> InvitationLink {
             repo_id: 10,
             repo_full_name: format!("{USER_LOGIN}/{}", "r".repeat(60)),
         }],
+    }
+}
+
+/// The requester page for a user whose invitation request on `link` awaits
+/// review, so no fresh attempt is offered.
+fn pending_page(link: &InvitationLink, request: RequestId) -> RequesterPage {
+    RequesterPage {
+        link_id: link.id,
+        invitation_code: link.slug.as_str().into(),
+        repos: link.repos.clone(),
+        permission: link.permission,
+        approval_required: link.approval_required,
+        can_start_fresh: false,
+        attempt: None,
+        request: Some(RequestSnapshot {
+            request_id: request,
+            link_id: link.id,
+            account_id: link.account_id,
+            requester_id: USER_ID,
+            justification: None,
+            state: RequestState::Pending,
+            admitted_at: Utc::now(),
+            decision_deadline: Some(Utc::now() + chrono::Duration::days(7)),
+            revision: 1,
+            decision: None,
+        }),
     }
 }
 

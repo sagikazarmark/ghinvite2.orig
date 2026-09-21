@@ -1,7 +1,7 @@
 //! #83: one installation transition leaves one audit event behind, even when
 //! the projection is retried after its audit write has already committed.
 //!
-//! `InstallationProjectionV1::apply` retains the audit event in a `ctx.run` step
+//! `InstallationProjection::apply` retains the audit event in a `ctx.run` step
 //! before it projects anything, so a retry replays the identity the first
 //! attempt minted. Nothing but a real invocation retry can show that: if the
 //! identity were minted outside the journal, the retry would mint a second one
@@ -284,8 +284,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         ),
     );
     // Projection ownership is not what this test varies; only the audit write is.
-    let endpoint =
-        ghinvite_workflows::build_cutover_endpoint(state, storage.clone(), None).unwrap();
+    let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {

@@ -65,8 +65,8 @@ cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignor
 ### Pending queue
 
 `invitation_requests.queue_account_id` is the pending queue's derived key, taken
-from the owning invitation link. Portable SQLite triggers maintain it for both
-legacy and versioned projection writers (including link/request relationship
+from the owning invitation link. Portable SQLite triggers maintain it for every
+projection write (including link/request relationship
 updates and restoration of missing links). This is an indexing key, never an authorization source: the read also
 joins the current owning link and checks its account. An orphan link cannot
 establish account ownership and is excluded, as with the previous queue query.
@@ -103,9 +103,9 @@ does not affect authoritative Restate receipts or extend live session deadlines.
 The v1 projection columns hold revisions, content/identity checks, deadlines,
 and audit identities. The `projection_assertions` table is transient within each
 SQLx transaction/D1 batch: named CHECK failures abort the entire application,
-and successful batches remove the assertion rows before commit. NULL revisions
-remain legacy-owned. The legacy pending-only uniqueness guard excludes versioned
-rows so reordered projections can converge without becoming admission authority.
+and successful batches remove the assertion rows before commit. The pending-only
+uniqueness index excludes versioned rows, so projections never become admission
+authority.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
 ## Adding a new migration

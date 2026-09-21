@@ -79,20 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
              (safe for local dev only)"
         );
     }
-    let endpoint =
-        match std::env::var("GHINVITE_ADMISSION_MODE")
-            .as_deref()
-            .unwrap_or("legacy")
-        {
-            "legacy" => build_endpoint(state, identity_key.as_deref())?,
-            "authoritative" => {
-                ghinvite_workflows::build_cutover_endpoint(state, storage, identity_key.as_deref())?
-            }
-            _ => return Err(
-                "invalid GHINVITE_ADMISSION_MODE (stop/isolate legacy endpoint for maintenance)"
-                    .into(),
-            ),
-        };
+    let endpoint = build_endpoint(state, storage, identity_key.as_deref())?;
 
     let addr: SocketAddr = std::env::var("GHINVITE_LISTEN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9080".into())

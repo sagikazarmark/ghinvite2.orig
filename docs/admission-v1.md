@@ -1,20 +1,14 @@
-# Isolated authoritative admission (#53)
+# Authoritative admission (#53)
 
-Native cutover tooling and endpoint/routing activation are now available under
-[#58's maintenance procedure](admission-cutover.md). The original isolated-path
-description below documents the earlier slices; defaults remain legacy until an
-operator performs cutover. #59 completed local Worker/D1 verification; production
-activation remains blocked by the operator-owned remote gates in #61.
+#59 completed local Worker/D1 verification; production activation remains
+blocked by the operator-owned remote gates in #61.
 
-`ghinvite_workflows::admission_v1::bind(builder)` registers `InvitationLinkV1`
-with lazy state. The default native/Worker endpoint and browser writers use legacy
-services; `authoritative` mode now selects the integrated cutover path. An isolated
-endpoint must also bind implementations of
-the `InvitationProjectionV1` and `InvitationRequestV1` consumer contracts.
-`projection_v1::bind(builder, Arc<dyn ProjectionStorage>)` supplies the durable
+`ghinvite_workflows::admission::bind(builder)` registers `InvitationLink`
+with lazy state. `build_endpoint` binds it for the native and Worker endpoints,
+together with implementations of the `InvitationProjection` and
+`InvitationRequest` consumer contracts.
+`projection::bind(builder, Arc<dyn ProjectionStorage>)` supplies the durable
 SQLx/D1 projector (#54); #55 supplies the request lifecycle consumer.
-Do not enable legacy and authoritative writers for the
-same link before #58's cutover.
 
 ## Trusted command boundary
 
@@ -26,7 +20,7 @@ trusted identity assertions, not credentials or browser-supplied authority. The
 object checks account scope, nonzero identities, canonical object key, and
 guardrails without consulting SQL projections. Installation access loss follows
 [the #60 availability integration](installation-availability.md): bind
-`AccountInstallationV1` alongside the link service (the cutover endpoint does so).
+`AccountInstallation` alongside the link service (`build_endpoint` does so).
 Bind with endpoint identity verification when deployed.
 
 Allocate `InvitationLinkId::new()` **once before the first create submission**
@@ -34,7 +28,7 @@ and retain the entire `CreateLink` command across uncertain transport failures.
 The canonical link ID is both object key and creation identity. Reuse with
 different normalized creation input conflicts. Successful creation replay returns
 the original creation snapshot, including its invitation code, even after revoke.
-Invitation-code routing is implemented in the isolated [browser path](browser-admission-v1.md); projection uniqueness conflicts remain
+Invitation-code routing is implemented in the [browser path](browser-admission-v1.md); projection uniqueness conflicts remain
 inspectable pending repair rather than changing the authoritative creation;
 new commands currently address immutable link IDs directly.
 
@@ -95,7 +89,8 @@ requests. Terminal declined/expired/cancelled records are retry-eligible and use
 are never refunded. #55 adds authoritative pending transitions, overdue status
 materialization/readmission and direct workflow notifications. There is no new
 cancellation action in this slice. Administrative kill/purge or state editing is
-outside ordinary recovery and requires the #58 maintenance/repair procedure.
+outside ordinary recovery and requires the controlled
+[repair procedure](#recovery-and-audit-retention).
 
 Current command bounds: 100 repositories, 256 bytes per repository full name,
 120 characters for a nonempty single-line description, and 16 KiB for internal
@@ -121,9 +116,15 @@ remote rollout verification remains #61.
 
 ## Durable query projection (#54)
 
-`InvitationProjectionV1/apply_transition` is an internal ordinary Restate service.
-It accepts the existing v1 wire envelope, whose types now live in
-`ghinvite_core::storage::projection` and are re-exported by `admission_v1`.
+`InvitationProjection/<link ID>/apply_transition` is an internal Restate
+Virtual Object keyed by link ID; a transition addressed to another key is
+rejected. The link object sends each transition fire-and-forget, so admission
+never waits on SQL, and the per-key queue applies one link's transitions in send
+order. A failing transition, including a D1 outage or an invariant failure
+awaiting repair, holds back only that link's later transitions. The revision
+checks below still guard against manual redrives. It accepts the existing v1
+wire envelope, whose types now live in
+`ghinvite_core::storage::projection` and are re-exported by `admission`.
 It applies one full link snapshot, at most two independently revisioned touched
 requests, and at most eight immutable events. Repository scope is bounded at 100;
 the expanded batch payload is capped at 2 MiB, allowing worst-case JSON escaping
@@ -139,16 +140,13 @@ The v1 `creation` field is immutable command input, including original metadata;
 future metadata commands must add a separate current-metadata snapshot rather than
 rewrite retained creation identity. `update_metadata` now writes a separate optional current metadata snapshot.
 
-Migration 0004 adds nullable revision/content/identity columns, request deadlines,
-and logical audit IDs/evaluation times. NULL revisions identify legacy-owned rows;
-this projector rejects collisions with them pending #58's explicit import. The
-pending-request unique index continues guarding legacy rows. Projected pending
-rows can temporarily overlap under reordered lifecycle delivery; Restate alone
+The initial schema carries revision/content/identity columns, request deadlines,
+and logical audit IDs/evaluation times. Projected rows lag Restate, which alone
 enforces eligibility. No rows are deleted or uses refunded to resolve that lag.
 
 The existing Console storage reads remain eventually consistent. The additional
 `ProjectionStorage::get_projected_request` read exposes the versioned snapshot and
-admission deadline; absent/legacy rows return `None`, never proof of rejection.
+admission deadline; absent rows return `None`, never proof of rejection.
 Existing audit pagination retains ULID IDs: projectors derive them deterministically
 from the domain-separated SHA-256 of the logical event ID (first 128 bits), retain
 the logical ID, and compare immutable content. Collisions fail rather than silently
@@ -162,8 +160,9 @@ encoding failures. Trace logs correlate transition ID, link ID and failure class
 Restate's `sys_invocation` exposes invocation ID, status, and last failure. Keep
 ingress and retained invocation inputs private: they contain domain payloads.
 
-1. Inspect pending `InvitationProjectionV1` invocations and correlate the link and
-   transition. Do not interpret lag as an admission rejection or refund a use.
+1. Inspect pending `InvitationProjection` invocations and correlate the link and
+   transition. Later transitions for the same link queue behind the failing one.
+   Do not interpret lag as an admission rejection or refund a use.
 2. For `projection dependency missing`, restore the fully owned installation/user
    rows via their existing owners or a compatible backup. Installation account ID
    must match. Projectors never fabricate user/installation stubs or update profiles,
@@ -173,14 +172,42 @@ ingress and retained invocation inputs private: they contain domain payloads.
    and authoritative state under controlled repair. Restore the correct row facts
    or deploy a compatible encoding fix; do not increase a revision just to win.
 4. Once repaired, ordinary retries redrive the same envelope automatically. A
-   trusted operator may also resubmit that exact envelope through the internal
-   service. Duplicate and ambiguous-commit replay is safe; never reconstruct an
+   trusted operator may also resubmit that exact envelope to the internal object
+   under its link ID. Duplicate and ambiguous-commit replay is safe; never reconstruct an
    admission command with a new operation identity as a projection repair.
 
-Administrative kill/purge and independent database loss need #58's coordinated
-recovery procedure. Completed Restate journals are not a permanent event archive;
-current snapshots alone cannot rebuild historical audit events. Preserve a
-compatible backup/event source before discarding retained work.
+### Recovery and audit retention
+
+Ordinary replay requires the original Restate journal, compatible deployed code,
+and retained authoritative keys. It is not a distributed rollback transaction.
+Completed Restate journals are not a permanent event archive; current snapshots
+alone cannot rebuild historical audit events. Preserve a compatible
+backup/event source before discarding retained work.
+
+- **Database restore:** use compatible forward repair, or an explicitly reviewed
+  reverse reconciliation of every outcome, use, blocker, deadline, decision,
+  invitation receipt, audit event and external effect. Never switch back to a
+  stale SQL snapshot. An absent SQL row does not mean unused eligibility.
+- **Killed/purged partial transitions:** close the link and all relevant receiving
+  commands. Compare the journaled complete decision against every touched key and
+  send identity. Restore the original journal/checkpoint if possible; otherwise
+  retain explicit repair evidence and reconcile missing sends/receipts before
+  reopening. Do not clear blockers or replay admission with a new ID as a repair.
+- **Projection rebuild:** current Restate link/request snapshots rebuild current
+  projections; plans and receiving receipts rebuild delivery views. Historical
+  events need retained envelopes/event archives or a compatible database backup.
+  Replay envelopes with their original event IDs and revisions.
+- **Orphan notifications:** enumerate retained workflow keys against link-owned
+  terminal/consumed records and outstanding send invocations. Quiesce publishers
+  and verify no lifecycle/dispatch obligation remains before runtime-supported
+  workflow cleanup. A late notify can recreate a promise but cannot authorize
+  dispatch; never delete link decisions/receipts along with orphan promise state.
+- **Uncertain external results:** use `DeliveryRecovery/recover` on retained
+  plans and read-only reconciliation per [delivery recovery](delivery-recovery.md).
+  A kill is operational, never request cancellation or permission for another
+  GitHub PUT.
+
+### Projection tests
 
 ```sh
 cargo test -p ghinvite-storage-sqlx --test projection
@@ -192,6 +219,7 @@ Native tests exercise public reads after real writes, reordered/duplicate envelo
 late historical audit, conflicting identities/content with atomic rollback,
 parent recovery, SQL failure/repair, retained invariant failures, and lost commit
 acknowledgement before Restate run completion. The real runtime binds production
-admission and projector code; a fixture receives #55's workflow startup.
+admission and projector code and asserts one link's commits land in revision
+order; a fixture receives #55's workflow startup.
 Actual local Worker/D1 runtime verification is covered by the
 [Worker gate](worker-admission-gate.md); remote rollout verification remains #61.

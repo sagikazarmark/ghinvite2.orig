@@ -18,6 +18,8 @@ For [#48](https://github.com/sagikazarmark/ghinvite2.orig/issues/48), we chose a
 | Separate Restate projection execution | Retry-safe SQLx/D1 writes, including request records, link records, and audit events. It does not decide admission. |
 | SQLx/D1 | Queryable records for Console lists, audit, and other read views. Projected eligibility is advisory, not permission to admit or approve. |
 
+**Update (2026-09-21):** These owners are implemented as `InvitationLinkV1`, `InvitationRequestV1` and the `InvitationProjectionV1` projector. The legacy `InvitationLink`/`InvitationRequest` writers and the cutover path were removed before launch; nothing had been deployed.
+
 This decision covers invitation-link and invitation-request admission/lifecycle state; it does not move all application data, sessions, or GitHub invitation state into the link object.
 
 All eligibility-affecting commands for a link use the same canonical object key, validated against the command's link ID. Account authorization is still required and is not replaced by key validation. Admission does not read projected database state to reconstruct current eligibility during normal operation.
@@ -254,6 +256,8 @@ Restate durably retains unfinished execution, but its journal is not automatical
 
 Use a separate ordinary Restate service with one internal `apply_transition(envelope)` command. The link object sends to it durably and does not await completion. The service may process different envelopes concurrently; correctness comes from conditional database writes and stable identities, not assumed delivery order. A keyed projector is unnecessary initially unless measured database contention warrants serialization. This is the concrete implementation recommendation, not an additional verified production adapter.
 
+**Update (2026-09-21):** `InvitationProjectionV1` is now a Virtual Object keyed by link ID rather than an ordinary service. The link object still sends without awaiting completion, but the per-key queue applies one link's transitions in send order, and a failing transition holds back only that link's later transitions. Revision checks remain as a guard against manual redrives.
+
 Each versioned envelope contains:
 
 - schema version and a stable transition ID generated/recorded with the authoritative decision;
@@ -319,6 +323,8 @@ This adds one small durable delivery module per request. Direct promise evidence
 If request withdrawal is wanted now, decide explicitly whether the requester, an account admin, or both may cancel a pending request. Then define audit actor/reason visibility and command replay. The recommended state rule is pending-only cancellation before its deadline, expiry at/after the deadline, no use refund, and no cascade to an approved request/GitHub invitation. Administrative Restate cancellation/kill remains operational recovery and is not a domain cancellation command.
 
 ## Approved dispatch recovery and migration contract
+
+**Update (2026-09-21):** The legacy writers and cutover path were removed before launch, so the controlled writer cutover, historical data treatment, and pre-cutover rollback steps below no longer apply; nothing had been deployed. The retained dispatch plan, receiving-side receipt, projection prerequisite and post-authority recovery rules still apply.
 
 The maintainer [confirmed this contract](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5668073287), including stable dispatch plans and create outcomes, controlled write maintenance, preservation of established historical deadlines, and existing identity-parent prerequisites. This is not a completed migration or verified external-effect protocol; concrete recovery mechanics and the migration rehearsal remain implementation work.
 
@@ -392,6 +398,8 @@ Required rehearsal: legacy pending/approved/terminal records, `Sent` and ambiguo
 | What can be rebuilt after retention, administrative kill/purge, or independent restore? | Define Restate backup/state retention and projection rebuild/redrive procedures. Workflow restart after completed-workflow retention must not repeat downstream GitHub effects. |
 
 ## Migration and implementation seams
+
+**Update (2026-09-21):** The legacy writers and cutover path were removed before launch. The files and existing-data cutover described below no longer exist or apply; #58's cutover tooling was deleted.
 
 Current code differs from this decision:
 

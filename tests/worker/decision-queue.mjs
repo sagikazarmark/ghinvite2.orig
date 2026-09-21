@@ -15,7 +15,7 @@ const mf = new Miniflare({
   compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
   kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
   bindings: {
-    GHINVITE_ADMISSION_MODE: 'authoritative', GHINVITE_BASE_URL: 'https://queue.test',
+    GHINVITE_BASE_URL: 'https://queue.test',
     GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: 'https://restate.test',
     GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
@@ -24,7 +24,7 @@ const mf = new Miniflare({
   async outboundService(request) {
     if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
     if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
-    if (/^https:\/\/restate.test\/InvitationLinkV1\/[A-Z0-9]+\/decide$/.test(request.url)) {
+    if (/^https:\/\/restate.test\/InvitationLink\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
       assert.ok(receipt, 'unexpected decision');
       if (loseAcknowledgement) { loseAcknowledgement = false; return new Response('acknowledgement lost', { status: 503 }); }

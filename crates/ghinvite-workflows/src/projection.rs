@@ -1,28 +1,35 @@
-//! Internal ordinary service. Retains failing work independently of link
-//! exclusivity, including invariant failures awaiting operator repair/redrive.
-use crate::admission_v1::InvitationProjectionV1;
+//! Internal projector, keyed by link ID. The link object sends each transition
+//! without waiting, so admission never blocks on SQL; the per-key queue applies
+//! one link's transitions in the order they were sent. A failing transition,
+//! including an invariant failure awaiting operator repair/redrive, holds back
+//! only that link's later transitions.
+use crate::admission::InvitationProjection;
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use restate_sdk::context::{Context, ContextSideEffects, RunFuture};
+use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::endpoint::Builder;
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::serde::Json;
 use std::sync::Arc;
 
-pub struct InvitationProjectionV1Impl {
+pub struct InvitationProjectionImpl {
     storage: Arc<dyn ProjectionStorage>,
 }
 
-/// Explicit opt-in alongside `admission_v1::bind`; keep ingress private.
+/// Bind alongside `admission::bind`; keep ingress private.
 pub fn bind(builder: Builder, storage: Arc<dyn ProjectionStorage>) -> Builder {
-    builder.bind(InvitationProjectionV1Impl { storage }.serve())
+    builder.bind(InvitationProjectionImpl { storage }.serve())
 }
 
-impl InvitationProjectionV1 for InvitationProjectionV1Impl {
+impl InvitationProjection for InvitationProjectionImpl {
     async fn apply_transition(
         &self,
-        ctx: Context<'_>,
+        ctx: ObjectContext<'_>,
         Json(envelope): Json<ProjectionEnvelope>,
     ) -> Result<(), TerminalError> {
+        // Ordering holds per key; a transition keyed elsewhere would bypass it.
+        if ctx.key() != envelope.link.link_id.to_string() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
         ctx.run(|| async {
             self.storage
                 .apply_transition(&envelope)
@@ -39,7 +46,7 @@ impl InvitationProjectionV1 for InvitationProjectionV1Impl {
                     HandlerError::from(error)
                 })
         })
-        .name("apply_projection_v1")
+        .name("apply_projection")
         .await
     }
 }

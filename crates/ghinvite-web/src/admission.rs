@@ -1,4 +1,4 @@
-//! Explicitly gated browser-to-authority facade. Never reads SQL eligibility.
+//! Browser-to-authority facade. Never reads SQL eligibility.
 use crate::{RestateClient, Result, WebError};
 use ghinvite_core::InvitationLinkId;
 use ghinvite_core::admission::*;
@@ -14,7 +14,7 @@ impl RestateAdmission {
     ) -> Result<ghinvite_core::storage::projection::LinkSnapshot> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "create",
                 &command,
@@ -27,7 +27,7 @@ impl RestateAdmission {
     ) -> Result<ghinvite_core::storage::projection::LinkSnapshot> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "link_status",
                 &command,
@@ -40,7 +40,7 @@ impl RestateAdmission {
     ) -> Result<ghinvite_core::storage::projection::LinkSnapshot> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "revoke",
                 &command,
@@ -53,7 +53,7 @@ impl RestateAdmission {
     ) -> Result<ghinvite_core::storage::projection::LinkSnapshot> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "update_metadata",
                 &command,
@@ -92,7 +92,7 @@ impl RestateAdmission {
     pub async fn resolve(&self, code: &str) -> Result<InvitationLinkId> {
         ghinvite_core::Slug::from_string(code.to_owned()).map_err(|_| WebError::NotFound)?;
         self.client
-            .authoritative_call("InvitationCodeV1", code, "resolve", &())
+            .authoritative_call("InvitationCode", code, "resolve", &())
             .await
     }
     pub async fn lookup(
@@ -110,7 +110,7 @@ impl RestateAdmission {
         let link_id = self.resolve(code).await?;
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &link_id.to_string(),
                 "requester_page",
                 &AttemptQuery {
@@ -124,7 +124,7 @@ impl RestateAdmission {
     pub async fn prepare(&self, command: Admit) -> Result<Attempt> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "prepare_attempt",
                 &command,
@@ -134,7 +134,7 @@ impl RestateAdmission {
     pub async fn admit(&self, command: Admit) -> Result<AdmissionReceipt> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "admit",
                 &command,

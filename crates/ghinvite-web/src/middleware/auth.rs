@@ -82,22 +82,6 @@ pub struct RequireConsoleAdminOf {
     pub tower: tower_sessions::Session,
 }
 
-/// Read-only Settings may describe an uninstalled account in legacy mode.
-/// This does not grant historical-account access to mutation routes.
-pub struct RequireSettingsAdminOf(pub RequireConsoleAdminOf);
-
-impl<S> FromRequestParts<S> for RequireSettingsAdminOf
-where
-    AppState: FromRef<S>,
-    S: Send + Sync,
-{
-    type Rejection = axum::response::Response;
-
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        resolve_console_admin(parts, state, true).await.map(Self)
-    }
-}
-
 impl<S> FromRequestParts<S> for RequireConsoleAdminOf
 where
     AppState: FromRef<S>,
@@ -109,14 +93,15 @@ where
         parts: &mut Parts,
         outer_state: &S,
     ) -> Result<Self, Self::Rejection> {
-        resolve_console_admin(parts, outer_state, false).await
+        resolve_console_admin(parts, outer_state).await
     }
 }
 
+// The rejection is the rendered response axum returns as-is.
+#[allow(clippy::result_large_err)]
 async fn resolve_console_admin<S>(
     parts: &mut Parts,
     outer_state: &S,
-    allow_historical_settings: bool,
 ) -> Result<RequireConsoleAdminOf, axum::response::Response>
 where
     AppState: FromRef<S>,
@@ -160,14 +145,12 @@ where
 
     let account = match state.storage.get_active_installation_by_login(&login).await {
         Ok(Some(account)) => account,
-        Ok(None) if allow_historical_settings || state.request_lifecycle.is_some() => {
-            match state.storage.get_latest_installation_by_login(&login).await {
-                Ok(Some(account)) => account,
-                Ok(None) => return Err(generic_not_found_response(&session)),
-                Err(error) => return Err(WebError::Storage(error).into_response()),
-            }
-        }
-        Ok(None) => return Err(generic_not_found_response(&session)),
+        // An uninstalled account keeps its history readable to its admins.
+        Ok(None) => match state.storage.get_latest_installation_by_login(&login).await {
+            Ok(Some(account)) => account,
+            Ok(None) => return Err(generic_not_found_response(&session)),
+            Err(error) => return Err(WebError::Storage(error).into_response()),
+        },
         Err(error) => return Err(WebError::Storage(error).into_response()),
     };
 

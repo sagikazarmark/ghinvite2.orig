@@ -9,7 +9,6 @@ use ghinvite_core::{
 pub(crate) struct InvitationRequestContext {
     pub request: InvitationRequest,
     pub link: InvitationLink,
-    pub requester: User,
 }
 
 #[derive(Clone, Debug)]
@@ -19,16 +18,11 @@ pub(crate) struct GithubInvitationContext {
     pub link: InvitationLink,
     pub repo: InvitationLinkRepo,
     pub repository: RepositoryIdentity,
-    pub requester: User,
     pub account: Account,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct GithubInvitationAccountContext {
-    pub invitation: GithubInvitation,
-    pub request: InvitationRequest,
-    pub link: InvitationLink,
-    pub requester: User,
     pub account: Account,
 }
 
@@ -61,20 +55,12 @@ pub(crate) async fn load_github_invitation_account_context(
     invitation_id: GithubInvitationId,
 ) -> Result<GithubInvitationAccountContext> {
     let invitation = load_github_invitation(state, invitation_id).await?;
-    let InvitationRequestContext {
-        request,
-        link,
-        requester,
-    } = load_invitation_request_context(state, invitation.invitation_request_id).await?;
+    let link = load_invitation_request_context(state, invitation.invitation_request_id)
+        .await?
+        .link;
     let account = load_installation_account(state, link.installation_id).await?;
 
-    Ok(GithubInvitationAccountContext {
-        invitation,
-        request,
-        link,
-        requester,
-        account,
-    })
+    Ok(GithubInvitationAccountContext { account })
 }
 
 /// Observation authority follows the immutable account; the link retains its
@@ -128,22 +114,6 @@ pub(crate) async fn load_verified_settlement_context(
     Ok(Some(context))
 }
 
-pub(crate) async fn load_github_invitation_context_for_account(
-    state: &AppState,
-    account: &Account,
-    invitation: &GithubInvitation,
-) -> Result<GithubInvitationContext> {
-    let context = load_github_invitation_context_for_loaded(state, invitation).await?;
-    if context.link.account_id != account.account_id {
-        return Err(HandlerError::Invariant(format!(
-            "github_invitation {} expected account {} but link uses account {}",
-            invitation.id, account.account_id, context.link.account_id
-        )));
-    }
-    expect_installation(&context, account.installation_id)?;
-    Ok(context)
-}
-
 async fn load_invitation_link_for_request(
     state: &AppState,
     request: &InvitationRequest,
@@ -179,13 +149,9 @@ pub(crate) async fn load_invitation_request_context(
             ghinvite_core::storage::Error::NotFound,
         ))?;
     let link = load_invitation_link_for_request(state, &request).await?;
-    let requester = load_requester_for_request(state, &request).await?;
+    load_requester_for_request(state, &request).await?;
 
-    Ok(InvitationRequestContext {
-        request,
-        link,
-        requester,
-    })
+    Ok(InvitationRequestContext { request, link })
 }
 
 async fn load_github_invitation(
@@ -205,11 +171,8 @@ async fn load_github_invitation_context_for_loaded(
     state: &AppState,
     invitation: &GithubInvitation,
 ) -> Result<GithubInvitationContext> {
-    let InvitationRequestContext {
-        request,
-        link,
-        requester,
-    } = load_invitation_request_context(state, invitation.invitation_request_id).await?;
+    let InvitationRequestContext { request, link } =
+        load_invitation_request_context(state, invitation.invitation_request_id).await?;
     let repo = link
         .repos
         .iter()
@@ -235,7 +198,6 @@ async fn load_github_invitation_context_for_loaded(
         link,
         repo,
         repository,
-        requester,
         account,
     })
 }
@@ -378,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_context_loads_request_link_and_requester() {
+    async fn request_context_loads_request_and_link() {
         let state = fixture_state().await;
         let (request_id, link_id) = seed_request_chain(&state).await;
 
@@ -388,8 +350,6 @@ mod tests {
 
         assert_eq!(context.request.id, request_id);
         assert_eq!(context.link.id, link_id);
-        assert_eq!(context.requester.user_id, 8);
-        assert_eq!(context.requester.login, "alice");
     }
 
     #[tokio::test]
@@ -422,7 +382,6 @@ mod tests {
         assert_eq!(context.repo.repo_id, 10);
         assert_eq!(context.repository.owner(), "acme");
         assert_eq!(context.repository.name(), "api");
-        assert_eq!(context.requester.login, "alice");
         assert_eq!(context.account.account_id, 100);
     }
 
@@ -566,65 +525,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_context_wrong_account_returns_invariant() {
-        let state = fixture_state().await;
-        let (request_id, _) = seed_request_chain(&state).await;
-        let invitation_id = seed_github_invitation(&state, request_id, 10).await;
-        let invitation = state
-            .storage
-            .get_github_invitation(invitation_id)
-            .await
-            .unwrap()
-            .unwrap();
-        let mut account = ghinvite_core::Account {
-            installation_id: 9,
-            account_id: 101,
-            account_login: "other".into(),
-            account_type: AccountType::Organization,
-            installed_at: dt("2026-05-04T12:00:00Z"),
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        };
-
-        let err = load_github_invitation_context_for_account(&state, &account, &invitation)
-            .await
-            .unwrap_err();
-
-        match err {
-            HandlerError::Invariant(message) => {
-                assert!(message.contains("expected account 101"));
-            }
-            other => panic!("expected invariant, got {other:?}"),
-        }
-
-        account.account_id = 100;
-        account.installation_id = 10;
-        let err = load_github_invitation_context_for_account(&state, &account, &invitation)
-            .await
-            .unwrap_err();
-
-        match err {
-            HandlerError::Invariant(message) => {
-                assert!(message.contains("expected installation 10"));
-            }
-            other => panic!("expected invariant, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn github_account_context_does_not_require_matching_repo() {
         let state = fixture_state().await;
-        let (request_id, link_id) = seed_request_chain_with_repos(&state, vec![]).await;
+        let (request_id, _) = seed_request_chain_with_repos(&state, vec![]).await;
         let invitation_id = seed_github_invitation(&state, request_id, 10).await;
 
         let context = load_github_invitation_account_context(&state, invitation_id)
             .await
             .unwrap();
-
-        assert_eq!(context.invitation.id, invitation_id);
-        assert_eq!(context.request.id, request_id);
-        assert_eq!(context.link.id, link_id);
-        assert_eq!(context.requester.login, "alice");
         assert_eq!(context.account.account_id, 100);
     }
 }

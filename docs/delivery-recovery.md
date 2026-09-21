@@ -1,10 +1,9 @@
 # Approved-request delivery recovery
 
-The versioned endpoint opts in by binding `admission_v1`, `projection_v1`,
-`request_lifecycle_v1`, and `delivery_v1::bind(builder, state)`. Keep ingress private.
-Deployment of these services together is required: durable sends cannot complete
-if the receiving service has not been registered. Legacy writers remain subject
-to the controlled cutover in ADR 0003 and #58.
+`build_endpoint` binds `admission`, `projection`, `request_lifecycle`,
+and `delivery::bind(builder, state)`. Keep ingress private. Deployment of these
+services together is required: durable sends cannot complete if the receiving
+service has not been registered.
 
 ## Retained authority
 
@@ -14,7 +13,7 @@ to the controlled cutover in ADR 0003 and #58.
   identity. This means submitted, not GitHub success.
 - Link `v1/consumed/<request>` records lifecycle consumption after fan-out (or
   after observing a non-approved terminal decision).
-- `GithubCreateV1/<invitation>` retains `v1/input` and `v1/receipt` without TTL.
+- `GithubCreate/<invitation>` retains `v1/input` and `v1/receipt` without TTL.
   The receipt is independent of the database invitation lifecycle.
 - `delivery_attempts` is an input-bound database **write fence**, not the receipt
   authority. Claiming an attempt generation permits one PUT. If its own
@@ -49,22 +48,18 @@ request justification, internal notes, or GitHub diagnostics.
 SQLx transactions and D1 batches apply receipt/lifecycle and audit insertion
 atomically. Audit insertion runs even for stale receipts or a lifecycle already
 beyond Sending; identical event content replays, conflicting content fails the
-whole projection. Ordinary retry and `DeliveryRecoveryV1/recover` repair missing
+whole projection. Ordinary retry and `DeliveryRecovery/recover` repair missing
 history without another GitHub write, including after workflow retention cleanup.
 
 Pre-#64 receipts lack a reliable original confirmation time. On first create
-replay or `project_import`, the receiver journals a recovery observation time,
-retains it with `recovered: true`, and advances the receipt revision once. Existing
-legacy invitation evidence is likewise marked recovered. Console history labels
+replay, the receiver journals a recovery observation time, retains it with
+`recovered: true`, and advances the receipt revision once. Historical SQL `Sent`
+rows with upstream IDs are likewise marked recovered. Console history labels
 these entries **Confirmed outcome observed during recovery**; their time is not
-the original send time. Existing audit history is preserved. The cutover verifier
-accepts only this specific enrichment when resuming an older manifest. Deploy
-these compatible handlers with in-flight invocations drained or pinned to their
-original deployment; do not switch a partially journaled old handler onto a
-changed durable-command sequence.
+the original send time. Existing audit history is preserved.
 
 The fence must be backed up alongside Restate and must never be reset or expired.
-Independent database restore requires maintenance and reconciliation of all
+Independent database restore requires closing writes and reconciling all
 unfinished attempts before writes reopen. A Restate backup alone cannot recover
 unjournaled HTTP effects. Missing state is never permission to generate new IDs.
 
@@ -72,11 +67,11 @@ unjournaled HTTP effects. Missing state is never permission to generate new IDs.
 
 Ordinary Restate replay finishes interrupted sends and checkpoints. For deliberate
 repair after workflow retention, call the private ordinary service
-`DeliveryRecoveryV1/recover` with `{link_id, request_id, requester_id}` from a trusted
+`DeliveryRecovery/recover` with `{link_id, request_id, requester_id}` from a trusted
 operator/caller. It obtains the retained plan, checks receiving receipts for input
 conflicts, durably resubmits original commands, and records submission checkpoints.
-It never starts `InvitationRequestV1/run`. Its response describes submission only;
-read `GithubCreateV1/<id>/status` or the current request page for delivery outcomes.
+It never starts `InvitationRequest/run`. Its response describes submission only;
+read `GithubCreate/<id>/status` or the current request page for delivery outcomes.
 
 Blocked creates schedule a one-hour dependency recheck, or the throttling wait
 below when that is what blocked them; explicit recovery may
@@ -89,11 +84,9 @@ failed read, not absence. Absence or failed reads retain unknown. Current collab
 current access, not the historical provenance of an invitation. No distributed
 exactly-once HTTP transaction is claimed.
 
-During controlled import, call `InvitationLinkV1/<link>/retain_dispatch` with the
-complete historical plan before workflow fan-out. It validates scope/approval and
-rejects changed input or IDs once bound. Existing SQL Sent rows with upstream IDs
-are affirmative create evidence; ambiguous historical rows are fenced before
-reconciliation. Never infer a successful original create from decline/expiry alone.
+Existing SQL Sent rows with upstream IDs are affirmative create evidence;
+ambiguous rows are fenced before reconciliation. Never infer a successful
+original create from decline/expiry alone.
 
 ## GitHub throttling
 
@@ -104,7 +97,7 @@ wording in the body names the limit. `x-ratelimit-remaining: 0` is weaker: the
 quota headers ride along on every response, so a permission refusal served as the
 hour's last request reports an exhausted quota too. An exhausted quota therefore
 only counts where GitHub named no other reason, and a 403 with no evidence at all
-remains a permission refusal that still settles a legacy invitation as failed.
+remains a permission refusal.
 
 The wait follows whichever evidence describes it. A `retry-after` — seconds or an
 HTTP-date — names this request's wait and wins outright. Failing that, only an
@@ -123,9 +116,7 @@ records which limit GitHub cited; the wait may still come from the quota reset,
 because which limit was cited and when the request can next succeed are different
 questions.
 
-Legacy delivery leaves a throttled invitation in `Sending` with nothing audited
-and re-enters `GithubInvitation/create` after that wait. Authoritative delivery
-records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
+Delivery records a `blocked` receipt reading `GitHub throttled delivery` and rechecks after
 the same wait instead of the hourly dependency cadence; a throttled *read* during
 reconciliation earns that recheck too, because rereading is safe and is the only
 way a delivery GitHub would not let us observe resolves on its own. Exactly one
@@ -147,7 +138,7 @@ Only a response classifies. Transport errors, timeouts, and every other uncertai
 result stay outcome-unknown and keep the write fence, so throttling handling can
 never conclude that an ambiguous PUT was not applied.
 
-Settlement's `cancel_v1` and `tick_expire_v1` are not covered by the continuation
+Settlement's `cancel` and `tick_expire` are not covered by the continuation
 policy above. A throttled DELETE or listing is transient there, so Restate
 retries it inside the invitation object's lock — the same way a 5xx or a 429
 already did before throttling was classified. That is deliberate: the alternative
@@ -161,7 +152,7 @@ of #80's delivery and observation scope.
 `notification_needed` validates the terminal fact and checks the retained consumed
 checkpoint; the workflow's notify handler consults it before resolving an absent
 promise. Deliberate late redelivery after consumption is suppressed. Read private
-`InvitationRequestV1/<request>/notification_status` to observe retained promise
+`InvitationRequest/<request>/notification_status` to observe retained promise
 state without starting the run handler.
 
 A notify invocation already in flight at cleanup may have journaled an earlier
@@ -171,8 +162,7 @@ the authoritative consumed checkpoint, and confirm no workflow run is active usi
 Restate's invocation inspector. Export state before removing only that workflow's
 orphan state through the Restate administrative state API. Never purge link or
 invitation-object state, never restart the workflow to clean a promise, and never
-interpret an absent promise as loss of the authoritative decision. Exact destructive
-management commands remain part of the #58 cutover rehearsal.
+interpret an absent promise as loss of the authoritative decision.
 
 ## Verification
 
@@ -192,8 +182,9 @@ audit-write rollback and retry. `retained_delivery` checks the same history thro
 real Restate, including stable recovery observations and workflow cleanup.
 `npm run test:admission --prefix tests/worker` runs the shared conformance scenario
 on actual D1, injects audit insertion failures into D1 batches, and checks events
-from actual Worker GitHub 201/204/422 delivery and migration resume. Console HTTP
+from actual Worker GitHub 201/204/422 delivery. Console HTTP
 summary/privacy coverage is in `console_flow` (`audit_` filter).
 
 #49's approved policy is recorded in ADR 0004. #60 implements admission availability
-enforcement and installation-event convergence; #57 handles full browser cutover.
+enforcement and installation-event convergence; #57 moved the browser onto
+authoritative admission.

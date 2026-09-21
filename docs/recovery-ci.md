@@ -59,10 +59,9 @@ invoked from npm's `tests/worker` working directory.
 
 These gates do not authorize production rollout. **#61** still owns live signed
 Restate identity/discovery/routing and private ingress validation; remote regional
-behavior and Cloud CPU/memory/subrequest/input/scope limits; live D1 coordinated
-export/fence/adoption and restore; old-writer/credential isolation; SDK journal
-handoff; administrative kill/purge and coordinated/independent restore with forward
-recovery. Local unsigned discovery and controlled GitHub HTTP are not live-signature
+behavior and Cloud CPU/memory/subrequest/input/scope limits; live D1 restore;
+old-deployment/credential isolation; administrative kill/purge and
+coordinated/independent restore with forward recovery. Local unsigned discovery and controlled GitHub HTTP are not live-signature
 or live-GitHub proof. Static island assets retain their separate CI gate.
 
 Targeted cross-feature fixes and their regressions remain with their owning bug-fix
@@ -72,8 +71,8 @@ it does not redefine installation/admission behavior.
 
 Local verification uses the available Nix Rust **1.94.0**, rather than claiming
 verification of the CI compiler. See [the Worker admission gate](worker-admission-gate.md)
-for the larger runtime matrix and [the cutover runbook](admission-cutover.md) for
-operator recovery procedures.
+for the larger runtime matrix and [admission recovery](admission-v1.md#recovery-and-audit-retention)
+for operator recovery procedures.
 
 ## Local verification on 2026-09-18
 

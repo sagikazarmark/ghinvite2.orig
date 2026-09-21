@@ -14,10 +14,10 @@ async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {
     let state = AppState::new(
         storage,
         Arc::new(BrowserGithub),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
 }
 
@@ -57,7 +57,7 @@ fn snapshot(id: ghinvite_core::InvitationLinkId, revoked: bool) -> serde_json::V
 async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retry() {
     let ingress = MockServer::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/InvitationLinkV1/{id}/revoke")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
         .respond_with(ResponseTemplate::new(503))
         .mount(&ingress)
         .await;
@@ -83,7 +83,7 @@ async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retr
         StatusCode::FORBIDDEN
     );
     ingress.reset().await;
-    Mock::given(path(format!("/InvitationLinkV1/{id}/link_status")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
         .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, true)))
         .mount(&ingress)
         .await;
@@ -125,10 +125,10 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
     let state = AppState::new(
         storage,
         Arc::new(BrowserGithub),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     let (app, cookie) = sign_in(build_app(state, protected_store().await)).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
@@ -317,7 +317,7 @@ async fn exact_operation_conflict_takes_precedence_over_request_recovery() {
 async fn creation_recovery_retains_canonical_input_before_eligibility_and_projection() {
     let ingress = MockServer::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/InvitationLinkV1/{id}/create")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
         .respond_with(ResponseTemplate::new(503))
         .mount(&ingress)
         .await;
@@ -339,10 +339,10 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let action = format!(
@@ -378,7 +378,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         .as_array_mut()
         .unwrap()
         .sort_by_key(|r| r["repo_id"].as_u64().unwrap());
-    Mock::given(path(format!("/InvitationLinkV1/{id}/link_status")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
         .respond_with(ResponseTemplate::new(200).set_body_json(confirmed))
         .mount(&ingress)
         .await;
@@ -397,7 +397,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     assert!(response_html(response).await.contains(&url));
     assert_eq!(ingress.received_requests().await.unwrap().len(), 3);
     ingress.reset().await;
-    Mock::given(path(format!("/InvitationLinkV1/{id}/create")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
         .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, false)))
         .mount(&ingress)
         .await;
@@ -413,7 +413,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         original, retry,
         "absolute expiry and repository identities stay fixed"
     );
-    Mock::given(path(format!("/InvitationLinkV1/{id}/link_status")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
         .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, false)))
         .mount(&ingress)
         .await;
@@ -437,7 +437,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         let link = ghinvite_core::InvitationLinkId::new();
         let request = ghinvite_core::RequestId::new();
         let operation = ghinvite_core::RequestId::new();
-        Mock::given(path(format!("/InvitationLinkV1/{link}/decide")))
+        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
             .respond_with(ResponseTemplate::new(503))
             .mount(&ingress)
             .await;
@@ -473,7 +473,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         .await;
         assert!(latest.contains(&url));
         ingress.reset().await;
-        Mock::given(path(format!("/InvitationLinkV1/{link}/decision_status")))
+        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decision_status")))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
             .mount(&ingress)
             .await;
@@ -482,7 +482,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
                 .await
                 .contains("Outcome unknown")
         );
-        Mock::given(path(format!("/InvitationLinkV1/{link}/decide")))
+        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
             .respond_with(ResponseTemplate::new(503))
             .mount(&ingress)
             .await;
@@ -532,7 +532,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
             ("incompatible", "expired", "decision deadline"),
         ] {
             ingress.reset().await;
-            Mock::given(path(format!("/InvitationLinkV1/{link}/decision_status")))
+            Mock::given(path(format!("/{LINK_SERVICE}/{link}/decision_status")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":outcome,"request":{
                     "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":state,
                     "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
@@ -550,7 +550,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
 async fn recovery_requires_current_account_authority_session_ownership_and_csrf() {
     let ingress = MockServer::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/InvitationLinkV1/{id}/revoke")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
         .respond_with(ResponseTemplate::new(503))
         .mount(&ingress)
         .await;
@@ -564,10 +564,10 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
     let state = AppState::new(
         storage.clone(),
         Arc::new(BrowserGithub),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     let (app, cookie) = sign_in(build_app(state, protected_store().await)).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
@@ -778,10 +778,10 @@ async fn mutation_recovery_browser_server() {
         AppState::new(
             storage,
             Arc::new(BrowserGithub),
-            Arc::new(RecordingCommands::default()),
+            Arc::new(UnusedCommands),
+            Arc::new(RestateClient::new(ingress.uri()).unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
-        )
-        .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap())),
+        ),
         protected_store().await,
     );
     let login_app = app.clone();

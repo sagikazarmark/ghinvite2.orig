@@ -85,8 +85,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .with_base(base),
         ),
     );
-    let endpoint =
-        ghinvite_workflows::build_cutover_endpoint(state, storage.clone(), None).unwrap();
+    let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -117,7 +116,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     let link = ghinvite_core::InvitationLinkId::new().to_string();
     let call = |handler: &str, input: Value| {
         client
-            .post(format!("{ingress}/InvitationLinkV1/{link}/{handler}"))
+            .post(format!("{ingress}/InvitationLink/{link}/{handler}"))
             .json(&input)
     };
     let creation = json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
@@ -249,7 +248,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         503
     );
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/100/status"))
+        .post(format!("{ingress}/AccountInstallation/100/status"))
         .send()
         .await
         .unwrap()
@@ -287,7 +286,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     for command in plan["commands"].as_array().unwrap() {
         let receipt: Value = client
             .post(format!(
-                "{ingress}/GithubCreateV1/{}/create",
+                "{ingress}/GithubCreate/{}/create",
                 command["invitation_id"].as_str().unwrap()
             ))
             .json(command)
@@ -308,7 +307,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // must repair delivery prerequisites even without another GitHub webhook.
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallationV1/100/recheck"))
+            .post(format!("{ingress}/AccountInstallation/100/recheck"))
             .send()
             .await
             .unwrap()
@@ -382,7 +381,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     let adopted_link = ghinvite_core::InvitationLinkId::new().to_string();
     assert!(
         client
-            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/create"))
+            .post(format!("{ingress}/InvitationLink/{adopted_link}/create"))
             .json(&json!({"version":1,"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
                 "description":"Adopted","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]}))
             .send()
@@ -426,7 +425,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // just as safely.
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallationV1/300/refresh"))
+            .post(format!("{ingress}/AccountInstallation/300/refresh"))
             .json(&json!(41))
             .send()
             .await
@@ -440,7 +439,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     let adopted_attempt = json!({"version":1,"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
     assert_eq!(
         client
-            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/admit"))
+            .post(format!("{ingress}/InvitationLink/{adopted_link}/admit"))
             .json(&adopted_attempt)
             .send()
             .await
@@ -450,7 +449,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert_eq!(
         client
-            .post(format!("{ingress}/AccountInstallationV1/300/status"))
+            .post(format!("{ingress}/AccountInstallation/300/status"))
             .send()
             .await
             .unwrap()
@@ -481,7 +480,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .await
     .unwrap();
     let adopted: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/300/status"))
+        .post(format!("{ingress}/AccountInstallation/300/status"))
         .send()
         .await
         .unwrap()
@@ -494,7 +493,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // still admits once the observation is available.
     assert_eq!(
         client
-            .post(format!("{ingress}/InvitationLinkV1/{adopted_link}/admit"))
+            .post(format!("{ingress}/InvitationLink/{adopted_link}/admit"))
             .json(&adopted_attempt)
             .send()
             .await
@@ -520,7 +519,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallationV1/300/refresh"))
+            .post(format!("{ingress}/AccountInstallation/300/refresh"))
             .json(&json!(40))
             .send()
             .await
@@ -529,7 +528,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     let retired: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/300/status"))
+        .post(format!("{ingress}/AccountInstallation/300/status"))
         .send()
         .await
         .unwrap()
@@ -593,7 +592,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         );
     }
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/100/status"))
+        .post(format!("{ingress}/AccountInstallation/100/status"))
         .send()
         .await
         .unwrap()
@@ -624,7 +623,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert!(first.unwrap().status().is_success());
     assert!(second.unwrap().status().is_success());
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/100/status"))
+        .post(format!("{ingress}/AccountInstallation/100/status"))
         .send()
         .await
         .unwrap()
@@ -757,7 +756,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallationV1/100/status"))
+        .post(format!("{ingress}/AccountInstallation/100/status"))
         .send()
         .await
         .unwrap()

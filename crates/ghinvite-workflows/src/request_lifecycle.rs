@@ -1,6 +1,6 @@
 //! Direct terminal promises coordinate wake-up; only the link authorizes work.
-use crate::admission_v1::{
-    InvitationLinkV1Client, InvitationRequestV1, RequestStatus, TerminalSignal, WorkflowEnvelope,
+use crate::admission::{
+    InvitationLinkClient, InvitationRequest, RequestStatus, TerminalSignal, WorkflowEnvelope,
 };
 use ghinvite_core::RequestState;
 use restate_sdk::context::{
@@ -40,7 +40,7 @@ pub struct DeliveryStatus {
 }
 
 #[derive(Default)]
-pub struct InvitationRequestV1Impl {
+pub struct InvitationRequestImpl {
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<WorkflowFaults>>,
 }
@@ -63,7 +63,7 @@ pub struct WorkflowFaults {
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<WorkflowFaults>) -> Builder {
     use restate_sdk::endpoint::{HandlerOptions, ServiceOptions};
     builder.bind_with_options(
-        InvitationRequestV1Impl {
+        InvitationRequestImpl {
             faults: Some(faults),
         }
         .serve(),
@@ -78,10 +78,10 @@ pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<WorkflowFaults>
 }
 
 pub fn bind(builder: Builder) -> Builder {
-    builder.bind(InvitationRequestV1Impl::default().serve())
+    builder.bind(InvitationRequestImpl::default().serve())
 }
 
-impl InvitationRequestV1 for InvitationRequestV1Impl {
+impl InvitationRequest for InvitationRequestImpl {
     async fn notification_status(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -108,7 +108,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
         let mut signalled = false;
         loop {
             let Json(request) = ctx
-                .object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                .object_client::<InvitationLinkClient>(query.link_id.to_string())
                 .request_status(Json(query.clone()))
                 .call()
                 .await?;
@@ -137,7 +137,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                 }
                 let dispatch = if state == RequestState::Approved {
                     Some(
-                        ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                        ctx.object_client::<InvitationLinkClient>(query.link_id.to_string())
                             .prepare_dispatch(Json(query.clone()))
                             .call()
                             .await?
@@ -149,7 +149,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                 if let Some(plan) = &dispatch {
                     for command in &plan.commands {
                         let invocation_id = ctx
-                            .object_client::<crate::delivery_v1::GithubCreateV1Client>(
+                            .object_client::<crate::delivery::GithubCreateClient>(
                                 command.invitation_id.to_string(),
                             )
                             .create(Json(command.clone()))
@@ -177,7 +177,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                             )
                             .await?;
                         }
-                        ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                        ctx.object_client::<InvitationLinkClient>(query.link_id.to_string())
                             .record_submitted(Json(SubmittedCommand {
                                 command: command.clone(),
                                 invocation_id,
@@ -190,7 +190,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
                     .decision
                     .as_ref()
                     .ok_or_else(|| TerminalError::new("terminal decision missing"))?;
-                ctx.object_client::<InvitationLinkV1Client>(query.link_id.to_string())
+                ctx.object_client::<InvitationLinkClient>(query.link_id.to_string())
                     .consume_lifecycle(Json(TerminalSignal {
                         link_id: query.link_id,
                         request_id: query.request_id,
@@ -289,7 +289,7 @@ impl InvitationRequestV1 for InvitationRequestV1Impl {
             return Ok(());
         }
         if !ctx
-            .object_client::<InvitationLinkV1Client>(signal.link_id.to_string())
+            .object_client::<InvitationLinkClient>(signal.link_id.to_string())
             .notification_needed(Json(signal.clone()))
             .call()
             .await?

@@ -24,7 +24,7 @@ durable timeout recovery and released account exclusivity. See the
 Test builds enable `runtime-tests` to expose production client/storage seams;
 these fixture routes are excluded from ordinary deployment builds.
 
-For authoritative admission, recovery, D1 projection and cutover execution, run
+For authoritative admission, recovery and D1 projection, run
 `npm run test:admission --prefix tests/worker` from the root. See the
 [separate gate/results](../../docs/worker-admission-gate.md), including its explicit
 blocked production rollout verdict. The session smoke below remains independent.

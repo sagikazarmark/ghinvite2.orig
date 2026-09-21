@@ -1,12 +1,10 @@
 # Recoverable browser admission (#57)
 
-`AppState::with_admission(client)` opts an **isolated, migrated** web deployment
-into v1 admission, creation, metadata, revocation and decisions together. The
-native and Worker entry points do not enable it. Bind `admission_v1::bind` (which
-also binds `InvitationCodeV1`), the projector, lifecycle and delivery consumers
-on private Restate ingress. Never mix legacy and v1 writers for the same link.
-Migration #58 must populate invitation-code routing for imported links before
-opening browser traffic; missing authority is never reconstructed from SQL.
+The web `AppState::new` always routes admission, creation, metadata, revocation
+and decisions through v1 admission. `build_endpoint` binds `admission::bind`
+(which also binds `InvitationCode`), the projector, lifecycle and delivery
+consumers on private Restate ingress. Missing authority is never reconstructed
+from SQL.
 
 ## Browser protocol
 
@@ -85,7 +83,7 @@ admission eligibility, independently of page-time hints.
 
 Creation allocates a random invitation code in the journaled creation decision.
 Before acknowledgement, the link registers its immutable code-to-ID mapping in
-`InvitationCodeV1`. The registry never calls a link, preventing a synchronous
+`InvitationCode`. The registry never calls a link, preventing a synchronous
 exclusive-object cycle. Resolution needs no SQL and always routes commands to the
 canonical link ID. Registry state is retained alongside link authority.
 

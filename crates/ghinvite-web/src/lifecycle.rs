@@ -1,4 +1,4 @@
-//! Explicit opt-in to the isolated authoritative request path.
+//! Authoritative request lifecycle commands and status reads.
 use crate::{RestateClient, Result};
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionReceipt, RequestStatus};
 use ghinvite_core::storage::projection::RequestSnapshot;
@@ -37,7 +37,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     async fn decision_status(&self, command: DecideRequest) -> Result<Option<DecisionReceipt>> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "decision_status",
                 &command,
@@ -50,7 +50,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     ) -> Result<Vec<ghinvite_core::delivery::RepositoryProgress>> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &query.link_id.to_string(),
                 "delivery_progress",
                 &query,
@@ -60,7 +60,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &command.link_id.to_string(),
                 "decide",
                 &command,
@@ -70,7 +70,7 @@ impl RequestLifecycle for RestateRequestLifecycle {
     async fn status(&self, query: RequestStatus) -> Result<RequestSnapshot> {
         self.client
             .authoritative_call(
-                "InvitationLinkV1",
+                "InvitationLink",
                 &query.link_id.to_string(),
                 "request_status",
                 &query,

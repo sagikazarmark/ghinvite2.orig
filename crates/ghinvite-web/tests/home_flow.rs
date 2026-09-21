@@ -84,6 +84,7 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();

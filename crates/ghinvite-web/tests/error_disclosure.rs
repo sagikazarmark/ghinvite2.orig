@@ -74,6 +74,7 @@ async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
         storage,
         transport,
         Arc::new(RestateCommands::new(restate)),
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     build_app(state, tower_sessions::MemoryStore::default())

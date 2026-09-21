@@ -3,6 +3,10 @@ use ghinvite_web::lifecycle::{RequestLifecycle, RestateRequestLifecycle};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+mod common;
+
+use common::link_authority::LINK_SERVICE;
+
 #[tokio::test]
 async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
     let calls = Arc::new(Mutex::new(vec![]));
@@ -57,7 +61,7 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
     assert_eq!(
         calls[0].0,
         (
-            "InvitationLinkV1".into(),
+            LINK_SERVICE.into(),
             command.link_id.to_string(),
             "decide".into()
         )

@@ -4,7 +4,7 @@
 
 **Local actual-binding gate implemented; production rollout remains blocked.**
 The maintainer resumed #59 and approved local workerd, real Restate ingress,
-the Rust D1 adapter, browser HTTP, and disposable cutover fixtures as test seams.
+the Rust D1 adapter, browser HTTP, and disposable fixtures as test seams.
 Local execution is not evidence of Cloudflare regional behavior, deployment
 credentials/routing, remote D1 backup/restore, or live GitHub guarantees.
 The [continuous recovery gates](recovery-ci.md) add native durable-projection CI,
@@ -20,7 +20,7 @@ npm ci --prefix tests/worker
 npm run test:admission --prefix tests/worker
 ```
 
-Requires local Docker/Compose with host-gateway networking, Python 3, Node
+Requires local Docker/Compose with host-gateway networking, Node
 20.20.2, Rust with `wasm32-unknown-unknown`, and wasm-bindgen CLI **0.2.120**.
 `WASM_BINDGEN=/absolute/path/to/wasm-bindgen` and `CARGO_TARGET_DIR` are supported.
 CI selects Rust **1.92.0**; the recorded local run used Nix Rust/Cargo **1.94.0**.
@@ -65,7 +65,7 @@ The HTTP observer parses real protocol frame boundaries and can truncate a
 response after its first actual state write. It never synthesizes an SDK result.
 
 HTTP calls and convergence are bounded at 25 seconds, runtime execution at five
-minutes, CLI import at one minute. Cleanup removes the runner's runtime and local
+minutes. Cleanup removes the runner's runtime and local
 fixtures. Failure/missing tools is a failed/unrun gate, never a pass. SIGKILL or
 host failure may need manual cleanup of the printed unique Compose project.
 
@@ -97,10 +97,6 @@ host failure may need manual cleanup of the printed unique Compose project.
   duplicate and never-adopted events are retained, synchronous observation still
   fails promptly, and restoration alone converges the projected scope. The
   pre-existing command state is seeded through Restate's admin state API.
-- #58 checkpoint preparation, projection adoption archive loaded into D1,
-  actual Worker import/verification/activation and identical resume, historical
-  pending/approved/cancelled/expired records, confirmed Sent identity, late old SQL
-  revoke/decision fences, and rejection of stale rollback after new admission.
 
 On 2026-09-14 the local lazy-history experiment retained fourteen 16-KiB
 rejected operations. A fresh rejection before and after unrelated history used
@@ -116,24 +112,17 @@ production capacity or billing estimates. The runner prints measurements each ru
    deployment routing, service discovery, runtime compatibility, regional lag,
    limits, CPU/memory/subrequest budgets and maximum repository/input envelopes.
    This session does not provision or verify remote Cloudflare infrastructure.
-2. #58 CLI still uses a **local SQLite checkpoint/progress ledger**. This rehearsal
-   loads its adopted archive into D1 and runs import against D1-backed Worker
-   handlers. It does not implement a live D1 coordinated export/fence/adoption
-   transaction or validate Cloud restore. That operator path must be implemented
-   and rehearsed before rollout; do not point `--database` at a workerd internal DB.
-3. Truncation verifies ordinary journal replay across a transport boundary, not
+2. Truncation verifies ordinary journal replay across a transport boundary, not
    arbitrary isolate termination at every individual instruction. The local D1
    ack-loss wrapper does not inject a remote storage-engine failure during commit.
-   Administrative kill/purge and independent checkpoint restores still require the
-   reconciliation procedure in `admission-cutover.md`.
-4. SQL fences and tombstone routing do not revoke old endpoints' network access or
-   fence an already-issued GitHub request. Remote old deployment URLs, controllers,
+   Cloud D1 restore is not validated. Administrative kill/purge and independent
+   checkpoint restores still require the
+   [recovery procedure](admission-v1.md#recovery-and-audit-retention).
+3. SQL fences do not revoke old endpoints' network access or fence an
+   already-issued GitHub request. Remote old deployment URLs, controllers,
    database access and outbound credentials must be permanently isolated; verify
    this operationally. Do not reopen old pinned URLs with incompatible SDK code.
-5. This SDK upgrade is verified on fresh disposable runtime state. It is not a
-   claim that in-flight 0.10 journals can be hot-swapped to 0.12 code. Inventory,
-   preserve pinned artifacts, drain/fence and transfer under the cutover procedure.
-6. GitHub stub results only establish the consumed fixture contract. They make no
+4. GitHub stub results only establish the consumed fixture contract. They make no
    live GitHub exactly-once, authorization or webhook availability guarantee.
 
 #59 is closed for its completed local gate; the maintainer moved these deferred
@@ -146,10 +135,9 @@ and readiness ordering.
 
 The local gate passed on 2026-09-14 using the versions above. SDK-upgrade native
 regressions also passed through `scripts/test-restate.sh` with targets
-`integration_test`, `authoritative_admission`, `retained_delivery`, and
-`writer_cutover`. These native results complement rather than replace the Worker
-gate. Standard checks passed: `cargo check --workspace`,
-`cargo clippy --workspace -- -D warnings`, `cargo fmt --check`, and
-`cargo test --workspace --locked`. The separate Worker session smoke and five
-Python migration tests also passed. A SIGTERM rehearsal while the GitHub stub
+`authoritative_admission` and `retained_delivery`. These native results
+complement rather than replace the Worker gate. Standard checks passed:
+`cargo check --workspace`, `cargo clippy --workspace -- -D warnings`,
+`cargo fmt --check`, and `cargo test --workspace --locked`. The separate Worker
+session smoke also passed. A SIGTERM rehearsal while the GitHub stub
 was running exited 143 through the shared cleanup path.

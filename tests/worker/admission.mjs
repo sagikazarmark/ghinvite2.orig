@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 import { execFileSync, execFile, spawn } from 'node:child_process';
@@ -34,7 +32,6 @@ let pauseWorkflows = false;
 let github;
 let githubUrl;
 let unexpectedOutbound = 0;
-let migrationDirectory;
 const children = new Set();
 let cleanupPromise;
 let primaryFailure;
@@ -83,7 +80,6 @@ async function cleanup() {
       if (server) { for (const session of sessions) session.destroy(); await new Promise(resolve => server.close(resolve)); }
     });
     await step(() => mf.dispose());
-    await step(async () => { if (migrationDirectory) rmSync(migrationDirectory, { recursive: true, force: true }); });
     if (errors.length) throw new AggregateError(errors, `cleanup failed for ${project}`);
   })();
   return cleanupPromise;
@@ -123,7 +119,6 @@ const mf = new Miniflare({
   compatibilityFlags: ['nodejs_compat'],
   d1Databases: ['DB', 'DB_DELIVERY'],
   bindings: {
-    GHINVITE_ADMISSION_MODE: 'authoritative',
     GHINVITE_GITHUB_APP_ID: '123',
     GHINVITE_GITHUB_APP_PRIVATE_KEY: readFileSync(new URL('../../crates/ghinvite-github/src/jwt_test_key.pem', import.meta.url)).toString('base64'),
   },
@@ -168,8 +163,8 @@ try {
   });
   assert.equal(response.status, 200, await response.clone().text());
   const manifest = await response.json();
-  assert.ok(manifest.services.some(service => service.name === 'InvitationLinkV1'), 'authoritative link endpoint must be deployed');
-  assert.ok(manifest.services.some(service => service.name === 'InvitationProjectionV1'), 'D1 projector must be deployed');
+  assert.ok(manifest.services.some(service => service.name === 'InvitationLink'), 'authoritative link endpoint must be deployed');
+  assert.ok(manifest.services.some(service => service.name === 'InvitationProjection'), 'D1 projector must be deployed');
   console.log('PASS actual workflows Worker authoritative discovery');
   compose('up', '-d', 'restate-smoke');
   const admin = `http://${compose('port', 'restate-smoke', '9070').trim()}`;
@@ -186,13 +181,13 @@ try {
       const incoming = request.url.startsWith('/invoke/') ? frames(body) : [];
       const invocation = incoming[0]?.type === 0 ? fields(incoming[0].payload).get(2)?.toString() : undefined;
       const objectKey = incoming[0]?.type === 0 ? fields(incoming[0].payload).get(6)?.toString() : undefined;
-      if ((interruption?.blocked && interruption.blocked === invocation) || (pauseWorkflows && request.url.endsWith('/InvitationRequestV1/run'))) {
+      if ((interruption?.blocked && interruption.blocked === invocation) || (pauseWorkflows && request.url.endsWith('/InvitationRequest/run'))) {
         response.writeHead(503); response.end(); return;
       }
       const result = await mf.dispatchFetch(`http://worker.test${request.url}`, {
         method: request.method, headers: { ...Object.fromEntries(Object.entries(request.headers).filter(([key]) => !key.startsWith(':'))),
           ...(clock === undefined ? {} : { 'x-test-clock': String(clock) }),
-          ...(auditAckAccount && objectKey === auditAckAccount && request.url.endsWith('/InstallationProjectionV1/apply')
+          ...(auditAckAccount && objectKey === auditAckAccount && request.url.endsWith('/InstallationProjection/apply')
             ? { 'x-test-lose-audit-ack': '1' } : {}) },
         body: body.length ? body : undefined,
       });
@@ -255,7 +250,7 @@ try {
   // Adopt existing installation facts before exercising projection failure.
   // Missing user parents keep link/request projection unavailable.
   const input = creation();
-  const command = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
+  const command = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   const created = await command('create', input);
   assert.equal(created.uses, 0);
   assert.ok(Math.abs(Date.parse(created.created_at) - Date.now()) < 30_000, 'actual Worker clock');
@@ -269,7 +264,7 @@ try {
   assert.equal(Date.parse(receipt.result.decision_deadline) - Date.parse(receipt.decided_at), 604800000);
   await command('revoke', { link_id: input.link_id, admin: input.admin });
   assert.deepEqual(await command('admit', attempts[winner]), receipt);
-  const conflict = await fetch(`${ingress}/InvitationLinkV1/${input.link_id}/admit`, {
+  const conflict = await fetch(`${ingress}/InvitationLink/${input.link_id}/admit`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ...attempts[winner], justification: 'changed' }), signal: AbortSignal.timeout(25_000),
   });
@@ -310,7 +305,7 @@ try {
   console.log('PASS D1 fixed-batch reorder/duplicate, stale missing audit, equal-version/event conflict rollback, commit-ack loss replay');
   clock = Date.parse('2026-01-01T00:00:00Z');
   const recoveryInput = { ...creation(), max_uses: 3, expires_at: '2026-01-02T00:00:00Z' };
-  const recovery = (handler, body) => http(`${ingress}/InvitationLinkV1/${recoveryInput.link_id}/${handler}`, body);
+  const recovery = (handler, body) => http(`${ingress}/InvitationLink/${recoveryInput.link_id}/${handler}`, body);
   await recovery('create', recoveryInput);
   const attempt = { version: 1, link_id: recoveryInput.link_id, operation_id: id(), requester_id: 91 };
   interruption = { operation: attempt.operation_id };
@@ -331,10 +326,10 @@ try {
   console.log('PASS response loss after first state write; exclusive status waits and complete decision survives expiration');
   clock = Date.parse('2026-01-01T00:00:00Z');
   const undecidedInput = { ...creation(), expires_at: '2026-01-02T00:00:00Z' };
-  await http(`${ingress}/InvitationLinkV1/${undecidedInput.link_id}/create`, undecidedInput);
+  await http(`${ingress}/InvitationLink/${undecidedInput.link_id}/create`, undecidedInput);
   const undecidedAttempt = { version: 1, link_id: undecidedInput.link_id, operation_id: id(), requester_id: 91 };
   interruption = { operation: undecidedAttempt.operation_id, type: 0x0402 };
-  const undecided = http(`${ingress}/InvitationLinkV1/${undecidedInput.link_id}/admit`, undecidedAttempt);
+  const undecided = http(`${ingress}/InvitationLink/${undecidedInput.link_id}/admit`, undecidedAttempt);
   await eventually(async () => interruption.blocked, Boolean);
   clock = Date.parse('2026-01-03T00:00:00Z');
   interruption = undefined;
@@ -347,7 +342,7 @@ try {
   pauseWorkflows = true;
   clock = Date.parse('2026-01-01T00:00:00Z');
   const timedInput = { ...creation(), max_uses: 5 };
-  const timed = (handler, body) => http(`${ingress}/InvitationLinkV1/${timedInput.link_id}/${handler}`, body);
+  const timed = (handler, body) => http(`${ingress}/InvitationLink/${timedInput.link_id}/${handler}`, body);
   const timedLink = await timed('create', timedInput);
   const timedAttempt = { version: 1, link_id: timedInput.link_id, operation_id: id(), requester_id: 91 };
   const first = await timed('admit', timedAttempt);
@@ -369,15 +364,15 @@ try {
   const declined = await timed('decide', { version: 1, link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'decline', reason: 'fixture' } });
   assert.equal(declined.request.state, 'declined');
-  await eventually(() => http(`${ingress}/InvitationRequestV1/${thirdReceipt.result.request_id}/notification_status`), Boolean);
+  await eventually(() => http(`${ingress}/InvitationRequest/${thirdReceipt.result.request_id}/notification_status`), Boolean);
   clock = undefined;
   pauseWorkflows = false;
-  const completed = await http(`${ingress}/restate/workflow/InvitationRequestV1/${thirdReceipt.result.request_id}/attach`, undefined, 'GET');
+  const completed = await http(`${ingress}/restate/workflow/InvitationRequest/${thirdReceipt.result.request_id}/attach`, undefined, 'GET');
   assert.equal(completed.state, 'declined');
   console.log('PASS exact deadline equality, overdue readmission without refund, direct notification before durable startup');
   pauseWorkflows = true;
   const timerInput = creation();
-  const timerCall = (handler, body) => http(`${ingress}/InvitationLinkV1/${timerInput.link_id}/${handler}`, body);
+  const timerCall = (handler, body) => http(`${ingress}/InvitationLink/${timerInput.link_id}/${handler}`, body);
   await timerCall('create', timerInput);
   clock = Date.now() - 604800000 + 5000;
   const timerReceipt = await timerCall('admit', { version: 1, link_id: timerInput.link_id, operation_id: id(), requester_id: 92 });
@@ -388,20 +383,20 @@ try {
   assert.ok(Date.now() < Date.parse(timerReceipt.result.decision_deadline), 'timer scheduled before deadline');
   const waiting = await timerCall('request_status', { link_id: timerInput.link_id, request_id: timerReceipt.result.request_id, requester_id: 92 });
   assert.equal(waiting.state, 'pending');
-  const timerResult = await http(`${ingress}/restate/workflow/InvitationRequestV1/${timerReceipt.result.request_id}/attach`, undefined, 'GET');
+  const timerResult = await http(`${ingress}/restate/workflow/InvitationRequest/${timerReceipt.result.request_id}/attach`, undefined, 'GET');
   assert.equal(timerResult.state, 'expired');
   assert.ok(Date.now() >= Date.parse(timerReceipt.result.decision_deadline));
   console.log('PASS actual Worker durable timer expiry after short historical admission window');
 
   const history = creation();
-  await http(`${ingress}/InvitationLinkV1/${history.link_id}/create`, history);
-  await http(`${ingress}/InvitationLinkV1/${history.link_id}/revoke`, { link_id: history.link_id, admin: history.admin });
+  await http(`${ingress}/InvitationLink/${history.link_id}/create`, history);
+  await http(`${ingress}/InvitationLink/${history.link_id}/revoke`, { link_id: history.link_id, admin: history.admin });
   const measureAttempt = async () => {
     const start = traffic.length;
-    await http(`${ingress}/InvitationLinkV1/${history.link_id}/admit`, {
+    await http(`${ingress}/InvitationLink/${history.link_id}/admit`, {
       version: 1, link_id: history.link_id, operation_id: id(), requester_id: 91, justification: 'x'.repeat(16_384),
     });
-    const calls = traffic.slice(start).filter(row => row.path.endsWith('/InvitationLinkV1/admit'));
+    const calls = traffic.slice(start).filter(row => row.path.endsWith('/InvitationLink/admit'));
     return { roundTrips: calls.length, maxRequest: Math.max(...calls.map(row => row.input)), maxResponse: Math.max(...calls.map(row => row.output)) };
   };
   const before = await measureAttempt();
@@ -417,7 +412,7 @@ try {
   console.log(`PASS lazy history bounds (bytes): ${JSON.stringify(bounds)}`);
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   const autoInput = { ...creation(), approval_required: false };
-  const auto = (handler, body) => http(`${ingress}/InvitationLinkV1/${autoInput.link_id}/${handler}`, body);
+  const auto = (handler, body) => http(`${ingress}/InvitationLink/${autoInput.link_id}/${handler}`, body);
   await auto('create', autoInput);
   const autoAttempt = { version: 1, link_id: autoInput.link_id, operation_id: id(), requester_id: 91 };
   const approved = await auto('admit', autoAttempt);
@@ -426,16 +421,16 @@ try {
   const progressQuery = { link_id: autoInput.link_id, request_id: approved.result.request_id, requester_id: 91 };
   const progress = await eventually(() => auto('delivery_progress', progressQuery), rows => rows.some(row => row.stage === 'submitted'));
   const plan = await auto('prepare_dispatch', progressQuery);
-  const receiving = await eventually(() => http(`${ingress}/GithubCreateV1/${plan.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
+  const receiving = await eventually(() => http(`${ingress}/GithubCreate/${plan.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
   assert.ok(receiving.outcome.upstream_id > 0);
-  await http(`${ingress}/GithubCreateV1/${receiving.command.invitation_id}/create`, receiving.command);
+  await http(`${ingress}/GithubCreate/${receiving.command.invitation_id}/create`, receiving.command);
   const createEvents = async receipt => (await storage('audit', 100)).events.filter(event => event.target_id === receipt.command.invitation_id);
   const firstEvents = await createEvents(receiving);
   assert.equal(firstEvents.length, 1);
   assert.equal(firstEvents[0].event_type, 'invitation.sent');
   assert.equal(firstEvents[0].occurred_at, receiving.confirmed_at);
   assert.equal(firstEvents[0].actor_kind, 'system');
-  await http(`${ingress}/GithubCreateV1/${receiving.command.invitation_id}/create`, receiving.command);
+  await http(`${ingress}/GithubCreate/${receiving.command.invitation_id}/create`, receiving.command);
   assert.deepEqual(await createEvents(receiving), firstEvents);
   // D1 batch rolls back receipt/lifecycle if the audit insertion fails. Retry
   // after repair (and replay after an unobserved successful response) is safe.
@@ -473,33 +468,33 @@ try {
   ]) {
     await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: stubOutcome });
     const input = { ...creation(), approval_required: false };
-    const call = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
+    const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
     await call('create', input);
     const admitted = await call('admit', { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
     const plan = await call('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
-    const receipt = await http(`${ingress}/GithubCreateV1/${plan.commands[0].invitation_id}/create`, plan.commands[0]);
+    const receipt = await http(`${ingress}/GithubCreate/${plan.commands[0].invitation_id}/create`, plan.commands[0]);
     assert.equal(receipt.outcome.kind, kind);
     const events = await createEvents(receipt);
     assert.equal(events.length, 1);
     assert.equal(events[0].event_type, eventType);
     assert.equal(events[0].actor_kind, actor);
     assert.equal(events[0].occurred_at, receipt.confirmed_at);
-    assert.deepEqual(await http(`${ingress}/GithubCreateV1/${receipt.command.invitation_id}/create`, receipt.command), receipt);
+    assert.deepEqual(await http(`${ingress}/GithubCreate/${receipt.command.invitation_id}/create`, receipt.command), receipt);
     assert.deepEqual(await createEvents(receipt), events);
   }
   await http(`${githubUrl}/reset`, undefined, 'DELETE');
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   console.log('PASS actual Worker GitHub 204/422 outcomes publish retained D1 audit events');
   const manualInput = creation();
-  const manual = (handler, body) => http(`${ingress}/InvitationLinkV1/${manualInput.link_id}/${handler}`, body);
+  const manual = (handler, body) => http(`${ingress}/InvitationLink/${manualInput.link_id}/${handler}`, body);
   await manual('create', manualInput);
   const manualReceipt = await manual('admit', { version: 1, link_id: manualInput.link_id, operation_id: id(), requester_id: 91 });
   const manualDecision = await manual('decide', { version: 1, link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
     operation_id: id(), admin: manualInput.admin, action: { kind: 'approve' } });
   assert.equal(manualDecision.request.state, 'approved');
-  const manualResult = await http(`${ingress}/restate/workflow/InvitationRequestV1/${manualReceipt.result.request_id}/attach`, undefined, 'GET');
+  const manualResult = await http(`${ingress}/restate/workflow/InvitationRequest/${manualReceipt.result.request_id}/attach`, undefined, 'GET');
   assert.equal(manualResult.state, 'approved');
-  await eventually(() => http(`${ingress}/GithubCreateV1/${manualResult.dispatch.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
+  await eventually(() => http(`${ingress}/GithubCreate/${manualResult.dispatch.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
   console.log('PASS manual approval and direct notification to waiting Worker lifecycle');
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
@@ -508,62 +503,6 @@ try {
   await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
     pause: value => { pauseWorkflows = value; } });
   await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
-  migrationDirectory = mkdtempSync(join(tmpdir(), 'ghinvite-d1-cutover-'));
-  execFileSync('python3', ['tests/worker/migration.py', migrationDirectory], { cwd: root, timeout: 30_000 });
-  // Import the adopted offline checkpoint into this disposable D1. Existing
-  // schema is identical; isolate account-parent collisions with the test rows.
-  const archive = readFileSync(join(migrationDirectory, 'adopted.sql'), 'utf8');
-  const statements = archive.split('\n').filter(line => line.startsWith('INSERT INTO') || line.startsWith('CREATE TRIGGER'));
-  const inserts = statements.filter(line => line.startsWith('INSERT INTO') && !line.startsWith('INSERT INTO "users"'));
-  for (const user of [8, 9]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
-  // Fixture's installation is a historical replacement for account 100.
-  await db.prepare("UPDATE installations SET uninstalled_at='2026-01-01T00:00:00Z'").run();
-  for (const sql of archive.match(/CREATE TABLE admission_(?:cutover|import_progress)[\s\S]*?;/g) ?? []) await db.exec(sql.replaceAll('\n', ' '));
-  await db.batch([db.prepare('PRAGMA defer_foreign_keys=ON'), ...inserts.map(sql => db.prepare(sql)), db.prepare('PRAGMA defer_foreign_keys=OFF')]);
-  for (const sql of archive.match(/CREATE TRIGGER cutover_[\s\S]*?END;/g) ?? []) await db.prepare(sql).run();
-  const cli = async (...args) => {
-    const child = spawn('python3', ['scripts/admission-cutover.py', ...args], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
-    children.add(child);
-    let text = '';
-    child.stdout.on('data', chunk => { text += chunk; }); child.stderr.on('data', chunk => { text += chunk; });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
-    const [code] = await once(child, 'exit'); clearTimeout(timer);
-    return { code, text };
-  };
-  const args = ['import', '--database', join(migrationDirectory, 'checkpoint.db'), '--manifest', join(migrationDirectory, 'prepared.json'), '--ingress', ingress];
-  const migrationManifest = JSON.parse(readFileSync(join(migrationDirectory, 'prepared.json'), 'utf8'));
-  const entry = migrationManifest.links[0];
-  const begin = { ...entry.begin, manifest_checksum: migrationManifest.checksum };
-  const migrationPath = `${ingress}/InvitationLinkV1/${entry.begin.link.link_id}`;
-  await http(`${migrationPath}/begin_import`, begin);
-  const closed = await fetch(`${migrationPath}/link_status`, { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ link_id: begin.link.link_id, admin: begin.link.creation.admin }), signal: AbortSignal.timeout(25_000) });
-  assert.equal(closed.status, 503, 'partial import remains closed');
-  const changedManifest = await fetch(`${migrationPath}/begin_import`, { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ ...begin, manifest_checksum: 'f'.repeat(64) }), signal: AbortSignal.timeout(25_000) });
-  assert.equal(changedManifest.status, 409);
-  let imported = await cli(...args); assert.equal(imported.code, 0, imported.text);
-  imported = await cli(...args, '--activate'); assert.equal(imported.code, 0, imported.text);
-  imported = await cli(...args, '--activate'); assert.equal(imported.code, 0, imported.text);
-  const legacyLink = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
-  const legacy = (handler, body) => http(`${ingress}/InvitationLinkV1/${legacyLink}/${handler}`, body);
-  const confirmed = await http(`${ingress}/GithubCreateV1/01ARZ3NDEKTSV4RRFFQ69G5FB0/status`);
-  assert.deepEqual(confirmed.outcome, { kind: 'created', upstream_id: 1234 });
-  const oldDecision = await fetch(`${ingress}/InvitationRequest/01ARZ3NDEKTSV4RRFFQ69G5FAW/decide`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ Approve: { decided_by: 7, decided_at: '2026-01-01T00:00:00Z' } }), signal: AbortSignal.timeout(25_000),
-  });
-  assert.equal(oldDecision.status, 410, 'obsolete command cannot regain authority');
-  for (const [suffix, state, requester_id] of [['FAX', 'approved', 9], ['FAY', 'cancelled', 8], ['FAZ', 'expired', 8]]) {
-    assert.equal((await legacy('request_status', { link_id: legacyLink, request_id: `01ARZ3NDEKTSV4RRFFQ69G5${suffix}`, requester_id })).state, state);
-  }
-  const newRequest = await legacy('admit', { version: 1, link_id: legacyLink, operation_id: id(), requester_id: 8 });
-  assert.equal(newRequest.result.kind, 'accepted');
-  await eventually(() => storage('link', legacyLink), value => value?.uses_count === 5);
-  await assert.rejects(db.prepare("UPDATE invitation_links SET revoked_at='2026-09-01T00:00:00Z',revoked_by=7 WHERE id=?").bind(legacyLink).run(), /obsolete writer/);
-  await assert.rejects(db.prepare("UPDATE invitation_requests SET state='approved' WHERE id='01ARZ3NDEKTSV4RRFFQ69G5FAW'").run(), /obsolete writer/);
-  const rollback = await cli('restore-legacy', '--database', join(migrationDirectory, 'checkpoint.db'), '--restored-coordinated-checkpoint', 'stale');
-  assert.notEqual(rollback.code, 0); assert.match(rollback.text, /reverse reconciliation/);
-  console.log('PASS #58 offline checkpoint → actual D1/Worker import, legacy states, resumable activation, late-writer fence and forward-only recovery');
   // #66 on actual D1 bindings: installation 40 is the shape adoption exists for.
   // Its command already retains the numeric account binding, while account 300
   // has never been observed and must adopt the existing row.
@@ -581,16 +520,16 @@ try {
   // The command completes rather than holding exclusivity, and a duplicate
   // event joins the retained continuation instead of competing with it.
   await http(`${ingress}/Installation/40/repos_changed`, reposChanged);
-  await http(`${ingress}/AccountInstallationV1/300/refresh`, 41);
+  await http(`${ingress}/AccountInstallation/300/refresh`, 41);
   const held = Date.now();
-  const offline = await fetch(`${ingress}/AccountInstallationV1/300/status`, { method: 'POST', signal: AbortSignal.timeout(25_000) });
+  const offline = await fetch(`${ingress}/AccountInstallation/300/status`, { method: 'POST', signal: AbortSignal.timeout(25_000) });
   assert.equal(offline.status, 503, 'synchronous observation fails promptly instead of holding exclusivity');
   assert.ok(Date.now() - held < 15_000);
   await db.prepare('ALTER TABLE installations_offline RENAME TO installations').run();
   // Restoration alone converges: no further webhook and no user action.
   await eventually(() => db.prepare('SELECT selected_repos FROM installations WHERE installation_id=40').first(),
     row => row?.selected_repos === '[10,11]');
-  const adopted = await http(`${ingress}/AccountInstallationV1/300/status`);
+  const adopted = await http(`${ingress}/AccountInstallation/300/status`);
   assert.equal(adopted.account.installation_id, 40);
   assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });

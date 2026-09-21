@@ -1,8 +1,11 @@
+pub mod link_authority;
+
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 /// Obtain authority from a real native form, never from session-store internals.
+#[allow(dead_code)] // Not every test binary that shares these helpers posts forms.
 pub async fn csrf_token(app: &axum::Router, cookie: &str) -> String {
     let response = app
         .clone()

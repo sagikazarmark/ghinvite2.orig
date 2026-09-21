@@ -49,16 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend.migrate().await?;
     let session_store = ProtectedStore::new(backend, config.session_secret);
 
-    let state = AppState::new(storage, transport, commands, config);
-    let state = match std::env::var("GHINVITE_ADMISSION_MODE")
-        .as_deref()
-        .unwrap_or("legacy")
-    {
-        "legacy" => state,
-        "maintenance" => state.with_write_maintenance(),
-        "authoritative" => state.with_admission(restate),
-        _ => return Err("invalid GHINVITE_ADMISSION_MODE".into()),
-    };
+    let state = AppState::new(storage, transport, commands, restate, config);
     let app = build_app(state, session_store);
 
     let addr = "127.0.0.1:8787".parse::<std::net::SocketAddr>()?;

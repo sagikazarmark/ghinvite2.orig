@@ -1,4 +1,4 @@
-//! Native forms for authoritative attempts, with optional SQL delivery observations.
+//! Native forms for admission attempts, with optional SQL delivery observations.
 use crate::{WebError, admission::RestateAdmission, session::Session};
 use axum::{
     http::StatusCode,
@@ -88,7 +88,7 @@ pub async fn page(
         }
     }
     if !page.can_start_fresh && page.attempt.is_none() && page.request.is_none() {
-        return super::invitation::invitation_not_found_response(session);
+        return super::invitation_not_found_response(session);
     }
     let fresh = fresh && page.can_start_fresh;
     let original = page
@@ -119,18 +119,15 @@ pub async fn page(
     if let Some(request) = &page.request
         && request.state == ghinvite_core::RequestState::Approved
     {
-        let progress = if let Some(lifecycle) = &state.request_lifecycle {
-            lifecycle
-                .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
-                    link_id: page.link_id,
-                    request_id: request.request_id,
-                    requester_id: session.user_id,
-                })
-                .await
-                .ok()
-        } else {
-            None
-        };
+        let progress = state
+            .request_lifecycle
+            .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
+                link_id: page.link_id,
+                request_id: request.request_id,
+                requester_id: session.user_id,
+            })
+            .await
+            .ok();
         let receipts = state
             .storage
             .list_delivery_for_request(request.request_id)
@@ -418,7 +415,7 @@ pub(crate) fn safe_error(code: &str, error: WebError) -> Response {
 
 fn page_error(session: &Session, code: &str, error: WebError) -> Response {
     if matches!(error, WebError::NotFound) {
-        super::invitation::invitation_not_found_response(session)
+        super::invitation_not_found_response(session)
     } else {
         safe_error(code, error)
     }

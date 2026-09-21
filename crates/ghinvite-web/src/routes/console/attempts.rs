@@ -225,39 +225,31 @@ pub(super) async fn page(
     };
     let result = match &command {
         Command::Decision(c) => {
-            let result = match &state.request_lifecycle {
-                Some(l) => l.decision_status(c.clone()).await,
-                None => Err(crate::WebError::NotFound),
-            };
+            let result = state.request_lifecycle.decision_status(c.clone()).await;
             return match result {
                 Ok(Some(receipt)) => decision_response(&admin, &command, &receipt),
                 Ok(None) | Err(crate::WebError::NotFound) => unknown(&admin, &command),
                 Err(e) => failed(&admin, &command, e),
             };
         }
-        Command::Create(c) => match &state.admission {
-            Some(a) => a
-                .link_status(AdminLinkCommand {
-                    link_id: c.link_id,
-                    admin: c.admin.clone(),
-                })
-                .await
-                .and_then(|link| {
-                    if link.creation == *c {
-                        Ok(Some("Invitation link created."))
-                    } else {
-                        Err(crate::WebError::Conflict)
-                    }
-                }),
-            None => Err(crate::WebError::NotFound),
-        },
-        Command::Revoke(c) => match &state.admission {
-            Some(a) => a.link_status(c.clone()).await.map(|link| {
-                link.revoked_at
-                    .map(|_| "Invitation link stopped accepting new invitation requests.")
+        Command::Create(c) => state
+            .admission
+            .link_status(AdminLinkCommand {
+                link_id: c.link_id,
+                admin: c.admin.clone(),
+            })
+            .await
+            .and_then(|link| {
+                if link.creation == *c {
+                    Ok(Some("Invitation link created."))
+                } else {
+                    Err(crate::WebError::Conflict)
+                }
             }),
-            None => Err(crate::WebError::NotFound),
-        },
+        Command::Revoke(c) => state.admission.link_status(c.clone()).await.map(|link| {
+            link.revoked_at
+                .map(|_| "Invitation link stopped accepting new invitation requests.")
+        }),
     };
     match result {
         Ok(Some(message)) => render_attempt(&admin, &command, StatusCode::OK, message, false),
@@ -307,10 +299,7 @@ pub(super) async fn execute(
     }
     let result = match &command {
         Command::Decision(c) => {
-            let result = match &state.request_lifecycle {
-                Some(l) => l.decide(c.clone()).await,
-                None => Err(crate::WebError::NotFound),
-            };
+            let result = state.request_lifecycle.decide(c.clone()).await;
             return match result {
                 Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
                     decision_response(admin, &command, &receipt)
@@ -333,14 +322,8 @@ pub(super) async fn execute(
                 Err(e) => failed(admin, &command, e),
             };
         }
-        Command::Create(c) => match &state.admission {
-            Some(a) => a.create(c.clone()).await.map(|_| ()),
-            None => Err(crate::WebError::NotFound),
-        },
-        Command::Revoke(c) => match &state.admission {
-            Some(a) => a.revoke(c.clone()).await.map(|_| ()),
-            None => Err(crate::WebError::NotFound),
-        },
+        Command::Create(c) => state.admission.create(c.clone()).await.map(|_| ()),
+        Command::Revoke(c) => state.admission.revoke(c.clone()).await.map(|_| ()),
     };
     match result {
         Ok(()) => Redirect::to(&format!(

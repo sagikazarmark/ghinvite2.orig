@@ -16,25 +16,14 @@ use restate_sdk::{
 };
 
 #[restate_sdk::object]
-pub trait GithubCreateV1 {
-    async fn project_import() -> Result<(), TerminalError>;
-    async fn import_receipt(input: Json<ImportReceipt>) -> Result<(), TerminalError>;
+pub trait GithubCreate {
     async fn create(input: Json<CreateCommand>) -> Result<Json<CreateReceipt>, TerminalError>;
     async fn recheck(input: Json<CreateCommand>) -> Result<(), TerminalError>;
     #[shared]
     async fn status() -> Result<Json<Option<CreateReceipt>>, TerminalError>;
 }
 
-#[derive(
-    Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
-)]
-pub struct ImportReceipt {
-    pub migration_id: String,
-    pub manifest_checksum: String,
-    pub receipt: CreateReceipt,
-}
-
-pub struct GithubCreateV1Impl {
+pub struct GithubCreateImpl {
     state: AppState,
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<DeliveryFaults>>,
@@ -51,14 +40,14 @@ pub struct DeliveryFaults {
 pub fn bind(builder: Builder, state: AppState) -> Builder {
     builder
         .bind(
-            GithubCreateV1Impl {
+            GithubCreateImpl {
                 state,
                 #[cfg(feature = "integration")]
                 faults: None,
             }
             .serve(),
         )
-        .bind(DeliveryRecoveryV1Impl.serve())
+        .bind(DeliveryRecoveryImpl.serve())
 }
 
 #[cfg(feature = "integration")]
@@ -69,35 +58,34 @@ pub fn bind_with_faults(
 ) -> Builder {
     builder
         .bind(
-            GithubCreateV1Impl {
+            GithubCreateImpl {
                 state,
                 faults: Some(faults),
             }
             .serve(),
         )
-        .bind(DeliveryRecoveryV1Impl.serve())
+        .bind(DeliveryRecoveryImpl.serve())
 }
 
 #[restate_sdk::service]
-pub trait DeliveryRecoveryV1 {
+pub trait DeliveryRecovery {
     async fn recover(
-        input: Json<crate::admission_v1::RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError>;
+        input: Json<crate::admission::RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError>;
 }
-pub struct DeliveryRecoveryV1Impl;
-impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
+pub struct DeliveryRecoveryImpl;
+impl DeliveryRecovery for DeliveryRecoveryImpl {
     async fn recover(
         &self,
         ctx: Context<'_>,
-        Json(query): Json<crate::admission_v1::RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError> {
-        let link = ctx.object_client::<crate::admission_v1::InvitationLinkV1Client>(
-            query.link_id.to_string(),
-        );
+        Json(query): Json<crate::admission::RequestStatus>,
+    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError> {
+        let link =
+            ctx.object_client::<crate::admission::InvitationLinkClient>(query.link_id.to_string());
         let Json(plan) = link.prepare_dispatch(Json(query.clone())).call().await?;
         for command in &plan.commands {
             let receiver =
-                ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string());
+                ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string());
             let Json(receipt) = receiver.status().call().await?;
             if let Some(receipt) = receipt
                 && receipt.command != *command
@@ -115,7 +103,7 @@ impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
                 .await?
                 .invocation_id()
                 .to_owned();
-            link.record_submitted(Json(crate::request_lifecycle_v1::SubmittedCommand {
+            link.record_submitted(Json(crate::request_lifecycle::SubmittedCommand {
                 command: command.clone(),
                 invocation_id,
             }))
@@ -126,63 +114,7 @@ impl DeliveryRecoveryV1 for DeliveryRecoveryV1Impl {
     }
 }
 
-impl GithubCreateV1 for GithubCreateV1Impl {
-    async fn project_import(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
-        let Json(mut receipt) = ctx
-            .get::<Json<CreateReceipt>>("v1/receipt")
-            .await?
-            .ok_or_else(|| TerminalError::new_with_code(404, "receipt missing"))?;
-        retain_recovery_time(&ctx, &mut receipt).await?;
-        ctx.run(|| async { project(&self.state, &receipt).await })
-            .name("project_imported_receipt")
-            .await
-    }
-    async fn import_receipt(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<ImportReceipt>,
-    ) -> Result<(), TerminalError> {
-        let conflict = || TerminalError::new_with_code(409, "receipt import conflict");
-        if ctx.key() != input.receipt.command.invitation_id.to_string()
-            || input.migration_id.is_empty()
-            || input.manifest_checksum.len() != 64
-            || input.receipt.revision == 0
-            || input.receipt.command.version != 1
-        {
-            return Err(conflict());
-        }
-        if let Some(Json(old)) = ctx
-            .get::<Json<ImportReceipt>>("migration/v1/source")
-            .await?
-        {
-            return if old == input {
-                Ok(())
-            } else {
-                Err(conflict())
-            };
-        }
-        if !ctx.get_keys().await?.is_empty() {
-            return Err(conflict());
-        }
-        // Unknown legacy effects remain fenced even if SQL is restored without
-        // its invitation row. Never permit the first guarded PUT on redrive.
-        if matches!(input.receipt.outcome, CreateOutcome::OutcomeUnknown) {
-            ctx.run(|| async {
-                self.state
-                    .storage
-                    .claim_delivery_attempt(&input.receipt.command)
-                    .await
-                    .map(|_| ())
-                    .map_err(HandlerError::from)
-            })
-            .name("import_uncertain_http_fence")
-            .await?;
-        }
-        ctx.set("v1/input", Json(input.receipt.command.clone()));
-        ctx.set("v1/receipt", Json(input.receipt.clone()));
-        ctx.set("migration/v1/source", Json(input));
-        Ok(())
-    }
+impl GithubCreate for GithubCreateImpl {
     async fn recheck(
         &self,
         ctx: ObjectContext<'_>,
@@ -199,7 +131,7 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             ));
         }
         ctx.clear("v1/recheck_scheduled");
-        ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
+        ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
             .create(Json(command))
             .send()
             .await?;
@@ -249,10 +181,8 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             return Ok(Json(receipt.clone()));
         }
         let Json(plan) = ctx
-            .object_client::<crate::admission_v1::InvitationLinkV1Client>(
-                command.link_id.to_string(),
-            )
-            .prepare_dispatch(Json(crate::admission_v1::RequestStatus {
+            .object_client::<crate::admission::InvitationLinkClient>(command.link_id.to_string())
+            .prepare_dispatch(Json(crate::admission::RequestStatus {
                 link_id: command.link_id,
                 request_id: command.request_id,
                 requester_id: command.requester_id,
@@ -335,7 +265,7 @@ impl GithubCreateV1 for GithubCreateV1Impl {
             let wait =
                 throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
             ctx.set("v1/recheck_scheduled", true);
-            ctx.object_client::<GithubCreateV1Client>(command.invitation_id.to_string())
+            ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
                 .recheck(Json(command))
                 .send_after(wait)
                 .await?;
@@ -443,7 +373,7 @@ async fn attempt(
             }
             .into());
         }
-        // Fence ambiguous legacy Sending/terminal rows before reconciliation.
+        // Fence ambiguous Sending/terminal rows before reconciliation.
         if has_no_retained_receipt {
             state.storage.claim_delivery_attempt(command).await?;
         }

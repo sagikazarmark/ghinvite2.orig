@@ -29,10 +29,10 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     const onboard = installation_id => ({ installation_id, actor_user_id: 7, account_id: account,
       account_login: 'stale-webhook-name', account_type: 'Organization', selected_repos: 'all', installed_at: '2026-01-01T00:00:00Z' });
     const event = (installation, handler, body) => http(`${ingress}/Installation/${installation}/${handler}`, body);
-    const status = () => http(`${ingress}/AccountInstallationV1/${account}/status`);
+    const status = () => http(`${ingress}/AccountInstallation/${account}/status`);
     const input = { ...creation(), account_id: account, installation_id: current, admin: { account_id: account, user_id: 7 },
       max_uses: 3, repos: [{ repo_id: 10, repo_full_name: 'acme/repo-10' }, { repo_id: 110, repo_full_name: 'acme/repo-110' }] };
-    const call = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
+    const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
     const attempt = requester_id => ({ version: 1, link_id: input.link_id, operation_id: id(), requester_id });
     await event(current, 'onboard', onboard(current));
     await call('create', input);
@@ -44,13 +44,13 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     // of the preceding unavailable case's fail-closed projection.
     const scope = Array.from({ length: 101 }, (_, n) => n + 10);
     mode = 'available';
-    await http(`${ingress}/AccountInstallationV1/${account}/refresh`, current);
+    await http(`${ingress}/AccountInstallation/${account}/refresh`, current);
     await eventually(() => storage('installation', current), row => row?.selected_repos?.length === 101);
     assert.deepEqual((await storage('installation', current)).selected_repos, scope);
     pages.length = 0;
     mode = 'incomplete';
     const retry = attempt(91);
-    const response = await fetch(`${ingress}/InvitationLinkV1/${input.link_id}/admit`, {
+    const response = await fetch(`${ingress}/InvitationLink/${input.link_id}/admit`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(retry), signal: AbortSignal.timeout(25_000),
     });
     assert.equal(response.status, 503, await response.text());

@@ -1,4 +1,4 @@
-//! Invitation-keyed settlement. New handlers leave deployed legacy journals intact.
+//! Invitation-keyed settlement.
 use crate::{AppState, github_invitation::*};
 use chrono::{DateTime, Utc};
 use ghinvite_core::{
@@ -24,7 +24,7 @@ pub fn eligible(row: &GithubInvitation) -> bool {
     row.state == InvitationState::Sent && row.github_invitation_id.is_some()
 }
 
-/// Read-only observation: unknown creates belong exclusively to GithubCreateV1.
+/// Read-only observation: unknown creates belong exclusively to GithubCreate.
 pub async fn observe(
     state: &AppState,
     row: &GithubInvitation,
@@ -169,7 +169,7 @@ pub async fn reconcile(
         .await
         .map_err(crate::error::to_sdk_handler_error)
     })
-    .name("settle_reconciled_v1")
+    .name("settle_reconciled")
     .await
 }
 
@@ -200,7 +200,7 @@ pub async fn webhook(
         .await
         .map_err(crate::error::to_sdk_handler_error)
     })
-    .name("settle_webhook_v1")
+    .name("settle_webhook")
     .await
 }
 
@@ -222,7 +222,7 @@ pub async fn cancel(
         .await
         .map_err(crate::error::to_sdk_handler_error)
     })
-    .name("settle_cancel_v1")
+    .name("settle_cancel")
     .await
 }
 
@@ -244,7 +244,7 @@ pub async fn expire(
         .await
         .map_err(crate::error::to_sdk_handler_error)
     })
-    .name("settle_expire_v1")
+    .name("settle_expire")
     .await
 }
 

@@ -1,8 +1,8 @@
-//! Isolated, link-ID-keyed admission protocol (ADR 0003).
+//! Link-ID-keyed admission protocol (ADR 0003).
 //!
-//! Bind explicitly with [`bind`]; the legacy endpoint does not register this
-//! service. Ingress is private: the trusted caller authenticates requesters and
-//! verifies current GitHub account-admin authority before constructing commands.
+//! Bind with [`bind`]. Ingress is private: the trusted caller authenticates
+//! requesters and verifies current GitHub account-admin authority before
+//! constructing commands.
 //! Identity fields are assertions from that caller, never browser form authority.
 //! Installation observations come from the account object, after receipt replay.
 
@@ -89,17 +89,18 @@ impl WorkflowEnvelope {
     }
 }
 
-/// Internal durable projection consumer; bind via `projection_v1::bind`.
-#[restate_sdk::service]
-pub trait InvitationProjectionV1 {
+/// Internal durable projection consumer, keyed by link ID so each link's
+/// transitions apply in send order; bind via `projection::bind`.
+#[restate_sdk::object]
+pub trait InvitationProjection {
     async fn apply_transition(input: Json<ProjectionEnvelope>) -> Result<(), TerminalError>;
 }
 
 #[restate_sdk::workflow]
-pub trait InvitationRequestV1 {
+pub trait InvitationRequest {
     async fn run(
         input: Json<WorkflowEnvelope>,
-    ) -> Result<Json<crate::request_lifecycle_v1::WorkflowResult>, TerminalError>;
+    ) -> Result<Json<crate::request_lifecycle::WorkflowResult>, TerminalError>;
     #[shared]
     async fn notify(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
     #[shared]
@@ -141,7 +142,7 @@ async fn send_projection(
     ctx: &ObjectContext<'_>,
     envelope: ProjectionEnvelope,
 ) -> Result<(), TerminalError> {
-    ctx.service_client::<InvitationProjectionV1Client>()
+    ctx.object_client::<InvitationProjectionClient>(envelope.link.link_id.to_string())
         .apply_transition(Json(envelope))
         .send()
         .await?;
@@ -153,12 +154,12 @@ pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
 
 /// Private, immutable routing registry; never consults SQL or calls a link.
 #[restate_sdk::object]
-pub trait InvitationCodeV1 {
+pub trait InvitationCode {
     async fn register(input: Json<InvitationLinkId>) -> Result<(), TerminalError>;
     async fn resolve(input: Json<()>) -> Result<Json<InvitationLinkId>, TerminalError>;
 }
-struct InvitationCodeV1Impl;
-impl InvitationCodeV1 for InvitationCodeV1Impl {
+struct InvitationCodeImpl;
+impl InvitationCode for InvitationCodeImpl {
     async fn register(
         &self,
         ctx: ObjectContext<'_>,
@@ -185,22 +186,7 @@ impl InvitationCodeV1 for InvitationCodeV1Impl {
 }
 
 #[restate_sdk::object]
-pub trait InvitationLinkV1 {
-    async fn verify_import(
-        input: Json<crate::migration_v1::HandoffImport>,
-    ) -> Result<Json<crate::migration_v1::VerifyImport>, TerminalError>;
-    async fn handoff_import(
-        input: Json<crate::migration_v1::HandoffImport>,
-    ) -> Result<(), TerminalError>;
-    async fn import_request(
-        input: Json<crate::migration_v1::ImportRequest>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
-    async fn begin_import(
-        input: Json<crate::migration_v1::BeginImport>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
-    async fn activate_import(
-        input: Json<crate::migration_v1::ActivateImport>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError>;
+pub trait InvitationLink {
     async fn update_metadata(
         input: Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError>;
@@ -223,16 +209,13 @@ pub trait InvitationLinkV1 {
     ) -> Result<Json<Option<DecisionReceipt>>, TerminalError>;
     async fn prepare_dispatch(
         input: Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
-    async fn retain_dispatch(
-        input: Json<crate::request_lifecycle_v1::ApprovedDispatch>,
-    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError>;
+    ) -> Result<Json<crate::request_lifecycle::ApprovedDispatch>, TerminalError>;
     async fn record_submitted(
-        input: Json<crate::request_lifecycle_v1::SubmittedCommand>,
+        input: Json<crate::request_lifecycle::SubmittedCommand>,
     ) -> Result<(), TerminalError>;
     async fn delivery_status(
         input: Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError>;
+    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError>;
     async fn delivery_progress(
         input: Json<RequestStatus>,
     ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError>;
@@ -241,7 +224,7 @@ pub trait InvitationLinkV1 {
 }
 
 #[derive(Default)]
-pub struct InvitationLinkV1Impl {
+pub struct InvitationLinkImpl {
     #[cfg(feature = "integration")]
     skip_availability: bool,
     #[cfg(feature = "integration")]
@@ -275,7 +258,7 @@ impl Faults {
     }
 }
 
-impl InvitationLinkV1Impl {
+impl InvitationLinkImpl {
     async fn transition(
         &self,
         ctx: &ObjectContext<'_>,
@@ -311,7 +294,7 @@ impl InvitationLinkV1Impl {
                     clear_blocker,
                 }))
             })
-            .name("decide_lifecycle_v1")
+            .name("decide_lifecycle")
             .await?;
         self.checkpoint(ctx, "lifecycle-after-decision").await?;
         if let Some(envelope) = decision.projection {
@@ -442,7 +425,7 @@ async fn send_terminal(
         .decision
         .as_ref()
         .ok_or_else(|| TerminalError::new_with_code(500, "terminal decision missing"))?;
-    ctx.workflow_client::<InvitationRequestV1Client>(request.request_id.to_string())
+    ctx.workflow_client::<InvitationRequestClient>(request.request_id.to_string())
         .notify(Json(TerminalSignal {
             link_id: request.link_id,
             request_id: request.request_id,
@@ -456,45 +439,39 @@ async fn send_terminal(
 
 #[cfg(feature = "integration")]
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Builder {
-    builder
-        .bind(InvitationCodeV1Impl.serve())
-        .bind_with_options(
-            InvitationLinkV1Impl {
-                faults: Some(faults),
-                skip_availability: true,
-            }
-            .serve(),
-            ServiceOptions::new()
-                .enable_lazy_state(true)
-                .idempotency_retention(std::time::Duration::from_secs(2))
-                .journal_retention(std::time::Duration::from_secs(2)),
-        )
+    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
+        InvitationLinkImpl {
+            faults: Some(faults),
+            skip_availability: true,
+        }
+        .serve(),
+        ServiceOptions::new()
+            .enable_lazy_state(true)
+            .idempotency_retention(std::time::Duration::from_secs(2))
+            .journal_retention(std::time::Duration::from_secs(2)),
+    )
 }
 
-/// Explicit opt-in for the isolated command path. Lazy state is required, not
+/// Bind the admission objects. Lazy state is required, not
 /// an optimization: retained operation/request history must never load eagerly.
 pub fn bind(builder: Builder) -> Builder {
-    builder
-        .bind(InvitationCodeV1Impl.serve())
-        .bind_with_options(
-            InvitationLinkV1Impl::default().serve(),
-            ServiceOptions::new().enable_lazy_state(true),
-        )
+    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
+        InvitationLinkImpl::default().serve(),
+        ServiceOptions::new().enable_lazy_state(true),
+    )
 }
 
 /// Isolated protocol fixtures supply no installation integration.
 #[cfg(feature = "integration")]
 pub fn bind_protocol_fixture(builder: Builder) -> Builder {
-    builder
-        .bind(InvitationCodeV1Impl.serve())
-        .bind_with_options(
-            InvitationLinkV1Impl {
-                skip_availability: true,
-                faults: None,
-            }
-            .serve(),
-            ServiceOptions::new().enable_lazy_state(true),
-        )
+    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
+        InvitationLinkImpl {
+            skip_availability: true,
+            faults: None,
+        }
+        .serve(),
+        ServiceOptions::new().enable_lazy_state(true),
+    )
 }
 
 fn invalid() -> TerminalError {
@@ -531,46 +508,11 @@ fn conflict() -> TerminalError {
     TerminalError::new_with_code(409, "operation conflict")
 }
 
-pub(crate) fn validate_import_plan(
-    link: &LinkSnapshot,
-    request: &RequestSnapshot,
-    plan: &crate::request_lifecycle_v1::ApprovedDispatch,
-) -> Result<(), TerminalError> {
-    let expected = WorkflowEnvelope::from_authority(link, request.clone());
-    if plan.dispatch_id != format!("v1/dispatch/{}", request.request_id)
-        || plan.input != expected
-        || request.state != RequestState::Approved
-        || plan.commands.len() != expected.repos.len()
-    {
-        return Err(conflict());
-    }
-    let approval = request.decision.as_ref().ok_or_else(conflict)?;
-    let mut ids = std::collections::HashSet::new();
-    for (command, repo) in plan.commands.iter().zip(&expected.repos) {
-        if command.version != 1
-            || command.link_id != link.link_id
-            || command.request_id != request.request_id
-            || command.approval_id != approval.decision_id
-            || command.approved_at != approval.effective_at
-            || command.account_id != link.creation.account_id
-            || command.installation_id != expected.installation_id
-            || command.requester_id != request.requester_id
-            || command.permission != expected.permission
-            || command.repo_id != repo.repo_id
-            || command.repo_full_name != repo.repo_full_name
-            || !ids.insert(command.invitation_id)
-        {
-            return Err(conflict());
-        }
-    }
-    Ok(())
-}
-
 async fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), TerminalError> {
     if ctx.key() != id.to_string() {
         return Err(missing());
     }
-    crate::migration_v1::ensure_open(ctx).await
+    Ok(())
 }
 
 async fn validate_signal(
@@ -647,44 +589,7 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
     Ok(input)
 }
 
-impl InvitationLinkV1 for InvitationLinkV1Impl {
-    async fn verify_import(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<crate::migration_v1::HandoffImport>,
-    ) -> Result<Json<crate::migration_v1::VerifyImport>, TerminalError> {
-        crate::migration_v1::verify(&ctx, input).await.map(Json)
-    }
-    async fn handoff_import(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<crate::migration_v1::HandoffImport>,
-    ) -> Result<(), TerminalError> {
-        crate::migration_v1::handoff(&ctx, input).await
-    }
-    async fn import_request(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<crate::migration_v1::ImportRequest>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
-        let result = crate::migration_v1::import_request(&ctx, input).await?;
-        self.checkpoint(&ctx, "migration-after-item").await?;
-        Ok(Json(result))
-    }
-    async fn begin_import(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<crate::migration_v1::BeginImport>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
-        crate::migration_v1::begin(&ctx, input).await.map(Json)
-    }
-    async fn activate_import(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<crate::migration_v1::ActivateImport>,
-    ) -> Result<Json<crate::migration_v1::ImportStatus>, TerminalError> {
-        crate::migration_v1::activate(&ctx, input).await.map(Json)
-    }
+impl InvitationLink for InvitationLinkImpl {
     async fn update_metadata(
         &self,
         ctx: ObjectContext<'_>,
@@ -732,7 +637,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                 event.event_id = format!("v1/link/{}/metadata/{}", link.link_id, link.revision);
                 Ok::<_, HandlerError>(Json(event))
             })
-            .name("metadata_event_v1")
+            .name("metadata_event")
             .await?;
         ctx.set("v1/link", Json(link.clone()));
         send_projection(&ctx, projection(&link, vec![], vec![event])).await?;
@@ -917,7 +822,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             .await?
             .ok_or_else(missing)?;
         let plan = ctx
-            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+            .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
                 "v1/dispatch/{}",
                 query.request_id
             ))
@@ -931,7 +836,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     .find(|c| c.repo_id == repo.repo_id)
                     .ok_or_else(conflict)?;
                 if ctx
-                    .get::<Json<crate::request_lifecycle_v1::SubmittedCommand>>(&format!(
+                    .get::<Json<crate::request_lifecycle::SubmittedCommand>>(&format!(
                         "v1/submitted/{}",
                         command.invitation_id
                     ))
@@ -975,47 +880,15 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         ))
     }
 
-    async fn retain_dispatch(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(plan): Json<crate::request_lifecycle_v1::ApprovedDispatch>,
-    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
-        // Trusted migration/repair interface: imported identities are supplied
-        // before first prepare, never inferred from a lagging SQL row.
-        validate_key(&ctx, plan.input.request.link_id).await?;
-        let request_id = plan.input.request.request_id;
-        let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&format!("v1/request/{request_id}"))
-            .await?
-            .ok_or_else(missing)?;
-        let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
-            .await?
-            .ok_or_else(missing)?;
-        let key = format!("v1/dispatch/{request_id}");
-        validate_import_plan(&link, &request, &plan)?;
-        if let Some(Json(old)) = ctx
-            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&key)
-            .await?
-        {
-            if old != plan {
-                return Err(conflict());
-            }
-            return Ok(Json(old));
-        }
-        ctx.set(&key, Json(plan.clone()));
-        Ok(Json(plan))
-    }
-
     async fn record_submitted(
         &self,
         ctx: ObjectContext<'_>,
-        Json(submitted): Json<crate::request_lifecycle_v1::SubmittedCommand>,
+        Json(submitted): Json<crate::request_lifecycle::SubmittedCommand>,
     ) -> Result<(), TerminalError> {
         let command = &submitted.command;
         validate_key(&ctx, command.link_id).await?;
         let Json(plan) = ctx
-            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+            .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
                 "v1/dispatch/{}",
                 command.request_id
             ))
@@ -1026,7 +899,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         }
         let key = format!("v1/submitted/{}", command.invitation_id);
         if ctx
-            .get::<Json<crate::request_lifecycle_v1::SubmittedCommand>>(&key)
+            .get::<Json<crate::request_lifecycle::SubmittedCommand>>(&key)
             .await?
             .is_none()
         {
@@ -1039,10 +912,10 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         &self,
         ctx: ObjectContext<'_>,
         Json(query): Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::DeliveryStatus>, TerminalError> {
+    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError> {
         validate_key(&ctx, query.link_id).await?;
         let Json(plan) = ctx
-            .get::<Json<crate::request_lifecycle_v1::ApprovedDispatch>>(&format!(
+            .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
                 "v1/dispatch/{}",
                 query.request_id
             ))
@@ -1060,7 +933,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                 submitted.push(record);
             }
         }
-        Ok(Json(crate::request_lifecycle_v1::DeliveryStatus {
+        Ok(Json(crate::request_lifecycle::DeliveryStatus {
             plan,
             submitted,
         }))
@@ -1070,7 +943,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         &self,
         ctx: ObjectContext<'_>,
         Json(input): Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle_v1::ApprovedDispatch>, TerminalError> {
+    ) -> Result<Json<crate::request_lifecycle::ApprovedDispatch>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(request) = ctx
             .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
@@ -1112,13 +985,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                         approved_at: decision.effective_at,
                     })
                     .collect();
-                Ok::<_, HandlerError>(Json(crate::request_lifecycle_v1::ApprovedDispatch {
+                Ok::<_, HandlerError>(Json(crate::request_lifecycle::ApprovedDispatch {
                     dispatch_id: key.clone(),
                     input: WorkflowEnvelope::from_authority(&link, request.clone()),
                     commands,
                 }))
             })
-            .name("retain_dispatch_plan_v1")
+            .name("retain_dispatch_plan")
             .await?;
         ctx.set(&key, Json(dispatch.clone()));
         Ok(Json(dispatch))
@@ -1201,7 +1074,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
         let check_availability = check_availability && !self.skip_availability;
         let (availability, availability_unknown) = if check_availability {
             let observation = ctx
-                .object_client::<crate::availability::AccountInstallationV1Client>(
+                .object_client::<crate::availability::AccountInstallationClient>(
                     link.creation.account_id.to_string(),
                 )
                 .eligibility(Json(crate::availability::Scope {
@@ -1347,7 +1220,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     }),
                 }))
             })
-            .name("decide_admission_v1")
+            .name("decide_admission")
             .await?;
         self.checkpoint(&ctx, "after-decision").await?;
         if decision.projection.is_some() {
@@ -1389,12 +1262,10 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
             self.checkpoint(&ctx, "after-old-notification-send").await?;
         }
         if let Some(envelope) = decision.workflow {
-            ctx.workflow_client::<InvitationRequestV1Client>(
-                envelope.request.request_id.to_string(),
-            )
-            .run(Json(envelope))
-            .send()
-            .await?;
+            ctx.workflow_client::<InvitationRequestClient>(envelope.request.request_id.to_string())
+                .run(Json(envelope))
+                .send()
+                .await?;
         }
         self.checkpoint(&ctx, "after-workflow-send").await?;
         match decision.operation {
@@ -1539,7 +1410,7 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                 link.revision += 1;
                 Ok::<_, HandlerError>(Json(link))
             })
-            .name("decide_revocation_v1")
+            .name("decide_revocation")
             .await?;
         ctx.set("v1/link", Json(link.clone()));
         send_projection(
@@ -1591,13 +1462,13 @@ impl InvitationLinkV1 for InvitationLinkV1Impl {
                     revoked_by: None,
                 }))
             })
-            .name("decide_creation_v1")
+            .name("decide_creation")
             .await?;
         ctx.set("v1/link", Json(link.clone()));
         ctx.set("v1/creation", Json(link.clone()));
         // Complete routing before acknowledging creation; this registry never
         // calls the link, avoiding an exclusive-object cycle.
-        ctx.object_client::<InvitationCodeV1Client>(&link.invitation_code)
+        ctx.object_client::<InvitationCodeClient>(&link.invitation_code)
             .register(Json(link.link_id))
             .call()
             .await?;

@@ -23,9 +23,8 @@ remain under #61.
    an unsigned direct request to that exact workflow version endpoint must be
    rejected. Confirm the signed invocation is pinned to its recorded deployment,
    and check alternate mutable/preview routes cannot accept unsigned calls either.
-4. Use a disposable GitHub App/account/repository and test users. Use the cutover
-   runbook before enabling authoritative admission; this gate is not permission
-   to change a live production account's admission mode.
+4. Use a disposable GitHub App/account/repository and test users; this gate is
+   not permission to open live production traffic.
 
 ## Verify the actual web bindings
 

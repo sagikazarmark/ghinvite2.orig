@@ -56,16 +56,14 @@ async fn member_webhook_ingress(
     let recorded = invocations.clone();
     let ingress = ingress.to_owned();
     let proxy = axum::Router::new().route(
-        "/GithubInvitation/{id}/on_webhook_v1/send",
+        "/GithubInvitation/{id}/on_webhook/send",
         post(move |Path(id): Path<String>, Json(input): Json<Value>| {
             let client = client.clone();
             let ingress = ingress.clone();
             let recorded = recorded.clone();
             async move {
                 let response = client
-                    .post(format!(
-                        "{ingress}/GithubInvitation/{id}/on_webhook_v1/send"
-                    ))
+                    .post(format!("{ingress}/GithubInvitation/{id}/on_webhook/send"))
                     .json(&input)
                     .send()
                     .await
@@ -90,12 +88,12 @@ async fn member_webhook_ingress(
     let proxy_server = tokio::spawn(async move {
         axum::serve(listener, proxy).await.unwrap();
     });
+    let restate = Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap());
     let state = ghinvite_web::AppState::new(
         storage,
         Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-        Arc::new(ghinvite_web::RestateCommands::new(Arc::new(
-            ghinvite_web::RestateClient::new(proxy_url).unwrap(),
-        ))),
+        Arc::new(ghinvite_web::RestateCommands::new(restate.clone())),
+        restate,
         ghinvite_web::WebConfig {
             webhook_secret: MEMBER_WEBHOOK_SECRET.to_vec(),
             ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
@@ -202,15 +200,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .with_base(&base),
     );
     let state = ghinvite_workflows::AppState::new(storage.clone(), github);
-    let builder = ghinvite_workflows::admission_v1::bind_protocol_fixture(Endpoint::builder());
-    let builder = ghinvite_workflows::projection_v1::bind(builder, storage.clone());
+    let builder = ghinvite_workflows::admission::bind_protocol_fixture(Endpoint::builder());
+    let builder = ghinvite_workflows::projection::bind(builder, storage.clone());
     let workflow_faults =
-        Arc::new(ghinvite_workflows::request_lifecycle_v1::WorkflowFaults::default());
-    let builder = ghinvite_workflows::request_lifecycle_v1::bind_with_faults(
-        builder,
-        workflow_faults.clone(),
-    );
-    let faults = Arc::new(ghinvite_workflows::delivery_v1::DeliveryFaults::default());
+        Arc::new(ghinvite_workflows::request_lifecycle::WorkflowFaults::default());
+    let builder =
+        ghinvite_workflows::request_lifecycle::bind_with_faults(builder, workflow_faults.clone());
+    let faults = Arc::new(ghinvite_workflows::delivery::DeliveryFaults::default());
     faults
         .lose_http_result
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -232,7 +228,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .serve(),
         );
     let endpoint =
-        ghinvite_workflows::delivery_v1::bind_with_faults(builder, state, faults.clone()).build();
+        ghinvite_workflows::delivery::bind_with_faults(builder, state, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -268,7 +264,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     };
     let creation = json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Delivery test","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]});
-    let response = call("InvitationLinkV1", link.to_string(), "create", creation)
+    let response = call("InvitationLink", link.to_string(), "create", creation)
         .send()
         .await
         .unwrap();
@@ -278,7 +274,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         response.text().await.unwrap()
     );
     let receipt: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         link.to_string(),
         "admit",
         json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
@@ -292,7 +288,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let request = receipt["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":link,"request_id":request,"requester_id":8});
     let plan: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         link.to_string(),
         "prepare_dispatch",
         query,
@@ -307,14 +303,14 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let id = command["invitation_id"].as_str().unwrap().to_owned();
     let completed = client
         .get(format!(
-            "{ingress}/restate/workflow/InvitationRequestV1/{request}/attach"
+            "{ingress}/restate/workflow/InvitationRequest/{request}/attach"
         ))
         .send()
         .await
         .unwrap();
     assert!(completed.status().is_success());
     let checkpoint: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         link.to_string(),
         "delivery_status",
         json!({"link_id":link,"request_id":request,"requester_id":8}),
@@ -331,7 +327,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .is_some(),
         "workflow must durably submit: {checkpoint}"
     );
-    let response = call("GithubCreateV1", id.clone(), "create", command.clone())
+    let response = call("GithubCreate", id.clone(), "create", command.clone())
         .send()
         .await
         .unwrap();
@@ -343,7 +339,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let result: Value = response.json().await.unwrap();
     assert_eq!(result["outcome"]["kind"], "created");
     let original_event = assert_create_audit(&*storage, &result).await.unwrap();
-    let replay: Value = call("GithubCreateV1", id.clone(), "create", command.clone())
+    let replay: Value = call("GithubCreate", id.clone(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -360,7 +356,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let mut changed = command.clone();
     changed["permission"] = json!("admin");
     assert_eq!(
-        call("GithubCreateV1", id, "create", changed)
+        call("GithubCreate", id, "create", changed)
             .send()
             .await
             .unwrap()
@@ -399,10 +395,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .await
             .unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
-        call("InvitationLinkV1",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+        call("InvitationLink",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
             "description":"Other result","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
         let admitted: Value = call(
-            "InvitationLinkV1",
+            "InvitationLink",
             link.to_string(),
             "admit",
             json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
@@ -415,7 +411,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let request = admitted["result"]["request_id"].as_str().unwrap();
         let plan: Value = call(
-            "InvitationLinkV1",
+            "InvitationLink",
             link.to_string(),
             "prepare_dispatch",
             json!({"link_id":link,"request_id":request,"requester_id":8}),
@@ -428,7 +424,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let command = plan["commands"][0].clone();
         let id = command["invitation_id"].as_str().unwrap().to_owned();
-        let result: Value = call("GithubCreateV1", id.clone(), "create", command.clone())
+        let result: Value = call("GithubCreate", id.clone(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -437,7 +433,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap();
         assert_eq!(result["outcome"]["kind"], expected);
         assert_create_audit(&*storage, &result).await;
-        let replay: Value = call("GithubCreateV1", id, "create", command)
+        let replay: Value = call("GithubCreate", id, "create", command)
             .send()
             .await
             .unwrap()
@@ -479,13 +475,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     }
     tokio::time::timeout(Duration::from_secs(15), async { loop {
         let response: Value = client.post(format!("{admin}/query")).header("accept","application/json")
-            .json(&json!({"query":format!("SELECT id FROM sys_invocation WHERE target_service_name = 'InvitationRequestV1' AND target_service_key = '{request}'")}))
+            .json(&json!({"query":format!("SELECT id FROM sys_invocation WHERE target_service_name = 'InvitationRequest' AND target_service_key = '{request}'")}))
             .send().await.unwrap().json().await.unwrap();
         if response["rows"].as_array().unwrap().is_empty() { break; }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }}).await.expect("actual workflow retention cleanup");
     let response = client
-        .post(format!("{ingress}/DeliveryRecoveryV1/recover"))
+        .post(format!("{ingress}/DeliveryRecovery/recover"))
         .json(&json!({"link_id":link,"request_id":request,"requester_id":8}))
         .send()
         .await
@@ -513,7 +509,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     let replay: Value = call(
-        "GithubCreateV1",
+        "GithubCreate",
         command["invitation_id"].as_str().unwrap().into(),
         "create",
         command.clone(),
@@ -540,7 +536,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let signal = json!({"link_id":link,"request_id":request,"revision":plan["input"]["request"]["revision"],"decision_id":command["approval_id"]});
     let needed: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         link.to_string(),
         "notification_needed",
         signal.clone(),
@@ -553,7 +549,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert_eq!(needed, false);
     assert!(
-        call("InvitationRequestV1", request.into(), "notify", signal)
+        call("InvitationRequest", request.into(), "notify", signal)
             .send()
             .await
             .unwrap()
@@ -562,7 +558,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let promise: Value = client
         .post(format!(
-            "{ingress}/InvitationRequestV1/{request}/notification_status"
+            "{ingress}/InvitationRequest/{request}/notification_status"
         ))
         .send()
         .await
@@ -599,9 +595,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .pause_after_send
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let partial_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLinkV1",partial_link.to_string(),"create",json!({"version":1,"link_id":partial_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    call("InvitationLink",partial_link.to_string(),"create",json!({"version":1,"link_id":partial_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Partial fanout","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]})).send().await.unwrap();
-    let admitted: Value = call("InvitationLinkV1",partial_link.to_string(),"admit",json!({"version":1,"link_id":partial_link,"requester_id":8,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
+    let admitted: Value = call("InvitationLink",partial_link.to_string(),"admit",json!({"version":1,"link_id":partial_link,"requester_id":8,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
     let partial_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":partial_link,"request_id":partial_request,"requester_id":8});
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -616,7 +612,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     let partial_plan: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         partial_link.to_string(),
         "prepare_dispatch",
         query.clone(),
@@ -627,37 +623,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .json()
     .await
     .unwrap();
-    assert!(
-        call(
-            "InvitationLinkV1",
-            partial_link.to_string(),
-            "retain_dispatch",
-            partial_plan.clone()
-        )
-        .send()
-        .await
-        .unwrap()
-        .status()
-        .is_success()
-    );
-    let mut changed_plan = partial_plan.clone();
-    changed_plan["commands"][0]["invitation_id"] = json!(ghinvite_core::GithubInvitationId::new());
-    assert_eq!(
-        call(
-            "InvitationLinkV1",
-            partial_link.to_string(),
-            "retain_dispatch",
-            changed_plan
-        )
-        .send()
-        .await
-        .unwrap()
-        .status(),
-        409
-    );
     let first = partial_plan["commands"][0].clone();
     call(
-        "GithubCreateV1",
+        "GithubCreate",
         first["invitation_id"].as_str().unwrap().into(),
         "create",
         first.clone(),
@@ -667,7 +635,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert!(
         call(
-            "InvitationLinkV1",
+            "InvitationLink",
             partial_link.to_string(),
             "revoke",
             json!({"link_id":partial_link,"admin":{"account_id":100,"user_id":7}})
@@ -679,7 +647,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .is_success()
     );
     let checkpoint: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         partial_link.to_string(),
         "delivery_status",
         query.clone(),
@@ -696,7 +664,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     let recovered = client
-        .post(format!("{ingress}/DeliveryRecoveryV1/recover"))
+        .post(format!("{ingress}/DeliveryRecovery/recover"))
         .json(&query)
         .send()
         .await
@@ -707,14 +675,14 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .store(false, std::sync::atomic::Ordering::SeqCst);
     client
         .get(format!(
-            "{ingress}/restate/workflow/InvitationRequestV1/{partial_request}/attach"
+            "{ingress}/restate/workflow/InvitationRequest/{partial_request}/attach"
         ))
         .send()
         .await
         .unwrap();
     for command in partial_plan["commands"].as_array().unwrap() {
         let response = call(
-            "GithubCreateV1",
+            "GithubCreate",
             command["invitation_id"].as_str().unwrap().into(),
             "create",
             command.clone(),
@@ -745,7 +713,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     let second = partial_plan["commands"][1].clone();
     let mismatch: Value = call(
-        "GithubCreateV1",
+        "GithubCreate",
         second["invitation_id"].as_str().unwrap().into(),
         "create",
         second.clone(),
@@ -765,7 +733,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     for command in partial_plan["commands"].as_array().unwrap() {
         let result: Value = call(
-            "GithubCreateV1",
+            "GithubCreate",
             command["invitation_id"].as_str().unwrap().into(),
             "create",
             command.clone(),
@@ -803,7 +771,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .any(|c| c["method"] == "PUT" && c["path"] == "/repos/acme/web/collaborators/renamed")
     );
     let checkpoint: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         partial_link.to_string(),
         "delivery_status",
         query,
@@ -817,7 +785,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(checkpoint["submitted"].as_array().unwrap().len(), 2);
     assert_eq!(checkpoint["plan"], partial_plan);
     let progress: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         partial_link.to_string(),
         "delivery_progress",
         json!({"link_id":partial_link,"request_id":partial_request,"requester_id":8}),
@@ -832,167 +800,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         progress,
         json!([{"repo_id":10,"stage":"submitted"},{"repo_id":11,"stage":"submitted"}])
     );
-    // Import a known Sent identity before first fan-out. Preparation must never
-    // allocate replacement IDs, even when the SQL receipt predates Restate.
     client.delete(format!("{base}/reset")).send().await.unwrap();
-    workflow_faults
-        .pause_before_dispatch
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let imported_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLinkV1",imported_link.to_string(),"create",json!({"version":1,"link_id":imported_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
-        "description":"Imported dispatch","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
-    let admitted: Value = call("InvitationLinkV1",imported_link.to_string(),"admit",json!({"version":1,"link_id":imported_link,"requester_id":8,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
-    let imported_request = admitted["result"]["request_id"].as_str().unwrap();
-    let query = json!({"link_id":imported_link,"request_id":imported_request,"requester_id":8});
-    let snapshot: Value = call(
-        "InvitationLinkV1",
-        imported_link.to_string(),
-        "request_status",
-        query.clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    let imported_id = ghinvite_core::GithubInvitationId::new();
-    let command = json!({"version":1,"invitation_id":imported_id,"link_id":imported_link,"request_id":imported_request,
-        "approval_id":snapshot["decision"]["decision_id"],"account_id":100,"installation_id":9,"requester_id":8,
-        "repo_id":10,"repo_full_name":"acme/api","permission":"push","approved_at":snapshot["decision"]["effective_at"]});
-    let imported_plan = json!({"dispatch_id":format!("v1/dispatch/{imported_request}"),"input":{"version":1,"request":snapshot,
-        "installation_id":9,"repos":[{"repo_id":10,"repo_full_name":"acme/api"}],"permission":"push","approval_required":false},"commands":[command]});
-    let response = call(
-        "InvitationLinkV1",
-        imported_link.to_string(),
-        "retain_dispatch",
-        imported_plan.clone(),
-    )
-    .send()
-    .await
-    .unwrap();
-    assert!(
-        response.status().is_success(),
-        "{}",
-        response.text().await.unwrap()
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while storage
-            .get_invitation_request(imported_request.parse().unwrap())
-            .await
-            .unwrap()
-            .is_none()
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .unwrap();
-    storage
-        .insert_github_invitation(&ghinvite_core::GithubInvitation {
-            id: imported_id,
-            invitation_request_id: imported_request.parse().unwrap(),
-            repo_id: 10,
-            github_invitation_id: Some(99123),
-            state: ghinvite_core::InvitationState::Sent,
-            error_message: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .unwrap();
-    workflow_faults
-        .pause_before_dispatch
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    let result: Value = call(
-        "GithubCreateV1",
-        imported_id.to_string(),
-        "create",
-        imported_plan["commands"][0].clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(
-        result["outcome"],
-        json!({"kind":"created","upstream_id":99123})
-    );
-    assert_eq!(result["recovered"], true);
-    assert_create_audit(&*storage, &result).await;
-    // A retained pre-#64 receipt gains a stable recovery observation on replay.
-    let mut old = result.clone();
-    old.as_object_mut().unwrap().remove("confirmed_at");
-    old.as_object_mut().unwrap().remove("recovered");
-    let old_id = ghinvite_core::GithubInvitationId::new();
-    old["command"]["invitation_id"] = json!(old_id);
-    let imported = call(
-        "GithubCreateV1",
-        old_id.to_string(),
-        "import_receipt",
-        json!({
-            "migration_id":"audit-recovery", "manifest_checksum":"a".repeat(64), "receipt":old
-        }),
-    )
-    .send()
-    .await
-    .unwrap();
-    assert!(imported.status().is_success());
-    let recovered: Value = call(
-        "GithubCreateV1",
-        old_id.to_string(),
-        "create",
-        old["command"].clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(recovered["recovered"], true);
-    let event = assert_create_audit(&*storage, &recovered).await.unwrap();
-    let replay: Value = call(
-        "GithubCreateV1",
-        old_id.to_string(),
-        "create",
-        old["command"].clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(replay, recovered);
-    assert_eq!(
-        assert_create_audit(&*storage, &replay).await.unwrap(),
-        event
-    );
-    let retained: Value = call(
-        "InvitationLinkV1",
-        imported_link.to_string(),
-        "prepare_dispatch",
-        query,
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(retained, imported_plan);
-    let calls: Value = client
-        .get(format!("{base}/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(calls["count"], 0);
     // Explicit 403 proves rejection, so restoration may safely try again.
     client
         .post(format!("{base}/identity"))
@@ -1010,7 +818,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     let rejected_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLinkV1",rejected_link.to_string(),"create",json!({"version":1,"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    call("InvitationLink",rejected_link.to_string(),"create",json!({"version":1,"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Access rejection","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
     storage
         .upsert_user(&ghinvite_core::User {
@@ -1021,11 +829,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         })
         .await
         .unwrap();
-    let admitted: Value = call("InvitationLinkV1",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
+    let admitted: Value = call("InvitationLink",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
     let rejected_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":84});
     let progress: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         rejected_link.to_string(),
         "delivery_progress",
         query.clone(),
@@ -1038,7 +846,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert_eq!(progress, json!([{"repo_id":10,"stage":"approved"}]));
     let plan: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         rejected_link.to_string(),
         "prepare_dispatch",
         query.clone(),
@@ -1050,7 +858,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     let progress: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         rejected_link.to_string(),
         "delivery_progress",
         query,
@@ -1064,7 +872,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(progress, json!([{"repo_id":10,"stage":"planned"}]));
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
-    let rejected: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+    let rejected: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1082,7 +890,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     let sweep = client
-        .post(format!("{ingress}/Reconcile/daily_run_v1"))
+        .post(format!("{ingress}/Reconcile/daily_run"))
         .json(&json!({"at":chrono::Utc::now()}))
         .send()
         .await
@@ -1107,7 +915,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .send()
         .await
         .unwrap();
-    let resumed: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+    let resumed: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1165,14 +973,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let evidence = json!({"expected":sent,"accepted":false,"at":chrono::Utc::now()});
     let (a, b, duplicate) = tokio::join!(
-        call(
-            "GithubInvitation",
-            id.into(),
-            "reconcile_v1",
-            evidence.clone()
-        )
-        .send(),
-        call("GithubInvitation", id.into(), "reconcile_v1", evidence).send(),
+        call("GithubInvitation", id.into(), "reconcile", evidence.clone()).send(),
+        call("GithubInvitation", id.into(), "reconcile", evidence).send(),
         send_signed_member(&client, &web_url, "member-2", &payload)
     );
     assert!(a.unwrap().status().is_success());
@@ -1256,10 +1058,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         client.delete(format!("{base}/reset")).send().await.unwrap();
         client.post(format!("{base}/outcomes")).json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_then_declined"})).send().await.unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
-        call("InvitationLinkV1",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+        call("InvitationLink",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
             "description":"Role reconciliation","approval_required":false,"permission":role,"repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
         let admitted: Value = call(
-            "InvitationLinkV1",
+            "InvitationLink",
             link.to_string(),
             "admit",
             json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
@@ -1271,7 +1073,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
         let plan: Value = call(
-            "InvitationLinkV1",
+            "InvitationLink",
             link.to_string(),
             "prepare_dispatch",
             json!({"link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8}),
@@ -1284,7 +1086,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let command = plan["commands"][0].clone();
         let id = command["invitation_id"].as_str().unwrap();
-        let unknown: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+        let unknown: Value = call("GithubCreate", id.into(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -1298,7 +1100,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .send()
             .await
             .unwrap();
-        let reconciled: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+        let reconciled: Value = call("GithubCreate", id.into(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -1327,14 +1129,14 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // #65: approval and scope belong to A even when delivery resumes through B.
     client.delete(format!("{base}/reset")).send().await.unwrap();
     let historical_link = ghinvite_core::InvitationLinkId::new();
-    let created = call("InvitationLinkV1", historical_link.to_string(), "create", json!({
+    let created = call("InvitationLink", historical_link.to_string(), "create", json!({
         "version":1,"link_id":historical_link,"account_id":100,"installation_id":9,
         "admin":{"account_id":100,"user_id":7},"description":"Reinstalled account",
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
     assert!(created.status().is_success());
     let admitted: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         historical_link.to_string(),
         "admit",
         json!({
@@ -1349,7 +1151,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     let query = json!({"link_id":historical_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
     let plan: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         historical_link.to_string(),
         "prepare_dispatch",
         query.clone(),
@@ -1366,7 +1168,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .mark_installation_uninstalled(9, chrono::Utc::now())
         .await
         .unwrap();
-    let blocked: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+    let blocked: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1379,7 +1181,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     replacement.installed_at = chrono::Utc::now();
     replacement.uninstalled_at = None;
     storage.insert_installation(&replacement).await.unwrap();
-    let delivered: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+    let delivered: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1518,7 +1320,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         original_deliveries
     );
     let retained_plan: Value = call(
-        "InvitationLinkV1",
+        "InvitationLink",
         historical_link.to_string(),
         "prepare_dispatch",
         query,
@@ -1550,17 +1352,17 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // than the slow dependency cadence. The object lock is released for that
     // wait, so the status reads below do not queue behind the retry.
     let throttled_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLinkV1", throttled_link.to_string(), "create", json!({
+    call("InvitationLink", throttled_link.to_string(), "create", json!({
         "version":1,"link_id":throttled_link,"account_id":100,"installation_id":19,
         "admin":{"account_id":100,"user_id":7},"description":"Throttled delivery",
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
     let key = throttled_link.to_string();
     let admit = json!({"version":1,"link_id":throttled_link,"requester_id":8,"operation_id":RequestId::new()});
-    let admitted = call("InvitationLinkV1", key.clone(), "admit", admit);
+    let admitted = call("InvitationLink", key.clone(), "admit", admit);
     let admitted: Value = admitted.send().await.unwrap().json().await.unwrap();
     let query = json!({"link_id":throttled_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
-    let plan = call("InvitationLinkV1", key, "prepare_dispatch", query);
+    let plan = call("InvitationLink", key, "prepare_dispatch", query);
     let plan: Value = plan.send().await.unwrap().json().await.unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
@@ -1570,7 +1372,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .send()
         .await
         .unwrap();
-    let throttled: Value = call("GithubCreateV1", id.into(), "create", command.clone())
+    let throttled: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1595,7 +1397,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let mut recovered = Value::Null;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let status = client.post(format!("{ingress}/GithubCreateV1/{id}/status"));
+        let status = client.post(format!("{ingress}/GithubCreate/{id}/status"));
         recovered = status.send().await.unwrap().json().await.unwrap();
         if recovered["outcome"]["kind"] == "created" {
             break;
@@ -1615,7 +1417,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
 
 async fn run_sweep(client: &reqwest::Client, ingress: &str) {
     let response = client
-        .post(format!("{ingress}/Reconcile/daily_run_v1"))
+        .post(format!("{ingress}/Reconcile/daily_run"))
         .json(&json!({"at": chrono::Utc::now()}))
         .send()
         .await

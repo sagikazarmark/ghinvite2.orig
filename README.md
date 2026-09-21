@@ -225,7 +225,7 @@ See [`docs/local-testing.md`](docs/local-testing.md) for the full integration te
 
 See [`docs/deploy.md`](docs/deploy.md) for remote D1 verification, immutable
 workflow endpoints and authenticated readiness. Production rollout remains blocked
-on the operator-owned remote/cutover gates in #61; local verification does not
+on the operator-owned remote gates in #61; local verification does not
 authorize deployment to live traffic.
 
 ## Project layout
@@ -259,4 +259,4 @@ GitHub Actions runs on every push and PR to `main`:
 - **Lint** — `cargo fmt --check` + `cargo clippy`
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
-- **Restate approval and delivery gate** — `bash scripts/test-restate.sh`: digest-pinned disposable Restate, real web commands and GitHub HTTP client, local GitHub stub, auto/manual approval with four-repository mixed outcomes, bounded retry, completed-operation deduplication, and persisted expiration/audit assertions
+- **Restate approval and delivery gate** — `bash scripts/test-restate.sh <target>` for `authoritative_admission`, `retained_delivery`, `installation_availability`, `installation_audit_replay` and `durable_projection`: digest-pinned disposable Restate, real GitHub HTTP client against a local GitHub stub, authoritative admission/lifecycle, retained delivery and projection recovery

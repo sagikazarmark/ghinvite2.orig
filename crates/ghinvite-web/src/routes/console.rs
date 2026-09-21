@@ -1,12 +1,8 @@
 //! `/console/accounts/{login}/...` routes. Plan 5.
 
 use crate::account_admin_reads::{find_account_admin_invitation_link, find_account_admin_request};
-use crate::commands::{
-    CreateInvitationLink, DecideInvitationRequest, RevokeInvitationLink,
-    UpdateInvitationLinkMetadata,
-};
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
-use crate::middleware::auth::{RequireConsoleAdminOf, RequireSettingsAdminOf};
+use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::session;
 use crate::state::AppState;
@@ -252,7 +248,7 @@ async fn overview(
         .map(|links| links.iter().filter(|l| l.is_active(now)).count() as u64);
     let recent_links = {
         let mut v = all_links.unwrap_or_default();
-        v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        v.sort_by_key(|l| std::cmp::Reverse(l.created_at));
         v.truncate(5);
         v
     };
@@ -327,18 +323,14 @@ async fn new_link_form(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let form = crate::views::links::LinkFormValues::default();
 
-    let now = Utc::now();
-    if state.admission.is_some() {
-        return creation_form_response(
-            &admin,
-            flash,
-            repos,
-            form,
-            now,
-            Some(ghinvite_core::InvitationLinkId::new()),
-        );
-    }
-    link_form_response(&admin, flash, repos, form, now)
+    creation_form_response(
+        &admin,
+        flash,
+        repos,
+        form,
+        Utc::now(),
+        ghinvite_core::InvitationLinkId::new(),
+    )
 }
 
 /// Render the new invitation link page, both fresh and re-rendered with
@@ -346,24 +338,15 @@ async fn new_link_form(
 ///
 /// `now` is the instant the island validates against in the browser (it is
 /// serialised into the page's props blob): on a failed POST it is the same
-/// instant the server just validated with, so both sides agree.
-fn link_form_response(
-    admin: &RequireConsoleAdminOf,
-    flash: Option<session::Flash>,
-    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
-    form: crate::views::links::LinkFormValues,
-    now: chrono::DateTime<Utc>,
-) -> axum::response::Response {
-    creation_form_response(admin, flash, repos, form, now, None)
-}
-
+/// instant the server just validated with, so both sides agree. `link_id`
+/// and `now` form the creation identity a retried submission replays.
 fn creation_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
     repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
     mut form: crate::views::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
-    link_id: Option<ghinvite_core::InvitationLinkId>,
+    link_id: ghinvite_core::InvitationLinkId,
 ) -> axum::response::Response {
     if let Ok(available) = &repos
         && let Some(message) = missing_repository_notice(&form.selected_repo_ids, available)
@@ -382,12 +365,10 @@ fn creation_form_response(
         Ok(repos) => (axum::http::StatusCode::OK, repos, None),
         Err(error) => (error.status, vec![], Some(error.message.to_string())),
     };
-    let action = link_id.map(|id| {
-        format!(
-            "/console/accounts/{account_login}/links?link_id={id}&anchor={}",
-            now.timestamp()
-        )
-    });
+    let action = Some(format!(
+        "/console/accounts/{account_login}/links?link_id={link_id}&anchor={}",
+        now.timestamp()
+    ));
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
@@ -515,52 +496,45 @@ async fn create_link(
         Ok(CsrfForm(form)) => form,
         Err(response) => return response,
     };
-    let (now, link_id) = if state.admission.is_some() {
-        let (Some(id), Some(anchor)) = (identity.link_id, identity.anchor) else {
-            return crate::WebError::BadRequest(
-                "Missing creation identity. Open a new creation form.".into(),
-            )
-            .into_response();
-        };
-        let Some(now) = chrono::DateTime::from_timestamp(anchor, 0) else {
-            return crate::WebError::BadRequest("Invalid creation time.".into()).into_response();
-        };
-        (now, Some(id))
-    } else {
-        (Utc::now(), None)
+    let (Some(link_id), Some(anchor)) = (identity.link_id, identity.anchor) else {
+        return crate::WebError::BadRequest(
+            "Missing creation identity. Open a new creation form.".into(),
+        )
+        .into_response();
+    };
+    let Some(now) = chrono::DateTime::from_timestamp(anchor, 0) else {
+        return crate::WebError::BadRequest("Invalid creation time.".into()).into_response();
     };
 
     // Recover before present repository eligibility; expiry and repository names
     // are canonical business input, not values to recompute on retry.
-    if let Some(id) = link_id {
-        match attempts::load(&state, &admin, &format!("create-{id}")).await {
-            Ok(Some(attempts::Command::Create(original))) => {
-                let repos = original
-                    .repos
-                    .iter()
-                    .map(|r| RepositoryChoice {
-                        id: r.repo_id,
-                        full_name: r.repo_full_name.clone(),
-                    })
-                    .collect::<Vec<_>>();
-                let matches = create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
-                    v.description == original.description
-                        && v.internal_note == original.internal_note
-                        && v.expires_at == original.expires_at
-                        && v.max_uses == original.max_uses
-                        && v.permission == original.permission
-                        && v.approval_required == original.approval_required
-                        && v.repos == original.repos
-                });
-                let command = attempts::Command::Create(original);
-                if !matches {
-                    return attempts::failed(&admin, &command, crate::WebError::Conflict);
-                }
-                return attempts::execute(&state, &admin, command).await;
+    match attempts::load(&state, &admin, &format!("create-{link_id}")).await {
+        Ok(Some(attempts::Command::Create(original))) => {
+            let repos = original
+                .repos
+                .iter()
+                .map(|r| RepositoryChoice {
+                    id: r.repo_id,
+                    full_name: r.repo_full_name.clone(),
+                })
+                .collect::<Vec<_>>();
+            let matches = create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
+                v.description == original.description
+                    && v.internal_note == original.internal_note
+                    && v.expires_at == original.expires_at
+                    && v.max_uses == original.max_uses
+                    && v.permission == original.permission
+                    && v.approval_required == original.approval_required
+                    && v.repos == original.repos
+            });
+            let command = attempts::Command::Create(original);
+            if !matches {
+                return attempts::failed(&admin, &command, crate::WebError::Conflict);
             }
-            Ok(_) => {}
-            Err(e) => return e.into_response(),
+            return attempts::execute(&state, &admin, command).await;
         }
+        Ok(_) => {}
+        Err(e) => return e.into_response(),
     }
 
     // Loaded once, before validating: the validators need the available
@@ -605,81 +579,22 @@ async fn create_link(
         }
     };
 
-    if state.admission.is_some() {
-        let id = link_id.unwrap();
-        let mut command = ghinvite_core::storage::projection::CreateLink {
-            version: 1,
-            link_id: id,
-            admin: admin_assertion(&admin),
-            account_id: admin.account.account_id,
-            installation_id: admin.account.installation_id,
-            description: validated.description,
-            internal_note: validated.internal_note,
-            expires_at: validated.expires_at,
-            max_uses: validated.max_uses,
-            permission: validated.permission,
-            approval_required: validated.approval_required,
-            repos: validated.repos,
-        };
-        command.repos.sort_by_key(|repo| repo.repo_id);
-        return attempts::execute(&state, &admin, attempts::Command::Create(command)).await;
-    }
-
-    let output = match state
-        .commands
-        .create_invitation_link(CreateInvitationLink {
-            installation_id: admin.account.installation_id,
-            account_id: admin.account.account_id,
-            created_by: admin.session.user_id,
-            created_at: now,
-            expires_at: validated.expires_at,
-            max_uses: validated.max_uses,
-            permission: validated.permission,
-            approval_required: validated.approval_required,
-            description: validated.description,
-            internal_note: validated.internal_note,
-            repos: validated.repos,
-        })
-        .await
-    {
-        Ok(v) => v,
-        Err(error) => {
-            tracing::warn!(
-                kind = error.kind(),
-                upstream_status = ?error.upstream_status(),
-                "create invitation link command failed"
-            );
-            let mut errors = crate::views::links::LinkFormErrors::default();
-            errors.summary.push(
-                if error.outcome_unknown() {
-                    "Creation outcome unknown. Check the invitation links list before creating another with these values."
-                } else {
-                    "Failed to create invitation link. Please try again."
-                }
-                .into(),
-            );
-            return (
-                axum::http::StatusCode::BAD_GATEWAY,
-                link_form_response(&admin, None, Ok(repos), form.into_view_values(errors), now),
-            )
-                .into_response();
-        }
+    let mut command = ghinvite_core::storage::projection::CreateLink {
+        version: 1,
+        link_id,
+        admin: admin_assertion(&admin),
+        account_id: admin.account.account_id,
+        installation_id: admin.account.installation_id,
+        description: validated.description,
+        internal_note: validated.internal_note,
+        expires_at: validated.expires_at,
+        max_uses: validated.max_uses,
+        permission: validated.permission,
+        approval_required: validated.approval_required,
+        repos: validated.repos,
     };
-    let link_id = output.link_id.to_string();
-
-    let _ = session::set_flash(
-        &admin.tower,
-        session::Flash {
-            level: session::FlashLevel::Success,
-            message: "Invitation link created.".into(),
-        },
-    )
-    .await;
-    axum::response::Redirect::to(&format!(
-        "/console/accounts/{}/links/{}",
-        admin.account.account_login, link_id
-    ))
-    .into_response()
+    command.repos.sort_by_key(|repo| repo.repo_id);
+    attempts::execute(&state, &admin, attempts::Command::Create(command)).await
 }
 
 #[derive(serde::Deserialize)]
@@ -696,7 +611,7 @@ async fn edit_link_form(
     let Ok(id) = id.parse() else {
         return console_not_found_response(&admin);
     };
-    let link = match authoritative_or_projected_link(&state, &admin, id).await {
+    let link = match authoritative_link(&state, &admin, id).await {
         Ok(link) => link,
         Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
         Err(error) => return error.into_response(),
@@ -722,7 +637,7 @@ async fn save_link_details(
     let Ok(id) = id.parse() else {
         return console_not_found_response(&admin);
     };
-    if let Err(error) = authoritative_or_projected_link(&state, &admin, id).await {
+    if let Err(error) = authoritative_link(&state, &admin, id).await {
         return match error {
             crate::error::WebError::NotFound => console_not_found_response(&admin),
             _ => (
@@ -742,81 +657,39 @@ async fn save_link_details(
         Ok(metadata) => metadata,
         Err(error) => return edit_link_response(&admin, id, values, Some(error), None),
     };
-    if let Some(admission) = &state.admission {
-        return match admission
-            .update_metadata(ghinvite_core::admission::UpdateMetadata {
-                link_id: id,
-                admin: admin_assertion(&admin),
-                description,
-                internal_note,
-            })
-            .await
-        {
-            Ok(_) => axum::response::Redirect::to(&format!(
-                "/console/accounts/{}/links/{id}",
-                admin.account.account_login
-            ))
-            .into_response(),
-            Err(crate::WebError::Restate(failure)) => {
-                tracing::warn!(
-                    ingress_failure = %failure,
-                    upstream_status = ?failure.upstream_status(),
-                    link_id = %id,
-                    "invitation link metadata save outcome unknown"
-                );
-                (axum::http::StatusCode::BAD_GATEWAY,
-                edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
-            }
-            Err(error) => error.into_response_with_recovery(
-                format!(
-                    "/console/accounts/{}/links/{id}",
-                    admin.account.account_login
-                ),
-                "Back to link details",
-            ),
-        };
-    }
-    if let Err(error) = state
-        .commands
-        .update_invitation_link_metadata(UpdateInvitationLinkMetadata {
-            account_id: admin.account.account_id,
+    match state
+        .admission
+        .update_metadata(ghinvite_core::admission::UpdateMetadata {
             link_id: id,
-            by_user: admin.session.user_id,
+            admin: admin_assertion(&admin),
             description,
             internal_note,
         })
         .await
     {
-        // Ingress errors may include command payloads; do not log private metadata.
-        tracing::warn!(
-            kind = error.kind(),
-            upstream_status = ?error.upstream_status(),
-            "update invitation link metadata command failed"
-        );
-        let message = if error.outcome_unknown() {
-            "Save outcome unknown. Check the link details before retrying these values."
-        } else {
-            "Failed to save invitation link details. Please try again."
-        };
-        return (
-            axum::http::StatusCode::BAD_GATEWAY,
-            edit_link_response(&admin, id, values, None, Some(message.into())),
-        )
-            .into_response();
+        Ok(_) => axum::response::Redirect::to(&format!(
+            "/console/accounts/{}/links/{id}",
+            admin.account.account_login
+        ))
+        .into_response(),
+        Err(crate::WebError::Restate(failure)) => {
+            tracing::warn!(
+                ingress_failure = %failure,
+                upstream_status = ?failure.upstream_status(),
+                link_id = %id,
+                "invitation link metadata save outcome unknown"
+            );
+            (axum::http::StatusCode::BAD_GATEWAY,
+            edit_link_response(&admin, id, values, None, Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
+        }
+        Err(error) => error.into_response_with_recovery(
+            format!(
+                "/console/accounts/{}/links/{id}",
+                admin.account.account_login
+            ),
+            "Back to link details",
+        ),
     }
-    let _ = session::set_flash(
-        &admin.tower,
-        session::Flash {
-            level: session::FlashLevel::Success,
-            message: "Invitation link details updated.".into(),
-        },
-    )
-    .await;
-    axum::response::Redirect::to(&format!(
-        "/console/accounts/{}/links/{id}",
-        admin.account.account_login
-    ))
-    .into_response()
 }
 
 fn edit_link_response(
@@ -854,7 +727,7 @@ async fn link_detail(
         Ok(id) => id,
         Err(_) => return console_not_found_response(&admin),
     };
-    let link = match authoritative_or_projected_link(&state, &admin, link_id).await {
+    let link = match authoritative_link(&state, &admin, link_id).await {
         Ok(link) => link,
         Err(e) => {
             match attempts::load(&state, &admin, &format!("create-{link_id}")).await {
@@ -905,75 +778,15 @@ async fn revoke_link(
         Ok(id) => id,
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
-    if state.admission.is_some() {
-        return attempts::execute(
-            &state,
-            &admin,
-            attempts::Command::Revoke(ghinvite_core::admission::AdminLinkCommand {
-                link_id,
-                admin: admin_assertion(&admin),
-            }),
-        )
-        .await;
-    }
-    if let Err(e) = find_account_admin_invitation_link(
-        state.storage.as_ref(),
-        admin.account.account_id,
-        link_id,
+    attempts::execute(
+        &state,
+        &admin,
+        attempts::Command::Revoke(ghinvite_core::admission::AdminLinkCommand {
+            link_id,
+            admin: admin_assertion(&admin),
+        }),
     )
     .await
-    {
-        return e.into_response();
-    }
-
-    if let Err(e) = state
-        .commands
-        .revoke_invitation_link(RevokeInvitationLink {
-            account_id: admin.account.account_id,
-            link_id,
-            by_user: admin.session.user_id,
-            when: Utc::now(),
-        })
-        .await
-    {
-        tracing::warn!(
-            kind = e.kind(),
-            upstream_status = ?e.upstream_status(),
-            "revoke invitation link command failed"
-        );
-        let _ = session::set_flash(
-            &admin.tower,
-            session::Flash {
-                level: session::FlashLevel::Error,
-                message: if e.outcome_unknown() {
-                    "Revocation outcome unknown. Check the link details before retrying revocation."
-                } else {
-                    "Could not stop this invitation link. Please try again."
-                }
-                .into(),
-            },
-        )
-        .await;
-        return axum::response::Redirect::to(&format!(
-            "/console/accounts/{}/links/{}",
-            admin.account.account_login, link_id_str
-        ))
-        .into_response();
-    }
-
-    let _ = session::set_flash(
-        &admin.tower,
-        session::Flash {
-            level: session::FlashLevel::Success,
-            message: "Invitation link stopped accepting new invitation requests.".into(),
-        },
-    )
-    .await;
-    axum::response::Redirect::to(&format!(
-        "/console/accounts/{}",
-        admin.account.account_login
-    ))
-    .into_response()
 }
 
 async fn requests_queue(
@@ -1074,73 +887,14 @@ async fn approve_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    if state.request_lifecycle.is_some() {
-        return authoritative_decision(
-            &state,
-            &admin,
-            request_id,
-            form,
-            ghinvite_core::request_lifecycle::DecisionAction::Approve,
-        )
-        .await;
-    }
-
-    let _account_request = match find_account_admin_request(
-        state.storage.as_ref(),
-        admin.account.account_id,
+    authoritative_decision(
+        &state,
+        &admin,
         request_id,
+        form,
+        ghinvite_core::request_lifecycle::DecisionAction::Approve,
     )
     .await
-    {
-        Ok(account_request) => account_request,
-        Err(e) => return e.into_response(),
-    };
-
-    match state
-        .commands
-        .decide_invitation_request(DecideInvitationRequest::approve(
-            request_id,
-            admin.session.user_id,
-            Utc::now(),
-        ))
-        .await
-    {
-        Ok(_) => {
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Success,
-                    message: "Request approved.".into(),
-                },
-            )
-            .await;
-        }
-        Err(e) => {
-            tracing::warn!(
-                kind = e.kind(),
-                upstream_status = ?e.upstream_status(),
-                "approve invitation request command failed"
-            );
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Error,
-                    message: if e.outcome_unknown() {
-                        "Approval outcome unknown. Check the request status before deciding again."
-                    } else {
-                        "Failed to approve request. Please try again."
-                    }
-                    .into(),
-                },
-            )
-            .await;
-        }
-    }
-    axum::response::Redirect::to(&format!(
-        "/console/accounts/{}/requests",
-        admin.account.account_login
-    ))
-    .into_response()
 }
 
 async fn decline_request(
@@ -1156,75 +910,14 @@ async fn decline_request(
         Err(_) => return crate::error::WebError::NotFound.into_response(),
     };
 
-    if state.request_lifecycle.is_some() {
-        return authoritative_decision(
-            &state,
-            &admin,
-            request_id,
-            form,
-            ghinvite_core::request_lifecycle::DecisionAction::Decline { reason: None },
-        )
-        .await;
-    }
-
-    let _account_request = match find_account_admin_request(
-        state.storage.as_ref(),
-        admin.account.account_id,
+    authoritative_decision(
+        &state,
+        &admin,
         request_id,
+        form,
+        ghinvite_core::request_lifecycle::DecisionAction::Decline { reason: None },
     )
     .await
-    {
-        Ok(account_request) => account_request,
-        Err(e) => return e.into_response(),
-    };
-
-    // v1: no reason field in the form; v1.1 will add a textarea.
-    match state
-        .commands
-        .decide_invitation_request(DecideInvitationRequest::decline(
-            request_id,
-            admin.session.user_id,
-            Utc::now(),
-            None,
-        ))
-        .await
-    {
-        Ok(_) => {
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Success,
-                    message: "Request declined.".into(),
-                },
-            )
-            .await;
-        }
-        Err(e) => {
-            tracing::warn!(
-                kind = e.kind(),
-                upstream_status = ?e.upstream_status(),
-                "decline invitation request command failed"
-            );
-            let _ = session::set_flash(
-                &admin.tower,
-                session::Flash {
-                    level: session::FlashLevel::Error,
-                    message: if e.outcome_unknown() {
-                        "Decline outcome unknown. Check the request status before deciding again."
-                    } else {
-                        "Failed to decline request. Please try again."
-                    }
-                    .into(),
-                },
-            )
-            .await;
-        }
-    }
-    axum::response::Redirect::to(&format!(
-        "/console/accounts/{}/requests",
-        admin.account.account_login
-    ))
-    .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -1270,33 +963,24 @@ fn admin_assertion(
     }
 }
 
-async fn authoritative_or_projected_link(
+async fn authoritative_link(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     link_id: ghinvite_core::InvitationLinkId,
 ) -> crate::Result<ghinvite_core::InvitationLink> {
-    match &state.admission {
-        Some(admission) => admission
-            .link_status(ghinvite_core::admission::AdminLinkCommand {
-                link_id,
-                admin: admin_assertion(admin),
-            })
-            .await
-            .map(|s| s.as_link()),
-        None => {
-            find_account_admin_invitation_link(
-                state.storage.as_ref(),
-                admin.account.account_id,
-                link_id,
-            )
-            .await
-        }
-    }
+    state
+        .admission
+        .link_status(ghinvite_core::admission::AdminLinkCommand {
+            link_id,
+            admin: admin_assertion(admin),
+        })
+        .await
+        .map(|s| s.as_link())
 }
 
 async fn settings_page(
     State(state): State<AppState>,
-    RequireSettingsAdminOf(admin): RequireSettingsAdminOf,
+    admin: RequireConsoleAdminOf,
 ) -> impl IntoResponse {
     let error = if admin.account.uninstalled_at.is_none() {
         load_installation_repos_for_form(&state, &admin).await.err()

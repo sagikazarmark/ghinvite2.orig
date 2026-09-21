@@ -1,14 +1,14 @@
-# Isolated authoritative request lifecycle (#55)
+# Authoritative request lifecycle (#55)
 
-Bind `admission_v1::bind`, `projection_v1::bind`, and
-`request_lifecycle_v1::bind` on the private Restate endpoint. The new web surface
-is explicitly enabled with `AppState::with_request_lifecycle`. Its admin routes
-retain current GitHub account-admin authorization and CSRF checks. Migration and
-admission/browser cutover are owned by the subsequent rollout tickets.
+`build_endpoint` binds `admission::bind`, `projection::bind`, and
+`request_lifecycle::bind` on the private Restate endpoint. The web
+`AppState::new` always uses the Restate request lifecycle
+(`AppState::with_request_lifecycle` only substitutes a test double). Its admin
+routes retain current GitHub account-admin authorization and CSRF checks.
 
 ## Commands and replay
 
-`InvitationLinkV1/<link_id>/decide` takes version 1, request ID, a strict ULID
+`InvitationLink/<link_id>/decide` takes version 1, request ID, a strict ULID
 operation ID, verified account/admin IDs, and `approve` or `decline { reason }`.
 The identity is `(link_id, lifecycle operation ID)` in its own command namespace.
 Canonical input binds request, actor, action, version and trimmed optional reason.

@@ -5,6 +5,7 @@ use axum::{
     response::Response,
 };
 use chrono::Utc;
+use common::link_authority::{self, CODE_SERVICE, LINK_SERVICE};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, storage::Storage,
@@ -17,7 +18,10 @@ use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_ap
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path},
+};
 
 mod common;
 
@@ -115,13 +119,13 @@ impl Browser {
                 "https://api.github.com/user/installations/77/repositories?per_page=100",
                 serde_json::json!({"total_count":1, "repositories":[{"id":10,"full_name":"octocat/api","private":true}]})));
         }
+        let restate = Arc::new(RestateClient::new(ingress.uri()).unwrap());
         let app = build_app(
             AppState::new(
                 storage,
                 Arc::new(MockTransport::scripted(expectations)),
-                Arc::new(RestateCommands::new(Arc::new(
-                    RestateClient::new(ingress.uri()).unwrap(),
-                ))),
+                Arc::new(RestateCommands::new(restate.clone())),
+                restate,
                 WebConfig::for_local_dev_with_secret([7; 32]),
             ),
             tower_sessions::MemoryStore::default(),
@@ -205,52 +209,104 @@ async fn html(response: Response) -> String {
     .unwrap()
 }
 
+impl Browser {
+    fn link_path(&self, method: &str) -> String {
+        format!("/{LINK_SERVICE}/{}/{method}", self.link.id)
+    }
+
+    /// The authority's view of the browser's invitation link.
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::to_value(link_authority::snapshot(&self.link)).unwrap()
+    }
+
+    /// Serve the authoritative reads the browser's pages make: link status for
+    /// the Console and the requester page for the invitation link.
+    async fn mount_reads(&self) {
+        Mock::given(path(self.link_path("link_status")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(self.snapshot()))
+            .mount(&self.ingress)
+            .await;
+        Mock::given(path(format!(
+            "/{CODE_SERVICE}/{}/resolve",
+            self.link.slug.as_str()
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(self.link.id))
+        .mount(&self.ingress)
+        .await;
+        Mock::given(path(self.link_path("requester_page")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "link_id": self.link.id, "invitation_code": self.link.slug.as_str(),
+                "repos": self.link.repos, "permission": "pull", "approval_required": true,
+                "can_start_fresh": true, "attempt": null, "request": null
+            })))
+            .mount(&self.ingress)
+            .await;
+    }
+}
+
+fn decision_receipt(link: InvitationLinkId, request: RequestId, state: &str) -> serde_json::Value {
+    serde_json::json!({"outcome": "applied", "request": {
+        "request_id": request, "link_id": link, "account_id": 42, "requester_id": 99,
+        "state": state, "admitted_at": "2026-09-14T12:00:00Z",
+        "decision_deadline": "2026-09-21T12:00:00Z", "revision": 2}})
+}
+
 #[tokio::test]
-async fn create_service_failure_redisplays_input_and_token_and_allows_retry() {
+async fn create_service_failure_keeps_the_attempt_and_token_and_allows_retry() {
     let browser = Browser::new().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(503))
         .mount(&browser.ingress)
         .await;
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
+    let link_id = InvitationLinkId::new();
+    let uri = format!(
+        "/console/accounts/octocat/links?link_id={link_id}&anchor={}",
+        Utc::now().timestamp()
+    );
     let body = format!(
         "csrf_token={token}&description=Keep+workshop&internal_note=Keep+note&permission=push&repo_ids=10&max_uses=7&expires_in_days=45"
     );
-    let response = browser
-        .post("/console/accounts/octocat/links", body.clone())
-        .await;
+    let response = browser.post(&uri, body.clone()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let page = html(response).await;
-    for value in [
-        "Keep workshop",
-        "Keep note",
-        "value=\"7\"",
-        "value=\"45\"",
-        "value=\"10\" checked",
-        &token,
-    ] {
-        assert!(page.contains(value), "missing preserved value {value}");
-    }
     // A 503 from ingress leaves the creation's effect in doubt — Restate may
-    // have persisted the invocation before the response went wrong — so the
-    // page says to check before creating another rather than inviting a blind
-    // retry. Resubmitting is still possible; the input and token below are
-    // preserved for exactly that.
-    assert!(page.contains("Creation outcome unknown"), "{page}");
+    // have applied it before the response went wrong — so the page offers the
+    // retained original attempt rather than inviting a blind new creation.
+    assert!(page.contains("Outcome unknown"), "{page}");
     assert!(!page.contains("Please try again"), "{page}");
+    assert!(page.contains(&format!(
+        "/console/accounts/octocat/attempts/create-{link_id}"
+    )));
+    assert!(page.contains(&token), "the retry form keeps the token");
     browser.ingress.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            serde_json::json!({"link_id":InvitationLinkId::new(), "slug":"abcdEFGH01234567"}),
-        ))
+    let mut link = browser.link.clone();
+    link.id = link_id;
+    Mock::given(path(format!("/{LINK_SERVICE}/{link_id}/create")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::to_value(link_authority::snapshot(&link)).unwrap()),
+        )
         .mount(&browser.ingress)
         .await;
-    let response = browser.post("/console/accounts/octocat/links", body).await;
+    // Resubmitting the same form replays the same creation identity.
+    let response = browser.post(&uri, body).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        format!("/console/accounts/octocat/links/{link_id}")
+    );
+    let created = browser.ingress.received_requests().await.unwrap();
+    assert_eq!(created.len(), 1);
+    let command: serde_json::Value = serde_json::from_slice(&created[0].body).unwrap();
+    assert_eq!(command["description"], "Keep workshop");
+    assert_eq!(command["internal_note"], "Keep note");
+    assert_eq!(command["max_uses"], 7);
+    assert!(!String::from_utf8_lossy(&created[0].body).contains(&token));
 }
 
 #[tokio::test]
-async fn requester_service_failure_preserves_justification_request_id_and_token() {
+async fn requester_service_failure_preserves_justification_operation_id_and_token() {
     let browser = Browser::new().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(503))
@@ -258,18 +314,19 @@ async fn requester_service_failure_preserves_justification_request_id_and_token(
         .await;
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let id = RequestId::new();
-    let body = format!("csrf_token={token}&request_id={id}&justification=Keep+my+context");
-    let path = format!("/i/{}", browser.link.slug.as_str());
-    let response = browser.post(&path, body.clone()).await;
+    let body = format!("csrf_token={token}&operation_id={id}&justification=Keep+my+context");
+    let code = browser.link.slug.as_str();
+    let path_ = format!("/i/{code}");
+    let response = browser.post(&path_, body.clone()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let page = html(response).await;
     for value in [
         "Keep my context",
-        // A 503 on a fire-and-forget send leaves admission in doubt, and an
-        // admitted request spends a use of the invitation link. The page says
-        // to check first rather than inviting a blind resubmit; the preserved
-        // request ID below is what makes a deliberate retry idempotent.
-        "Submission outcome unknown",
+        // A 503 leaves admission in doubt, and an admitted request spends a
+        // use of the invitation link. The page offers the same attempt
+        // rather than a blind resubmit; the preserved operation ID below is
+        // what makes a deliberate retry idempotent.
+        "Outcome unknown",
         &id.to_string(),
         &token,
     ] {
@@ -277,13 +334,24 @@ async fn requester_service_failure_preserves_justification_request_id_and_token(
     }
     assert!(!page.contains("Please try again"), "{page}");
     browser.ingress.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(202))
+    Mock::given(path(format!("/{CODE_SERVICE}/{code}/resolve")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(browser.link.id))
         .mount(&browser.ingress)
         .await;
+    Mock::given(path(browser.link_path("prepare_attempt")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "input": {"version": 1, "link_id": browser.link.id, "operation_id": id,
+                "requester_id": 42, "justification": "Keep my context"},
+            "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
+                "request_id": RequestId::new(), "state": "pending", "decision_deadline": null}}
+        })))
+        .mount(&browser.ingress)
+        .await;
+    let response = browser.post(&path_, body).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
-        browser.post(&path, body).await.status(),
-        StatusCode::SEE_OTHER
+        response.headers()["location"],
+        format!("/i/{code}?operation_id={id}")
     );
 }
 
@@ -291,6 +359,7 @@ async fn requester_service_failure_preserves_justification_request_id_and_token(
 async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
     let browser = Browser::new().await;
     let stranger = Browser::new().await;
+    browser.mount_reads().await;
     let other_token = common::csrf_token(&stranger.app, &stranger.cookie).await;
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let base = "/console/accounts/octocat";
@@ -326,8 +395,14 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         }
         assert!(forms > 0, "{path}");
     }
+    // Rendering read the authority; forgeries must not reach it at all.
+    let reads = browser.ingress.received_requests().await.unwrap().len();
     let paths = [
-        format!("{base}/links"),
+        format!(
+            "{base}/links?link_id={}&anchor={}",
+            InvitationLinkId::new(),
+            Utc::now().timestamp()
+        ),
         format!("{detail}/edit"),
         format!("{detail}/revoke"),
         format!("{base}/requests/{}/approve", browser.request_id),
@@ -361,31 +436,49 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
     }
-    assert!(
-        browser
-            .ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        browser.ingress.received_requests().await.unwrap().len(),
+        reads
     );
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "link_id":InvitationLinkId::new(), "slug":"abcdEFGH01234567"
-        })))
+    // The same forms with the rendered token dispatch their commands.
+    let declined = RequestId::new();
+    Mock::given(path(browser.link_path("revoke")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(browser.snapshot()))
         .mount(&browser.ingress)
         .await;
-    for path in paths.iter().skip(2).take(3) {
+    for (request, state) in [(browser.request_id, "approved"), (declined, "declined")] {
+        Mock::given(path(browser.link_path("decide")))
+            .and(wiremock::matchers::body_partial_json(
+                serde_json::json!({"request_id": request}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(decision_receipt(
+                browser.link.id,
+                request,
+                state,
+            )))
+            .mount(&browser.ingress)
+            .await;
+    }
+    let lifecycle = || {
+        format!(
+            "csrf_token={token}&link_id={}&operation_id={}",
+            browser.link.id,
+            RequestId::new()
+        )
+    };
+    for (path, body) in [
+        (paths[2].clone(), format!("csrf_token={token}")),
+        (paths[3].clone(), lifecycle()),
+        (format!("{base}/requests/{declined}/decline"), lifecycle()),
+    ] {
         assert_eq!(
-            browser
-                .post(path, format!("csrf_token={token}"))
-                .await
-                .status(),
-            StatusCode::SEE_OTHER
+            browser.post(&path, body).await.status(),
+            StatusCode::SEE_OTHER,
+            "{path}"
         );
     }
     let requests = browser.ingress.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), reads + 3);
     for request in requests {
         assert!(!String::from_utf8_lossy(&request.body).contains(&token));
         assert!(!request.url.as_str().contains(&token));
@@ -395,11 +488,12 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
 #[tokio::test]
 async fn validation_and_edit_service_redisplays_keep_reusable_authority() {
     let browser = Browser::new().await;
+    browser.mount_reads().await;
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
-    let path = format!("/console/accounts/octocat/links/{}/edit", browser.link.id);
+    let path_ = format!("/console/accounts/octocat/links/{}/edit", browser.link.id);
     let invalid = browser
         .post(
-            &path,
+            &path_,
             format!("csrf_token={token}&description=&internal_note=Keep+note"),
         )
         .await;
@@ -412,26 +506,28 @@ async fn validation_and_edit_service_redisplays_keep_reusable_authority() {
             .received_requests()
             .await
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|r| !r.url.path().ends_with("/update_metadata"))
     );
-    Mock::given(method("POST"))
+    Mock::given(path(browser.link_path("update_metadata")))
         .respond_with(ResponseTemplate::new(503))
         .mount(&browser.ingress)
         .await;
     let body = format!("csrf_token={token}&description=Keep+description&internal_note=Keep+note");
-    let failure = browser.post(&path, body.clone()).await;
+    let failure = browser.post(&path_, body.clone()).await;
     assert_eq!(failure.status(), StatusCode::BAD_GATEWAY);
     let page = html(failure).await;
     assert!(
         page.contains(&token) && page.contains("Keep description") && page.contains("Keep note")
     );
     browser.ingress.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200))
+    browser.mount_reads().await;
+    Mock::given(path(browser.link_path("update_metadata")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(browser.snapshot()))
         .mount(&browser.ingress)
         .await;
     assert_eq!(
-        browser.post(&path, body).await.status(),
+        browser.post(&path_, body).await.status(),
         StatusCode::SEE_OTHER
     );
 }

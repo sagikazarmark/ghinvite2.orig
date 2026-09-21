@@ -4,13 +4,13 @@ Issue [#63](https://github.com/sagikazarmark/ghinvite2.orig/issues/63) adds
 versioned settlement handlers on the existing `GithubInvitation/<invitation_id>`
 Virtual Object:
 
-- `on_webhook_v1`, `reconcile_v1`, `cancel_v1`, and `tick_expire_v1` share object
+- `on_webhook`, `reconcile`, `cancel`, and `tick_expire` share object
   exclusivity and one `Storage::settle_github_invitation` transition boundary.
-- `Reconcile/daily_run_v1` journals read-only GitHub evidence, then calls the
+- `Reconcile/daily_run` journals read-only GitHub evidence, then calls the
   invitation owner with the observed invitation identity, state, and upstream ID.
   Concurrent sweeps can observe the same row; only the first valid settlement wins.
 - Only `Sent` rows with an upstream ID qualify. `Sending` placeholders, including
-  blocked and outcome-unknown creates, remain with `GithubCreateV1`. A missing
+  blocked and outcome-unknown creates, remain with `GithubCreate`. A missing
   GitHub list entry cannot resolve an uncertain create.
 - A conditional insert retains the winning terminal transition. The SQLx
   transaction / D1 batch commits this receipt, its audit, and its state together.
@@ -24,39 +24,13 @@ Virtual Object:
 
 The expected `Sent` state and exact upstream/request/repository identity are the
 fence: this lifecycle has no transition back to `Sent`. It does not require a
-timestamp comparison or a revision backfill for historical invitations. Existing
-terminal rows retain their state and historical audit. Historical `Sent` rows
-with upstream IDs use the new boundary directly, without a retained create receipt.
+timestamp comparison. `Sent` rows with upstream IDs but no retained create
+receipt still use this boundary directly.
 
-## Deployment and pinned invocations
-
-This is an explicit lifecycle cutover, extending the deployment discipline in
-[writer cutover](admission-cutover.md) and ADRs 0003/0004:
-
-1. Pause webhook/lifecycle ingress and the reconciliation scheduler. Inventory
-   outstanding legacy `GithubInvitation` handlers and `Reconcile/daily_run`
-   invocations, including retrying invocations and delayed timers.
-2. Drain legacy work on its **original pinned deployment**, or isolate its
-   endpoint/database credentials and reconcile its outcomes before resubmitting
-   under the new handlers. Do not repin an existing journal to a new handler or
-   replay an uncertain create as a fresh create. Preserve coordinated backups.
-3. Apply migration `0006_invitation_settlement.sql` to SQLx/D1. Retain the
-   settlement table with invitation and audit records in backups/restores.
-4. Register a new immutable deployment using the authoritative/cutover endpoint.
-   It returns 410 for new legacy settlement/sweep calls. The legacy endpoint
-   implementation retains its original journal sequence for draining; registering
-   a deployment alone does not fence old code that still has database access.
-5. Deploy the web caller (`on_webhook_v1`), change scheduled sweeps to
-   `Reconcile/daily_run_v1`, and replace queued operational cancellation/expiration
-   calls with `cancel_v1`/`tick_expire_v1` after checking their current state.
-   Reopen ingress only after old writers are drained or isolated.
-
-Confirmed create ownership and `GithubCreateV1` journal sequences are unchanged.
-The post-settlement SQL fence is defense in depth, not permission to run an
-unfenced old sweep concurrently during cutover. Independently restoring SQL or
-manually deleting settlement receipts requires coordinated recovery before
-resuming writes. Existing already-corrupted terminal rows need evidence-based
-operator repair; the migration does not guess their original outcome.
+The post-settlement SQL fence is defense in depth. Retain the settlement table
+with invitation and audit records in backups/restores. Independently restoring
+SQL or manually deleting settlement receipts requires coordinated recovery before
+resuming writes.
 
 ## Verification
 
@@ -75,7 +49,7 @@ reconciliation evidence; concurrent reconciliation; atomic rollback on audit
 failure; and one terminal audit. The D1 test executes the real batch and loses its
 acknowledgement before retry, and exercises historical Sent rows, cancellation,
 and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
-late legacy writer rejection.
+rejection of a late write after settlement.
 
 ## Member-added webhooks
 
@@ -91,7 +65,7 @@ repository, and requester IDs, including links from historical installations;
 repository names, user logins, and `sender` do not select a request. The lookup
 returns at most two historical candidates. Exactly one candidate in `Sent` with
 an upstream invitation ID is dispatched as acceptance through
-`GithubInvitation/<id>/on_webhook_v1`. Web ingress retains routing receipts in SQL;
+`GithubInvitation/<id>/on_webhook`. Web ingress retains routing receipts in SQL;
 only the lifecycle owner settles invitation state and publishes its audit.
 
 Before dispatch, `member_webhook_receipts` retains the first match or no-match
@@ -147,16 +121,14 @@ bash scripts/test-restate.sh retained_delivery
 WASM_BINDGEN=/path/to/wasm-bindgen npm run test:settlement --prefix tests/worker
 ```
 
-Apply `0007_member_webhook_receipts.sql` before deploying the new web/storage code
-against the #63 lifecycle cutover. Retain both routing and settlement receipts.
-No lifecycle handler journal sequence is changed. The routing receipt guarantees
-replay association from this deployment onward; it cannot establish when a never
+Retain both routing and settlement receipts. The routing receipt guarantees
+replay association from deployment onward; it cannot establish when a never
 previously observed delayed provider event occurred.
 
 ## Recovery after reinstall
 
 Issue [#65](https://github.com/sagikazarmark/ghinvite2.orig/issues/65) makes
-`Reconcile/daily_run_v1` discover pending work by the link's immutable account ID
+`Reconcile/daily_run` discover pending work by the link's immutable account ID
 across historical installations. Each observation reloads the current active
 installation, verifies its installation/account IDs and suspension status with
 GitHub, and validates the scoped numeric repository ID before reading invitation
@@ -170,13 +142,8 @@ history are preserved. Settlement still runs through the invitation-keyed owner.
 The native runtime test covers A approval → blocked delivery → B delivery →
 credential outage/identity mismatch → missed-webhook settlement. The Worker gate
 covers replacement discovery and account mismatch using actual D1 and Restate.
-
-Deploy as a new immutable deployment; keep in-flight sweeps pinned to their
-original deployment. The `daily_run_v1` journal entry shapes and ordering are
-unchanged: account-based discovery and authority verification happen inside the
-existing candidate/observation run closures. A completed old candidate snapshot
-may omit historical rows; a fresh scheduled sweep discovers them. No migration
-or create-handler journal change is required.
+Account-based discovery and authority verification happen inside the
+`daily_run` candidate/observation run closures.
 
 ## Complete pending-invitation observation
 
@@ -191,7 +158,7 @@ pages are still not a consistent snapshot: an invitation cancelled on an earlier
 page mid-walk can shift a later one out of view. That residual race is unchanged
 by this work and is bounded by the settlement fence, which admits one terminal
 transition per invitation. Native tests cover
-lifecycle reconciliation (`Reconcile/daily_run` and `settlement_v1::observe`) and
+lifecycle reconciliation (`Reconcile/daily_run` and `settlement::observe`) and
 retained-create evidence with multi-page results and a failing later page:
 
 ```sh

@@ -71,7 +71,7 @@ pub struct RefreshContinuation {
 }
 
 #[restate_sdk::object]
-pub trait AccountInstallationV1 {
+pub trait AccountInstallation {
     async fn retry_uninstall(input: Json<UninstallInput>) -> Result<(), TerminalError>;
     async fn retry_refresh(input: Json<RefreshContinuation>) -> Result<(), TerminalError>;
     async fn recheck() -> Result<(), TerminalError>;
@@ -81,13 +81,13 @@ pub trait AccountInstallationV1 {
     async fn status() -> Result<Json<InstallationStatus>, TerminalError>;
     async fn eligibility(input: Json<Scope>) -> Result<Json<Eligibility>, TerminalError>;
 }
-pub struct AccountInstallationV1Impl {
+pub struct AccountInstallationImpl {
     pub state: AppState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum InstallationProjection {
+pub enum InstallationChange {
     Onboard {
         input: OnboardInput,
     },
@@ -99,17 +99,17 @@ pub enum InstallationProjection {
     },
 }
 #[restate_sdk::object]
-pub trait InstallationProjectionV1 {
-    async fn apply(input: Json<InstallationProjection>) -> Result<(), TerminalError>;
+pub trait InstallationProjection {
+    async fn apply(input: Json<InstallationChange>) -> Result<(), TerminalError>;
 }
-pub struct InstallationProjectionV1Impl {
+pub struct InstallationProjectionImpl {
     pub state: AppState,
 }
-impl InstallationProjectionV1 for InstallationProjectionV1Impl {
+impl InstallationProjection for InstallationProjectionImpl {
     async fn apply(
         &self,
         ctx: ObjectContext<'_>,
-        Json(input): Json<InstallationProjection>,
+        Json(input): Json<InstallationChange>,
     ) -> Result<(), TerminalError> {
         let account_id: u64 = ctx.key().parse().map_err(|_| invalid())?;
         // Retained before the projection runs, so a retry replays the event the
@@ -150,14 +150,14 @@ impl InstallationProjectionV1 for InstallationProjectionV1Impl {
 /// storage has taken the transition yet.
 fn installation_audit(
     account_id: u64,
-    input: &InstallationProjection,
+    input: &InstallationChange,
     id: ghinvite_core::AuditEventId,
     occurred_at: chrono::DateTime<chrono::Utc>,
     request_id: String,
 ) -> ghinvite_core::audit::AuditEvent {
     use ghinvite_core::audit::{ActorKind, AuditEvent, EventType, TargetKind};
     let (installation_id, event_type, actor_id, metadata) = match input {
-        InstallationProjection::Onboard { input } => (
+        InstallationChange::Onboard { input } => (
             input.installation_id,
             EventType::InstallationCreated,
             Some(input.actor_user_id),
@@ -169,13 +169,13 @@ fn installation_audit(
         // Always a subset: a refresh retains exact repository IDs even for an
         // installation configured for all repositories, so there is no `all`
         // selection left to report (docs/installation-availability.md).
-        InstallationProjection::Repos { input } => (
+        InstallationChange::Repos { input } => (
             input.installation_id,
             EventType::InstallationReposChanged,
             None,
             serde_json::json!({"selected_repos_kind": "subset"}),
         ),
-        InstallationProjection::Uninstall { input } => (
+        InstallationChange::Uninstall { input } => (
             input.installation_id,
             EventType::InstallationUninstalled,
             None,
@@ -234,11 +234,11 @@ impl From<ProjectionFailure> for HandlerError {
 /// transition already applied leaves the installation as it stands.
 async fn project_installation(
     state: &AppState,
-    input: &InstallationProjection,
+    input: &InstallationChange,
 ) -> std::result::Result<(), ProjectionFailure> {
     use ghinvite_core::storage::{ConflictKind, Error as StorageError};
     match input {
-        InstallationProjection::Onboard { input } => {
+        InstallationChange::Onboard { input } => {
             let account = Account {
                 installation_id: input.installation_id,
                 account_id: input.account_id,
@@ -265,12 +265,12 @@ async fn project_installation(
                 Err(error) => Err(ProjectionFailure::Storage(error)),
             }
         }
-        InstallationProjection::Repos { input } => state
+        InstallationChange::Repos { input } => state
             .storage
             .update_installation_repos(input.installation_id, &input.selected_repos)
             .await
             .map_err(ProjectionFailure::Storage),
-        InstallationProjection::Uninstall { input } => {
+        InstallationChange::Uninstall { input } => {
             match state
                 .storage
                 .mark_installation_uninstalled(input.installation_id, input.uninstalled_at)
@@ -285,18 +285,15 @@ async fn project_installation(
     }
 }
 
-async fn project(
-    ctx: &ObjectContext<'_>,
-    input: InstallationProjection,
-) -> Result<(), TerminalError> {
-    ctx.object_client::<InstallationProjectionV1Client>(ctx.key())
+async fn project(ctx: &ObjectContext<'_>, input: InstallationChange) -> Result<(), TerminalError> {
+    ctx.object_client::<InstallationProjectionClient>(ctx.key())
         .apply(Json(input))
         .send()
         .await?;
     Ok(())
 }
 
-impl AccountInstallationV1Impl {
+impl AccountInstallationImpl {
     async fn load(&self, ctx: &ObjectContext<'_>) -> Result<InstallationStatus, TerminalError> {
         if let Some(Json(status)) = ctx.get("installation/v1").await? {
             return Ok(status);
@@ -379,7 +376,7 @@ impl AccountInstallationV1Impl {
             if account.selected_repos != selected {
                 project(
                     ctx,
-                    InstallationProjection::Repos {
+                    InstallationChange::Repos {
                         input: crate::installation::ReposChangedInput {
                             installation_id: account.installation_id,
                             selected_repos: selected.clone(),
@@ -393,7 +390,7 @@ impl AccountInstallationV1Impl {
                 && ctx.get::<bool>(RECHECK_SLOT).await?.is_none()
             {
                 ctx.set(RECHECK_SLOT, true);
-                ctx.object_client::<AccountInstallationV1Client>(ctx.key())
+                ctx.object_client::<AccountInstallationClient>(ctx.key())
                     .recheck()
                     .send_after(RECHECK_INTERVAL)
                     .await?;
@@ -462,7 +459,7 @@ impl AccountInstallationV1Impl {
             return Ok(());
         }
         ctx.set(&slot, true);
-        ctx.object_client::<AccountInstallationV1Client>(ctx.key())
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
             .retry_refresh(Json(RefreshContinuation {
                 target: refresh.target,
                 attempt: refresh.attempt.saturating_add(1),
@@ -498,7 +495,7 @@ fn refresh_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(1 << attempt.min(6)).min(RECHECK_INTERVAL)
 }
 
-impl AccountInstallationV1 for AccountInstallationV1Impl {
+impl AccountInstallation for AccountInstallationImpl {
     async fn retry_uninstall(
         &self,
         ctx: ObjectContext<'_>,
@@ -623,7 +620,7 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
                 .await?;
             project(
                 &ctx,
-                InstallationProjection::Uninstall {
+                InstallationChange::Uninstall {
                     input: UninstallInput {
                         installation_id: old.installation_id,
                         uninstalled_at: now,
@@ -644,7 +641,7 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
         input.selected_repos = SelectedRepos::Subset(vec![]);
         project(
             &ctx,
-            InstallationProjection::Onboard {
+            InstallationChange::Onboard {
                 input: input.clone(),
             },
         )
@@ -686,7 +683,7 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
         let mut status = match self.load(&ctx).await {
             Ok(status) => status,
             Err(_) => {
-                ctx.object_client::<AccountInstallationV1Client>(ctx.key())
+                ctx.object_client::<AccountInstallationClient>(ctx.key())
                     .retry_uninstall(Json(input))
                     .send_after(std::time::Duration::from_secs(60))
                     .await?;
@@ -698,7 +695,7 @@ impl AccountInstallationV1 for AccountInstallationV1Impl {
             .as_ref()
             .is_some_and(|a| a.installation_id == input.installation_id)
         {
-            project(&ctx, InstallationProjection::Uninstall { input }).await?;
+            project(&ctx, InstallationChange::Uninstall { input }).await?;
             status.account = None;
             status.observation = Observation::Unavailable;
             ctx.set("installation/v1", Json(status));
@@ -746,8 +743,8 @@ mod tests {
     use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
     use ghinvite_core::storage::{ConflictKind, Error as StorageError};
 
-    fn onboarding() -> InstallationProjection {
-        InstallationProjection::Onboard {
+    fn onboarding() -> InstallationChange {
+        InstallationChange::Onboard {
             input: onboarding_input(),
         }
     }
@@ -797,10 +794,9 @@ mod tests {
 
         let mut renamed = onboarding_input();
         renamed.account_login = "someone-else".into();
-        let failure =
-            project_installation(&state, &InstallationProjection::Onboard { input: renamed })
-                .await
-                .expect_err("the same installation cannot have been onboarded twice over");
+        let failure = project_installation(&state, &InstallationChange::Onboard { input: renamed })
+            .await
+            .expect_err("the same installation cannot have been onboarded twice over");
 
         assert!(matches!(failure, ProjectionFailure::IdentityConflict));
     }
@@ -812,10 +808,9 @@ mod tests {
 
         let mut second = onboarding_input();
         second.installation_id = 2;
-        let failure =
-            project_installation(&state, &InstallationProjection::Onboard { input: second })
-                .await
-                .expect_err("an account has at most one active installation");
+        let failure = project_installation(&state, &InstallationChange::Onboard { input: second })
+            .await
+            .expect_err("an account has at most one active installation");
 
         // Retrying cannot converge while the first installation is active, so
         // the crate's own classification has to settle it rather than the SDK's
@@ -835,7 +830,7 @@ mod tests {
 
         project_installation(
             &state,
-            &InstallationProjection::Repos {
+            &InstallationChange::Repos {
                 input: crate::installation::ReposChangedInput {
                     installation_id: 1,
                     selected_repos: SelectedRepos::Subset(vec![10, 20]),
@@ -855,7 +850,7 @@ mod tests {
 
         let failure = project_installation(
             &state,
-            &InstallationProjection::Repos {
+            &InstallationChange::Repos {
                 input: crate::installation::ReposChangedInput {
                     installation_id: 999,
                     selected_repos: SelectedRepos::Subset(vec![10]),
@@ -879,7 +874,7 @@ mod tests {
 
         project_installation(
             &state,
-            &InstallationProjection::Uninstall {
+            &InstallationChange::Uninstall {
                 input: UninstallInput {
                     installation_id: 1,
                     uninstalled_at,
@@ -899,7 +894,7 @@ mod tests {
 
         project_installation(
             &state,
-            &InstallationProjection::Uninstall {
+            &InstallationChange::Uninstall {
                 input: UninstallInput {
                     installation_id: 999,
                     uninstalled_at: dt("2026-05-05T00:00:00Z"),
@@ -912,7 +907,7 @@ mod tests {
         assert!(state.storage.get_installation(999).await.unwrap().is_none());
     }
 
-    fn audit_for(input: &InstallationProjection) -> ghinvite_core::audit::AuditEvent {
+    fn audit_for(input: &InstallationChange) -> ghinvite_core::audit::AuditEvent {
         installation_audit(
             100,
             input,
@@ -944,7 +939,7 @@ mod tests {
 
     #[test]
     fn a_repository_change_audit_is_attributed_to_github() {
-        let event = audit_for(&InstallationProjection::Repos {
+        let event = audit_for(&InstallationChange::Repos {
             input: crate::installation::ReposChangedInput {
                 installation_id: 1,
                 selected_repos: SelectedRepos::Subset(vec![10, 20]),
@@ -965,7 +960,7 @@ mod tests {
     #[test]
     fn an_uninstall_audit_records_when_the_installation_ended() {
         let uninstalled_at = dt("2026-05-05T00:00:00Z");
-        let event = audit_for(&InstallationProjection::Uninstall {
+        let event = audit_for(&InstallationChange::Uninstall {
             input: UninstallInput {
                 installation_id: 1,
                 uninstalled_at,

@@ -16,13 +16,13 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.equal(await storage('member-binding', ['b'.repeat(64), sent.id]), sent.id);
   assert.equal(await storage('member-binding', ['b'.repeat(64), null]), sent.id, 'lost acknowledgement retry retains its original target');
   await db.prepare("CREATE TRIGGER settlement_audit_failure BEFORE INSERT ON audit_events WHEN NEW.target_kind = 'github_invitation' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END").run();
-  const invocation = await lifecycle(sent.id, 'on_webhook_v1/send', { invitation_id: sent.id, action: 'accepted', at });
+  const invocation = await lifecycle(sent.id, 'on_webhook/send', { invitation_id: sent.id, action: 'accepted', at });
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.equal((await storage('invitation', sent.id)).state, 'sent', 'audit failure cannot commit terminal state');
   await db.prepare('DROP TRIGGER settlement_audit_failure').run();
   await http(`${ingress}/restate/invocation/${invocation.invocationId}/attach`, undefined, 'GET');
   const evidence = { expected: sent, accepted: false, at };
-  await Promise.all([lifecycle(sent.id, 'reconcile_v1', evidence), lifecycle(sent.id, 'reconcile_v1', evidence)]);
+  await Promise.all([lifecycle(sent.id, 'reconcile', evidence), lifecycle(sent.id, 'reconcile', evidence)]);
   assert.equal((await storage('invitation', sent.id)).state, 'accepted');
   let events = (await storage('audit', 100)).events.filter(event => event.target_id === sent.id);
   assert.equal(events.length, 2);
@@ -50,25 +50,25 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.equal((await storage('member-candidates', [100, sent.repo_id, requester])).length, 2, 'ambiguous lookup returns at most two rows');
   assert.equal(await storage('member-binding', ['b'.repeat(64), cancelled.id]), sent.id, 'another request cannot replace the binding');
   console.log('PASS #84 actual D1 immutable-identity lookup, bounded historical ambiguity and retained webhook bindings');
-  await lifecycle(cancelled.id, 'cancel_v1', { invitation_id: cancelled.id, installation_id: 1, by_user: 7, at });
+  await lifecycle(cancelled.id, 'cancel', { invitation_id: cancelled.id, installation_id: 1, by_user: 7, at });
   assert.equal((await storage('invitation', cancelled.id)).state, 'cancelled');
   const expiring = { ...sent, id: id() };
   await storage('insert_invitation', expiring);
-  await lifecycle(expiring.id, 'tick_expire_v1', { invitation_id: expiring.id, installation_id: 1, at });
+  await lifecycle(expiring.id, 'tick_expire', { invitation_id: expiring.id, installation_id: 1, at });
   assert.equal((await storage('invitation', expiring.id)).state, 'expired');
 
   // A real blocked receiver, ordinary concurrent sweeps, then safe recovery.
   pause(true);
   const input = { ...creation(), approval_required: false };
-  const link = (handler, body) => http(`${ingress}/InvitationLinkV1/${input.link_id}/${handler}`, body);
+  const link = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   await link('create', input);
   const admitted = await link('admit', { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
   const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'access_lost_once' });
   const command = plan.commands[0];
-  const create = () => http(`${ingress}/GithubCreateV1/${command.invitation_id}/create`, command);
+  const create = () => http(`${ingress}/GithubCreate/${command.invitation_id}/create`, command);
   assert.equal((await create()).outcome.kind, 'blocked');
-  await Promise.all([http(`${ingress}/Reconcile/daily_run_v1`, { at }), http(`${ingress}/Reconcile/daily_run_v1`, { at })]);
+  await Promise.all([http(`${ingress}/Reconcile/daily_run`, { at }), http(`${ingress}/Reconcile/daily_run`, { at })]);
   assert.equal((await storage('invitation', command.invitation_id)).state, 'sending');
   const recovered = await create();
   assert.equal(recovered.outcome.kind, 'created');
@@ -78,13 +78,13 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const renamed = { ...sent, id: id(), github_invitation_id: 987656 };
   await storage('insert_invitation', renamed);
   await http(`${githubUrl}/identity`, { login: 'renamed', addressed_id: 91, role_name: 'write' });
-  await http(`${ingress}/Reconcile/daily_run_v1`, { at });
+  await http(`${ingress}/Reconcile/daily_run`, { at });
   assert.equal((await storage('invitation', renamed.id)).state, 'accepted', 'settlement resolves numeric requester identity after rename');
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   // #65: real D1 candidate discovery across installation provenance, with the
   // replacement established through the production account installation owner.
   const historicalInput = { ...creation(), approval_required: false };
-  const historical = (handler, body) => http(`${ingress}/InvitationLinkV1/${historicalInput.link_id}/${handler}`, body);
+  const historical = (handler, body) => http(`${ingress}/InvitationLink/${historicalInput.link_id}/${handler}`, body);
   await historical('create', historicalInput);
   const admittedHistorical = await historical('admit', { version: 1, link_id: historicalInput.link_id, operation_id: id(), requester_id: 91 });
   const query = { link_id: historicalInput.link_id, request_id: admittedHistorical.result.request_id, requester_id: 91 };
@@ -92,27 +92,27 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await eventually(() => storage('request', query.request_id), row => row?.state === 'approved');
   const originalLink = await storage('link', historicalInput.link_id);
   const originalRequest = await storage('request', query.request_id);
-  const account = (handler, body) => http(`${ingress}/AccountInstallationV1/100/${handler}`, body);
+  const account = (handler, body) => http(`${ingress}/AccountInstallation/100/${handler}`, body);
   await account('uninstall', { installation_id: 1, uninstalled_at: at });
   await account('onboard', { installation_id: 19, account_id: 100, account_login: 'acme', account_type: 'Organization',
     actor_user_id: 7, selected_repos: 'all', installed_at: at });
   const historicalCommand = historicalPlan.commands[0];
-  const delivered = await eventually(() => http(`${ingress}/GithubCreateV1/${historicalCommand.invitation_id}/create`, historicalCommand), value => value.outcome.kind === 'created');
+  const delivered = await eventually(() => http(`${ingress}/GithubCreate/${historicalCommand.invitation_id}/create`, historicalCommand), value => value.outcome.kind === 'created');
   assert.equal(delivered.command.installation_id, 1);
   await http(`${githubUrl}/repos/acme/api/invitations/${delivered.outcome.upstream_id}`, undefined, 'DELETE');
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91, role_name: 'write' });
   await http(`${githubUrl}/installation-identity`, { id: 200, login: 'acme', type: 'Organization' });
-  await http(`${ingress}/Reconcile/daily_run_v1`, { at });
+  await http(`${ingress}/Reconcile/daily_run`, { at });
   assert.equal((await storage('invitation', historicalCommand.invitation_id)).state, 'sent', 'another account cannot settle history');
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
-  await http(`${ingress}/Reconcile/daily_run_v1`, { at });
+  await http(`${ingress}/Reconcile/daily_run`, { at });
   const settled = await storage('invitation', historicalCommand.invitation_id);
   assert.equal(settled.state, 'accepted');
   assert.equal(settled.github_invitation_id, delivered.outcome.upstream_id);
   assert.deepEqual(await storage('link', historicalInput.link_id), originalLink);
   assert.deepEqual(await storage('request', query.request_id), originalRequest);
   assert.deepEqual(await historical('prepare_dispatch', query), historicalPlan);
-  assert.deepEqual(await http(`${ingress}/GithubCreateV1/${historicalCommand.invitation_id}/status`), delivered);
+  assert.deepEqual(await http(`${ingress}/GithubCreate/${historicalCommand.invitation_id}/status`), delivered);
   const accepted = (await storage('audit', 100)).events.filter(event => event.target_id === settled.id && event.event_type === 'invitation.accepted');
   assert.equal(accepted.length, 1);
   assert.deepEqual(accepted[0].metadata, { reconciled: true });

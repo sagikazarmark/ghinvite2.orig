@@ -88,18 +88,8 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
              This is only safe for local dev."
         );
     }
-    let mode = env
-        .var("GHINVITE_ADMISSION_MODE")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "legacy".into());
-    let endpoint = match mode.as_str() {
-        "legacy" => ghinvite_workflows::build_endpoint(state, identity_key.as_deref()),
-        "authoritative" => {
-            ghinvite_workflows::build_cutover_endpoint(state, storage, identity_key.as_deref())
-        }
-        _ => return Err(worker_err("invalid GHINVITE_ADMISSION_MODE")),
-    }
-    .map_err(worker_err)?;
+    let endpoint = ghinvite_workflows::build_endpoint(state, storage, identity_key.as_deref())
+        .map_err(worker_err)?;
 
     // Cloudflare Workers does not support true bidirectional streaming — it
     // buffers the entire request body before passing it to the worker. We
