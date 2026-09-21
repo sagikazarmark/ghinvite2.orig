@@ -15,23 +15,15 @@
 //! `restate-server` (compose.yaml) behind the `integration` feature; see
 //! `scripts/test-restate.sh`.
 
-// SDK 0.12 retains the trait-based service API; migrating macro style is
-// separate work.
-#[allow(deprecated)]
 pub mod admission;
 pub mod audit;
-#[allow(deprecated)]
 pub mod availability;
-#[allow(deprecated)]
 pub mod delivery;
 pub mod error;
-#[allow(deprecated)]
 pub mod github_invitation;
-#[allow(deprecated)]
 pub mod installation;
 pub mod invitation_context;
 pub mod projection;
-#[allow(deprecated)]
 pub mod reconcile;
 pub mod request_lifecycle;
 pub mod settlement;
@@ -64,38 +56,22 @@ pub fn build_endpoint(
     projection: std::sync::Arc<dyn ghinvite_core::storage::projection::ProjectionStorage>,
     identity_key: Option<&str>,
 ) -> std::result::Result<Endpoint, String> {
-    use github_invitation::GithubInvitation as _;
-    use installation::Installation as _;
-    use reconcile::Reconcile as _;
     let builder = Endpoint::builder()
-        .bind(
-            installation::InstallationImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        )
-        .bind(
-            github_invitation::GithubInvitationImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        )
-        .bind(
-            reconcile::ReconcileImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        )
-        .bind(availability::AccountInstallation::serve(
-            availability::AccountInstallationImpl {
-                state: state.clone(),
-            },
-        ))
-        .bind(availability::InstallationProjection::serve(
-            availability::InstallationProjectionImpl {
-                state: state.clone(),
-            },
-        ));
+        .bind(installation::Installation {
+            state: state.clone(),
+        })
+        .bind(github_invitation::GithubInvitation {
+            state: state.clone(),
+        })
+        .bind(reconcile::Reconcile {
+            state: state.clone(),
+        })
+        .bind(availability::AccountInstallation {
+            state: state.clone(),
+        })
+        .bind(availability::InstallationProjection {
+            state: state.clone(),
+        });
     let builder = admission::bind(builder);
     let builder = projection::bind(builder, projection);
     let builder = request_lifecycle::bind(builder);

@@ -110,18 +110,11 @@ fn retry_policy() -> RunRetryPolicy {
         .max_delay(Duration::from_millis(200))
 }
 
+struct AdmissionProofLink(Arc<Faults>);
+
 #[restate_sdk::object]
-trait AdmissionProofLink {
-    async fn initialize(expires_at_ms: i64) -> Result<(), TerminalError>;
-    async fn admit(input: Json<Admission>) -> Result<Json<Outcome>, TerminalError>;
-    async fn revoke() -> Result<(), TerminalError>;
-    #[shared]
-    async fn status() -> Result<Json<LinkState>, TerminalError>;
-}
-
-struct LinkHandler(Arc<Faults>);
-
-impl AdmissionProofLink for LinkHandler {
+impl AdmissionProofLink {
+    #[handler]
     async fn initialize(
         &self,
         ctx: ObjectContext<'_>,
@@ -138,10 +131,12 @@ impl AdmissionProofLink for LinkHandler {
         Ok(())
     }
 
+    #[handler]
     async fn status(&self, ctx: SharedObjectContext<'_>) -> Result<Json<LinkState>, TerminalError> {
         Ok(ctx.get("state").await?.expect("initialized proof link"))
     }
 
+    #[handler]
     async fn admit(
         &self,
         ctx: ObjectContext<'_>,
@@ -246,6 +241,7 @@ impl AdmissionProofLink for LinkHandler {
         Ok(Json(outcome))
     }
 
+    #[handler]
     async fn revoke(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
         let Json(mut state) = ctx.get::<Json<LinkState>>("state").await?.unwrap();
         if state.revoked {
@@ -266,14 +262,11 @@ impl AdmissionProofLink for LinkHandler {
     }
 }
 
+struct AdmissionProofRequest(Arc<Faults>);
+
 #[restate_sdk::workflow]
-trait AdmissionProofRequest {
-    async fn run(outcome: Json<Outcome>) -> Result<(), TerminalError>;
-}
-
-struct RequestHandler(Arc<Faults>);
-
-impl AdmissionProofRequest for RequestHandler {
+impl AdmissionProofRequest {
+    #[handler]
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -291,17 +284,14 @@ impl AdmissionProofRequest for RequestHandler {
     }
 }
 
-#[restate_sdk::service]
-trait AdmissionProofProjection {
-    async fn apply(projection: Json<Projection>) -> Result<(), TerminalError>;
-}
-
-struct ProjectionHandler {
+struct AdmissionProofProjection {
     pool: SqlitePool,
     faults: Arc<Faults>,
 }
 
-impl AdmissionProofProjection for ProjectionHandler {
+#[restate_sdk::service]
+impl AdmissionProofProjection {
+    #[handler]
     async fn apply(
         &self,
         ctx: Context<'_>,
@@ -453,15 +443,12 @@ async fn scenario() {
     let faults = Arc::new(Faults::default());
     faults.offline.store(true, Ordering::SeqCst);
     let endpoint = Endpoint::builder()
-        .bind(LinkHandler(faults.clone()).serve())
-        .bind(RequestHandler(faults.clone()).serve())
-        .bind(
-            ProjectionHandler {
-                pool: pool.clone(),
-                faults: faults.clone(),
-            }
-            .serve(),
-        );
+        .bind(AdmissionProofLink(faults.clone()))
+        .bind(AdmissionProofRequest(faults.clone()))
+        .bind(AdmissionProofProjection {
+            pool: pool.clone(),
+            faults: faults.clone(),
+        });
     let deadline_clock = Arc::new(std::sync::atomic::AtomicI64::new(0));
     let endpoint = split_state::bind(endpoint, faults.clone());
     let endpoint = deadlines::bind(endpoint, faults.clone(), deadline_clock.clone());

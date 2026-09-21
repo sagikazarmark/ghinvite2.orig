@@ -1,6 +1,7 @@
 //! Extension of the throwaway protocol proof: lazy, bounded-access state.
 
 use super::*;
+use restate_sdk::service::IntoServiceDefinition;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 struct Header {
@@ -40,19 +41,11 @@ struct Transition {
     state: String,
 }
 
+struct AdmissionSplitProof(Arc<Faults>);
+
 #[restate_sdk::object]
-trait AdmissionSplitProof {
-    async fn initialize() -> Result<(), TerminalError>;
-    async fn admit(input: Json<Admission>) -> Result<Json<Outcome>, TerminalError>;
-    // Deliberately exclusive: a multi-record authoritative view must queue
-    // behind unfinished mutations, including their suspension and replay.
-    async fn status(query: Json<StatusQuery>) -> Result<Json<Status>, TerminalError>;
-    async fn transition(input: Json<Transition>) -> Result<(), TerminalError>;
-}
-
-struct Handler(Arc<Faults>);
-
-impl AdmissionSplitProof for Handler {
+impl AdmissionSplitProof {
+    #[handler]
     async fn initialize(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
         ctx.set(
             "link",
@@ -67,6 +60,7 @@ impl AdmissionSplitProof for Handler {
         Ok(())
     }
 
+    #[handler]
     async fn admit(
         &self,
         ctx: ObjectContext<'_>,
@@ -174,6 +168,9 @@ impl AdmissionSplitProof for Handler {
         Ok(Json(decision.outcome))
     }
 
+    // Deliberately exclusive: a multi-record authoritative view must queue
+    // behind unfinished mutations, including their suspension and replay.
+    #[handler]
     async fn status(
         &self,
         ctx: ObjectContext<'_>,
@@ -199,6 +196,7 @@ impl AdmissionSplitProof for Handler {
         }))
     }
 
+    #[handler]
     async fn transition(
         &self,
         ctx: ObjectContext<'_>,
@@ -231,9 +229,10 @@ pub(super) fn bind(
     builder: restate_sdk::endpoint::Builder,
     faults: Arc<Faults>,
 ) -> restate_sdk::endpoint::Builder {
-    builder.bind_with_options(
-        Handler(faults).serve(),
-        restate_sdk::endpoint::ServiceOptions::new().enable_lazy_state(true),
+    builder.bind(
+        AdmissionSplitProof(faults)
+            .into_service_definition()
+            .options(restate_sdk::endpoint::ServiceOptions::new().enable_lazy_state(true)),
     )
 }
 

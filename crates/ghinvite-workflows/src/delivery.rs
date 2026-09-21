@@ -15,15 +15,7 @@ use restate_sdk::{
     serde::Json,
 };
 
-#[restate_sdk::object]
-pub trait GithubCreate {
-    async fn create(input: Json<CreateCommand>) -> Result<Json<CreateReceipt>, TerminalError>;
-    async fn recheck(input: Json<CreateCommand>) -> Result<(), TerminalError>;
-    #[shared]
-    async fn status() -> Result<Json<Option<CreateReceipt>>, TerminalError>;
-}
-
-pub struct GithubCreateImpl {
+pub struct GithubCreate {
     state: AppState,
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<DeliveryFaults>>,
@@ -39,15 +31,12 @@ pub struct DeliveryFaults {
 
 pub fn bind(builder: Builder, state: AppState) -> Builder {
     builder
-        .bind(
-            GithubCreateImpl {
-                state,
-                #[cfg(feature = "integration")]
-                faults: None,
-            }
-            .serve(),
-        )
-        .bind(DeliveryRecoveryImpl.serve())
+        .bind(GithubCreate {
+            state,
+            #[cfg(feature = "integration")]
+            faults: None,
+        })
+        .bind(DeliveryRecovery)
 }
 
 #[cfg(feature = "integration")]
@@ -57,24 +46,18 @@ pub fn bind_with_faults(
     faults: std::sync::Arc<DeliveryFaults>,
 ) -> Builder {
     builder
-        .bind(
-            GithubCreateImpl {
-                state,
-                faults: Some(faults),
-            }
-            .serve(),
-        )
-        .bind(DeliveryRecoveryImpl.serve())
+        .bind(GithubCreate {
+            state,
+            faults: Some(faults),
+        })
+        .bind(DeliveryRecovery)
 }
 
+pub struct DeliveryRecovery;
+
 #[restate_sdk::service]
-pub trait DeliveryRecovery {
-    async fn recover(
-        input: Json<crate::admission::RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError>;
-}
-pub struct DeliveryRecoveryImpl;
-impl DeliveryRecovery for DeliveryRecoveryImpl {
+impl DeliveryRecovery {
+    #[handler]
     async fn recover(
         &self,
         ctx: Context<'_>,
@@ -114,7 +97,9 @@ impl DeliveryRecovery for DeliveryRecoveryImpl {
     }
 }
 
-impl GithubCreate for GithubCreateImpl {
+#[restate_sdk::object]
+impl GithubCreate {
+    #[handler]
     async fn recheck(
         &self,
         ctx: ObjectContext<'_>,
@@ -134,6 +119,7 @@ impl GithubCreate for GithubCreateImpl {
             .await?;
         Ok(())
     }
+    #[handler]
     async fn status(
         &self,
         ctx: SharedObjectContext<'_>,
@@ -145,6 +131,7 @@ impl GithubCreate for GithubCreateImpl {
         ))
     }
 
+    #[handler]
     async fn create(
         &self,
         ctx: ObjectContext<'_>,
@@ -221,16 +208,15 @@ impl GithubCreate for GithubCreateImpl {
         ctx.run(|| async {
             project(&self.state, &receipt).await?;
             #[cfg(feature = "integration")]
-            if let Some(faults) = &self.faults {
-                if faults
+            if let Some(faults) = &self.faults
+                && faults
                     .lose_projection_ack
                     .swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    return Err(std::io::Error::other(
-                        "fixture: SQL committed but acknowledgement lost",
-                    )
-                    .into());
-                }
+            {
+                return Err(std::io::Error::other(
+                    "fixture: SQL committed but acknowledgement lost",
+                )
+                .into());
             }
             Ok::<_, HandlerError>(())
         })

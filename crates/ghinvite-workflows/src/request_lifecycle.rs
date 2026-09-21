@@ -1,7 +1,5 @@
 //! Direct terminal promises coordinate wake-up; only the link authorizes work.
-use crate::admission::{
-    InvitationLinkClient, InvitationRequest, RequestStatus, TerminalSignal, WorkflowEnvelope,
-};
+use crate::admission::{InvitationLinkClient, RequestStatus, TerminalSignal, WorkflowEnvelope};
 use ghinvite_core::RequestState;
 use restate_sdk::context::{
     ContextClient, ContextPromises, ContextSideEffects, ContextTimers, RunFuture,
@@ -39,8 +37,9 @@ pub struct DeliveryStatus {
     pub submitted: Vec<SubmittedCommand>,
 }
 
+/// The request lifecycle workflow, keyed by request ID.
 #[derive(Default)]
-pub struct InvitationRequestImpl {
+pub struct InvitationRequest {
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<WorkflowFaults>>,
 }
@@ -62,26 +61,31 @@ pub struct WorkflowFaults {
 #[cfg(feature = "integration")]
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<WorkflowFaults>) -> Builder {
     use restate_sdk::endpoint::{HandlerOptions, ServiceOptions};
-    builder.bind_with_options(
-        InvitationRequestImpl {
+    use restate_sdk::service::IntoServiceDefinition;
+    builder.bind(
+        InvitationRequest {
             faults: Some(faults),
         }
-        .serve(),
-        ServiceOptions::new()
-            .journal_retention(std::time::Duration::from_secs(2))
-            .idempotency_retention(std::time::Duration::from_secs(2))
-            .handler(
-                "run",
-                HandlerOptions::new().workflow_retention(std::time::Duration::from_secs(2)),
-            ),
+        .into_service_definition()
+        .options(
+            ServiceOptions::new()
+                .journal_retention(std::time::Duration::from_secs(2))
+                .idempotency_retention(std::time::Duration::from_secs(2))
+                .handler(
+                    "run",
+                    HandlerOptions::new().workflow_retention(std::time::Duration::from_secs(2)),
+                ),
+        ),
     )
 }
 
 pub fn bind(builder: Builder) -> Builder {
-    builder.bind(InvitationRequestImpl::default().serve())
+    builder.bind(InvitationRequest::default())
 }
 
-impl InvitationRequest for InvitationRequestImpl {
+#[restate_sdk::workflow]
+impl InvitationRequest {
+    #[handler]
     async fn notification_status(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -92,6 +96,7 @@ impl InvitationRequest for InvitationRequestImpl {
                 .map(|s| s.0),
         ))
     }
+    #[handler]
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -268,6 +273,7 @@ impl InvitationRequest for InvitationRequestImpl {
         }
     }
 
+    #[handler]
     async fn notify(
         &self,
         ctx: SharedWorkflowContext<'_>,

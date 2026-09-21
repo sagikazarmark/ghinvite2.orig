@@ -39,21 +39,13 @@ pub struct TickExpireInput {
     pub at: DateTime<Utc>,
 }
 
-#[restate_sdk::object]
-pub trait GithubInvitation {
-    async fn reconcile(
-        input: Json<crate::settlement::ReconcileEvidence>,
-    ) -> std::result::Result<(), TerminalError>;
-    async fn on_webhook(input: Json<OnWebhookInput>) -> std::result::Result<(), TerminalError>;
-    async fn cancel(input: Json<CancelInvitationInput>) -> std::result::Result<(), TerminalError>;
-    async fn tick_expire(input: Json<TickExpireInput>) -> std::result::Result<(), TerminalError>;
-}
-
-pub struct GithubInvitationImpl {
+pub struct GithubInvitation {
     pub state: AppState,
 }
 
-impl GithubInvitation for GithubInvitationImpl {
+#[restate_sdk::object]
+impl GithubInvitation {
+    #[handler]
     async fn reconcile(
         &self,
         ctx: ObjectContext<'_>,
@@ -61,6 +53,7 @@ impl GithubInvitation for GithubInvitationImpl {
     ) -> std::result::Result<(), TerminalError> {
         crate::settlement::reconcile(&self.state, ctx, input).await
     }
+    #[handler]
     async fn on_webhook(
         &self,
         ctx: ObjectContext<'_>,
@@ -68,6 +61,7 @@ impl GithubInvitation for GithubInvitationImpl {
     ) -> std::result::Result<(), TerminalError> {
         crate::settlement::webhook(&self.state, ctx, input).await
     }
+    #[handler]
     async fn cancel(
         &self,
         ctx: ObjectContext<'_>,
@@ -75,6 +69,7 @@ impl GithubInvitation for GithubInvitationImpl {
     ) -> std::result::Result<(), TerminalError> {
         crate::settlement::cancel(&self.state, ctx, input).await
     }
+    #[handler]
     async fn tick_expire(
         &self,
         ctx: ObjectContext<'_>,

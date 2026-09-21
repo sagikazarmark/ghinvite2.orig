@@ -6,6 +6,8 @@
 //! Identity fields are assertions from that caller, never browser form authority.
 //! Installation observations come from the account object, after receipt replay.
 
+use crate::projection::InvitationProjectionClient;
+use crate::request_lifecycle::InvitationRequestClient;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::{
@@ -19,6 +21,7 @@ use restate_sdk::context::{
 use restate_sdk::endpoint::{Builder, ServiceOptions};
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::serde::Json;
+use restate_sdk::service::IntoServiceDefinition;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -87,24 +90,6 @@ impl WorkflowEnvelope {
     }
 }
 
-/// Internal durable projection consumer, keyed by link ID so each link's
-/// transitions apply in send order; bind via `projection::bind`.
-#[restate_sdk::object]
-pub trait InvitationProjection {
-    async fn apply_transition(input: Json<ProjectionEnvelope>) -> Result<(), TerminalError>;
-}
-
-#[restate_sdk::workflow]
-pub trait InvitationRequest {
-    async fn run(
-        input: Json<WorkflowEnvelope>,
-    ) -> Result<Json<crate::request_lifecycle::WorkflowResult>, TerminalError>;
-    #[shared]
-    async fn notify(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
-    #[shared]
-    async fn notification_status() -> Result<Json<Option<TerminalSignal>>, TerminalError>;
-}
-
 fn audit(
     kind: EventType,
     target: impl ToString,
@@ -150,13 +135,11 @@ async fn send_projection(
 pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
 
 /// Private, immutable routing registry; never consults SQL or calls a link.
+struct InvitationCode;
+
 #[restate_sdk::object]
-pub trait InvitationCode {
-    async fn register(input: Json<InvitationLinkId>) -> Result<(), TerminalError>;
-    async fn resolve(input: Json<()>) -> Result<Json<InvitationLinkId>, TerminalError>;
-}
-struct InvitationCodeImpl;
-impl InvitationCode for InvitationCodeImpl {
+impl InvitationCode {
+    #[handler]
     async fn register(
         &self,
         ctx: ObjectContext<'_>,
@@ -172,6 +155,7 @@ impl InvitationCode for InvitationCodeImpl {
         }
         Ok(())
     }
+    #[handler]
     async fn resolve(
         &self,
         ctx: ObjectContext<'_>,
@@ -182,46 +166,8 @@ impl InvitationCode for InvitationCodeImpl {
     }
 }
 
-#[restate_sdk::object]
-pub trait InvitationLink {
-    async fn update_metadata(
-        input: Json<UpdateMetadata>,
-    ) -> Result<Json<LinkSnapshot>, TerminalError>;
-    async fn prepare_attempt(input: Json<Admit>) -> Result<Json<Attempt>, TerminalError>;
-    async fn requester_page(
-        input: Json<AttemptQuery>,
-    ) -> Result<Json<RequesterPage>, TerminalError>;
-    async fn create(input: Json<CreateLink>) -> Result<Json<LinkSnapshot>, TerminalError>;
-    async fn admit(input: Json<Admit>) -> Result<Json<AdmissionReceipt>, TerminalError>;
-    async fn revoke(input: Json<AdminLinkCommand>) -> Result<Json<LinkSnapshot>, TerminalError>;
-    async fn link_status(
-        input: Json<AdminLinkCommand>,
-    ) -> Result<Json<LinkSnapshot>, TerminalError>;
-    async fn request_status(
-        input: Json<RequestStatus>,
-    ) -> Result<Json<RequestSnapshot>, TerminalError>;
-    async fn decide(input: Json<DecideRequest>) -> Result<Json<DecisionReceipt>, TerminalError>;
-    async fn decision_status(
-        input: Json<DecideRequest>,
-    ) -> Result<Json<Option<DecisionReceipt>>, TerminalError>;
-    async fn prepare_dispatch(
-        input: Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle::ApprovedDispatch>, TerminalError>;
-    async fn record_submitted(
-        input: Json<crate::request_lifecycle::SubmittedCommand>,
-    ) -> Result<(), TerminalError>;
-    async fn delivery_status(
-        input: Json<RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError>;
-    async fn delivery_progress(
-        input: Json<RequestStatus>,
-    ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError>;
-    async fn consume_lifecycle(input: Json<TerminalSignal>) -> Result<(), TerminalError>;
-    async fn notification_needed(input: Json<TerminalSignal>) -> Result<Json<bool>, TerminalError>;
-}
-
 #[derive(Default)]
-pub struct InvitationLinkImpl {
+pub struct InvitationLink {
     #[cfg(feature = "integration")]
     skip_availability: bool,
     #[cfg(feature = "integration")]
@@ -255,7 +201,7 @@ impl Faults {
     }
 }
 
-impl InvitationLinkImpl {
+impl InvitationLink {
     async fn transition(
         &self,
         ctx: &ObjectContext<'_>,
@@ -436,12 +382,12 @@ async fn send_terminal(
 
 #[cfg(feature = "integration")]
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Builder {
-    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
-        InvitationLinkImpl {
+    bind_objects(
+        builder,
+        InvitationLink {
             faults: Some(faults),
             skip_availability: true,
-        }
-        .serve(),
+        },
         ServiceOptions::new()
             .enable_lazy_state(true)
             .idempotency_retention(std::time::Duration::from_secs(2))
@@ -452,8 +398,9 @@ pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Bui
 /// Bind the admission objects. Lazy state is required, not
 /// an optimization: retained operation/request history must never load eagerly.
 pub fn bind(builder: Builder) -> Builder {
-    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
-        InvitationLinkImpl::default().serve(),
+    bind_objects(
+        builder,
+        InvitationLink::default(),
         ServiceOptions::new().enable_lazy_state(true),
     )
 }
@@ -461,14 +408,20 @@ pub fn bind(builder: Builder) -> Builder {
 /// Isolated protocol fixtures supply no installation integration.
 #[cfg(feature = "integration")]
 pub fn bind_protocol_fixture(builder: Builder) -> Builder {
-    builder.bind(InvitationCodeImpl.serve()).bind_with_options(
-        InvitationLinkImpl {
+    bind_objects(
+        builder,
+        InvitationLink {
             skip_availability: true,
             faults: None,
-        }
-        .serve(),
+        },
         ServiceOptions::new().enable_lazy_state(true),
     )
+}
+
+fn bind_objects(builder: Builder, link: InvitationLink, options: ServiceOptions) -> Builder {
+    builder
+        .bind(InvitationCode)
+        .bind(link.into_service_definition().options(options))
 }
 
 fn invalid() -> TerminalError {
@@ -585,7 +538,9 @@ fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError
     Ok(input)
 }
 
-impl InvitationLink for InvitationLinkImpl {
+#[restate_sdk::object]
+impl InvitationLink {
+    #[handler]
     async fn update_metadata(
         &self,
         ctx: ObjectContext<'_>,
@@ -639,6 +594,7 @@ impl InvitationLink for InvitationLinkImpl {
         send_projection(&ctx, projection(&link, vec![], vec![event])).await?;
         Ok(Json(link))
     }
+    #[handler]
     async fn prepare_attempt(
         &self,
         ctx: ObjectContext<'_>,
@@ -688,6 +644,7 @@ impl InvitationLink for InvitationLinkImpl {
         }))
     }
 
+    #[handler]
     async fn requester_page(
         &self,
         ctx: ObjectContext<'_>,
@@ -795,6 +752,7 @@ impl InvitationLink for InvitationLinkImpl {
             request,
         }))
     }
+    #[handler]
     async fn delivery_progress(
         &self,
         ctx: ObjectContext<'_>,
@@ -852,6 +810,7 @@ impl InvitationLink for InvitationLinkImpl {
         }
         Ok(Json(result))
     }
+    #[handler]
     async fn consume_lifecycle(
         &self,
         ctx: ObjectContext<'_>,
@@ -862,6 +821,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(())
     }
 
+    #[handler]
     async fn notification_needed(
         &self,
         ctx: ObjectContext<'_>,
@@ -875,6 +835,7 @@ impl InvitationLink for InvitationLinkImpl {
         ))
     }
 
+    #[handler]
     async fn record_submitted(
         &self,
         ctx: ObjectContext<'_>,
@@ -903,6 +864,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(())
     }
 
+    #[handler]
     async fn delivery_status(
         &self,
         ctx: ObjectContext<'_>,
@@ -934,6 +896,7 @@ impl InvitationLink for InvitationLinkImpl {
         }))
     }
 
+    #[handler]
     async fn prepare_dispatch(
         &self,
         ctx: ObjectContext<'_>,
@@ -991,6 +954,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(Json(dispatch))
     }
 
+    #[handler]
     async fn admit(
         &self,
         ctx: ObjectContext<'_>,
@@ -1268,6 +1232,7 @@ impl InvitationLink for InvitationLinkImpl {
         }
     }
 
+    #[handler]
     async fn link_status(
         &self,
         ctx: ObjectContext<'_>,
@@ -1282,6 +1247,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(Json(link))
     }
 
+    #[handler]
     async fn request_status(
         &self,
         ctx: ObjectContext<'_>,
@@ -1302,6 +1268,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(Json(request))
     }
 
+    #[handler]
     async fn decision_status(
         &self,
         ctx: ObjectContext<'_>,
@@ -1321,6 +1288,7 @@ impl InvitationLink for InvitationLinkImpl {
         }
     }
 
+    #[handler]
     async fn decide(
         &self,
         ctx: ObjectContext<'_>,
@@ -1376,6 +1344,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(Json(receipt))
     }
 
+    #[handler]
     async fn revoke(
         &self,
         ctx: ObjectContext<'_>,
@@ -1418,6 +1387,7 @@ impl InvitationLink for InvitationLinkImpl {
         Ok(Json(link))
     }
 
+    #[handler]
     async fn create(
         &self,
         ctx: ObjectContext<'_>,

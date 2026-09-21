@@ -213,20 +213,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     faults
         .lose_projection_ack
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    use ghinvite_workflows::{github_invitation::GithubInvitation as _, reconcile::Reconcile as _};
     let builder = builder
-        .bind(
-            ghinvite_workflows::github_invitation::GithubInvitationImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        )
-        .bind(
-            ghinvite_workflows::reconcile::ReconcileImpl {
-                state: state.clone(),
-            }
-            .serve(),
-        );
+        .bind(ghinvite_workflows::github_invitation::GithubInvitation {
+            state: state.clone(),
+        })
+        .bind(ghinvite_workflows::reconcile::Reconcile {
+            state: state.clone(),
+        });
     let endpoint =
         ghinvite_workflows::delivery::bind_with_faults(builder, state, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();

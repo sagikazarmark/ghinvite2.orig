@@ -3,7 +3,6 @@
 //! one link's transitions in the order they were sent. A failing transition,
 //! including an invariant failure awaiting operator repair/redrive, holds back
 //! only that link's later transitions.
-use crate::admission::InvitationProjection;
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture};
 use restate_sdk::endpoint::Builder;
@@ -11,16 +10,20 @@ use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::serde::Json;
 use std::sync::Arc;
 
-pub struct InvitationProjectionImpl {
+/// Internal durable projection consumer, keyed by link ID so each link's
+/// transitions apply in send order; bind via [`bind`].
+pub struct InvitationProjection {
     storage: Arc<dyn ProjectionStorage>,
 }
 
 /// Bind alongside `admission::bind`; keep ingress private.
 pub fn bind(builder: Builder, storage: Arc<dyn ProjectionStorage>) -> Builder {
-    builder.bind(InvitationProjectionImpl { storage }.serve())
+    builder.bind(InvitationProjection { storage })
 }
 
-impl InvitationProjection for InvitationProjectionImpl {
+#[restate_sdk::object]
+impl InvitationProjection {
+    #[handler]
     async fn apply_transition(
         &self,
         ctx: ObjectContext<'_>,

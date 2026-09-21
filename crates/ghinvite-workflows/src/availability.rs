@@ -70,18 +70,7 @@ pub struct RefreshContinuation {
     pub attempt: u32,
 }
 
-#[restate_sdk::object]
-pub trait AccountInstallation {
-    async fn retry_uninstall(input: Json<UninstallInput>) -> Result<(), TerminalError>;
-    async fn retry_refresh(input: Json<RefreshContinuation>) -> Result<(), TerminalError>;
-    async fn recheck() -> Result<(), TerminalError>;
-    async fn onboard(input: Json<OnboardInput>) -> Result<(), TerminalError>;
-    async fn refresh(input: Json<u64>) -> Result<(), TerminalError>;
-    async fn uninstall(input: Json<UninstallInput>) -> Result<(), TerminalError>;
-    async fn status() -> Result<Json<InstallationStatus>, TerminalError>;
-    async fn eligibility(input: Json<Scope>) -> Result<Json<Eligibility>, TerminalError>;
-}
-pub struct AccountInstallationImpl {
+pub struct AccountInstallation {
     pub state: AppState,
 }
 
@@ -98,14 +87,13 @@ pub enum InstallationChange {
         input: UninstallInput,
     },
 }
-#[restate_sdk::object]
-pub trait InstallationProjection {
-    async fn apply(input: Json<InstallationChange>) -> Result<(), TerminalError>;
-}
-pub struct InstallationProjectionImpl {
+pub struct InstallationProjection {
     pub state: AppState,
 }
-impl InstallationProjection for InstallationProjectionImpl {
+
+#[restate_sdk::object]
+impl InstallationProjection {
+    #[handler]
     async fn apply(
         &self,
         ctx: ObjectContext<'_>,
@@ -293,7 +281,7 @@ async fn project(ctx: &ObjectContext<'_>, input: InstallationChange) -> Result<(
     Ok(())
 }
 
-impl AccountInstallationImpl {
+impl AccountInstallation {
     async fn load(&self, ctx: &ObjectContext<'_>) -> Result<InstallationStatus, TerminalError> {
         if let Some(Json(status)) = ctx.get("installation").await? {
             return Ok(status);
@@ -495,7 +483,9 @@ fn refresh_backoff(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_secs(1 << attempt.min(6)).min(RECHECK_INTERVAL)
 }
 
-impl AccountInstallation for AccountInstallationImpl {
+#[restate_sdk::object]
+impl AccountInstallation {
+    #[handler]
     async fn retry_uninstall(
         &self,
         ctx: ObjectContext<'_>,
@@ -503,6 +493,7 @@ impl AccountInstallation for AccountInstallationImpl {
     ) -> Result<(), TerminalError> {
         self.uninstall(ctx, Json(input)).await
     }
+    #[handler]
     async fn retry_refresh(
         &self,
         ctx: ObjectContext<'_>,
@@ -510,6 +501,7 @@ impl AccountInstallation for AccountInstallationImpl {
     ) -> Result<(), TerminalError> {
         self.continue_refresh(&ctx, refresh).await
     }
+    #[handler]
     async fn recheck(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
         self.continue_refresh(
             &ctx,
@@ -520,6 +512,7 @@ impl AccountInstallation for AccountInstallationImpl {
         )
         .await
     }
+    #[handler]
     async fn onboard(
         &self,
         ctx: ObjectContext<'_>,
@@ -658,6 +651,7 @@ impl AccountInstallation for AccountInstallationImpl {
         self.refresh_status(&ctx, status).await?;
         Ok(())
     }
+    #[handler]
     async fn refresh(
         &self,
         ctx: ObjectContext<'_>,
@@ -674,6 +668,7 @@ impl AccountInstallation for AccountInstallationImpl {
         )
         .await
     }
+    #[handler]
     async fn uninstall(
         &self,
         ctx: ObjectContext<'_>,
@@ -702,12 +697,14 @@ impl AccountInstallation for AccountInstallationImpl {
         }
         Ok(())
     }
+    #[handler]
     async fn status(
         &self,
         ctx: ObjectContext<'_>,
     ) -> Result<Json<InstallationStatus>, TerminalError> {
         self.load(&ctx).await.map(Json)
     }
+    #[handler]
     async fn eligibility(
         &self,
         ctx: ObjectContext<'_>,

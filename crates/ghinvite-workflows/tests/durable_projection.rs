@@ -44,7 +44,10 @@ impl ProjectionStorage for LostAcknowledgement {
 
 // #55 owns lifecycle execution; only its startup contract is needed here.
 struct RequestSink;
-impl admission::InvitationRequest for RequestSink {
+
+#[restate_sdk::workflow(name = "InvitationRequest")]
+impl RequestSink {
+    #[handler]
     async fn notification_status(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
@@ -54,6 +57,7 @@ impl admission::InvitationRequest for RequestSink {
     > {
         Ok(restate_sdk::serde::Json(None))
     }
+    #[handler]
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
@@ -61,6 +65,7 @@ impl admission::InvitationRequest for RequestSink {
     ) -> Result<(), restate_sdk::errors::TerminalError> {
         Ok(())
     }
+    #[handler]
     async fn run(
         &self,
         _: restate_sdk::context::WorkflowContext<'_>,
@@ -92,7 +97,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         }
         let acknowledgements = Arc::new(LostAcknowledgement { storage: storage.clone(), committed_attempts: AtomicUsize::new(0), committed_revisions: Default::default() });
         let endpoint = projection::bind(admission::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())
-            .bind(admission::InvitationRequest::serve(RequestSink)).build();
+            .bind(RequestSink).build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {

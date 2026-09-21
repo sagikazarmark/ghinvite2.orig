@@ -2,6 +2,7 @@
 //! Controlled time is test infrastructure, never command-supplied production time.
 use super::*;
 use restate_sdk::context::ContextTimers;
+use restate_sdk::service::IntoServiceDefinition;
 use std::sync::atomic::AtomicI64;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -39,19 +40,14 @@ struct Change {
 }
 
 #[derive(Clone)]
-struct Handler {
+struct DeadlineProof {
     faults: Arc<Faults>,
     clock: Arc<AtomicI64>,
 }
 
 #[restate_sdk::object]
-trait DeadlineProof {
-    async fn initialize(link: Json<Link>) -> Result<(), TerminalError>;
-    async fn command(command: Json<Command>) -> Result<Json<Change>, TerminalError>;
-    async fn inspect(id: String) -> Result<Json<(Link, Option<Record>)>, TerminalError>;
-}
-
-impl DeadlineProof for Handler {
+impl DeadlineProof {
+    #[handler]
     async fn initialize(
         &self,
         ctx: ObjectContext<'_>,
@@ -61,6 +57,7 @@ impl DeadlineProof for Handler {
         Ok(())
     }
 
+    #[handler]
     async fn inspect(
         &self,
         ctx: ObjectContext<'_>,
@@ -74,6 +71,7 @@ impl DeadlineProof for Handler {
         Ok(Json((link, request)))
     }
 
+    #[handler]
     async fn command(
         &self,
         ctx: ObjectContext<'_>,
@@ -236,12 +234,11 @@ struct Wake {
     deadline: i64,
 }
 
+struct DeadlineTimerProof;
+
 #[restate_sdk::workflow]
-trait DeadlineTimerProof {
-    async fn run(wake: Json<Wake>) -> Result<String, TerminalError>;
-}
-struct Timer;
-impl DeadlineTimerProof for Timer {
+impl DeadlineTimerProof {
+    #[handler]
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -277,11 +274,12 @@ pub(super) fn bind(
     clock: Arc<AtomicI64>,
 ) -> restate_sdk::endpoint::Builder {
     builder
-        .bind_with_options(
-            Handler { faults, clock }.serve(),
-            restate_sdk::endpoint::ServiceOptions::new().enable_lazy_state(true),
+        .bind(
+            DeadlineProof { faults, clock }
+                .into_service_definition()
+                .options(restate_sdk::endpoint::ServiceOptions::new().enable_lazy_state(true)),
         )
-        .bind(Timer.serve())
+        .bind(DeadlineTimerProof)
 }
 
 async fn command(client: &reqwest::Client, base: &str, id: &str, action: &str) -> Change {

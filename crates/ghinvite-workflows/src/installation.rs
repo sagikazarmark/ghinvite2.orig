@@ -45,20 +45,13 @@ pub struct UninstallInput {
     pub uninstalled_at: DateTime<Utc>,
 }
 
-#[restate_sdk::object]
-pub trait Installation {
-    async fn onboard(input: Json<OnboardInput>) -> std::result::Result<(), TerminalError>;
-    async fn repos_changed(
-        input: Json<ReposChangedInput>,
-    ) -> std::result::Result<(), TerminalError>;
-    async fn uninstall(input: Json<UninstallInput>) -> std::result::Result<(), TerminalError>;
-}
-
-pub struct InstallationImpl {
+pub struct Installation {
     pub state: AppState,
 }
 
-impl Installation for InstallationImpl {
+#[restate_sdk::object]
+impl Installation {
+    #[handler]
     async fn onboard(
         &self,
         ctx: ObjectContext<'_>,
@@ -86,6 +79,7 @@ impl Installation for InstallationImpl {
         .await
     }
 
+    #[handler]
     async fn repos_changed(
         &self,
         ctx: ObjectContext<'_>,
@@ -107,6 +101,7 @@ impl Installation for InstallationImpl {
         Ok(())
     }
 
+    #[handler]
     async fn uninstall(
         &self,
         ctx: ObjectContext<'_>,
@@ -136,7 +131,7 @@ fn validate_key(ctx: &ObjectContext<'_>, id: u64) -> std::result::Result<(), Ter
     }
     Ok(())
 }
-impl InstallationImpl {
+impl Installation {
     async fn account_id(
         &self,
         ctx: &ObjectContext<'_>,

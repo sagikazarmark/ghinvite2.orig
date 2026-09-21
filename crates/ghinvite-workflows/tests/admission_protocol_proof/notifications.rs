@@ -2,6 +2,7 @@
 use super::*;
 use restate_sdk::context::{ContextPromises, SharedWorkflowContext};
 use restate_sdk::endpoint::{HandlerOptions, ServiceOptions};
+use restate_sdk::service::IntoServiceDefinition;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 struct Fact {
@@ -10,18 +11,11 @@ struct Fact {
     state: String,
 }
 
+struct NotificationProof(Arc<Faults>);
+
 #[restate_sdk::workflow]
-trait NotificationProof {
-    async fn run() -> Result<Json<Fact>, TerminalError>;
-    #[shared]
-    async fn notify(fact: Json<Fact>) -> Result<String, TerminalError>;
-    #[shared]
-    async fn peek() -> Result<Json<Option<Fact>>, TerminalError>;
-}
-
-struct Handler(Arc<Faults>);
-
-impl NotificationProof for Handler {
+impl NotificationProof {
+    #[handler]
     async fn run(&self, ctx: WorkflowContext<'_>) -> Result<Json<Fact>, TerminalError> {
         ctx.run(|| async {
             self.0.notification_runs.fetch_add(1, Ordering::SeqCst);
@@ -32,6 +26,7 @@ impl NotificationProof for Handler {
         ctx.promise::<Json<Fact>>("terminal").await
     }
 
+    #[handler]
     async fn notify(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -54,6 +49,7 @@ impl NotificationProof for Handler {
         Ok("delivered".into())
     }
 
+    #[handler]
     async fn peek(
         &self,
         ctx: SharedWorkflowContext<'_>,
@@ -70,13 +66,12 @@ pub(super) fn bind(
     builder: restate_sdk::endpoint::Builder,
     faults: Arc<Faults>,
 ) -> restate_sdk::endpoint::Builder {
-    builder.bind_with_options(
-        Handler(faults).serve(),
+    builder.bind(NotificationProof(faults).into_service_definition().options(
         ServiceOptions::new().handler(
             "run",
             HandlerOptions::new().workflow_retention(Duration::from_secs(2)),
         ),
-    )
+    ))
 }
 
 pub(super) async fn scenario(client: &reqwest::Client, ingress: &str, faults: &Arc<Faults>) {

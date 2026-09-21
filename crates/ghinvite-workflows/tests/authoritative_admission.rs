@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use admission::{InvitationProjection, InvitationRequest, ProjectionEnvelope, WorkflowEnvelope};
+use admission::{ProjectionEnvelope, WorkflowEnvelope};
 use ghinvite_core::InvitationLinkId;
 use ghinvite_workflows::admission;
 use restate_sdk::context::{ContextSideEffects, ObjectContext, RunFuture, WorkflowContext};
@@ -16,6 +16,7 @@ use restate_sdk::endpoint::{
 };
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::serde::Json;
+use restate_sdk::service::IntoServiceDefinition;
 use serde_json::{Value, json};
 use tokio::time::{sleep, timeout};
 
@@ -81,9 +82,12 @@ struct Received {
     workflows: Vec<WorkflowEnvelope>,
 }
 
-struct Consumer(Arc<Mutex<Received>>, Arc<AtomicBool>);
+// Stands in for the production projector under its Restate name.
+struct ProjectionConsumer(Arc<Mutex<Received>>, Arc<AtomicBool>);
 
-impl InvitationProjection for Consumer {
+#[restate_sdk::object(name = "InvitationProjection")]
+impl ProjectionConsumer {
+    #[handler]
     async fn apply_transition(
         &self,
         ctx: ObjectContext<'_>,
@@ -106,13 +110,19 @@ impl InvitationProjection for Consumer {
     }
 }
 
-impl InvitationRequest for Consumer {
+// Stands in for the production request workflow under its Restate name.
+struct RequestConsumer(Arc<Mutex<Received>>);
+
+#[restate_sdk::workflow(name = "InvitationRequest")]
+impl RequestConsumer {
+    #[handler]
     async fn notification_status(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
     ) -> Result<Json<Option<admission::TerminalSignal>>, TerminalError> {
         Ok(Json(None))
     }
+    #[handler]
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
@@ -120,6 +130,7 @@ impl InvitationRequest for Consumer {
     ) -> Result<(), TerminalError> {
         Ok(())
     }
+    #[handler]
     async fn run(
         &self,
         ctx: WorkflowContext<'_>,
@@ -184,9 +195,8 @@ impl Runtime {
         let offline = Arc::new(AtomicBool::new(true));
         let workflow_faults =
             Arc::new(ghinvite_workflows::request_lifecycle::WorkflowFaults::default());
-        let builder = admission::bind_with_faults(Endpoint::builder(), faults.clone()).bind(
-            InvitationProjection::serve(Consumer(received.clone(), offline.clone())),
-        );
+        let builder = admission::bind_with_faults(Endpoint::builder(), faults.clone())
+            .bind(ProjectionConsumer(received.clone(), offline.clone()));
         let builder = if real_workflow {
             let builder = ghinvite_workflows::request_lifecycle::bind_with_faults(
                 builder,
@@ -214,12 +224,13 @@ impl Runtime {
                 ghinvite_workflows::AppState::new(storage.clone(), github),
             )
         } else {
-            builder.bind_with_options(
-                InvitationRequest::serve(Consumer(received.clone(), offline.clone())),
-                ServiceOptions::new().handler(
-                    "run",
-                    HandlerOptions::new().workflow_retention(Duration::from_secs(2)),
-                ),
+            builder.bind(
+                RequestConsumer(received.clone())
+                    .into_service_definition()
+                    .options(ServiceOptions::new().handler(
+                        "run",
+                        HandlerOptions::new().workflow_retention(Duration::from_secs(2)),
+                    )),
             )
         };
         let endpoint = builder.build();

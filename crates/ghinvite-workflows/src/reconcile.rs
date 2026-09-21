@@ -31,16 +31,13 @@ enum Observed {
     Evidence(Option<crate::settlement::ReconcileEvidence>),
 }
 
-#[restate_sdk::service]
-pub trait Reconcile {
-    async fn daily_run(input: Json<DailyRunInput>) -> std::result::Result<(), TerminalError>;
-}
-
-pub struct ReconcileImpl {
+pub struct Reconcile {
     pub state: AppState,
 }
 
-impl Reconcile for ReconcileImpl {
+#[restate_sdk::service]
+impl Reconcile {
+    #[handler]
     async fn daily_run(
         &self,
         ctx: Context<'_>,

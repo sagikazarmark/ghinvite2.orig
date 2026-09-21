@@ -32,6 +32,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
+      # The Restate integration suites and their fault injection compile only
+      # with the `integration` feature, so lint them explicitly.
+      - run: cargo clippy -p ghinvite-workflows --features integration --tests -- -D warnings
 
   css:
     name: CSS freshness
