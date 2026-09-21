@@ -1,7 +1,7 @@
 # GitHub invitation settlement
 
 Issue [#63](https://github.com/sagikazarmark/ghinvite2.orig/issues/63) adds
-versioned settlement handlers on the existing `GithubInvitation/<invitation_id>`
+settlement handlers on the existing `GithubInvitation/<invitation_id>`
 Virtual Object:
 
 - `on_webhook`, `reconcile`, `cancel`, and `tick_expire` share object

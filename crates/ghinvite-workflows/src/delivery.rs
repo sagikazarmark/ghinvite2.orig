@@ -1,4 +1,4 @@
-//! Receiving-side create receipts. Private, versioned ingress; ADR 0004.
+//! Receiving-side create receipts. Private ingress; ADR 0004.
 use crate::AppState;
 use ghinvite_core::{
     InvitationState,
@@ -120,17 +120,14 @@ impl GithubCreate for GithubCreateImpl {
         ctx: ObjectContext<'_>,
         Json(command): Json<CreateCommand>,
     ) -> Result<(), TerminalError> {
-        let previous = ctx
-            .get::<Json<CreateCommand>>("v1/input")
-            .await?
-            .map(|c| c.0);
+        let previous = ctx.get::<Json<CreateCommand>>("input").await?.map(|c| c.0);
         if ctx.key() != command.invitation_id.to_string() || previous.as_ref() != Some(&command) {
             return Err(TerminalError::new_with_code(
                 409,
                 "recheck identity conflict",
             ));
         }
-        ctx.clear("v1/recheck_scheduled");
+        ctx.clear("recheck_scheduled");
         ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
             .create(Json(command))
             .send()
@@ -142,7 +139,7 @@ impl GithubCreate for GithubCreateImpl {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Option<CreateReceipt>>, TerminalError> {
         Ok(Json(
-            ctx.get::<Json<CreateReceipt>>("v1/receipt")
+            ctx.get::<Json<CreateReceipt>>("receipt")
                 .await?
                 .map(|r| r.0),
         ))
@@ -156,19 +153,13 @@ impl GithubCreate for GithubCreateImpl {
         if ctx.key() != command.invitation_id.to_string() || command.requester_id == 0 {
             return Err(TerminalError::new_with_code(400, "invalid create command"));
         }
-        if let Some(Json(old)) = ctx.get::<Json<CreateCommand>>("v1/input").await?
+        if let Some(Json(old)) = ctx.get::<Json<CreateCommand>>("input").await?
             && old != command
         {
             return Err(TerminalError::new_with_code(409, "create input conflict"));
         }
-        if command.version != 1 {
-            return Err(TerminalError::new_with_code(
-                400,
-                "unsupported command version",
-            ));
-        }
         let previous = ctx
-            .get::<Json<CreateReceipt>>("v1/receipt")
+            .get::<Json<CreateReceipt>>("receipt")
             .await?
             .map(|r| r.0);
         if let Some(receipt) = &previous
@@ -194,7 +185,7 @@ impl GithubCreate for GithubCreateImpl {
                 "command differs from approved plan",
             ));
         }
-        ctx.set("v1/input", Json(command.clone()));
+        ctx.set("input", Json(command.clone()));
         let Json(Attempt {
             mut receipt,
             throttled_for_secs,
@@ -226,7 +217,7 @@ impl GithubCreate for GithubCreateImpl {
         {
             receipt.outcome = CreateOutcome::OutcomeUnknown;
         }
-        ctx.set("v1/receipt", Json(receipt.clone()));
+        ctx.set("receipt", Json(receipt.clone()));
         ctx.run(|| async {
             project(&self.state, &receipt).await?;
             #[cfg(feature = "integration")]
@@ -259,11 +250,11 @@ impl GithubCreate for GithubCreateImpl {
         // It costs that recovery the pending hour; it settles nothing wrongly.
         let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
         if (blocked || throttled_for_secs.is_some())
-            && ctx.get::<bool>("v1/recheck_scheduled").await?.is_none()
+            && ctx.get::<bool>("recheck_scheduled").await?.is_none()
         {
             let wait =
                 throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
-            ctx.set("v1/recheck_scheduled", true);
+            ctx.set("recheck_scheduled", true);
             ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
                 .recheck(Json(command))
                 .send_after(wait)
@@ -343,7 +334,7 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
     }
     // An existing `github_invitations` row is not create evidence. Only this
     // object's own projection writes it, after the receipt it projects is
-    // already retained, so the row never knows more than `v1/receipt`. Every
+    // already retained, so the row never knows more than `receipt`. Every
     // PUT is preceded by a durable claim on the fence below, which is what
     // keeps a retry — even one without a retained receipt — from writing twice.
     let attempted = state
@@ -625,7 +616,6 @@ mod tests {
         let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
         let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let command = CreateCommand {
-            version: 1,
             invitation_id: GithubInvitationId::new(),
             link_id: seeded.link_id,
             request_id: seeded.request_id,
@@ -769,7 +759,6 @@ mod tests {
         let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
         let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let command = CreateCommand {
-            version: 1,
             invitation_id: GithubInvitationId::new(),
             link_id: seeded.link_id,
             request_id: seeded.request_id,

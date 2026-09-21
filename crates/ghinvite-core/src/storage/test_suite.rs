@@ -268,7 +268,7 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
     .await
     .unwrap();
     let receipt: crate::delivery::CreateReceipt = serde_json::from_value(serde_json::json!({
-        "command": {"version":1,"invitation_id":id,"link_id":link.id,"request_id":request.id,
+        "command": {"invitation_id":id,"link_id":link.id,"request_id":request.id,
             "approval_id":"approval-64","account_id":100,"installation_id":1,"requester_id":8,
             "repo_id":10,"repo_full_name":"acme/api","permission":"pull","approved_at":request.created_at},
         "outcome":{"kind":"created","upstream_id":99123},"revision":2,

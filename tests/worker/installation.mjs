@@ -33,7 +33,7 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     const input = { ...creation(), account_id: account, installation_id: current, admin: { account_id: account, user_id: 7 },
       max_uses: 3, repos: [{ repo_id: 10, repo_full_name: 'acme/repo-10' }, { repo_id: 110, repo_full_name: 'acme/repo-110' }] };
     const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
-    const attempt = requester_id => ({ version: 1, link_id: input.link_id, operation_id: id(), requester_id });
+    const attempt = requester_id => ({ link_id: input.link_id, operation_id: id(), requester_id });
     await event(current, 'onboard', onboard(current));
     await call('create', input);
     mode = 'unavailable';

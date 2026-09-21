@@ -30,7 +30,7 @@ transaction ends. Verify deployed data with `PRAGMA foreign_key_check`.
 - Files named `NNNN_short_description.sql` where `NNNN` is a zero-padded sequence number starting at `0001`.
 - SQLite-portable SQL only: no Postgres-isms, no `WITHOUT ROWID`, no `STRICT`.
 - No `CHECK (col IN (...))` on enum-shaped columns (see spec §7.2). Domain enums in `crates/ghinvite-core` validate values before write.
-- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format. Versioned projection batches use Chrono's equivalent UTC Serde encoding (`Z`), consistently for both writes and content checks.
+- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format. Projection batches use Chrono's equivalent UTC Serde encoding (`Z`), consistently for both writes and content checks.
 
 ### Audit ordering
 

@@ -92,7 +92,6 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
         storage
             .project_delivery(&CreateReceipt {
                 command: CreateCommand {
-                    version: 1,
                     invitation_id: invitation.id,
                     link_id: link.id,
                     request_id: request.id,

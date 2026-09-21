@@ -295,7 +295,7 @@ async fn project(ctx: &ObjectContext<'_>, input: InstallationChange) -> Result<(
 
 impl AccountInstallationImpl {
     async fn load(&self, ctx: &ObjectContext<'_>) -> Result<InstallationStatus, TerminalError> {
-        if let Some(Json(status)) = ctx.get("installation/v1").await? {
+        if let Some(Json(status)) = ctx.get("installation").await? {
             return Ok(status);
         }
         let account_id: u64 = ctx.key().parse().map_err(|_| invalid())?;
@@ -318,7 +318,7 @@ impl AccountInstallationImpl {
             account,
             observation: Observation::Unknown,
         };
-        ctx.set("installation/v1", Json(status.clone()));
+        ctx.set("installation", Json(status.clone()));
         Ok(status)
     }
 
@@ -399,7 +399,7 @@ impl AccountInstallationImpl {
         } else {
             status.observation = Observation::Unavailable;
         }
-        ctx.set("installation/v1", Json(status.clone()));
+        ctx.set("installation", Json(status.clone()));
         Ok(status)
     }
 
@@ -698,7 +698,7 @@ impl AccountInstallation for AccountInstallationImpl {
             project(&ctx, InstallationChange::Uninstall { input }).await?;
             status.account = None;
             status.observation = Observation::Unavailable;
-            ctx.set("installation/v1", Json(status));
+            ctx.set("installation", Json(status));
         }
         Ok(())
     }

@@ -17,7 +17,7 @@ are never admission input.
 
 Submission first calls `prepare_attempt`, binding normalized input to that ID in
 the link object, then calls `admit`. Preparation is **not acceptance**. It stores
-`v1/attempt/<id>` and a per-requester `v1/latest-attempt/<user>` recovery pointer.
+`attempt/<id>` and a per-requester `latest-attempt/<user>` recovery pointer.
 There is no automatic expiry and no request-history UI. Two tabs can have distinct
 IDs. Each can recover by its URL; opening the base invitation link recovers the
 latest prepared/decided attempt. Older URLs remain valid after the pointer moves.

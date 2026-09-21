@@ -17,7 +17,6 @@ pub fn envelope(
     revision: u64,
 ) -> ProjectionEnvelope {
     ProjectionEnvelope {
-        version: 1,
         transition_id: format!("fixture/{}/{revision}", link.id),
         link: link_snapshot(link, revision),
         requests: requests
@@ -33,7 +32,6 @@ pub fn link_snapshot(link: &InvitationLink, revision: u64) -> LinkSnapshot {
         metadata: None,
         link_id: link.id,
         creation: CreateLink {
-            version: 1,
             link_id: link.id,
             admin: AccountAdmin {
                 account_id: link.account_id,

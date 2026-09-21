@@ -31,10 +31,7 @@ pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
                 ));
             }
         };
-        let digest = Sha256::digest(format!(
-            "ghinvite/delivery/audit/v1/{}",
-            command.invitation_id
-        ));
+        let digest = Sha256::digest(format!("ghinvite/delivery/audit/{}", command.invitation_id));
         let bytes: [u8; 16] = digest[..16].try_into().unwrap();
         json!({"id":ulid::Ulid::from_bytes(bytes).to_string(),"account_id":command.account_id,
             "occurred_at":at,"event_type":kind,"actor_kind":actor,"target_id":command.invitation_id,

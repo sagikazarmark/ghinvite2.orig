@@ -580,7 +580,6 @@ async fn create_link(
     };
 
     let mut command = ghinvite_core::storage::projection::CreateLink {
-        version: 1,
         link_id,
         admin: admin_assertion(&admin),
         account_id: admin.account.account_id,
@@ -941,7 +940,6 @@ async fn authoritative_decision(
         .into_response();
     };
     let command = DecideRequest {
-        version: 1,
         link_id,
         request_id,
         operation_id,

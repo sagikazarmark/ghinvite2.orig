@@ -92,7 +92,7 @@ async function terminate(reason, code) {
   process.exit(code);
 }
 const id = () => '01' + randomBytes(12).toString('hex').toUpperCase();
-const creation = () => ({ version: 1, link_id: id(), admin: { account_id: 100, user_id: 7 },
+const creation = () => ({ link_id: id(), admin: { account_id: 100, user_id: 7 },
   account_id: 100, installation_id: 1, description: 'Workshop', internal_note: 'Private context',
   expires_at: null, max_uses: 1, permission: 'pull', approval_required: true,
   repos: [{ repo_id: 10, repo_full_name: 'acme/api' }] });
@@ -255,7 +255,7 @@ try {
   assert.equal(created.uses, 0);
   assert.ok(Math.abs(Date.parse(created.created_at) - Date.now()) < 30_000, 'actual Worker clock');
   console.log('PASS actual Restate → Worker create with real clock and durable dispatch');
-  const attempts = [91, 92].map(requester_id => ({ version: 1, link_id: input.link_id, operation_id: id(), requester_id }));
+  const attempts = [91, 92].map(requester_id => ({ link_id: input.link_id, operation_id: id(), requester_id }));
   const receipts = await Promise.all(attempts.map(attempt => command('admit', attempt)));
   assert.equal(receipts.filter(receipt => receipt.result.kind === 'accepted').length, 1);
   assert.equal(receipts.filter(receipt => receipt.result.reason === 'exhausted').length, 1);
@@ -283,7 +283,7 @@ try {
     created_at: '2026-01-01T00:00:00Z', uses: 0, revision: 1, revoked_at: null, revoked_by: null };
   const event = { event_id: `fixture/${projection.link_id}`, kind: 'invitation_link.created', actor_id: 7,
     target_id: projection.link_id, effective_at: snapshot.created_at, evaluated_at: snapshot.created_at };
-  const old = { version: 1, transition_id: 'fixture/old', link: snapshot, requests: [], events: [event] };
+  const old = { transition_id: 'fixture/old', link: snapshot, requests: [], events: [event] };
   const newer = { ...old, transition_id: 'fixture/new', events: [], link: { ...snapshot, revision: 2,
     revoked_at: '2026-01-02T00:00:00Z', revoked_by: 7 } };
   await storage('apply', newer);
@@ -307,7 +307,7 @@ try {
   const recoveryInput = { ...creation(), max_uses: 3, expires_at: '2026-01-02T00:00:00Z' };
   const recovery = (handler, body) => http(`${ingress}/InvitationLink/${recoveryInput.link_id}/${handler}`, body);
   await recovery('create', recoveryInput);
-  const attempt = { version: 1, link_id: recoveryInput.link_id, operation_id: id(), requester_id: 91 };
+  const attempt = { link_id: recoveryInput.link_id, operation_id: id(), requester_id: 91 };
   interruption = { operation: attempt.operation_id };
   const pending = recovery('admit', attempt);
   await eventually(async () => interruption.blocked, Boolean);
@@ -327,7 +327,7 @@ try {
   clock = Date.parse('2026-01-01T00:00:00Z');
   const undecidedInput = { ...creation(), expires_at: '2026-01-02T00:00:00Z' };
   await http(`${ingress}/InvitationLink/${undecidedInput.link_id}/create`, undecidedInput);
-  const undecidedAttempt = { version: 1, link_id: undecidedInput.link_id, operation_id: id(), requester_id: 91 };
+  const undecidedAttempt = { link_id: undecidedInput.link_id, operation_id: id(), requester_id: 91 };
   interruption = { operation: undecidedAttempt.operation_id, type: 0x0402 };
   const undecided = http(`${ingress}/InvitationLink/${undecidedInput.link_id}/admit`, undecidedAttempt);
   await eventually(async () => interruption.blocked, Boolean);
@@ -344,12 +344,12 @@ try {
   const timedInput = { ...creation(), max_uses: 5 };
   const timed = (handler, body) => http(`${ingress}/InvitationLink/${timedInput.link_id}/${handler}`, body);
   const timedLink = await timed('create', timedInput);
-  const timedAttempt = { version: 1, link_id: timedInput.link_id, operation_id: id(), requester_id: 91 };
+  const timedAttempt = { link_id: timedInput.link_id, operation_id: id(), requester_id: 91 };
   const first = await timed('admit', timedAttempt);
   assert.equal(first.decided_at, '2026-01-01T00:00:00Z');
   assert.equal(first.result.decision_deadline, '2026-01-08T00:00:00Z');
   clock = Date.parse(first.result.decision_deadline);
-  const late = await timed('decide', { version: 1, link_id: timedInput.link_id, request_id: first.result.request_id,
+  const late = await timed('decide', { link_id: timedInput.link_id, request_id: first.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'approve' } });
   assert.equal(late.request.state, 'expired', 'deadline equality expires');
   const second = await timed('admit', { ...timedAttempt, operation_id: id() });
@@ -361,7 +361,7 @@ try {
   assert.equal((await timed('link_status', { link_id: timedInput.link_id, admin: timedInput.admin })).uses, 3);
   assert.deepEqual(await timed('admit', timedAttempt), first);
   // Notify before startup; late startup must consume authority, never re-decide.
-  const declined = await timed('decide', { version: 1, link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
+  const declined = await timed('decide', { link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'decline', reason: 'fixture' } });
   assert.equal(declined.request.state, 'declined');
   await eventually(() => http(`${ingress}/InvitationRequest/${thirdReceipt.result.request_id}/notification_status`), Boolean);
@@ -375,7 +375,7 @@ try {
   const timerCall = (handler, body) => http(`${ingress}/InvitationLink/${timerInput.link_id}/${handler}`, body);
   await timerCall('create', timerInput);
   clock = Date.now() - 604800000 + 5000;
-  const timerReceipt = await timerCall('admit', { version: 1, link_id: timerInput.link_id, operation_id: id(), requester_id: 92 });
+  const timerReceipt = await timerCall('admit', { link_id: timerInput.link_id, operation_id: id(), requester_id: 92 });
   clock = undefined;
   pauseWorkflows = false;
   await eventually(async () => traffic.filter(row => row.objectKey === timerReceipt.result.request_id), rows =>
@@ -394,7 +394,7 @@ try {
   const measureAttempt = async () => {
     const start = traffic.length;
     await http(`${ingress}/InvitationLink/${history.link_id}/admit`, {
-      version: 1, link_id: history.link_id, operation_id: id(), requester_id: 91, justification: 'x'.repeat(16_384),
+      link_id: history.link_id, operation_id: id(), requester_id: 91, justification: 'x'.repeat(16_384),
     });
     const calls = traffic.slice(start).filter(row => row.path.endsWith('/InvitationLink/admit'));
     return { roundTrips: calls.length, maxRequest: Math.max(...calls.map(row => row.input)), maxResponse: Math.max(...calls.map(row => row.output)) };
@@ -414,7 +414,7 @@ try {
   const autoInput = { ...creation(), approval_required: false };
   const auto = (handler, body) => http(`${ingress}/InvitationLink/${autoInput.link_id}/${handler}`, body);
   await auto('create', autoInput);
-  const autoAttempt = { version: 1, link_id: autoInput.link_id, operation_id: id(), requester_id: 91 };
+  const autoAttempt = { link_id: autoInput.link_id, operation_id: id(), requester_id: 91 };
   const approved = await auto('admit', autoAttempt);
   assert.equal(approved.result.state, 'approved');
   assert.equal(approved.result.decision_deadline, null);
@@ -470,7 +470,7 @@ try {
     const input = { ...creation(), approval_required: false };
     const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
     await call('create', input);
-    const admitted = await call('admit', { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
+    const admitted = await call('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
     const plan = await call('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
     const receipt = await http(`${ingress}/GithubCreate/${plan.commands[0].invitation_id}/create`, plan.commands[0]);
     assert.equal(receipt.outcome.kind, kind);
@@ -488,8 +488,8 @@ try {
   const manualInput = creation();
   const manual = (handler, body) => http(`${ingress}/InvitationLink/${manualInput.link_id}/${handler}`, body);
   await manual('create', manualInput);
-  const manualReceipt = await manual('admit', { version: 1, link_id: manualInput.link_id, operation_id: id(), requester_id: 91 });
-  const manualDecision = await manual('decide', { version: 1, link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
+  const manualReceipt = await manual('admit', { link_id: manualInput.link_id, operation_id: id(), requester_id: 91 });
+  const manualDecision = await manual('decide', { link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
     operation_id: id(), admin: manualInput.admin, action: { kind: 'approve' } });
   assert.equal(manualDecision.request.state, 'approved');
   const manualResult = await http(`${ingress}/restate/workflow/InvitationRequest/${manualReceipt.result.request_id}/attach`, undefined, 'GET');

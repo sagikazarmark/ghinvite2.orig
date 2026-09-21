@@ -263,7 +263,6 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
     assert!(html.contains("No projected delivery outcome yet"));
     let mut receipt = CreateReceipt {
         command: CreateCommand {
-            version: 1,
             invitation_id: ghinvite_core::GithubInvitationId::new(),
             link_id: request.link_id,
             request_id: request.request_id,

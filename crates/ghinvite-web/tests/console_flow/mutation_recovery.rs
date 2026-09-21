@@ -43,7 +43,7 @@ async fn post(
 
 fn snapshot(id: ghinvite_core::InvitationLinkId, revoked: bool) -> serde_json::Value {
     serde_json::json!({"link_id":id,"creation":{
-        "version":1,"link_id":id,"admin":{"account_id":42,"user_id":42},"account_id":42,
+        "link_id":id,"admin":{"account_id":42,"user_id":42},"account_id":42,
         "installation_id":77,"description":"Recovery fixture","internal_note":null,
         "expires_at":null,"max_uses":null,"permission":"pull","approval_required":true,
         "repos":[{"repo_id":10,"repo_full_name":"octocat/api"}]},
@@ -766,10 +766,8 @@ async fn mutation_recovery_browser_server() {
         "requester_id":99,"state":"pending","admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":1})).collect::<Vec<_>>();
     storage
         .apply_transition(
-            &serde_json::from_value(
-                serde_json::json!({"version":1,"transition_id":format!("v1/link/{link}/1"),
-        "link":link_snapshot,"requests":requests,"events":[]}),
-            )
+            &serde_json::from_value(serde_json::json!({"transition_id":format!("link/{link}/1"),
+        "link":link_snapshot,"requests":requests,"events":[]}))
             .unwrap(),
         )
         .await

@@ -1,7 +1,7 @@
 # crates/ghinvite-workflows
 
 Restate handler services for ghinvite. `build_endpoint` binds every service on
-one endpoint, and the `_v1` services own every durable state change:
+one endpoint, and these services own every durable state change:
 `InvitationLink` and `InvitationRequest` own admission and the request
 lifecycle, `GithubCreate` owns delivery, and `AccountInstallation` owns
 installations. `GithubInvitation` keeps only its settlement handlers and

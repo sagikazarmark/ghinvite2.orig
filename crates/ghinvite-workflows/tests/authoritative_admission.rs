@@ -298,7 +298,7 @@ async fn authoritative_workflow_contract() {
         let input = creation();
         let id = input["link_id"].as_str().unwrap();
         runtime.ok(id, "create", &input).await;
-        let attempt = json!({"version": 1, "link_id": id,
+        let attempt = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 91});
         let receipt = runtime.ok(id, "admit", &attempt).await;
         runtime.faults.set_clock(None);
@@ -333,7 +333,7 @@ async fn authoritative_workflow_contract() {
         let input = creation();
         let id = input["link_id"].as_str().unwrap();
         runtime.ok(id, "create", &input).await;
-        let attempt = json!({"version": 1, "link_id": id,
+        let attempt = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 92});
         let receipt = runtime.ok(id, "admit", &attempt).await;
         let request_id = receipt["result"]["request_id"].as_str().unwrap();
@@ -342,7 +342,7 @@ async fn authoritative_workflow_contract() {
             .ok(
                 id,
                 "decide",
-                &json!({"version": 1, "link_id": id,
+                &json!({"link_id": id,
             "request_id": request_id, "operation_id": ghinvite_core::RequestId::new(),
             "admin": input["admin"], "action": {"kind": "approve"}}),
             )
@@ -390,7 +390,7 @@ async fn authoritative_workflow_contract() {
         assert_eq!(result["state"], "approved");
         assert_eq!(
             result["dispatch"]["dispatch_id"],
-            format!("v1/dispatch/{request_id}")
+            format!("dispatch/{request_id}")
         );
         assert_eq!(
             result["dispatch"]["input"]["repos"][0]["repo_full_name"],
@@ -413,7 +413,7 @@ async fn authoritative_workflow_contract() {
             .ok(
                 id,
                 "admit",
-                &json!({"version": 1, "link_id": id,
+                &json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 93}),
             )
             .await;
@@ -481,7 +481,7 @@ async fn interrupted_timer_setup(runtime: &Runtime) {
         .ok(
             id,
             "admit",
-            &json!({"version": 1, "link_id": id,
+            &json!({"link_id": id,
         "operation_id": ghinvite_core::RequestId::new(), "requester_id": 94}),
         )
         .await;
@@ -541,7 +541,7 @@ async fn waiting_notification_and_timer_races(runtime: &Runtime) {
             .ok(
                 id,
                 "admit",
-                &json!({"version": 1, "link_id": id,
+                &json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 95}),
             )
             .await;
@@ -563,7 +563,7 @@ async fn waiting_notification_and_timer_races(runtime: &Runtime) {
             .ok(
                 id,
                 "decide",
-                &json!({"version": 1, "link_id": id,
+                &json!({"link_id": id,
             "request_id": request_id, "operation_id": ghinvite_core::RequestId::new(),
             "admin": input["admin"], "action": {"kind": "approve"}}),
             )
@@ -600,7 +600,6 @@ async fn waiting_notification_and_timer_races(runtime: &Runtime) {
 
 fn creation() -> Value {
     json!({
-        "version": 1,
         "link_id": InvitationLinkId::new(),
         "admin": {"account_id": 100, "user_id": 7},
         "account_id": 100, "installation_id": 1,
@@ -763,7 +762,7 @@ async fn authoritative_admission_contract() {
             );
         }
         let operation = ghinvite_core::RequestId::new().to_string();
-        let admission = json!({"version": 1, "link_id": id, "operation_id": operation,
+        let admission = json!({"link_id": id, "operation_id": operation,
             "requester_id": 11, "justification": " access "});
         let receipt = runtime.ok(id, "admit", &admission).await;
         assert_eq!(receipt["result"]["kind"], "accepted");
@@ -778,11 +777,10 @@ async fn authoritative_admission_contract() {
         replay["operation_id"] = json!(operation.to_lowercase());
         replay["justification"] = json!("access");
         assert_eq!(runtime.ok(id, "admit", &replay).await, receipt);
-        for field in ["requester_id", "justification", "version"] {
+        for field in ["requester_id", "justification"] {
             let mut changed = admission.clone();
             changed[field] = match field {
                 "requester_id" => json!(12),
-                "version" => json!(2),
                 _ => json!("secret changed"),
             };
             let response = runtime.command(id, "admit", &changed).await;
@@ -868,7 +866,6 @@ async fn authoritative_admission_contract() {
                 .iter()
                 .find(|w| w.request.link_id.to_string() == id)
                 .unwrap();
-            assert_eq!(workflow.version, 1);
             assert_eq!(
                 workflow.request.request_id.to_string(),
                 receipt["result"]["request_id"]
@@ -928,14 +925,14 @@ async fn lifecycle_boundaries(runtime: &Runtime) {
         input["max_uses"] = json!(3);
         let id = input["link_id"].as_str().unwrap();
         runtime.ok(id, "create", &input).await;
-        let attempt = json!({"version": 1, "link_id": id,
+        let attempt = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 81});
         let admitted = runtime.ok(id, "admit", &attempt).await;
         let deadline = now + chrono::Duration::days(7);
         runtime
             .faults
             .set_clock(Some(deadline + chrono::Duration::milliseconds(offset)));
-        let decision = json!({"version": 1, "link_id": id,
+        let decision = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(),
             "request_id": admitted["result"]["request_id"], "admin": input["admin"],
             "action": {"kind": action}});
@@ -958,12 +955,12 @@ async fn lifecycle_boundaries(runtime: &Runtime) {
             .set_clock(Some(deadline + chrono::Duration::days(1)));
         assert_eq!(runtime.ok(id, "decide", &decision).await, result);
         assert_eq!(runtime.ok(id, "decision_status", &decision).await, result);
-        for field in ["admin", "request_id", "version"] {
+        for field in ["admin", "request_id"] {
             let mut foreign = decision.clone();
             foreign[field] = match field {
                 "admin" => json!({"account_id": 200, "user_id": 7}),
                 "request_id" => json!(ghinvite_core::RequestId::new()),
-                _ => json!(2),
+                _ => unreachable!(),
             };
             assert_eq!(
                 runtime.command(id, "decide", &foreign).await.status(),
@@ -1027,7 +1024,7 @@ async fn overdue_status_and_timer_race(runtime: &Runtime) {
             .ok(
                 id,
                 "admit",
-                &json!({"version": 1, "link_id": id,
+                &json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 85}),
             )
             .await;
@@ -1035,7 +1032,7 @@ async fn overdue_status_and_timer_race(runtime: &Runtime) {
         runtime
             .faults
             .set_clock(Some(now + chrono::Duration::days(7)));
-        let command = json!({"version": 1, "link_id": id, "request_id": receipt["result"]["request_id"],
+        let command = json!({"link_id": id, "request_id": receipt["result"]["request_id"],
             "operation_id": ghinvite_core::RequestId::new(), "admin": input["admin"], "action": {"kind": "approve"}});
         let (status, decision) = if status_first {
             tokio::join!(
@@ -1094,7 +1091,7 @@ async fn lifecycle_recovery(runtime: &Runtime) {
             input["max_uses"] = json!(3);
             let id = input["link_id"].as_str().unwrap();
             runtime.ok(id, "create", &input).await;
-            let attempt = json!({"version": 1, "link_id": id,
+            let attempt = json!({"link_id": id,
                 "operation_id": ghinvite_core::RequestId::new(), "requester_id": 83});
             let original = runtime.ok(id, "admit", &attempt).await;
             let deadline = now + chrono::Duration::days(7);
@@ -1102,10 +1099,10 @@ async fn lifecycle_recovery(runtime: &Runtime) {
                 deadline + chrono::Duration::milliseconds(if handler == "decide" { -1 } else { 0 }),
             ));
             let command = if handler == "decide" {
-                json!({"version": 1, "link_id": id, "request_id": original["result"]["request_id"],
+                json!({"link_id": id, "request_id": original["result"]["request_id"],
                     "operation_id": ghinvite_core::RequestId::new(), "admin": input["admin"], "action": {"kind": "approve"}})
             } else {
-                json!({"operation_id": ghinvite_core::RequestId::new(), "version": 1, "link_id": id, "requester_id": 83})
+                json!({"operation_id": ghinvite_core::RequestId::new(), "link_id": id, "requester_id": 83})
             };
             runtime.faults.arm(stage);
             let call = runtime.ok(id, handler, &command);
@@ -1141,7 +1138,7 @@ async fn lifecycle_recovery(runtime: &Runtime) {
             assert_eq!(read.await["state"], expected, "{stage}");
             assert_eq!(runtime.ok(id, handler, &command).await, result, "{stage}");
             assert_eq!(runtime.ok(id, "admit", &attempt).await, original);
-            let new_attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 83});
+            let new_attempt = json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 83});
             if handler == "admit" || expected == "approved" {
                 assert_eq!(
                     runtime.ok(id, "admit", &new_attempt).await["result"]["reason"],
@@ -1193,7 +1190,7 @@ async fn overdue_readmission(runtime: &Runtime) {
         }
         let id = input["link_id"].as_str().unwrap();
         runtime.ok(id, "create", &input).await;
-        let attempt = json!({"version": 1, "link_id": id,
+        let attempt = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 82});
         let admitted = runtime.ok(id, "admit", &attempt).await;
         if rejection == Some("revoked") {
@@ -1278,8 +1275,10 @@ async fn queued_expiry(runtime: &Runtime) {
     let id = input["link_id"].as_str().unwrap();
     runtime.ok(id, "create", &input).await;
     runtime.faults.arm("after-decision");
-    let first = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 61});
-    let second = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 62});
+    let first =
+        json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 61});
+    let second =
+        json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 62});
     let first_call = runtime.ok(id, "admit", &first);
     tokio::pin!(first_call);
     tokio::select! {
@@ -1342,7 +1341,7 @@ async fn interruption_recovery(runtime: &Runtime) {
         let id = input["link_id"].as_str().unwrap();
         runtime.ok(id, "create", &input).await;
         runtime.faults.arm(stage);
-        let attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 41});
+        let attempt = json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 41});
         let client = runtime.client.clone();
         let url = format!("{}/InvitationLink/{id}/admit", runtime.ingress);
         let payload = attempt.clone();
@@ -1467,10 +1466,10 @@ async fn imported_terminal_requests(runtime: &Runtime) {
             "admitted_at": "2026-01-01T00:00:00Z", "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2});
         let mut state = serde_json::Map::new();
         for (key, value) in [
-            ("v1/link".to_owned(), link),
-            ("v1/creation".to_owned(), original_link),
-            (format!("v1/request/{request_id}"), old_request.clone()),
-            ("v1/blocker/71".to_owned(), json!(request_id)),
+            ("link".to_owned(), link),
+            ("creation".to_owned(), original_link),
+            (format!("request/{request_id}"), old_request.clone()),
+            ("blocker/71".to_owned(), json!(request_id)),
         ] {
             state.insert(key, json!(serde_json::to_vec(&value).unwrap()));
         }
@@ -1500,7 +1499,7 @@ async fn imported_terminal_requests(runtime: &Runtime) {
         })
         .await
         .expect("historical fixture not imported");
-        let attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 71});
+        let attempt = json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 71});
         assert_eq!(
             runtime.ok(id, "admit", &attempt).await["result"]["kind"],
             "accepted"
@@ -1524,7 +1523,8 @@ async fn retention_and_bounded_history(runtime: &Runtime) {
     let input = creation();
     let id = input["link_id"].as_str().unwrap();
     runtime.ok(id, "create", &input).await;
-    let attempt = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 51});
+    let attempt =
+        json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 51});
     let receipt = runtime.ok(id, "admit", &attempt).await;
     let request = receipt["result"]["request_id"].as_str().unwrap();
     assert!(
@@ -1556,7 +1556,7 @@ async fn retention_and_bounded_history(runtime: &Runtime) {
     // Accumulate > 512 KiB of retained rejected outcomes under the same link.
     // Request-response transport must still carry only directly accessed keys.
     for n in 0..40 {
-        let rejected = json!({"version": 1, "link_id": id,
+        let rejected = json!({"link_id": id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 100 + n,
             "justification": "large retained private justification ".repeat(400)});
         assert_eq!(
@@ -1601,7 +1601,7 @@ async fn admission_edges(runtime: &Runtime) {
     input["approval_required"] = json!(false);
     let id = input["link_id"].as_str().unwrap();
     runtime.ok(id, "create", &input).await;
-    let mut attempt = json!({"version": 1, "link_id": id,
+    let mut attempt = json!({"link_id": id,
         "operation_id": ghinvite_core::RequestId::new(), "requester_id": 20});
     for malformed in [
         json!(null),
@@ -1660,8 +1660,10 @@ async fn admission_edges(runtime: &Runtime) {
     let race_link = creation();
     let id = race_link["link_id"].as_str().unwrap();
     runtime.ok(id, "create", &race_link).await;
-    let a = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 31});
-    let b = json!({"version": 1, "link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 32});
+    let a =
+        json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 31});
+    let b =
+        json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 32});
     let (a, b) = tokio::join!(runtime.ok(id, "admit", &a), runtime.ok(id, "admit", &b));
     let outcomes = [a, b];
     assert_eq!(

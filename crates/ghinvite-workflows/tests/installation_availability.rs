@@ -119,7 +119,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .post(format!("{ingress}/InvitationLink/{link}/{handler}"))
             .json(&input)
     };
-    let creation = json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    let creation = json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Availability","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]});
     assert!(
         call("create", creation)
@@ -131,7 +131,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let result: Value = call(
         "admit",
-        json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
+        json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
     )
     .send()
     .await
@@ -172,8 +172,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "{}",
         response.text().await.unwrap()
     );
-    let attempt =
-        json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
+    let attempt = json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
     let unavailable: Value = call("admit", attempt.clone())
         .send()
         .await
@@ -194,8 +193,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .await
         .unwrap();
     assert_eq!(replay, unavailable);
-    let accepted_attempt =
-        json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
+    let accepted_attempt = json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
     observed.lock().unwrap()["rate_limited"] = json!(true);
     assert_eq!(
         call("admit", accepted_attempt.clone())
@@ -241,8 +239,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .unwrap(),
         accepted
     );
-    let fresh =
-        json!({"version":1,"link_id":link,"requester_id":12,"operation_id":RequestId::new()});
+    let fresh = json!({"link_id":link,"requester_id":12,"operation_id":RequestId::new()});
     assert_eq!(
         call("admit", fresh.clone()).send().await.unwrap().status(),
         503
@@ -269,7 +266,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         pending["decision_deadline"],
         accepted["result"]["decision_deadline"]
     );
-    let approved: Value = call("decide", json!({"version":1,"link_id":link,"request_id":accepted["result"]["request_id"],"operation_id":RequestId::new(),"admin":{"account_id":100,"user_id":7},"action":{"kind":"approve"}})).send().await.unwrap().json().await.unwrap();
+    let approved: Value = call("decide", json!({"link_id":link,"request_id":accepted["result"]["request_id"],"operation_id":RequestId::new(),"admin":{"account_id":100,"user_id":7},"action":{"kind":"approve"}})).send().await.unwrap().json().await.unwrap();
     assert_eq!(approved["request"]["state"], "approved");
     assert_eq!(
         approved["request"]["decision_deadline"],
@@ -382,7 +379,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert!(
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/create"))
-            .json(&json!({"version":1,"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
+            .json(&json!({"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
                 "description":"Adopted","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]}))
             .send()
             .await
@@ -436,7 +433,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // Admission's synchronous observation still fails promptly with an
     // infrastructure result, holding no exclusivity and recording no rejection.
     let started = std::time::Instant::now();
-    let adopted_attempt = json!({"version":1,"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
+    let adopted_attempt =
+        json!({"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
     assert_eq!(
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/admit"))
@@ -636,8 +634,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert_eq!(status["observation"]["repo_ids"][100], 110);
     observed.lock().unwrap()["account_id"] = json!(200);
-    let foreign =
-        json!({"version":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
+    let foreign = json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
     assert_eq!(
         call("admit", foreign)
             .send()
@@ -703,7 +700,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let exhausted: Value = call(
         "admit",
-        json!({"version":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
+        json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
     )
     .send()
     .await
@@ -723,7 +720,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let revoked: Value = call(
         "admit",
-        json!({"version":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
+        json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
     )
     .send()
     .await

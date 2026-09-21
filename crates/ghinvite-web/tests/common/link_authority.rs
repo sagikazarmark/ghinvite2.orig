@@ -129,7 +129,6 @@ pub fn snapshot(link: &InvitationLink) -> LinkSnapshot {
         metadata: None,
         link_id: link.id,
         creation: CreateLink {
-            version: 1,
             link_id: link.id,
             admin: ghinvite_core::storage::projection::AccountAdmin {
                 account_id: link.account_id,

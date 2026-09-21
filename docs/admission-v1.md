@@ -34,8 +34,8 @@ new commands currently address immutable link IDs directly.
 
 | Command | Input | Result |
 |---|---|---|
-| `create` | Version 1, preallocated link ID, admin/account/installation, fixed guardrails and metadata | Original link creation snapshot |
-| `admit` | Version, link ID, strict ULID operation ID, authenticated requester ID, optional justification | Original accepted/rejected admission receipt |
+| `create` | Preallocated link ID, admin/account/installation, fixed guardrails and metadata | Original link creation snapshot |
+| `admit` | Link ID, strict ULID operation ID, authenticated requester ID, optional justification | Original accepted/rejected admission receipt |
 | `revoke` | Link ID and current account-admin assertion | Revoked link snapshot |
 | `link_status` | Link ID and current account-admin assertion | Current admin link snapshot |
 | `request_status` | Link/request IDs and authenticated requester ID | Requester's authoritative request snapshot |
@@ -48,8 +48,7 @@ idempotency key is required: retries must reach application input comparison.
 Operation IDs accept canonical Crockford ULIDs with ASCII case normalization;
 overflow, ambiguous character aliases, missing IDs and arbitrary strings fail
 validation. Justification trims outer whitespace and normalizes absent/empty to
-`None`, preserving internal content. A changed version reaches retained input
-comparison before unsupported-version validation for fresh attempts.
+`None`, preserving internal content.
 
 HTTP 400 means invalid structure/guardrails, 404 means missing or inaccessible,
 and 409 means identity conflict. HTTP 200 carries either an accepted receipt or
@@ -61,10 +60,10 @@ requires retrying the same identity/input; it is not business rejection.
 
 ## State and recovery
 
-The object directly reads `v1/op/<canonical operation ID>` before eligibility.
-The small `v1/link` record contains no histories. Requests and exact requester
-blockers use `v1/request/<request ID>` and `v1/blocker/<GitHub user ID>`.
-`v1/creation` retains the original creation result. No business receipt expires
+The object directly reads `op/<canonical operation ID>` before eligibility.
+The small `link` record contains no histories. Requests and exact requester
+blockers use `request/<request ID>` and `blocker/<GitHub user ID>`.
+`creation` retains the original creation result. No business receipt expires
 automatically. Missing authority is not reconstructed from SQL.
 
 Admission journals the entire bounded decision with a fresh decision-time clock
@@ -122,8 +121,8 @@ rejected. The link object sends each transition fire-and-forget, so admission
 never waits on SQL, and the per-key queue applies one link's transitions in send
 order. A failing transition, including a D1 outage or an invariant failure
 awaiting repair, holds back only that link's later transitions. The revision
-checks below still guard against manual redrives. It accepts the existing v1
-wire envelope, whose types now live in
+checks below still guard against manual redrives. It accepts the projection
+envelope, whose types live in
 `ghinvite_core::storage::projection` and are re-exported by `admission`.
 It applies one full link snapshot, at most two independently revisioned touched
 requests, and at most eight immutable events. Repository scope is bounded at 100;
@@ -139,7 +138,7 @@ replace older ones; equal or lower revisions are no-ops, so replays are harmless
 and stale snapshots cannot regress records.
 Request revisions are independent of link revisions. Audit insertions always run,
 even alongside stale snapshots, and uses are assigned from authoritative snapshots.
-The v1 `creation` field is immutable command input, including original metadata;
+The `creation` field is immutable command input, including original metadata;
 future metadata commands must add a separate current-metadata snapshot rather than
 rewrite retained creation identity. `update_metadata` now writes a separate optional current metadata snapshot.
 

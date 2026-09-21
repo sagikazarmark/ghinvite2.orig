@@ -8,10 +8,10 @@ routes retain current GitHub account-admin authorization and CSRF checks.
 
 ## Commands and replay
 
-`InvitationLink/<link_id>/decide` takes version 1, request ID, a strict ULID
+`InvitationLink/<link_id>/decide` takes the link ID, request ID, a strict ULID
 operation ID, verified account/admin IDs, and `approve` or `decline { reason }`.
 The identity is `(link_id, lifecycle operation ID)` in its own command namespace.
-Canonical input binds request, actor, action, version and trimmed optional reason.
+Canonical input binds request, actor, action and trimmed optional reason.
 Missing/empty reasons normalize to absent; timestamps are not accepted. Reusing
 an identity with different input returns generic conflict. Authorization precedes
 receipt lookup. Receipts are retained without automatic expiry.
@@ -56,7 +56,7 @@ while interrupted setup creates a due sleep rather than replaying a stale durati
 Native tests interrupt precisely between the target journal and sleep construction.
 
 `prepare_dispatch` returns a stable approved handoff and retains it under
-`v1/dispatch/<request_id>` in the link object. The workflow result exposes that
+`dispatch/<request_id>` in the link object. The workflow result exposes that
 handoff. This is an authorization/input checkpoint, not evidence of submission or
 GitHub delivery. #56 extends it with per-repository dispatch and receiving receipts.
 Workflow journal/promise cleanup cannot delete link-owned receipts, terminal state,

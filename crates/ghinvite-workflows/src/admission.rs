@@ -68,7 +68,6 @@ struct AdmissionDecision {
 /// Admin-only link metadata is deliberately absent.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WorkflowEnvelope {
-    pub version: u32,
     pub request: RequestSnapshot,
     pub installation_id: u64,
     pub repos: Vec<InvitationLinkRepo>,
@@ -79,7 +78,6 @@ pub struct WorkflowEnvelope {
 impl WorkflowEnvelope {
     pub(crate) fn from_authority(link: &LinkSnapshot, request: RequestSnapshot) -> Self {
         Self {
-            version: 1,
             request,
             installation_id: link.creation.installation_id,
             repos: link.creation.repos.clone(),
@@ -115,7 +113,7 @@ fn audit(
 ) -> AuditIntent {
     let target_id = target.to_string();
     AuditIntent {
-        event_id: format!("v1/{kind}/{target_id}"),
+        event_id: format!("{kind}/{target_id}"),
         kind,
         actor_id,
         target_id,
@@ -130,8 +128,7 @@ fn projection(
     events: Vec<AuditIntent>,
 ) -> ProjectionEnvelope {
     ProjectionEnvelope {
-        version: 1,
-        transition_id: format!("v1/link/{}/{}", link.link_id, link.revision),
+        transition_id: format!("link/{}/{}", link.link_id, link.revision),
         link: link.clone(),
         requests,
         events,
@@ -269,10 +266,10 @@ impl InvitationLinkImpl {
             return Ok(request);
         }
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
-        let blocker_key = format!("v1/blocker/{}", request.requester_id);
+        let blocker_key = format!("blocker/{}", request.requester_id);
         let blocker = ctx.get::<Json<RequestId>>(&blocker_key).await?.map(|v| v.0);
         self.checkpoint(ctx, "lifecycle-before-decision").await?;
         let Json(decision) = ctx
@@ -299,7 +296,7 @@ impl InvitationLinkImpl {
         self.checkpoint(ctx, "lifecycle-after-decision").await?;
         if let Some(envelope) = decision.projection {
             ctx.set(
-                &format!("v1/request/{}", decision.request.request_id),
+                &format!("request/{}", decision.request.request_id),
                 Json(decision.request.clone()),
             );
             self.checkpoint(ctx, "lifecycle-after-request").await?;
@@ -521,7 +518,7 @@ async fn validate_signal(
 ) -> Result<(), TerminalError> {
     validate_key(ctx, signal.link_id).await?;
     let Json(request) = ctx
-        .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", signal.request_id))
+        .get::<Json<RequestSnapshot>>(&format!("request/{}", signal.request_id))
         .await?
         .ok_or_else(missing)?;
     if request.revision != signal.revision
@@ -551,7 +548,7 @@ fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError
         }
     }
     Ok(format!(
-        "v1/lifecycle-op/{}",
+        "lifecycle-op/{}",
         String::from(input.operation_id.clone())
     ))
 }
@@ -559,8 +556,7 @@ fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError
 fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError> {
     validate_admin(&input.admin, input.account_id)?;
     input.description = input.description.trim().into();
-    if input.version != 1
-        || input.installation_id == 0
+    if input.installation_id == 0
         || input.description.is_empty()
         || input.description.chars().count() > 120
         || input.description.contains(['\r', '\n'])
@@ -597,7 +593,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(mut link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
@@ -634,12 +630,12 @@ impl InvitationLink for InvitationLinkImpl {
                     Some(input.admin.user_id),
                     self.now(),
                 );
-                event.event_id = format!("v1/link/{}/metadata/{}", link.link_id, link.revision);
+                event.event_id = format!("link/{}/metadata/{}", link.link_id, link.revision);
                 Ok::<_, HandlerError>(Json(event))
             })
             .name("metadata_event")
             .await?;
-        ctx.set("v1/link", Json(link.clone()));
+        ctx.set("link", Json(link.clone()));
         send_projection(&ctx, projection(&link, vec![], vec![event])).await?;
         Ok(Json(link))
     }
@@ -651,7 +647,6 @@ impl InvitationLink for InvitationLinkImpl {
         validate_key(&ctx, input.link_id).await?;
         input.normalize();
         if input.requester_id == 0
-            || input.version != 1
             || input
                 .justification
                 .as_ref()
@@ -659,12 +654,12 @@ impl InvitationLink for InvitationLinkImpl {
         {
             return Err(invalid());
         }
-        ctx.get::<Json<LinkSnapshot>>("v1/link")
+        ctx.get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         let id = String::from(input.operation_id.clone());
         if let Some(Json(old)) = ctx
-            .get::<Json<OperationRecord>>(&format!("v1/op/{id}"))
+            .get::<Json<OperationRecord>>(&format!("op/{id}"))
             .await?
         {
             if old.input != input {
@@ -675,7 +670,7 @@ impl InvitationLink for InvitationLinkImpl {
                 receipt: Some(old.receipt),
             }));
         }
-        let key = format!("v1/attempt/{id}");
+        let key = format!("attempt/{id}");
         if let Some(Json(old)) = ctx.get::<Json<Admit>>(&key).await? {
             if old != input {
                 return Err(conflict());
@@ -683,7 +678,7 @@ impl InvitationLink for InvitationLinkImpl {
         } else {
             ctx.set(&key, Json(input.clone()));
             ctx.set(
-                &format!("v1/latest-attempt/{}", input.requester_id),
+                &format!("latest-attempt/{}", input.requester_id),
                 Json(input.operation_id.clone()),
             );
         }
@@ -703,7 +698,7 @@ impl InvitationLink for InvitationLinkImpl {
             return Err(missing());
         }
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         let explicit = query.operation_id.is_some();
@@ -711,7 +706,7 @@ impl InvitationLink for InvitationLinkImpl {
             Some(id) => Some(id),
             None => ctx
                 .get::<Json<AdmissionOperationId>>(&format!(
-                    "v1/latest-attempt/{}",
+                    "latest-attempt/{}",
                     query.requester_id
                 ))
                 .await?
@@ -721,7 +716,7 @@ impl InvitationLink for InvitationLinkImpl {
         if let Some(id) = operation_id {
             let id = String::from(id);
             if let Some(Json(old)) = ctx
-                .get::<Json<OperationRecord>>(&format!("v1/op/{id}"))
+                .get::<Json<OperationRecord>>(&format!("op/{id}"))
                 .await?
             {
                 attempt = Some(Attempt {
@@ -729,7 +724,7 @@ impl InvitationLink for InvitationLinkImpl {
                     receipt: Some(old.receipt),
                 });
             } else if let Some(Json(input)) =
-                ctx.get::<Json<Admit>>(&format!("v1/attempt/{id}")).await?
+                ctx.get::<Json<Admit>>(&format!("attempt/{id}")).await?
             {
                 attempt = Some(Attempt {
                     input,
@@ -745,7 +740,7 @@ impl InvitationLink for InvitationLinkImpl {
             }
         }
         let blocker_id = ctx
-            .get::<Json<RequestId>>(&format!("v1/blocker/{}", query.requester_id))
+            .get::<Json<RequestId>>(&format!("blocker/{}", query.requester_id))
             .await?
             .map(|v| v.0);
         let request_id = match attempt
@@ -758,7 +753,7 @@ impl InvitationLink for InvitationLinkImpl {
         };
         let request = if let Some(id) = request_id {
             let Json(request) = ctx
-                .get::<Json<RequestSnapshot>>(&format!("v1/request/{id}"))
+                .get::<Json<RequestSnapshot>>(&format!("request/{id}"))
                 .await?
                 .ok_or_else(missing)?;
             if request.requester_id != query.requester_id {
@@ -778,7 +773,7 @@ impl InvitationLink for InvitationLinkImpl {
             request.clone()
         } else if let Some(id) = blocker_id {
             let Json(blocker) = ctx
-                .get::<Json<RequestSnapshot>>(&format!("v1/request/{id}"))
+                .get::<Json<RequestSnapshot>>(&format!("request/{id}"))
                 .await?
                 .ok_or_else(missing)?;
             Some(self.transition(&ctx, blocker, None).await?)
@@ -808,7 +803,7 @@ impl InvitationLink for InvitationLinkImpl {
         use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
         validate_key(&ctx, query.link_id).await?;
         let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", query.request_id))
+            .get::<Json<RequestSnapshot>>(&format!("request/{}", query.request_id))
             .await?
             .ok_or_else(missing)?;
         if request.requester_id != query.requester_id {
@@ -818,12 +813,12 @@ impl InvitationLink for InvitationLinkImpl {
             return Ok(Json(Vec::new()));
         }
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         let plan = ctx
             .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
-                "v1/dispatch/{}",
+                "dispatch/{}",
                 query.request_id
             ))
             .await?;
@@ -837,7 +832,7 @@ impl InvitationLink for InvitationLinkImpl {
                     .ok_or_else(conflict)?;
                 if ctx
                     .get::<Json<crate::request_lifecycle::SubmittedCommand>>(&format!(
-                        "v1/submitted/{}",
+                        "submitted/{}",
                         command.invitation_id
                     ))
                     .await?
@@ -863,7 +858,7 @@ impl InvitationLink for InvitationLinkImpl {
         Json(signal): Json<TerminalSignal>,
     ) -> Result<(), TerminalError> {
         validate_signal(&ctx, &signal).await?;
-        ctx.set(&format!("v1/consumed/{}", signal.request_id), Json(signal));
+        ctx.set(&format!("consumed/{}", signal.request_id), Json(signal));
         Ok(())
     }
 
@@ -874,7 +869,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<bool>, TerminalError> {
         validate_signal(&ctx, &signal).await?;
         Ok(Json(
-            ctx.get::<Json<TerminalSignal>>(&format!("v1/consumed/{}", signal.request_id))
+            ctx.get::<Json<TerminalSignal>>(&format!("consumed/{}", signal.request_id))
                 .await?
                 .is_none(),
         ))
@@ -889,7 +884,7 @@ impl InvitationLink for InvitationLinkImpl {
         validate_key(&ctx, command.link_id).await?;
         let Json(plan) = ctx
             .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
-                "v1/dispatch/{}",
+                "dispatch/{}",
                 command.request_id
             ))
             .await?
@@ -897,7 +892,7 @@ impl InvitationLink for InvitationLinkImpl {
         if !plan.commands.contains(command) || submitted.invocation_id.is_empty() {
             return Err(conflict());
         }
-        let key = format!("v1/submitted/{}", command.invitation_id);
+        let key = format!("submitted/{}", command.invitation_id);
         if ctx
             .get::<Json<crate::request_lifecycle::SubmittedCommand>>(&key)
             .await?
@@ -916,7 +911,7 @@ impl InvitationLink for InvitationLinkImpl {
         validate_key(&ctx, query.link_id).await?;
         let Json(plan) = ctx
             .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&format!(
-                "v1/dispatch/{}",
+                "dispatch/{}",
                 query.request_id
             ))
             .await?
@@ -927,7 +922,7 @@ impl InvitationLink for InvitationLinkImpl {
         let mut submitted = Vec::new();
         for command in &plan.commands {
             if let Some(Json(record)) = ctx
-                .get(&format!("v1/submitted/{}", command.invitation_id))
+                .get(&format!("submitted/{}", command.invitation_id))
                 .await?
             {
                 submitted.push(record);
@@ -946,7 +941,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<crate::request_lifecycle::ApprovedDispatch>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
+            .get::<Json<RequestSnapshot>>(&format!("request/{}", input.request_id))
             .await?
             .ok_or_else(missing)?;
         if input.requester_id == 0 || request.requester_id != input.requester_id {
@@ -955,12 +950,12 @@ impl InvitationLink for InvitationLinkImpl {
         if request.state != RequestState::Approved {
             return Err(conflict());
         }
-        let key = format!("v1/dispatch/{}", input.request_id);
+        let key = format!("dispatch/{}", input.request_id);
         if let Some(dispatch) = ctx.get(&key).await? {
             return Ok(dispatch);
         }
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         let Json(dispatch) = ctx
@@ -971,7 +966,6 @@ impl InvitationLink for InvitationLinkImpl {
                     .repos
                     .iter()
                     .map(|repo| ghinvite_core::delivery::CreateCommand {
-                        version: 1,
                         invitation_id: ghinvite_core::GithubInvitationId::new(),
                         link_id: input.link_id,
                         request_id: input.request_id,
@@ -1017,17 +1011,17 @@ impl InvitationLink for InvitationLinkImpl {
         {
             return Err(invalid());
         }
-        let operation_key = format!("v1/op/{}", String::from(input.operation_id.clone()));
+        let operation_key = format!("op/{}", String::from(input.operation_id.clone()));
         if let Some(Json(previous)) = ctx.get::<Json<OperationRecord>>(&operation_key).await? {
             if previous.input != input {
                 return Err(conflict());
             }
             return Ok(Json(previous.receipt));
         }
-        // A retained identity must reach comparison even with a future version.
+        // A prepared attempt with this identity must match the retried input.
         if let Some(Json(prepared)) = ctx
             .get::<Json<Admit>>(&format!(
-                "v1/attempt/{}",
+                "attempt/{}",
                 String::from(input.operation_id.clone())
             ))
             .await?
@@ -1035,18 +1029,15 @@ impl InvitationLink for InvitationLinkImpl {
         {
             return Err(conflict());
         }
-        if input.version != 1 {
-            return Err(invalid());
-        }
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
-        let blocker_key = format!("v1/blocker/{}", input.requester_id);
+        let blocker_key = format!("blocker/{}", input.requester_id);
         let blocker = ctx.get::<Json<RequestId>>(&blocker_key).await?;
         let blocking_request = if let Some(Json(id)) = blocker {
             Some(
-                ctx.get::<Json<RequestSnapshot>>(&format!("v1/request/{id}"))
+                ctx.get::<Json<RequestSnapshot>>(&format!("request/{id}"))
                     .await?
                     .ok_or_else(|| {
                         TerminalError::new_with_code(500, "missing authoritative request")
@@ -1146,7 +1137,7 @@ impl InvitationLink for InvitationLinkImpl {
                         decision_deadline,
                         revision: 1,
                         decision: (state == RequestState::Approved).then(|| TerminalDecision {
-                            decision_id: format!("v1/request.approved/{request_id}"),
+                            decision_id: format!("request.approved/{request_id}"),
                             decided_by: None,
                             effective_at: now,
                             evaluated_at: now,
@@ -1224,12 +1215,12 @@ impl InvitationLink for InvitationLinkImpl {
             .await?;
         self.checkpoint(&ctx, "after-decision").await?;
         if decision.projection.is_some() {
-            ctx.set("v1/link", Json(decision.link.clone()));
+            ctx.set("link", Json(decision.link.clone()));
             self.checkpoint(&ctx, "after-link").await?;
         }
         if let Some(expired) = &decision.expired {
             ctx.set(
-                &format!("v1/request/{}", expired.request_id),
+                &format!("request/{}", expired.request_id),
                 Json(expired.clone()),
             );
             self.checkpoint(&ctx, "after-old-request").await?;
@@ -1238,7 +1229,7 @@ impl InvitationLink for InvitationLinkImpl {
         }
         if let Some(request) = &decision.request {
             ctx.set(
-                &format!("v1/request/{}", request.request_id),
+                &format!("request/{}", request.request_id),
                 Json(request.clone()),
             );
             self.checkpoint(&ctx, "after-request").await?;
@@ -1249,7 +1240,7 @@ impl InvitationLink for InvitationLinkImpl {
             ctx.set(&operation_key, Json(operation.clone()));
         }
         ctx.set(
-            &format!("v1/latest-attempt/{}", input.requester_id),
+            &format!("latest-attempt/{}", input.requester_id),
             Json(input.operation_id.clone()),
         );
         self.checkpoint(&ctx, "after-outcome").await?;
@@ -1284,7 +1275,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
@@ -1298,7 +1289,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<RequestSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
+            .get::<Json<RequestSnapshot>>(&format!("request/{}", input.request_id))
             .await?
             .ok_or_else(missing)?;
         if input.requester_id == 0 || request.requester_id != input.requester_id {
@@ -1318,7 +1309,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<Option<DecisionReceipt>>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
@@ -1337,7 +1328,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<DecisionReceipt>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
@@ -1348,11 +1339,8 @@ impl InvitationLink for InvitationLinkImpl {
             }
             return Ok(Json(old.receipt));
         }
-        if input.version != 1 {
-            return Err(invalid());
-        }
         let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&format!("v1/request/{}", input.request_id))
+            .get::<Json<RequestSnapshot>>(&format!("request/{}", input.request_id))
             .await?
             .ok_or_else(missing)?;
         let was_pending = request.state == RequestState::Pending;
@@ -1395,7 +1383,7 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>("v1/link")
+            .get::<Json<LinkSnapshot>>("link")
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
@@ -1412,7 +1400,7 @@ impl InvitationLink for InvitationLinkImpl {
             })
             .name("decide_revocation")
             .await?;
-        ctx.set("v1/link", Json(link.clone()));
+        ctx.set("link", Json(link.clone()));
         send_projection(
             &ctx,
             projection(
@@ -1437,12 +1425,12 @@ impl InvitationLink for InvitationLinkImpl {
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let input = normalize_creation(input)?;
-        if let Some(Json(link)) = ctx.get::<Json<LinkSnapshot>>("v1/link").await? {
+        if let Some(Json(link)) = ctx.get::<Json<LinkSnapshot>>("link").await? {
             if link.creation != input {
                 return Err(conflict());
             }
             // Return the original creation receipt even after later mutations.
-            return ctx.get("v1/creation").await?.ok_or_else(missing);
+            return ctx.get("creation").await?.ok_or_else(missing);
         }
         let Json(link) = ctx
             .run(|| async {
@@ -1464,8 +1452,8 @@ impl InvitationLink for InvitationLinkImpl {
             })
             .name("decide_creation")
             .await?;
-        ctx.set("v1/link", Json(link.clone()));
-        ctx.set("v1/creation", Json(link.clone()));
+        ctx.set("link", Json(link.clone()));
+        ctx.set("creation", Json(link.clone()));
         // Complete routing before acknowledging creation; this registry never
         // calls the link, avoiding an exclusive-object cycle.
         ctx.object_client::<InvitationCodeClient>(&link.invitation_code)

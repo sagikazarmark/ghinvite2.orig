@@ -1,4 +1,4 @@
-//! Versioned browser admission commands. Identities are trusted caller assertions.
+//! Browser admission commands. Identities are trusted caller assertions.
 use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -24,7 +24,6 @@ impl From<AdmissionOperationId> for String {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Admit {
-    pub version: u32,
     pub link_id: InvitationLinkId,
     pub operation_id: AdmissionOperationId,
     pub requester_id: u64,

@@ -55,7 +55,7 @@ struct Handler(Arc<Faults>);
 impl AdmissionSplitProof for Handler {
     async fn initialize(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
         ctx.set(
-            "v1/link",
+            "link",
             Json(Header {
                 revision: 0,
                 uses: 0,
@@ -63,7 +63,7 @@ impl AdmissionSplitProof for Handler {
         );
         // A recognizable, unrelated 256 KiB history entry. The HTTP observer
         // asserts it is not eagerly sent to status/admission executions.
-        ctx.set("v1/op/history", "UNRELATED_HISTORY_PAYLOAD".repeat(11_000));
+        ctx.set("op/history", "UNRELATED_HISTORY_PAYLOAD".repeat(11_000));
         Ok(())
     }
 
@@ -72,7 +72,7 @@ impl AdmissionSplitProof for Handler {
         ctx: ObjectContext<'_>,
         Json(input): Json<Admission>,
     ) -> Result<Json<Outcome>, TerminalError> {
-        let operation_key = format!("v1/op/{}", input.operation);
+        let operation_key = format!("op/{}", input.operation);
         if let Some(Json(outcome)) = ctx.get::<Json<Outcome>>(&operation_key).await? {
             if outcome.input != input {
                 return Err(TerminalError::new_with_code(
@@ -82,8 +82,8 @@ impl AdmissionSplitProof for Handler {
             }
             return Ok(Json(outcome));
         }
-        let Json(header) = ctx.get::<Json<Header>>("v1/link").await?.unwrap();
-        let blocker_key = format!("v1/blocker/{}", input.requester);
+        let Json(header) = ctx.get::<Json<Header>>("link").await?.unwrap();
+        let blocker_key = format!("blocker/{}", input.requester);
         let blocker = ctx.get::<String>(&blocker_key).await?;
         let Json(decision) = ctx
             .run(|| async {
@@ -112,14 +112,14 @@ impl AdmissionSplitProof for Handler {
             .name("decide_split")
             .await?;
 
-        ctx.set("v1/link", Json(decision.header.clone()));
+        ctx.set("link", Json(decision.header.clone()));
         ctx.run(|| self.0.checkpoint("split-after-header"))
             .name("split-after-header")
             .retry_policy(retry_policy())
             .await?;
         if decision.outcome.result == "accepted" {
             ctx.set(
-                &format!("v1/request/{}", input.operation),
+                &format!("request/{}", input.operation),
                 Json(RequestRecord {
                     outcome: decision.outcome.clone(),
                     state: "pending".into(),
@@ -179,17 +179,17 @@ impl AdmissionSplitProof for Handler {
         ctx: ObjectContext<'_>,
         Json(query): Json<StatusQuery>,
     ) -> Result<Json<Status>, TerminalError> {
-        let Json(header) = ctx.get::<Json<Header>>("v1/link").await?.unwrap();
+        let Json(header) = ctx.get::<Json<Header>>("link").await?.unwrap();
         let outcome = ctx
-            .get::<Json<Outcome>>(&format!("v1/op/{}", query.operation))
+            .get::<Json<Outcome>>(&format!("op/{}", query.operation))
             .await?
             .map(|Json(v)| v);
         let request = ctx
-            .get::<Json<RequestRecord>>(&format!("v1/request/{}", query.operation))
+            .get::<Json<RequestRecord>>(&format!("request/{}", query.operation))
             .await?
             .map(|Json(v)| v);
         let blocker = ctx
-            .get::<String>(&format!("v1/blocker/{}", query.requester))
+            .get::<String>(&format!("blocker/{}", query.requester))
             .await?;
         Ok(Json(Status {
             header,
@@ -204,13 +204,13 @@ impl AdmissionSplitProof for Handler {
         ctx: ObjectContext<'_>,
         Json(input): Json<Transition>,
     ) -> Result<(), TerminalError> {
-        let request_key = format!("v1/request/{}", input.operation);
+        let request_key = format!("request/{}", input.operation);
         let Json(mut request) = ctx.get::<Json<RequestRecord>>(&request_key).await?.unwrap();
         if request.state != "pending" {
             return Ok(());
         }
         assert!(["approved", "declined", "expired", "cancelled"].contains(&input.state.as_str()));
-        let blocker_key = format!("v1/blocker/{}", request.outcome.input.requester);
+        let blocker_key = format!("blocker/{}", request.outcome.input.requester);
         let blocker = ctx.get::<String>(&blocker_key).await?;
         request.state = input.state.clone();
         ctx.set(&request_key, Json(request));

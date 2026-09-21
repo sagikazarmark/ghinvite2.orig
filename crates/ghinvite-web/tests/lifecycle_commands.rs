@@ -41,7 +41,7 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
     let client = RestateRequestLifecycle::new(Arc::new(
         ghinvite_web::RestateClient::new(format!("http://{address}")).unwrap(),
     ));
-    let command: DecideRequest = serde_json::from_value(json!({"version": 1,
+    let command: DecideRequest = serde_json::from_value(json!({
         "link_id": request["link_id"], "request_id": request["request_id"],
         "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAB", "admin": {"account_id": 100, "user_id": 7},
         "action": {"kind": "approve"}}))

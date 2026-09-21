@@ -73,7 +73,6 @@ impl RestateAdmission {
         let operation_id = AdmissionOperationId::try_from(operation_id.to_owned())
             .map_err(|_| WebError::BadRequest("Missing or invalid operation ID. Return to the invitation link to start a fresh attempt.".into()))?;
         let mut command = Admit {
-            version: 1,
             link_id,
             operation_id,
             requester_id,

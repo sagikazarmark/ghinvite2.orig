@@ -1,4 +1,4 @@
-//! Versioned, bounded admission after-images. Parents are verified identities,
+//! Bounded admission after-images. Parents are verified identities,
 //! not profile snapshots: their owners must restore missing installations/users.
 use crate::audit::EventType;
 use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
@@ -17,7 +17,6 @@ pub struct AccountAdmin {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLink {
-    pub version: u32,
     pub link_id: InvitationLinkId,
     pub admin: AccountAdmin,
     pub account_id: u64,
@@ -104,7 +103,6 @@ pub struct RequestSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectionEnvelope {
-    pub version: u32,
     pub transition_id: String,
     pub link: LinkSnapshot,
     pub requests: Vec<RequestSnapshot>,

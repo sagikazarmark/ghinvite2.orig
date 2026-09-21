@@ -262,7 +262,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .post(format!("{ingress}/{service}/{key}/{handler}"))
             .json(&input)
     };
-    let creation = json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    let creation = json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Delivery test","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]});
     let response = call("InvitationLink", link.to_string(), "create", creation)
         .send()
@@ -277,7 +277,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "InvitationLink",
         link.to_string(),
         "admit",
-        json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
+        json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
     )
     .send()
     .await
@@ -395,13 +395,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .await
             .unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
-        call("InvitationLink",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+        call("InvitationLink",link.to_string(),"create",json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
             "description":"Other result","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
         let admitted: Value = call(
             "InvitationLink",
             link.to_string(),
             "admit",
-            json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
+            json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
         )
         .send()
         .await
@@ -611,9 +611,20 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .pause_after_send
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let partial_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLink",partial_link.to_string(),"create",json!({"version":1,"link_id":partial_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    call("InvitationLink",partial_link.to_string(),"create",json!({"link_id":partial_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Partial fanout","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]})).send().await.unwrap();
-    let admitted: Value = call("InvitationLink",partial_link.to_string(),"admit",json!({"version":1,"link_id":partial_link,"requester_id":8,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
+    let admitted: Value = call(
+        "InvitationLink",
+        partial_link.to_string(),
+        "admit",
+        json!({"link_id":partial_link,"requester_id":8,"operation_id":RequestId::new()}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let partial_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":partial_link,"request_id":partial_request,"requester_id":8});
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -834,7 +845,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     let rejected_link = ghinvite_core::InvitationLinkId::new();
-    call("InvitationLink",rejected_link.to_string(),"create",json!({"version":1,"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+    call("InvitationLink",rejected_link.to_string(),"create",json!({"link_id":rejected_link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Access rejection","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
     storage
         .upsert_user(&ghinvite_core::User {
@@ -845,7 +856,18 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         })
         .await
         .unwrap();
-    let admitted: Value = call("InvitationLink",rejected_link.to_string(),"admit",json!({"version":1,"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()})).send().await.unwrap().json().await.unwrap();
+    let admitted: Value = call(
+        "InvitationLink",
+        rejected_link.to_string(),
+        "admit",
+        json!({"link_id":rejected_link,"requester_id":84,"operation_id":RequestId::new()}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
     let rejected_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":84});
     let progress: Value = call(
@@ -1074,13 +1096,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         client.delete(format!("{base}/reset")).send().await.unwrap();
         client.post(format!("{base}/outcomes")).json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_then_declined"})).send().await.unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
-        call("InvitationLink",link.to_string(),"create",json!({"version":1,"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+        call("InvitationLink",link.to_string(),"create",json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
             "description":"Role reconciliation","approval_required":false,"permission":role,"repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).send().await.unwrap();
         let admitted: Value = call(
             "InvitationLink",
             link.to_string(),
             "admit",
-            json!({"version":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
+            json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
         )
         .send()
         .await
@@ -1146,7 +1168,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     client.delete(format!("{base}/reset")).send().await.unwrap();
     let historical_link = ghinvite_core::InvitationLinkId::new();
     let created = call("InvitationLink", historical_link.to_string(), "create", json!({
-        "version":1,"link_id":historical_link,"account_id":100,"installation_id":9,
+        "link_id":historical_link,"account_id":100,"installation_id":9,
         "admin":{"account_id":100,"user_id":7},"description":"Reinstalled account",
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
@@ -1156,7 +1178,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         historical_link.to_string(),
         "admit",
         json!({
-            "version":1,"link_id":historical_link,"requester_id":8,"operation_id":RequestId::new()
+            "link_id":historical_link,"requester_id":8,"operation_id":RequestId::new()
         }),
     )
     .send()
@@ -1369,12 +1391,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // wait, so the status reads below do not queue behind the retry.
     let throttled_link = ghinvite_core::InvitationLinkId::new();
     call("InvitationLink", throttled_link.to_string(), "create", json!({
-        "version":1,"link_id":throttled_link,"account_id":100,"installation_id":19,
+        "link_id":throttled_link,"account_id":100,"installation_id":19,
         "admin":{"account_id":100,"user_id":7},"description":"Throttled delivery",
         "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
     })).send().await.unwrap();
     let key = throttled_link.to_string();
-    let admit = json!({"version":1,"link_id":throttled_link,"requester_id":8,"operation_id":RequestId::new()});
+    let admit = json!({"link_id":throttled_link,"requester_id":8,"operation_id":RequestId::new()});
     let admitted = call("InvitationLink", key.clone(), "admit", admit);
     let admitted: Value = admitted.send().await.unwrap().json().await.unwrap();
     let query = json!({"link_id":throttled_link,"request_id":admitted["result"]["request_id"],"requester_id":8});

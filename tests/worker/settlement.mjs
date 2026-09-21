@@ -62,7 +62,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const input = { ...creation(), approval_required: false };
   const link = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   await link('create', input);
-  const admitted = await link('admit', { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
+  const admitted = await link('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
   const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'access_lost_once' });
   const command = plan.commands[0];
@@ -86,7 +86,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const historicalInput = { ...creation(), approval_required: false };
   const historical = (handler, body) => http(`${ingress}/InvitationLink/${historicalInput.link_id}/${handler}`, body);
   await historical('create', historicalInput);
-  const admittedHistorical = await historical('admit', { version: 1, link_id: historicalInput.link_id, operation_id: id(), requester_id: 91 });
+  const admittedHistorical = await historical('admit', { link_id: historicalInput.link_id, operation_id: id(), requester_id: 91 });
   const query = { link_id: historicalInput.link_id, request_id: admittedHistorical.result.request_id, requester_id: 91 };
   const historicalPlan = await historical('prepare_dispatch', query);
   await eventually(() => storage('request', query.request_id), row => row?.state === 'approved');

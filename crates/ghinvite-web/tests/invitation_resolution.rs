@@ -456,7 +456,7 @@ async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppres
                 "repos": [{"repo_id": 1, "repo_full_name": "acme/private"}], "permission": "pull",
                 "approval_required": true, "can_start_fresh": can_start,
                 "attempt": if attempt { serde_json::json!({"input": {
-                    "version": 1, "link_id": RequestId::new(), "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA",
+                    "link_id": RequestId::new(), "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA",
                     "requester_id": REQUESTER_ID, "justification": null },
                     "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
                     "request_id": RequestId::new(), "state": "pending", "decision_deadline": "2026-09-21T12:00:00Z"}}
@@ -853,7 +853,7 @@ async fn request_submission_requires_the_rendered_session_token() {
     wiremock::Mock::given(wiremock::matchers::path_regex("/prepare_attempt$"))
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "input": {"version": 1, "link_id": RequestId::new(), "operation_id": id,
+                "input": {"link_id": RequestId::new(), "operation_id": id,
                     "requester_id": REQUESTER_ID, "justification": "Native request"},
                 "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
                     "request_id": RequestId::new(), "state": "pending", "decision_deadline": null}}
@@ -908,7 +908,7 @@ async fn submission_rejected_for_an_existing_request_is_final() {
     wiremock::Mock::given(wiremock::matchers::path_regex("/prepare_attempt$"))
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "input": {"version": 1, "link_id": RequestId::new(), "operation_id": id,
+                "input": {"link_id": RequestId::new(), "operation_id": id,
                     "requester_id": REQUESTER_ID, "justification": null},
                 "receipt": {"decided_at": "2026-09-14T12:00:00Z",
                     "result": {"kind": "rejected", "reason": "existing_request"}}

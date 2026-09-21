@@ -341,7 +341,7 @@ async fn requester_service_failure_preserves_justification_operation_id_and_toke
         .await;
     Mock::given(path(browser.link_path("prepare_attempt")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "input": {"version": 1, "link_id": browser.link.id, "operation_id": id,
+            "input": {"link_id": browser.link.id, "operation_id": id,
                 "requester_id": 42, "justification": "Keep my context"},
             "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
                 "request_id": RequestId::new(), "state": "pending", "decision_deadline": null}}

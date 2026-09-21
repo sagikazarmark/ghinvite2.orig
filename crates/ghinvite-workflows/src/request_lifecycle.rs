@@ -97,7 +97,7 @@ impl InvitationRequest for InvitationRequestImpl {
         ctx: WorkflowContext<'_>,
         Json(input): Json<WorkflowEnvelope>,
     ) -> Result<Json<WorkflowResult>, TerminalError> {
-        if input.version != 1 || ctx.key() != input.request.request_id.to_string() {
+        if ctx.key() != input.request.request_id.to_string() {
             return Err(TerminalError::new_with_code(400, "invalid workflow input"));
         }
         let query = RequestStatus {

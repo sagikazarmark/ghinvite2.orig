@@ -6,13 +6,13 @@ use serde_json::json;
 
 fn envelope() -> ProjectionEnvelope {
     serde_json::from_value(json!({
-        "version": 1, "transition_id": "v1/link/01ARZ3NDEKTSV4RRFFQ69G5FAV/2",
+        "transition_id": "link/01ARZ3NDEKTSV4RRFFQ69G5FAV/2",
         "link": {
             "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 2, "uses": 1,
             "invitation_code": "abcdefghijklmnop", "created_at": "2026-09-14T00:00:00Z",
             "revoked_at": null, "revoked_by": null,
             "creation": {
-                "version": 1, "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "admin": {"account_id": 100, "user_id": 7}, "account_id": 100,
                 "installation_id": 1, "description": "Workshop", "internal_note": null,
                 "expires_at": null, "max_uses": 1, "permission": "pull",
@@ -26,7 +26,7 @@ fn envelope() -> ProjectionEnvelope {
             "state": "pending", "admitted_at": "2026-09-14T01:00:00Z",
             "decision_deadline": "2026-09-21T01:00:00Z", "revision": 1
         }],
-        "events": [{"event_id": "v1/request.created/01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "events": [{"event_id": "request.created/01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "kind": "request.created", "actor_id": 8, "target_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "effective_at": "2026-09-14T01:00:00Z", "evaluated_at": "2026-09-14T01:00:00Z"}]
     }))
@@ -92,7 +92,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
     ] {
         let id = ghinvite_core::GithubInvitationId::new();
         let receipt: ghinvite_core::delivery::CreateReceipt = serde_json::from_value(json!({
-            "command":{"version":1,"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
+            "command":{"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
                 "approval_id":"approval","account_id":100,"installation_id":1,"requester_id":8,"repo_id":10,
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"

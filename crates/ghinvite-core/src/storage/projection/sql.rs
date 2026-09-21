@@ -6,16 +6,14 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 fn invalid() -> Error {
-    Error::ProjectionInvariant("invalid v1 envelope".into())
+    Error::ProjectionInvariant("invalid envelope".into())
 }
 
 pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
     let link = &envelope.link;
     let creation = &link.creation;
     let valid_id = |id: u64| id > 0 && id <= i64::MAX as u64;
-    if envelope.version != 1
-        || creation.version != 1
-        || envelope.transition_id.is_empty()
+    if envelope.transition_id.is_empty()
         || envelope.transition_id.len() > 256
         || link.link_id != creation.link_id
         || creation.admin.account_id != creation.account_id
@@ -120,7 +118,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         // Preserve the existing ULID audit-read/cursor contract. The logical ID
         // is retained separately and content checked; 128-bit hash collisions
         // fail the immutable-content assertion rather than deduplicating silently.
-        let digest = Sha256::digest(format!("ghinvite/projection/audit/v1/{}", event.event_id));
+        let digest = Sha256::digest(format!("ghinvite/projection/audit/{}", event.event_id));
         let bytes: [u8; 16] = digest[..16].try_into().unwrap();
         encoded["id"] = json!(ulid::Ulid::from_bytes(bytes).to_string());
         encoded["target_kind"] = json!(target_kind);

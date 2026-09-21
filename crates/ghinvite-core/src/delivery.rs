@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateCommand {
-    pub version: u32,
     pub invitation_id: GithubInvitationId,
     pub link_id: InvitationLinkId,
     pub request_id: RequestId,

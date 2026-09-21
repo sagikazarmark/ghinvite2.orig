@@ -35,7 +35,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       const input = { ...creation(), approval_required: false };
       const link = `InvitationLink/${input.link_id}`;
       await http(`${ingress}/${link}/create`, input);
-      const receipt = await http(`${ingress}/${link}/admit`, { version: 1, link_id: input.link_id, operation_id: id(), requester_id: 91 });
+      const receipt = await http(`${ingress}/${link}/admit`, { link_id: input.link_id, operation_id: id(), requester_id: 91 });
       const query = { link_id: input.link_id, request_id: receipt.result.request_id, requester_id: 91 };
       const plan = await http(`${ingress}/${link}/prepare_dispatch`, query);
       const command = plan.commands[0];
@@ -44,7 +44,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       // retain its identity, and leave the account available to queued status.
       const pending = creation();
       await http(`${ingress}/InvitationLink/${pending.link_id}/create`, pending);
-      const attempt = { version: 1, link_id: pending.link_id, operation_id: id(), requester_id: 91 };
+      const attempt = { link_id: pending.link_id, operation_id: id(), requester_id: 91 };
       const seen = fault(phase, installationId);
       const write = call(`GithubCreate/${command.invitation_id}/create`, command);
       await waitForFault(seen.write, 'GitHub PUT');

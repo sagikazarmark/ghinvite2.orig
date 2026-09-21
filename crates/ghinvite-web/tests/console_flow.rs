@@ -64,10 +64,10 @@ async fn deadline_queue_app(
     let request = ghinvite_core::RequestId::new();
     // A historical/custom deadline, deliberately not today's seven-day policy.
     let envelope = serde_json::from_value(serde_json::json!({
-        "version":1, "transition_id":format!("v1/link/{link}/2"),
+        "transition_id":format!("link/{link}/2"),
         "link":{"link_id":link,"revision":2,"uses":1,"invitation_code":"DeadlineQueue001",
             "created_at":"2026-01-01T00:00:00Z", "revoked_at":null,"revoked_by":null,
-            "creation":{"version":1,"link_id":link,"admin":{"account_id":42,"user_id":42},
+            "creation":{"link_id":link,"admin":{"account_id":42,"user_id":42},
                 "account_id":42,"installation_id":77,"description":"Deadline fixture",
                 "internal_note":null,"expires_at":expires_at,"max_uses":null,"permission":"pull",
                 "approval_required":true,"repos":[{"repo_id":10,"repo_full_name":"octocat/api"}]}},
@@ -98,7 +98,7 @@ async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
     let template = envelope.requests[0].clone();
     envelope.link.revision += 1;
     envelope.link.uses = 54;
-    envelope.transition_id = format!("v1/link/{}/3", envelope.link.link_id);
+    envelope.transition_id = format!("link/{}/3", envelope.link.link_id);
     envelope.requests = (1..=53)
         .map(|n| {
             let mut request = template.clone();
@@ -199,7 +199,7 @@ async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
     envelope.link.creation.link_id = link;
     envelope.link.creation.approval_required = false;
     envelope.link.invitation_code = "AutoDeadline0001".into();
-    envelope.transition_id = format!("v1/link/{link}/2");
+    envelope.transition_id = format!("link/{link}/2");
     envelope.requests[0].link_id = link;
     envelope.requests[0].request_id = ghinvite_core::RequestId::new();
     envelope.requests[0].state = ghinvite_core::RequestState::Approved;
@@ -233,7 +233,7 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let ingress = MockServer::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
     let snapshot = serde_json::json!({"link_id": id, "creation": {
-        "version": 1, "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
+        "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
         "installation_id": 1, "description": "Original", "internal_note": null, "expires_at": null,
         "max_uses": null, "permission": "pull", "approval_required": true,
         "repos": [{"repo_id": 1, "repo_full_name": "octocat/api"}]},

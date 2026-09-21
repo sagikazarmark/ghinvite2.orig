@@ -121,7 +121,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             }
         };
         // Parents are absent. Creation succeeds and its separate projection waits.
-        command("create", json!({"version": 1, "link_id": link_id,
+        command("create", json!({"link_id": link_id,
             "admin": {"account_id": 100, "user_id": 7}, "account_id": 100, "installation_id": 1,
             "description": "Workshop", "internal_note": null, "expires_at": null, "max_uses": 1,
             "permission": "pull", "approval_required": true,
@@ -146,14 +146,14 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         }
         // Real SQLite write failure late in the transaction, not a fake consumer.
         storage.debug_set_audit_failure(true).await.unwrap();
-        let accepted = command("admit", json!({"version": 1, "link_id": link_id,
+        let accepted = command("admit", json!({"link_id": link_id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 8,
             "justification": "Access please"})).await;
         assert_eq!(accepted["result"]["kind"], "accepted");
         let revoked = command("revoke", json!({"link_id": link_id,
             "admin": {"account_id": 100, "user_id": 7}})).await;
         assert!(revoked["revoked_at"].is_string());
-        let decision = command("decide", json!({"version": 1, "link_id": link_id,
+        let decision = command("decide", json!({"link_id": link_id,
             "request_id": accepted["result"]["request_id"], "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 100, "user_id": 7}, "action": {"kind": "decline", "reason": "Admin-only context"}})).await;
         assert_eq!(decision["outcome"], "applied");

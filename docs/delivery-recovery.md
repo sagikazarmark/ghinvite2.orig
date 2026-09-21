@@ -7,13 +7,13 @@ service has not been registered.
 
 ## Retained authority
 
-- Link `v1/dispatch/<request>` contains the immutable approval-bound plan, including
+- Link `dispatch/<request>` contains the immutable approval-bound plan, including
   one invitation ID per repository. Scope is limited to 100 at link creation.
-- Link `v1/submitted/<invitation>` stores the first acknowledged durable invocation
+- Link `submitted/<invitation>` stores the first acknowledged durable invocation
   identity. This means submitted, not GitHub success.
-- Link `v1/consumed/<request>` records lifecycle consumption after fan-out (or
+- Link `consumed/<request>` records lifecycle consumption after fan-out (or
   after observing a non-approved terminal decision).
-- `GithubCreate/<invitation>` retains `v1/input` and `v1/receipt` without TTL.
+- `GithubCreate/<invitation>` retains `input` and `receipt` without TTL.
   The receipt is independent of the database invitation lifecycle.
 - `delivery_attempts` is an input-bound database **write fence**, not the receipt
   authority. Claiming an attempt generation permits one PUT. If its own
@@ -38,8 +38,8 @@ invitation ID and account scope comes from the immutable create command. Blocked
 and outcome-unknown receipts publish none of these events.
 
 The audit ID is the first 128 bits of SHA-256 of
-`ghinvite/delivery/audit/v1/<invitation_id>`, encoded as a ULID for existing audit
-cursors. This mapping and the event metadata contract are versioned, retained
+`ghinvite/delivery/audit/<invitation_id>`, encoded as a ULID for existing audit
+cursors. This mapping and the event metadata contract are retained
 protocol: changing them requires explicit migration. Metadata contains only
 repository name, numeric requester identity, and upstream invitation ID or a safe
 outcome reason. Audit browsing renders allowlisted summaries, never raw metadata,
@@ -79,7 +79,7 @@ exactly-once HTTP transaction is claimed.
 
 A `github_invitations` row is never create evidence: only the receiving object's
 own projection writes it, after the receipt it projects is retained, so it never
-knows more than `v1/receipt`. Without a confirmed receipt, the write fence alone
+knows more than `receipt`. Without a confirmed receipt, the write fence alone
 decides between one PUT and read-only reconciliation. Never infer a successful
 original create from decline/expiry alone.
 
