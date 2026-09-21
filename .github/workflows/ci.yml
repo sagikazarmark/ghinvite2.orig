@@ -94,6 +94,8 @@ jobs:
       - run: npm run test:queue --prefix tests/worker
       - run: npm run test:history --prefix tests/worker
       - run: npm run test:deadlines --prefix tests/worker
+      - name: Shared storage conformance on actual D1
+        run: npm run test:storage --prefix tests/worker
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker

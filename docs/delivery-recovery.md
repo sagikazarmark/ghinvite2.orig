@@ -175,10 +175,10 @@ verify all confirmed audit outcomes, uncertain/blocked exclusion, stale event
 delivery, immutable-content conflicts, audit-write rollback and retry.
 `retained_delivery` checks the same history through real Restate, including
 workflow cleanup.
-`npm run test:admission --prefix tests/worker` runs the shared conformance scenario
-on actual D1, injects audit insertion failures into D1 batches, and checks events
-from actual Worker GitHub 201/204/422 delivery. Console HTTP
-summary/privacy coverage is in `console_flow` (`audit_` filter).
+`npm run test:storage --prefix tests/worker` runs the shared conformance suite,
+including this scenario, on actual D1. `npm run test:admission --prefix tests/worker`
+injects audit insertion failures into D1 batches and checks events from actual
+Worker GitHub 201/204/422 delivery. Console HTTP summary/privacy coverage is in `console_flow` (`audit_` filter).
 
 #49's approved policy is recorded in ADR 0004. #60 implements admission availability
 enforcement and installation-event convergence; #57 moved the browser onto

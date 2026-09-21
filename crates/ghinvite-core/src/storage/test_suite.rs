@@ -1,7 +1,8 @@
 //! Cross-cutting Storage behavior tests, parameterized over any `Storage` impl.
-//! Per-impl test files (e.g. `ghinvite-storage-sqlx/tests/sqlx_suite.rs`)
-//! call `run_suite(make_storage)`
-//! with a factory so each scenario gets a fresh database. Links and requests
+//! `ghinvite-storage-sqlx/tests/sqlx_suite.rs` calls `run_suite(make_storage)`
+//! with a factory so each scenario gets a fresh database; the Worker storage
+//! gate (`tests/worker/storage-suite.mjs`) runs each of [`SCENARIOS`] against
+//! a fresh D1 database inside workerd. Links and requests
 //! are seeded through the projector, their only production writer.
 
 use super::Storage;
@@ -100,26 +101,51 @@ async fn seed<S: ProjectionStorage>(
         .unwrap();
 }
 
+/// Declares every scenario once: the name list adapters iterate and the
+/// by-name dispatcher that runs one scenario against one store.
+macro_rules! scenarios {
+    ($($name:ident),* $(,)?) => {
+        /// Every scenario's name, in suite order.
+        pub const SCENARIOS: &[&str] = &[$(stringify!($name)),*];
+
+        /// Run the named scenario against `s`, which must be a fresh store:
+        /// scenarios use simple fixed IDs. Returns `false` for an unknown name.
+        pub async fn run_scenario<S: Storage + ProjectionStorage>(name: &str, s: S) -> bool {
+            match name {
+                $(stringify!($name) => $name(s).await,)*
+                _ => return false,
+            }
+            true
+        }
+    };
+}
+
+scenarios![
+    scenario_install_uninstall_reinstall,
+    scenario_invitation_link_lifecycle,
+    scenario_recorded_request_deadlines,
+    scenario_request_history,
+    scenario_github_invitation_lifecycle,
+    scenario_audit_appends,
+    scenario_audit_pages,
+    scenario_timestamp_precision,
+    scenario_delivery_audit,
+];
+
 /// Run the full cross-cutting suite against any `Storage` impl.
 ///
 /// `make_storage` is invoked once per scenario so every scenario starts against
-/// a fresh database — scenarios can use simple IDs without worrying about
-/// cross-scenario collisions.
+/// a fresh database. Adapters that cannot run in-process (D1 inside workerd)
+/// iterate [`SCENARIOS`] and call [`run_scenario`] themselves.
 pub async fn run_suite<S, F, Fut>(make_storage: F)
 where
     S: Storage + ProjectionStorage,
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = S>,
 {
-    scenario_install_uninstall_reinstall(make_storage().await).await;
-    scenario_invitation_link_lifecycle(make_storage().await).await;
-    scenario_recorded_request_deadlines(make_storage().await).await;
-    scenario_request_history(make_storage().await).await;
-    scenario_github_invitation_lifecycle(make_storage().await).await;
-    scenario_audit_appends(make_storage().await).await;
-    scenario_audit_pages(make_storage().await).await;
-    scenario_timestamp_precision(make_storage().await).await;
-    scenario_delivery_audit(make_storage().await).await;
+    for name in SCENARIOS {
+        assert!(run_scenario(name, make_storage().await).await, "{name}");
+    }
 }
 
 /// Equal timestamps, mixed precision, terminal rows and foreign cursors must not

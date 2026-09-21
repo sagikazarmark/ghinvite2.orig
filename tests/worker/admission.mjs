@@ -117,7 +117,7 @@ const mf = new Miniflare({
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   compatibilityDate: '2024-09-23',
   compatibilityFlags: ['nodejs_compat'],
-  d1Databases: ['DB', 'DB_DELIVERY'],
+  d1Databases: ['DB'],
   bindings: {
     GHINVITE_GITHUB_APP_ID: '123',
     GHINVITE_GITHUB_APP_PRIVATE_KEY: readFileSync(new URL('../../crates/ghinvite-github/src/jwt_test_key.pem', import.meta.url)).toString('base64'),
@@ -226,11 +226,9 @@ try {
     });
   });
   const db = await mf.getD1Database('DB');
-  const deliveryDb = await mf.getD1Database('DB_DELIVERY');
   for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
     const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
     await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
-    await deliveryDb.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
   }
   if (process.env.INSTALLATION_ONLY === '1') {
     for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
@@ -244,8 +242,6 @@ try {
     });
     assert.equal(unexpectedOutbound, 0);
   } else {
-  await storage('delivery-suite', null);
-  console.log('PASS shared SQLx/D1 confirmed-create audit conformance: all outcomes, replay, ordering and immutable content');
   await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'[10,11]')").run();
   // Adopt existing installation facts before exercising projection failure.
   // Missing user parents keep link/request projection unavailable.

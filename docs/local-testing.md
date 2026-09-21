@@ -6,7 +6,7 @@
 cargo test --workspace
 ```
 
-This excludes the feature-gated real Restate acceptance gate, the opt-in ignored D1 suite,
+This excludes the feature-gated real Restate acceptance gate, the Worker/D1 gates,
 and browser tests. A passing workspace suite does **not** verify Restate runtime
 compatibility or container networking.
 
@@ -294,25 +294,24 @@ admission implementation or D1/Worker conformance. See
 verification. The default runner still executes the existing production workflow
 acceptance gate; the proof is explicitly selected by the argument above.
 
-### D1 storage smoke tests (requires wrangler)
-
-The [Worker admission gate](worker-admission-gate.md) exercises the **actual Rust
-D1 binding path** via workerd and real Restate. Run
-`npm run test:admission --prefix tests/worker`. The SQL-only suite below is separate.
-
-Install `wrangler` separately (`npm i -g wrangler`).
-
-First, apply migrations to local D1:
+### D1 storage conformance (requires wasm-bindgen CLI)
 
 ```bash
-wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
+npm run test:storage --prefix tests/worker
 ```
 
-Then run the smoke tests:
+This builds the actual workflows Worker with `runtime-tests` and runs every
+shared storage scenario (`ghinvite_core::storage::test_suite`, the same suite
+`sqlx_suite` runs natively) against the real `D1Storage` inside workerd. Each
+scenario gets its own Miniflare instance with a fresh in-memory D1 database
+migrated from `migrations/`. It also executes the shared audit seek query over
+historical UTC encodings, exact page boundaries and nanosecond/ID seeks through
+the adapter, and asserts D1's expression-index query plans. No Docker, Restate or
+Wrangler is needed; setup is as in the [Worker smoke](../tests/worker/README.md).
 
-```bash
-cargo test -p ghinvite-storage-d1 --features d1-suite -- --ignored
-```
+The [Worker admission gate](worker-admission-gate.md) separately exercises the
+D1 binding path end to end via workerd and real Restate
+(`npm run test:admission --prefix tests/worker`).
 
 ### wasm32 build check
 
@@ -374,4 +373,4 @@ or Restate) and visits the public and Console documents at 390 x 844 and
 | Island bundle | ✅ requires dx | ✅ push + PR |
 | Document shell browser suite | ✅ requires Playwright | ✅ push + PR |
 | Restate integration | ✅ `bash scripts/test-restate.sh` | ✅ push + PR |
-| D1 suite | ✅ requires wrangler | ❌ not in CI v1 |
+| D1 storage conformance | ✅ requires wasm-bindgen CLI | ✅ push + PR |

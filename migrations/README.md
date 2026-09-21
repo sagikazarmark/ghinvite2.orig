@@ -54,12 +54,12 @@ Requester logins are optional enrichment in that same statement, with indexed
 user-ID lookups for the bounded page rather than separate per-request queries.
 
 The scalar seek bound plus exclusive `(time key, id)` boundary uses these indexes
-without a temporary sort. SQLite tests assert query-plan index/seek use; targeted
-D1 runtime tests execute the same query builder, including mixed encodings:
+without a temporary sort. SQLite tests assert query-plan index/seek use; the D1 storage gate executes the
+same query builder through the adapter, including mixed encodings, and asserts
+D1's plans:
 
 ```sh
-wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
-cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignored
+npm run test:storage --prefix tests/worker
 ```
 
 ### Pending queue

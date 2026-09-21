@@ -9,6 +9,12 @@ checks entrypoints and rejects fixture-only routes. See
 [continuous recovery checks](../../docs/recovery-ci.md) for pins, evidence, and
 the remaining #61 live rollout obligations.
 
+For shared storage conformance on the actual D1 adapter, run
+`npm run test:storage --prefix tests/worker`. It runs every
+`ghinvite_core::storage::test_suite` scenario inside workerd, each against its
+own freshly migrated in-memory D1 database, plus D1 audit seek plans. See
+[local testing](../../docs/local-testing.md#d1-storage-conformance-requires-wasm-bindgen-cli).
+
 For the authenticated decision queue, run
 `npm run test:queue --prefix tests/worker`. This exercises the actual web Worker
 and D1 adapter with non-expiring links, earlier/later link expiration, persisted
