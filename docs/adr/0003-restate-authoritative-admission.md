@@ -18,7 +18,7 @@ For [#48](https://github.com/sagikazarmark/ghinvite2.orig/issues/48), we chose a
 | Separate Restate projection execution | Retry-safe SQLx/D1 writes, including request records, link records, and audit events. It does not decide admission. |
 | SQLx/D1 | Queryable records for Console lists, audit, and other read views. Projected eligibility is advisory, not permission to admit or approve. |
 
-**Update (2026-09-21):** These owners are implemented as `InvitationLinkV1`, `InvitationRequestV1` and the `InvitationProjectionV1` projector. The legacy `InvitationLink`/`InvitationRequest` writers and the cutover path were removed before launch; nothing had been deployed.
+**Update (2026-09-21):** These owners are implemented as the `InvitationLink` Virtual Object, the `InvitationRequest` workflow and the `InvitationProjection` projector. The earlier SQL-driven writers and the cutover path were removed before launch; nothing had been deployed.
 
 This decision covers invitation-link and invitation-request admission/lifecycle state; it does not move all application data, sessions, or GitHub invitation state into the link object.
 
@@ -89,12 +89,12 @@ Keep all authoritative keys in the **same link-ID object**, but separate growing
 
 | Key (logical encoding) | Value and access |
 |---|---|
-| `v1/link` | Link identity/account, fixed guardrails, metadata, revocation, uses, and monotonic revision. No requester list or outcome history. Read for new admission and link changes. |
-| `v1/op/<operation_id>` | Immutable canonical input/fingerprint and original accepted/rejected outcome. Direct lookup before eligibility. |
-| `v1/request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
-| `v1/blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
+| `link` | Link identity/account, fixed guardrails, metadata, revocation, uses, and monotonic revision. No requester list or outcome history. Read for new admission and link changes. |
+| `op/<operation_id>` | Immutable canonical input/fingerprint and original accepted/rejected outcome. Direct lookup before eligibility. |
+| `request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
+| `blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
 
-Use canonical typed identifiers and versioned encoding, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the approved production contract below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation.
+Use canonical typed identifiers, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the approved production contract below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation.
 
 ### Approved operation identity and retention contract
 
@@ -256,7 +256,7 @@ Restate durably retains unfinished execution, but its journal is not automatical
 
 Use a separate ordinary Restate service with one internal `apply_transition(envelope)` command. The link object sends to it durably and does not await completion. The service may process different envelopes concurrently; correctness comes from conditional database writes and stable identities, not assumed delivery order. A keyed projector is unnecessary initially unless measured database contention warrants serialization. This is the concrete implementation recommendation, not an additional verified production adapter.
 
-**Update (2026-09-21):** `InvitationProjectionV1` is now a Virtual Object keyed by link ID rather than an ordinary service. The link object still sends without awaiting completion, but the per-key queue applies one link's transitions in send order, and a failing transition holds back only that link's later transitions. Revision checks remain as a guard against manual redrives.
+**Update (2026-09-21):** `InvitationProjection` is now a Virtual Object keyed by link ID rather than an ordinary service. The link object still sends without awaiting completion, but the per-key queue applies one link's transitions in send order, and a failing transition holds back only that link's later transitions. Revision checks remain as a guard against manual redrives.
 
 Each versioned envelope contains:
 
