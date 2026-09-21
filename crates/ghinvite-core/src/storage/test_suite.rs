@@ -122,6 +122,7 @@ macro_rules! scenarios {
 
 scenarios![
     scenario_install_uninstall_reinstall,
+    scenario_integers_stored_exactly_or_refused,
     scenario_invitation_link_lifecycle,
     scenario_recorded_request_deadlines,
     scenario_request_history,
@@ -587,6 +588,25 @@ async fn scenario_install_uninstall_reinstall<S: Storage>(s: S) {
         .unwrap()
         .unwrap();
     assert_eq!(active.installation_id, 2);
+}
+
+/// An integer identity is stored exactly or refused, never silently rounded:
+/// D1 binds JavaScript doubles, exact only up to 2^53.
+async fn scenario_integers_stored_exactly_or_refused<S: Storage>(s: S) {
+    let id = (1u64 << 53) + 1;
+    let account = sample_account(id, 9012, "acme12");
+    match s.insert_installation(&account).await {
+        Ok(()) => assert_eq!(s.get_installation(id).await.unwrap(), Some(account)),
+        Err(error) => {
+            assert!(matches!(error, super::Error::Database(_)), "{error:?}");
+            assert!(
+                s.get_active_installation_by_account_id(9012)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
 }
 
 async fn scenario_invitation_link_lifecycle<S: Storage + ProjectionStorage>(s: S) {

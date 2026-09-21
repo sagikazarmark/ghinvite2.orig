@@ -89,3 +89,67 @@ pub fn query(event: Option<EventType>, position: AuditPosition, probe: bool) -> 
         "SELECT {columns} FROM audit_events WHERE account_id = ?1 AND {filter} AND {boundary} ORDER BY {TIME_KEY} {order}, id {order} LIMIT {limit}"
     )
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct AuditEventRow {
+    pub id: AuditEventId,
+    pub account_id: u64,
+    pub occurred_at: DateTime<Utc>,
+    pub event_type: EventType,
+    pub actor_kind: crate::audit::ActorKind,
+    pub actor_id: Option<u64>,
+    pub target_kind: crate::audit::TargetKind,
+    pub target_id: String,
+    pub metadata: Option<String>,
+    pub request_id: Option<String>,
+}
+
+impl AuditEventRow {
+    pub fn into_event(self) -> super::Result<AuditEvent> {
+        Ok(AuditEvent {
+            id: self.id,
+            account_id: self.account_id,
+            occurred_at: self.occurred_at,
+            event_type: self.event_type,
+            actor_kind: self.actor_kind,
+            actor_id: self.actor_id,
+            target_kind: self.target_kind,
+            target_id: self.target_id,
+            metadata: match self.metadata {
+                None => serde_json::Value::Null,
+                Some(s) => serde_json::from_str(&s)
+                    .map_err(|e| super::Error::Corrupt(format!("audit metadata: {e}")))?,
+            },
+            request_id: self.request_id,
+        })
+    }
+}
+
+impl AuditPage {
+    /// The page read at `position`, in newest-first order, before its
+    /// navigation [`probes`](Self::probes) have run.
+    pub fn from_rows(rows: Vec<AuditEventRow>, position: AuditPosition) -> super::Result<Self> {
+        let mut events = rows
+            .into_iter()
+            .map(AuditEventRow::into_event)
+            .collect::<super::Result<Vec<_>>>()?;
+        if matches!(position, AuditPosition::After(_)) {
+            events.reverse();
+        }
+        Ok(Self {
+            events,
+            has_older: false,
+            has_newer: false,
+        })
+    }
+
+    /// Probe positions for a non-empty page: `[newer, older]`. The adapter runs
+    /// each as a probe [`query`] and records whether a row came back.
+    pub fn probes(&self) -> Option<[AuditPosition; 2]> {
+        let (first, last) = (self.events.first()?, self.events.last()?);
+        Some([
+            AuditPosition::After(first.into()),
+            AuditPosition::Before(last.into()),
+        ])
+    }
+}

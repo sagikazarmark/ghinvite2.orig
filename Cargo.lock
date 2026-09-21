@@ -2039,7 +2039,6 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "thiserror 1.0.69",
- "ulid",
  "wasm-bindgen",
  "worker",
 ]

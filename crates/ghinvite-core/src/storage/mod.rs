@@ -19,29 +19,21 @@ pub mod test_suite;
 
 pub mod attempt_continuations;
 pub mod audit_read;
+pub mod audit_write;
+pub mod delivery_attempts;
 pub mod delivery_projection;
+pub mod github_invitations;
+pub mod installations;
+pub mod invitation_links;
+pub mod invitation_requests;
 pub mod pending_queue;
 pub mod projection;
 pub mod request_history;
 pub mod settlement;
+pub mod users;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-/// Installation projectors retain complete audit events before insertion. An
-/// identical primary-key replay succeeds; differing content violates NOT NULL
-/// and leaves the stored event intact. Shared SQLite/D1 statement semantics.
-pub const INSTALLATION_AUDIT_REPLAY: &str = " ON CONFLICT(id) DO UPDATE SET account_id = CASE WHEN audit_events.account_id IS excluded.account_id AND audit_events.occurred_at IS excluded.occurred_at AND audit_events.event_type IS excluded.event_type AND audit_events.actor_kind IS excluded.actor_kind AND audit_events.actor_id IS excluded.actor_id AND audit_events.target_kind IS excluded.target_kind AND audit_events.target_id IS excluded.target_id AND audit_events.metadata IS excluded.metadata AND audit_events.request_id IS excluded.request_id THEN audit_events.account_id ELSE NULL END";
-
-/// Include terminal history: member events carry no invitation ID or event time,
-/// so a historical duplicate must not be reassigned to a later request. Two rows
-/// suffice to detect ambiguity without loading an account's invitation history.
-pub const MEMBER_INVITATION_CANDIDATES: &str = "SELECT g.id, g.invitation_request_id,
-    g.repo_id, g.github_invitation_id, g.state, g.error_message, g.created_at, g.updated_at
-    FROM github_invitations g
-    JOIN invitation_requests r ON r.id = g.invitation_request_id
-    JOIN invitation_links l ON l.id = r.invitation_link_id
-    WHERE l.account_id = ?1 AND g.repo_id = ?2 AND r.requester_id = ?3 LIMIT 2";
 
 /// Reasons a write may fail with [`Error::Conflict`]. Each variant pinpoints a
 /// specific unique-constraint or invariant the storage layer enforced.
@@ -75,6 +67,35 @@ pub enum Error {
 
     #[error("data corruption: {0}")]
     Corrupt(String),
+}
+
+/// Classify a failed constraint-checked insert by SQLite's error text, which both
+/// drivers carry (D1 surfaces nothing else). Anything else is a database error.
+pub fn classify_insert(message: String) -> Error {
+    if unique_violation(&message) {
+        // Only the partial unique index covers `installations.account_id`;
+        // primary-key hits name `installations.installation_id`.
+        Error::Conflict(if message.contains("installations.account_id") {
+            ConflictKind::DuplicateActiveInstallation
+        } else {
+            ConflictKind::DuplicateId
+        })
+    } else if message.contains("FOREIGN KEY constraint failed") {
+        Error::Conflict(ConflictKind::ForeignKey)
+    } else {
+        Error::Database(message)
+    }
+}
+
+/// Decode one result row, presented by either driver as a JSON object of its
+/// column values, into a shared row type. Undecodable rows are corrupt.
+pub fn decode_row<T: serde::de::DeserializeOwned>(row: serde_json::Value) -> Result<T> {
+    serde_json::from_value(row).map_err(|e| Error::Corrupt(e.to_string()))
+}
+
+/// SQLite names the violated columns, not the index, after this prefix.
+pub(crate) fn unique_violation(message: &str) -> bool {
+    message.contains("UNIQUE constraint failed")
 }
 
 #[async_trait]
@@ -405,4 +426,34 @@ pub trait Storage: Send + Sync + 'static {
     /// idempotency key, so a duplicate primary key succeeds without another row.
     /// Other constraints and database errors must still surface.
     async fn audit(&self, event: &AuditEvent) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_failures_classify_by_sqlite_text_whatever_the_driver_prefix() {
+        let classified = |message: &str| classify_insert(message.into());
+        assert!(matches!(
+            classified(
+                "D1_ERROR: UNIQUE constraint failed: installations.account_id: SQLITE_CONSTRAINT"
+            ),
+            Error::Conflict(ConflictKind::DuplicateActiveInstallation)
+        ));
+        assert!(matches!(
+            classified(
+                "error returned from database: (code: 1555) UNIQUE constraint failed: installations.installation_id"
+            ),
+            Error::Conflict(ConflictKind::DuplicateId)
+        ));
+        assert!(matches!(
+            classified("D1_ERROR: FOREIGN KEY constraint failed: SQLITE_CONSTRAINT"),
+            Error::Conflict(ConflictKind::ForeignKey)
+        ));
+        assert!(matches!(
+            classified("NOT NULL constraint failed: audit_events.account_id"),
+            Error::Database(_)
+        ));
+    }
 }

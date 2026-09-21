@@ -45,12 +45,24 @@ pub struct PendingPage {
     pub next: Option<PendingBoundary>,
 }
 
+/// One [`query`] result row: a [`PendingRow`] as JSON text.
+#[derive(Debug, Deserialize)]
+pub struct JsonRow {
+    pub row_json: String,
+}
+
+/// The [`COUNT_QUERY`] result row.
+#[derive(Debug, Deserialize)]
+pub struct CountRow {
+    pub pending: u64,
+}
+
 impl PendingPage {
-    pub fn from_json(rows: Vec<String>) -> super::Result<Self> {
+    pub fn from_json(rows: Vec<JsonRow>) -> super::Result<Self> {
         let mut rows = rows
             .into_iter()
             .map(|row| {
-                serde_json::from_str::<PendingRow>(&row)
+                serde_json::from_str::<PendingRow>(&row.row_json)
                     .map_err(|e| super::Error::Corrupt(e.to_string()))
             })
             .collect::<super::Result<Vec<_>>>()?;

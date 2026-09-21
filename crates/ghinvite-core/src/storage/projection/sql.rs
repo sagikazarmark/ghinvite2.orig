@@ -127,8 +127,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
 pub fn classify(message: String) -> Error {
     if message.contains("projection_dependency") {
         Error::ProjectionDependency
-    } else if message.contains("projection_invariant")
-        || message.contains("UNIQUE constraint failed")
+    } else if message.contains("projection_invariant") || crate::storage::unique_violation(&message)
     {
         Error::ProjectionInvariant("immutable identity conflict".into())
     } else {

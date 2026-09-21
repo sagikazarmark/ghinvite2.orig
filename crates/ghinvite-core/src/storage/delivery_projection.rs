@@ -73,6 +73,21 @@ pub fn audit_statement() -> String {
         json_extract(?1,'$.event.event_type'), json_extract(?1,'$.event.actor_kind'), NULL, 'github_invitation',
         json_extract(?1,'$.event.target_id'), json_extract(?1,'$.event.metadata'), NULL
         WHERE json_type(?1,'$.event') != 'null' {}"#,
-        super::INSTALLATION_AUDIT_REPLAY
+        super::audit_write::INSTALLATION_REPLAY
     )
+}
+
+/// Projected receipts of one request, in invitation order.
+pub const FOR_REQUEST: &str =
+    "SELECT receipt FROM delivery_outcomes WHERE request_id = ?1 ORDER BY invitation_id";
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ReceiptRow {
+    pub receipt: String,
+}
+
+impl ReceiptRow {
+    pub fn decode(self) -> super::Result<CreateReceipt> {
+        serde_json::from_str(&self.receipt).map_err(|e| super::Error::Corrupt(e.to_string()))
+    }
 }

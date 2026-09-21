@@ -1,17 +1,28 @@
-//! `Storage` implementation backed by `sqlx::SqlitePool`.
+//! `Storage` implementation backed by `sqlx::SqlitePool`. Statements and row
+//! mapping are core's; this adapter binds values and runs them.
 
-use crate::records::{InstallationRow, encode_selected_repos, u64_to_i64};
+use crate::{decode, to_db_err, u64_to_i64};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ghinvite_core::audit::AuditEvent;
-use ghinvite_core::storage::{ConflictKind, Error, Result, Storage};
+use ghinvite_core::audit::{AuditEvent, EventType};
+use ghinvite_core::delivery::{CreateCommand, CreateReceipt};
+use ghinvite_core::storage::attempt_continuations::StoredContinuation;
+use ghinvite_core::storage::{
+    AuditPage, AuditPosition, Error, Result, Storage, attempt_continuations, audit_read,
+    audit_write, classify_insert, delivery_attempts, delivery_projection, github_invitations,
+    installations, invitation_links, invitation_requests, pending_queue, request_history,
+    settlement, users,
+};
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
     InvitationRequest, RequestId, SelectedRepos, User,
 };
-use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use serde::de::{DeserializeOwned, IgnoredAny};
+use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Sqlite, SqlitePool};
 use std::path::Path;
+
+type Query<'q> = sqlx::query::Query<'q, Sqlite, SqliteArguments<'q>>;
 
 #[derive(Clone)]
 pub struct SqlxStorage {
@@ -29,7 +40,7 @@ impl SqlxStorage {
             .max_connections(1) // in-memory shares one connection so all queries see the same DB
             .connect_with(opts)
             .await
-            .map_err(crate::to_db_err)?;
+            .map_err(to_db_err)?;
         let s = Self { pool };
         s.run_migrations().await?;
         Ok(s)
@@ -45,7 +56,7 @@ impl SqlxStorage {
             .max_connections(8)
             .connect_with(opts)
             .await
-            .map_err(crate::to_db_err)?;
+            .map_err(to_db_err)?;
         let s = Self { pool };
         s.run_migrations().await?;
         Ok(s)
@@ -55,16 +66,19 @@ impl SqlxStorage {
     /// Production browsing uses the bounded `Storage::list_audit_events`.
     #[cfg(any(test, feature = "test-util"))]
     pub async fn debug_list_audit(&self, account_id: u64) -> Result<Vec<AuditEvent>> {
-        let rows: Vec<crate::records::AuditEventRow> = sqlx::query_as(
-            r#"SELECT id, account_id, occurred_at, event_type, actor_kind, actor_id,
+        let rows: Vec<audit_read::AuditEventRow> = self
+            .all(
+                sqlx::query(
+                    r#"SELECT id, account_id, occurred_at, event_type, actor_kind, actor_id,
                       target_kind, target_id, metadata, request_id
                FROM audit_events WHERE account_id = ?1 ORDER BY occurred_at, id"#,
-        )
-        .bind(u64_to_i64(account_id))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|r| r.try_into_domain()).collect()
+                )
+                .bind(u64_to_i64(account_id)),
+            )
+            .await?;
+        rows.into_iter()
+            .map(audit_read::AuditEventRow::into_event)
+            .collect()
     }
 
     /// Test-only: force a GitHub invitation row into `state`, bypassing the
@@ -84,7 +98,7 @@ impl SqlxStorage {
         .bind(github_invitation_id.map(u64_to_i64))
         .execute(&self.pool)
         .await
-        .map_err(crate::to_db_err)?;
+        .map_err(to_db_err)?;
         Ok(())
     }
 
@@ -102,7 +116,7 @@ impl SqlxStorage {
         sqlx::query(sql)
             .execute(&self.pool)
             .await
-            .map_err(crate::to_db_err)?;
+            .map_err(to_db_err)?;
         Ok(())
     }
 
@@ -118,7 +132,7 @@ impl SqlxStorage {
         sqlx::query(sql)
             .execute(&self.pool)
             .await
-            .map_err(crate::to_db_err)?;
+            .map_err(to_db_err)?;
         Ok(())
     }
 
@@ -136,7 +150,7 @@ impl SqlxStorage {
         sqlx::query(sql)
             .execute(&self.pool)
             .await
-            .map_err(crate::to_db_err)?;
+            .map_err(to_db_err)?;
         Ok(())
     }
 
@@ -151,54 +165,46 @@ impl SqlxStorage {
             .map_err(|e| Error::Database(e.to_string()))?;
         Ok(())
     }
-}
 
-/// Collapse a `LEFT JOIN invitation_links × invitation_link_repos` result set into at most
-/// one [`InvitationLink`]. Returns `None` if the join produced zero rows.
-fn group_one_invitation_link(
-    rows: Vec<(
-        crate::records::InvitationLinkRow,
-        Option<i64>,
-        Option<String>,
-    )>,
-) -> Result<Option<InvitationLink>> {
-    let mut iter = rows.into_iter();
-    let Some((row, first_repo_id, first_repo_name)) = iter.next() else {
-        return Ok(None);
-    };
-    let mut repos = Vec::new();
-    if let (Some(rid), Some(name)) = (first_repo_id, first_repo_name) {
-        repos.push(ghinvite_core::InvitationLinkRepo {
-            repo_id: rid as u64,
-            repo_full_name: name,
-        });
+    async fn all<T: DeserializeOwned>(&self, query: Query<'_>) -> Result<Vec<T>> {
+        let rows = query.fetch_all(&self.pool).await.map_err(to_db_err)?;
+        rows.iter().map(decode).collect()
     }
-    for (_, repo_id, repo_full_name) in iter {
-        if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
-            repos.push(ghinvite_core::InvitationLinkRepo {
-                repo_id: rid as u64,
-                repo_full_name: name,
-            });
+
+    async fn optional<T: DeserializeOwned>(&self, query: Query<'_>) -> Result<Option<T>> {
+        let row = query.fetch_optional(&self.pool).await.map_err(to_db_err)?;
+        row.as_ref().map(decode).transpose()
+    }
+
+    async fn one<T: DeserializeOwned>(&self, query: Query<'_>) -> Result<T> {
+        decode(&query.fetch_one(&self.pool).await.map_err(to_db_err)?)
+    }
+
+    /// Rows changed.
+    async fn execute(&self, query: Query<'_>) -> Result<u64> {
+        Ok(query
+            .execute(&self.pool)
+            .await
+            .map_err(to_db_err)?
+            .rows_affected())
+    }
+
+    /// Run `statements` in one transaction, each bound to the same `input`.
+    async fn transaction<S: AsRef<str>>(
+        &self,
+        statements: &[S],
+        input: &str,
+        classify: fn(String) -> Error,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await.map_err(to_db_err)?;
+        for statement in statements {
+            sqlx::query(statement.as_ref())
+                .bind(input)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| classify(e.to_string()))?;
         }
-    }
-    Ok(Some(row.try_into_domain(repos)?))
-}
-
-/// Map a SQLite UNIQUE-violation error message to our typed [`ConflictKind`].
-///
-/// SQLite formats its UNIQUE constraint violations as
-/// `"UNIQUE constraint failed: <table>.<column>[, <table>.<column>...]"`,
-/// using the underlying *column*, not the index name. We pattern-match on
-/// table.column pairs to identify which constraint fired and fall back to
-/// `default` for primary-key collisions and other unique violations.
-fn classify_unique(db: &dyn sqlx::error::DatabaseError, default: ConflictKind) -> ConflictKind {
-    let m = db.message();
-    if m.contains("installations.account_id") {
-        // Only the partial unique index covers `installations.account_id`;
-        // `installation_id` (PK) hits would say "installations.installation_id".
-        ConflictKind::DuplicateActiveInstallation
-    } else {
-        default
+        tx.commit().await.map_err(to_db_err)
     }
 }
 
@@ -212,206 +218,120 @@ impl Storage for SqlxStorage {
         payload: &str,
         expires_at: i64,
         now: i64,
-    ) -> Result<ghinvite_core::storage::attempt_continuations::StoredContinuation> {
-        use ghinvite_core::storage::attempt_continuations::*;
-        sqlx::query(CLEANUP)
-            .bind(now)
-            .execute(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        sqlx::query(INSERT)
-            .bind(scope)
-            .bind(id)
-            .bind(binding)
-            .bind(payload)
-            .bind(expires_at)
-            .execute(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        let (id, payload): (String, String) = sqlx::query_as(BY_BINDING)
-            .bind(scope)
-            .bind(binding)
-            .bind(id)
-            .bind(now)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        Ok(StoredContinuation { id, payload })
+    ) -> Result<StoredContinuation> {
+        use attempt_continuations::*;
+        self.execute(sqlx::query(CLEANUP).bind(now)).await?;
+        self.execute(
+            sqlx::query(INSERT)
+                .bind(scope)
+                .bind(id)
+                .bind(binding)
+                .bind(payload)
+                .bind(expires_at),
+        )
+        .await?;
+        self.one(
+            sqlx::query(BY_BINDING)
+                .bind(scope)
+                .bind(binding)
+                .bind(id)
+                .bind(now),
+        )
+        .await
     }
     async fn get_attempt_continuation(
         &self,
         scope: &str,
         id: &str,
         now: i64,
-    ) -> Result<Option<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
-        use ghinvite_core::storage::attempt_continuations::*;
-        let row: Option<(String, String)> = sqlx::query_as(GET)
-            .bind(scope)
-            .bind(id)
-            .bind(now)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        Ok(row.map(|(id, payload)| StoredContinuation { id, payload }))
+    ) -> Result<Option<StoredContinuation>> {
+        let query = sqlx::query(attempt_continuations::GET);
+        self.optional(query.bind(scope).bind(id).bind(now)).await
     }
     async fn list_attempt_continuations(
         &self,
         scope: &str,
         now: i64,
-    ) -> Result<Vec<ghinvite_core::storage::attempt_continuations::StoredContinuation>> {
-        use ghinvite_core::storage::attempt_continuations::*;
-        let rows: Vec<(String, String)> = sqlx::query_as(LIST)
-            .bind(scope)
-            .bind(now)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, payload)| StoredContinuation { id, payload })
-            .collect())
+    ) -> Result<Vec<StoredContinuation>> {
+        let query = sqlx::query(attempt_continuations::LIST);
+        self.all(query.bind(scope).bind(now)).await
     }
     async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
-        use ghinvite_core::storage::attempt_continuations::*;
-        sqlx::query(RELEASE)
-            .bind(scope)
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
+        let query = sqlx::query(attempt_continuations::RELEASE);
+        self.execute(query.bind(scope).bind(id)).await?;
         Ok(())
     }
-    async fn settle_github_invitation(
-        &self,
-        transition: &ghinvite_core::storage::settlement::Settlement,
-    ) -> Result<()> {
-        use ghinvite_core::storage::settlement;
+    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
         let input = settlement::encode(transition)?;
-        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
-        for statement in settlement::STATEMENTS {
-            sqlx::query(statement)
-                .bind(&input)
-                .execute(&mut *tx)
-                .await
-                .map_err(crate::to_db_err)?;
-        }
-        tx.commit().await.map_err(crate::to_db_err)
+        self.transaction(settlement::STATEMENTS, &input, Error::Database)
+            .await
     }
     async fn list_github_invitations_for_request(
         &self,
         id: RequestId,
     ) -> Result<Vec<GithubInvitation>> {
-        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
-            "SELECT * FROM github_invitations WHERE invitation_request_id = ? ORDER BY id",
-        )
-        .bind(id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|row| row.try_into_domain()).collect()
+        let query = sqlx::query(github_invitations::FOR_REQUEST);
+        self.all(query.bind(id.to_string())).await
     }
     async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM delivery_attempts WHERE invitation_id = ? AND retryable = 0)")
-            .bind(id.to_string())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(crate::to_db_err)
+        let query = sqlx::query(delivery_attempts::FENCED).bind(id.to_string());
+        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
     }
-    async fn claim_delivery_attempt(
-        &self,
-        command: &ghinvite_core::delivery::CreateCommand,
-    ) -> Result<Option<u64>> {
-        let encoded = serde_json::to_string(command).map_err(|e| Error::Corrupt(e.to_string()))?;
-        let generation: Option<i64> = sqlx::query_scalar("INSERT INTO delivery_attempts(invitation_id, command) VALUES (?, ?) ON CONFLICT(invitation_id) DO UPDATE SET generation = generation + 1, retryable = 0 WHERE retryable = 1 AND command = excluded.command RETURNING generation")
-            .bind(command.invitation_id.to_string()).bind(&encoded).fetch_optional(&self.pool).await.map_err(crate::to_db_err)?;
-        let old: String =
-            sqlx::query_scalar("SELECT command FROM delivery_attempts WHERE invitation_id = ?")
-                .bind(command.invitation_id.to_string())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(crate::to_db_err)?;
-        if old != encoded {
-            return Err(Error::ProjectionInvariant(
-                "delivery attempt conflict".into(),
-            ));
-        }
-        Ok(generation.map(|n| n as u64))
+    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
+        let encoded = delivery_attempts::encode(command)?;
+        let id = command.invitation_id.to_string();
+        let generation = self
+            .optional(
+                sqlx::query(delivery_attempts::CLAIM)
+                    .bind(&id)
+                    .bind(&encoded),
+            )
+            .await?;
+        let retained = self
+            .one(sqlx::query(delivery_attempts::COMMAND).bind(&id))
+            .await?;
+        delivery_attempts::claimed(generation, retained, &encoded)
     }
 
     async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
-        sqlx::query(
-            "UPDATE delivery_attempts SET retryable = 1 WHERE invitation_id = ? AND generation = ?",
-        )
-        .bind(id.to_string())
-        .bind(generation as i64)
-        .execute(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
+        let query = sqlx::query(delivery_attempts::REJECT)
+            .bind(id.to_string())
+            .bind(u64_to_i64(generation));
+        self.execute(query).await?;
         Ok(())
     }
 
-    async fn project_delivery(
-        &self,
-        receipt: &ghinvite_core::delivery::CreateReceipt,
-    ) -> Result<()> {
-        use ghinvite_core::storage::delivery_projection as sql;
-        let encoded = sql::encode(receipt)?;
-        let mut tx = self.pool.begin().await.map_err(crate::to_db_err)?;
-        for statement in sql::statements() {
-            sqlx::query(&statement)
-                .bind(&encoded)
-                .execute(&mut *tx)
-                .await
-                .map_err(crate::to_db_err)?;
-        }
-        tx.commit().await.map_err(crate::to_db_err)?;
-        Ok(())
+    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
+        let encoded = delivery_projection::encode(receipt)?;
+        self.transaction(
+            &delivery_projection::statements(),
+            &encoded,
+            Error::Database,
+        )
+        .await
     }
 
-    async fn list_delivery_for_request(
-        &self,
-        id: RequestId,
-    ) -> Result<Vec<ghinvite_core::delivery::CreateReceipt>> {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT receipt FROM delivery_outcomes WHERE request_id = ? ORDER BY invitation_id",
-        )
-        .bind(id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter()
-            .map(|row| serde_json::from_str(&row).map_err(|e| Error::Corrupt(e.to_string())))
-            .collect()
+    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
+        let query = sqlx::query(delivery_projection::FOR_REQUEST).bind(id.to_string());
+        let rows: Vec<delivery_projection::ReceiptRow> = self.all(query).await?;
+        rows.into_iter().map(|row| row.decode()).collect()
     }
 
     async fn insert_installation(&self, account: &Account) -> Result<()> {
-        let res = sqlx::query(
-            r#"
-            INSERT INTO installations
-              (installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-        )
-        .bind(u64_to_i64(account.installation_id))
-        .bind(u64_to_i64(account.account_id))
-        .bind(&account.account_login)
-        .bind(account.account_type.to_string())
-        .bind(account.installed_at)
-        .bind(account.uninstalled_at)
-        .bind(encode_selected_repos(&account.selected_repos))
-        .execute(&self.pool)
-        .await;
-
-        match res {
-            Ok(_) => Ok(()),
-            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => Err(Error::Conflict(
-                classify_unique(&*db, ConflictKind::DuplicateId),
-            )),
-            Err(sqlx::Error::Database(db)) if db.is_foreign_key_violation() => {
-                Err(Error::Conflict(ConflictKind::ForeignKey))
-            }
-            Err(e) => Err(Error::Database(e.to_string())),
-        }
+        sqlx::query(installations::INSERT)
+            .bind(u64_to_i64(account.installation_id))
+            .bind(u64_to_i64(account.account_id))
+            .bind(&account.account_login)
+            .bind(account.account_type.to_string())
+            .bind(account.installed_at)
+            .bind(account.uninstalled_at)
+            .bind(installations::encode_selected_repos(
+                &account.selected_repos,
+            ))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| classify_insert(e.to_string()))?;
+        Ok(())
     }
 
     async fn mark_installation_uninstalled(
@@ -419,18 +339,13 @@ impl Storage for SqlxStorage {
         installation_id: u64,
         when: DateTime<Utc>,
     ) -> Result<()> {
-        let res = sqlx::query(
-            r#"UPDATE installations SET uninstalled_at = ?1 WHERE installation_id = ?2 AND uninstalled_at IS NULL"#,
-        )
-        .bind(when)
-        .bind(u64_to_i64(installation_id))
-        .execute(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        if res.rows_affected() == 0 {
-            return Err(Error::NotFound);
+        let query = sqlx::query(installations::MARK_UNINSTALLED)
+            .bind(when)
+            .bind(u64_to_i64(installation_id));
+        match self.execute(query).await? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     async fn update_installation_repos(
@@ -438,282 +353,125 @@ impl Storage for SqlxStorage {
         installation_id: u64,
         selected: &SelectedRepos,
     ) -> Result<()> {
-        let res = sqlx::query(
-            r#"UPDATE installations SET selected_repos = ?1 WHERE installation_id = ?2 AND uninstalled_at IS NULL"#,
-        )
-        .bind(encode_selected_repos(selected))
-        .bind(u64_to_i64(installation_id))
-        .execute(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        if res.rows_affected() == 0 {
-            return Err(Error::NotFound);
+        let query = sqlx::query(installations::UPDATE_REPOS)
+            .bind(installations::encode_selected_repos(selected))
+            .bind(u64_to_i64(installation_id));
+        match self.execute(query).await? {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        let row: Option<InstallationRow> = sqlx::query_as(
-            r#"SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos
-               FROM installations WHERE installation_id = ?1"#,
-        )
-        .bind(u64_to_i64(installation_id))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        let query = sqlx::query(installations::GET).bind(u64_to_i64(installation_id));
+        self.installation(query).await
     }
 
     async fn get_active_installation_by_account_id(
         &self,
         account_id: u64,
     ) -> Result<Option<Account>> {
-        let row: Option<InstallationRow> = sqlx::query_as(
-            r#"SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos
-               FROM installations WHERE account_id = ?1 AND uninstalled_at IS NULL"#,
-        )
-        .bind(u64_to_i64(account_id))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        let query = sqlx::query(installations::ACTIVE_BY_ACCOUNT).bind(u64_to_i64(account_id));
+        self.installation(query).await
     }
 
     async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        let row: Option<InstallationRow> = sqlx::query_as(
-            r#"SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos
-               FROM installations WHERE account_login = ?1 AND uninstalled_at IS NULL"#,
-        )
-        .bind(login)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        self.installation(sqlx::query(installations::ACTIVE_BY_LOGIN).bind(login))
+            .await
     }
 
     async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        let row: Option<InstallationRow> = sqlx::query_as(
-            "SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos FROM installations WHERE account_login = ? ORDER BY installed_at DESC, installation_id DESC LIMIT 1",
-        ).bind(login).fetch_optional(&self.pool).await.map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        self.installation(sqlx::query(installations::LATEST_BY_LOGIN).bind(login))
+            .await
     }
 
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
-        let rows: Vec<InstallationRow> = sqlx::query_as(
-            r#"SELECT installation_id, account_id, account_login, account_type, installed_at, uninstalled_at, selected_repos
-               FROM installations WHERE uninstalled_at IS NULL ORDER BY installed_at"#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|r| r.try_into_domain()).collect()
+        let rows: Vec<installations::InstallationRow> =
+            self.all(sqlx::query(installations::LIST_ACTIVE)).await?;
+        rows.into_iter().map(|row| row.into_account()).collect()
     }
 
     async fn upsert_user(&self, user: &User) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO users (user_id, login, avatar_url, last_seen_at)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(user_id) DO UPDATE SET
-                login = excluded.login,
-                avatar_url = excluded.avatar_url,
-                last_seen_at = excluded.last_seen_at
-            "#,
-        )
-        .bind(u64_to_i64(user.user_id))
-        .bind(&user.login)
-        .bind(user.avatar_url.as_deref())
-        .bind(user.last_seen_at)
-        .execute(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
+        let query = sqlx::query(users::UPSERT)
+            .bind(u64_to_i64(user.user_id))
+            .bind(&user.login)
+            .bind(user.avatar_url.as_deref())
+            .bind(user.last_seen_at);
+        self.execute(query).await?;
         Ok(())
     }
 
     async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
-        let row: Option<crate::records::UserRow> = sqlx::query_as(
-            r#"SELECT user_id, login, avatar_url, last_seen_at FROM users WHERE user_id = ?1"#,
-        )
-        .bind(u64_to_i64(user_id))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        Ok(row.map(|r| r.into_domain()))
+        self.optional(sqlx::query(users::GET).bind(u64_to_i64(user_id)))
+            .await
     }
 
     async fn get_invitation_link_by_id(
         &self,
         id: InvitationLinkId,
     ) -> Result<Option<InvitationLink>> {
-        let rows: Vec<crate::records::InvitationLinkJoinRow> = sqlx::query_as(
-            r#"
-                SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
-                       l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
-                       l.description, l.internal_note, l.revoked_at, l.revoked_by,
-                       r.repo_id, r.repo_full_name
-                FROM invitation_links l
-                LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
-                WHERE l.id = ?1
-                ORDER BY r.repo_id
-                "#,
-        )
-        .bind(id.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        group_one_invitation_link(rows.into_iter().map(|j| j.split()).collect())
+        let query = sqlx::query(invitation_links::GET).bind(id.to_string());
+        Ok(invitation_links::fold(self.all(query).await?)?.pop())
     }
 
     async fn list_invitation_links_for_account(
         &self,
         account_id: u64,
     ) -> Result<Vec<InvitationLink>> {
-        use std::collections::BTreeMap;
-
-        let rows: Vec<crate::records::InvitationLinkJoinRow> = sqlx::query_as(
-            r#"
-                SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
-                       l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
-                       l.description, l.internal_note, l.revoked_at, l.revoked_by,
-                       r.repo_id, r.repo_full_name
-                FROM invitation_links l
-                LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
-                WHERE l.account_id = ?1
-                ORDER BY l.created_at DESC, l.id, r.repo_id
-                "#,
-        )
-        .bind(u64_to_i64(account_id))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        let rows: Vec<(
-            crate::records::InvitationLinkRow,
-            Option<i64>,
-            Option<String>,
-        )> = rows.into_iter().map(|j| j.split()).collect();
-
-        // Preserve the SQL ordering (created_at DESC, id) by tracking insertion order.
-        let mut order: Vec<String> = Vec::new();
-        let mut by_link: BTreeMap<
-            String,
-            (
-                crate::records::InvitationLinkRow,
-                Vec<ghinvite_core::InvitationLinkRepo>,
-            ),
-        > = BTreeMap::new();
-        for (link_row, repo_id, repo_full_name) in rows {
-            let key = link_row.id.clone();
-            let entry = by_link.entry(key.clone()).or_insert_with(|| {
-                order.push(key.clone());
-                (link_row, Vec::new())
-            });
-            if let (Some(rid), Some(name)) = (repo_id, repo_full_name) {
-                entry.1.push(ghinvite_core::InvitationLinkRepo {
-                    repo_id: rid as u64,
-                    repo_full_name: name,
-                });
-            }
-        }
-
-        order
-            .into_iter()
-            .map(|k| {
-                let (row, repos) = by_link.remove(&k).expect("inserted above");
-                row.try_into_domain(repos)
-            })
-            .collect()
+        let query = sqlx::query(invitation_links::FOR_ACCOUNT).bind(u64_to_i64(account_id));
+        invitation_links::fold(self.all(query).await?)
     }
 
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
-        let row: Option<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT id, invitation_link_id, requester_id, justification, state,
-                      decided_by, decided_at, decline_reason, created_at, decision_deadline
-               FROM invitation_requests WHERE id = ?1"#,
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        self.optional(sqlx::query(invitation_requests::GET).bind(id.to_string()))
+            .await
     }
 
     async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
-        let count: i64 = sqlx::query_scalar(ghinvite_core::storage::pending_queue::COUNT_QUERY)
-            .bind(u64_to_i64(account_id))
-            .fetch_one(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        u64::try_from(count).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))
+        let query = sqlx::query(pending_queue::COUNT_QUERY).bind(u64_to_i64(account_id));
+        let row: pending_queue::CountRow = self.one(query).await?;
+        Ok(row.pending)
     }
 
     async fn pending_request_page(
         &self,
         account_id: u64,
-        after: Option<ghinvite_core::storage::pending_queue::PendingBoundary>,
-    ) -> Result<ghinvite_core::storage::pending_queue::PendingPage> {
-        use ghinvite_core::storage::pending_queue::{self, PendingPage};
-        let rows: Vec<String> = sqlx::query_scalar(&pending_queue::query(after.is_some()))
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage> {
+        let sql = pending_queue::query(after.is_some());
+        let query = sqlx::query(&sql)
             .bind(u64_to_i64(account_id))
-            .bind(after.map(|b| b.seek_key()))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        PendingPage::from_json(rows)
+            .bind(after.map(|b| b.seek_key()));
+        pending_queue::PendingPage::from_json(self.all(query).await?)
     }
 
     async fn request_history(
         &self,
         account_id: u64,
         link_id: InvitationLinkId,
-        before: Option<ghinvite_core::storage::request_history::Boundary>,
-    ) -> Result<ghinvite_core::storage::request_history::Page> {
-        use ghinvite_core::storage::request_history as history;
-        #[derive(sqlx::FromRow)]
-        struct Row {
-            #[sqlx(flatten)]
-            request: crate::records::InvitationRequestRow,
-            requester_login: Option<String>,
-        }
-        let rows: Vec<Row> = sqlx::query_as(&history::query(before))
+        before: Option<request_history::Boundary>,
+    ) -> Result<request_history::Page> {
+        let sql = request_history::query(before);
+        let query = sqlx::query(&sql)
             .bind(u64_to_i64(account_id))
             .bind(link_id.to_string())
-            .bind(before.map(history::boundary_key))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
-        Ok(history::page(
-            rows.into_iter()
-                .map(|r| Ok((r.request.try_into_domain()?, r.requester_login)))
-                .collect::<Result<_>>()?,
-        ))
+            .bind(before.map(request_history::boundary_key));
+        Ok(request_history::page(self.all(query).await?))
     }
+
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
-        sqlx::query(
-            r#"
-            INSERT INTO github_invitations
-              (id, invitation_request_id, repo_id, github_invitation_id, state, error_message, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-        )
-        .bind(invitation.id.to_string())
-        .bind(invitation.invitation_request_id.to_string())
-        .bind(u64_to_i64(invitation.repo_id))
-        .bind(invitation.github_invitation_id.map(u64_to_i64))
-        .bind(invitation.state.to_string())
-        .bind(invitation.error_message.as_deref())
-        .bind(invitation.created_at)
-        .bind(invitation.updated_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| match e {
-            sqlx::Error::Database(db) if db.is_unique_violation() => {
-                Error::Conflict(classify_unique(&*db, ConflictKind::DuplicateId))
-            }
-            sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
-                Error::Conflict(ConflictKind::ForeignKey)
-            }
-            other => Error::Database(other.to_string()),
-        })?;
+        sqlx::query(github_invitations::INSERT)
+            .bind(invitation.id.to_string())
+            .bind(invitation.invitation_request_id.to_string())
+            .bind(u64_to_i64(invitation.repo_id))
+            .bind(invitation.github_invitation_id.map(u64_to_i64))
+            .bind(invitation.state.to_string())
+            .bind(invitation.error_message.as_deref())
+            .bind(invitation.created_at)
+            .bind(invitation.updated_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| classify_insert(e.to_string()))?;
         Ok(())
     }
 
@@ -721,32 +479,16 @@ impl Storage for SqlxStorage {
         &self,
         id: GithubInvitationId,
     ) -> Result<Option<GithubInvitation>> {
-        let row: Option<crate::records::GithubInvitationRow> = sqlx::query_as(
-            r#"SELECT id, invitation_request_id, repo_id, github_invitation_id, state,
-                      error_message, created_at, updated_at
-               FROM github_invitations WHERE id = ?1"#,
-        )
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        self.optional(sqlx::query(github_invitations::GET).bind(id.to_string()))
+            .await
     }
 
     async fn get_github_invitation_by_github_id(
         &self,
         github_id: u64,
     ) -> Result<Option<GithubInvitation>> {
-        let row: Option<crate::records::GithubInvitationRow> = sqlx::query_as(
-            r#"SELECT id, invitation_request_id, repo_id, github_invitation_id, state,
-                      error_message, created_at, updated_at
-               FROM github_invitations WHERE github_invitation_id = ?1"#,
-        )
-        .bind(u64_to_i64(github_id))
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        row.map(|r| r.try_into_domain()).transpose()
+        let query = sqlx::query(github_invitations::BY_GITHUB_ID).bind(u64_to_i64(github_id));
+        self.optional(query).await
     }
 
     async fn member_invitation_candidates(
@@ -755,15 +497,11 @@ impl Storage for SqlxStorage {
         repo_id: u64,
         requester_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        let rows: Vec<crate::records::GithubInvitationRow> =
-            sqlx::query_as(ghinvite_core::storage::MEMBER_INVITATION_CANDIDATES)
-                .bind(u64_to_i64(account_id))
-                .bind(u64_to_i64(repo_id))
-                .bind(u64_to_i64(requester_id))
-                .fetch_all(&self.pool)
-                .await
-                .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|r| r.try_into_domain()).collect()
+        let query = sqlx::query(github_invitations::MEMBER_CANDIDATES)
+            .bind(u64_to_i64(account_id))
+            .bind(u64_to_i64(repo_id))
+            .bind(u64_to_i64(requester_id));
+        self.all(query).await
     }
 
     async fn bind_member_webhook(
@@ -771,41 +509,22 @@ impl Storage for SqlxStorage {
         payload_sha256: &str,
         invitation_id: Option<GithubInvitationId>,
     ) -> Result<Option<GithubInvitationId>> {
-        sqlx::query("INSERT INTO member_webhook_receipts(payload_sha256, invitation_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING")
-            .bind(payload_sha256).bind(invitation_id.map(|id| id.to_string()))
-            .execute(&self.pool).await.map_err(crate::to_db_err)?;
-        let id: Option<String> = sqlx::query_scalar(
-            "SELECT invitation_id FROM member_webhook_receipts WHERE payload_sha256 = ?1",
-        )
-        .bind(payload_sha256)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        id.map(|id| {
-            id.parse()
-                .map_err(|_| Error::Corrupt("member webhook invitation ID".into()))
-        })
-        .transpose()
+        let query = sqlx::query(github_invitations::BIND_MEMBER_WEBHOOK)
+            .bind(payload_sha256)
+            .bind(invitation_id.map(|id| id.to_string()));
+        self.execute(query).await?;
+        let query = sqlx::query(github_invitations::MEMBER_WEBHOOK_BINDING).bind(payload_sha256);
+        let binding: github_invitations::MemberWebhookBinding = self.one(query).await?;
+        Ok(binding.invitation_id)
     }
 
     async fn list_pending_github_invitations_for_account(
         &self,
         account_id: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        let rows: Vec<crate::records::GithubInvitationRow> = sqlx::query_as(
-            r#"SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id, g.state,
-                      g.error_message, g.created_at, g.updated_at
-               FROM github_invitations g
-               JOIN invitation_requests r ON r.id = g.invitation_request_id
-               JOIN invitation_links l ON l.id = r.invitation_link_id
-               WHERE l.account_id = ?1 AND g.state IN ('sending', 'sent')
-               ORDER BY g.created_at"#,
-        )
-        .bind(u64_to_i64(account_id))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|r| r.try_into_domain()).collect()
+        let query =
+            sqlx::query(github_invitations::PENDING_FOR_ACCOUNT).bind(u64_to_i64(account_id));
+        self.all(query).await
     }
 
     async fn invitation_link_belongs_to_account(
@@ -813,100 +532,47 @@ impl Storage for SqlxStorage {
         account_id: u64,
         id: InvitationLinkId,
     ) -> Result<bool> {
-        Ok(
-            sqlx::query("SELECT 1 FROM invitation_links WHERE id = ?1 AND account_id = ?2 LIMIT 1")
-                .bind(id.to_string())
-                .bind(u64_to_i64(account_id))
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(crate::to_db_err)?
-                .is_some(),
-        )
+        let query = sqlx::query(invitation_links::BELONGS_TO_ACCOUNT)
+            .bind(id.to_string())
+            .bind(u64_to_i64(account_id));
+        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
     }
 
     async fn list_audit_events(
         &self,
         account_id: u64,
-        event: Option<ghinvite_core::audit::EventType>,
-        position: ghinvite_core::storage::AuditPosition,
-    ) -> Result<ghinvite_core::storage::AuditPage> {
-        use ghinvite_core::storage::{AuditBoundary, AuditPage, AuditPosition, audit_read};
-        let boundary = position.boundary();
-        let rows: Vec<crate::records::AuditEventRow> =
-            sqlx::query_as(&audit_read::query(event, position, false))
+        event: Option<EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage> {
+        fn query(
+            sql: &str,
+            account_id: u64,
+            event: Option<EventType>,
+            position: AuditPosition,
+        ) -> Query<'_> {
+            let boundary = position.boundary();
+            sqlx::query(sql)
                 .bind(u64_to_i64(account_id))
                 .bind(event.map(|e| e.as_str()))
                 .bind(boundary.map(audit_read::boundary_time))
                 .bind(boundary.map(|b| b.id.to_string()))
-                .fetch_all(&self.pool)
-                .await
-                .map_err(crate::to_db_err)?;
-        let mut events = rows
-            .into_iter()
-            .map(|r| r.try_into_domain())
-            .collect::<Result<Vec<_>>>()?;
-        if matches!(position, AuditPosition::After(_)) {
-            events.reverse();
         }
-        let mut page = AuditPage {
-            events,
-            has_older: false,
-            has_newer: false,
-        };
-        if let (Some(first), Some(last)) = (page.events.first(), page.events.last()) {
-            for (seek, flag) in [
-                (
-                    AuditPosition::After(AuditBoundary::from(first)),
-                    &mut page.has_newer,
-                ),
-                (
-                    AuditPosition::Before(AuditBoundary::from(last)),
-                    &mut page.has_older,
-                ),
-            ] {
-                let b = seek.boundary().unwrap();
-                *flag = sqlx::query(&audit_read::query(event, seek, true))
-                    .bind(u64_to_i64(account_id))
-                    .bind(event.map(|e| e.as_str()))
-                    .bind(audit_read::boundary_time(b))
-                    .bind(b.id.to_string())
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(crate::to_db_err)?
-                    .is_some();
+        let sql = audit_read::query(event, position, false);
+        let rows = self.all(query(&sql, account_id, event, position)).await?;
+        let mut page = AuditPage::from_rows(rows, position)?;
+        if let Some([newer, older]) = page.probes() {
+            for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
+                let sql = audit_read::query(event, seek, true);
+                let probe = query(&sql, account_id, event, seek);
+                *flag = self.optional::<IgnoredAny>(probe).await?.is_some();
             }
         }
         Ok(page)
     }
 
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
-        let metadata_json = if event.metadata.is_null() {
-            None
-        } else {
-            Some(serde_json::to_string(&event.metadata).expect("audit metadata serializes"))
-        };
-
-        let mut sql = String::from(
-            r#"
-            INSERT INTO audit_events
-              (id, account_id, occurred_at, event_type, actor_kind, actor_id,
-               target_kind, target_id, metadata, request_id)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-            "#,
-        );
-        // Metadata commands journal their event ID before writing. Ignore only
-        // that primary-key replay, not other constraints or database failures.
-        if event.event_type == ghinvite_core::audit::EventType::InvitationLinkMetadataUpdated {
-            sql.push_str(" ON CONFLICT(id) DO NOTHING");
-        } else if matches!(
-            event.event_type,
-            ghinvite_core::audit::EventType::InstallationCreated
-                | ghinvite_core::audit::EventType::InstallationReposChanged
-                | ghinvite_core::audit::EventType::InstallationUninstalled
-        ) {
-            sql.push_str(ghinvite_core::storage::INSTALLATION_AUDIT_REPLAY);
-        }
-        sqlx::query(&sql)
+        let sql = audit_write::insert(event.event_type);
+        let query = sqlx::query(&sql)
             .bind(event.id.to_string())
             .bind(u64_to_i64(event.account_id))
             .bind(event.occurred_at)
@@ -915,18 +581,24 @@ impl Storage for SqlxStorage {
             .bind(event.actor_id.map(u64_to_i64))
             .bind(event.target_kind.to_string())
             .bind(&event.target_id)
-            .bind(metadata_json)
-            .bind(event.request_id.as_deref())
-            .execute(&self.pool)
-            .await
-            .map_err(crate::to_db_err)?;
+            .bind(audit_write::metadata(event))
+            .bind(event.request_id.as_deref());
+        self.execute(query).await?;
         Ok(())
+    }
+}
+
+impl SqlxStorage {
+    async fn installation(&self, query: Query<'_>) -> Result<Option<Account>> {
+        let row: Option<installations::InstallationRow> = self.optional(query).await?;
+        row.map(|row| row.into_account()).transpose()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghinvite_core::storage::ConflictKind;
     use ghinvite_core::{AccountType, SelectedRepos};
 
     pub(crate) fn dt(s: &str) -> DateTime<Utc> {
