@@ -1,5 +1,6 @@
 //! Receiving-side create receipts. Private ingress; ADR 0004.
 use crate::AppState;
+use crate::repository_access::{RepositoryAccess, Unavailable, verify_repository_access};
 use ghinvite_core::{
     InvitationState,
     delivery::{CreateCommand, CreateOutcome, CreateReceipt},
@@ -66,35 +67,70 @@ impl DeliveryRecovery {
         let link =
             ctx.object_client::<crate::admission::InvitationLinkClient>(query.link_id.to_string());
         let Json(plan) = link.prepare_dispatch(Json(query.clone())).call().await?;
-        for command in &plan.commands {
-            let receiver =
-                ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string());
-            let Json(receipt) = receiver.status().call().await?;
-            if let Some(receipt) = receipt
-                && receipt.command != *command
-            {
-                return Err(TerminalError::new_with_code(
-                    409,
-                    "receiving identity conflict",
-                ));
-            }
-            // Confirmed replay also repairs a missing SQL projection. It
-            // cannot reissue PUT; uncertain replay only reconciles.
-            let invocation_id = receiver
-                .create(Json(command.clone()))
-                .send()
-                .await?
-                .invocation_id()
-                .to_owned();
-            link.record_submitted(Json(crate::request_lifecycle::SubmittedCommand {
-                command: command.clone(),
-                invocation_id,
-            }))
-            .call()
-            .await?;
-        }
+        // Confirmed replay also repairs a missing SQL projection. It cannot
+        // reissue PUT; uncertain replay only reconciles.
+        let ctx = &ctx;
+        submit_plan(
+            ctx,
+            &link,
+            &plan,
+            move |command| async move {
+                let Json(receipt) = ctx
+                    .object_client::<GithubCreateClient>(command.invitation_id.to_string())
+                    .status()
+                    .call()
+                    .await?;
+                if let Some(receipt) = receipt
+                    && receipt.command != command
+                {
+                    return Err(TerminalError::new_with_code(
+                        409,
+                        "receiving identity conflict",
+                    ));
+                }
+                Ok(())
+            },
+            || async { Ok(()) },
+        )
+        .await?;
         link.delivery_status(Json(query)).call().await
     }
+}
+
+/// Send each planned create to its receiving object and record the submission
+/// with the link, one repository at a time: a repository's send is journaled
+/// before its record, and its record before the next repository's send.
+/// `before_send` may refuse a command before it is sent; `after_send` runs
+/// between a send and its record.
+pub(crate) async fn submit_plan<'ctx, B, A>(
+    ctx: &impl ContextClient<'ctx>,
+    link: &crate::admission::InvitationLinkClient<'ctx>,
+    plan: &crate::request_lifecycle::ApprovedDispatch,
+    mut before_send: impl FnMut(CreateCommand) -> B,
+    mut after_send: impl FnMut() -> A,
+) -> Result<(), TerminalError>
+where
+    B: std::future::Future<Output = Result<(), TerminalError>>,
+    A: std::future::Future<Output = Result<(), TerminalError>>,
+{
+    for command in &plan.commands {
+        before_send(command.clone()).await?;
+        let receiver = ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string());
+        let invocation_id = receiver
+            .create(Json(command.clone()))
+            .send()
+            .await?
+            .invocation_id()
+            .to_owned();
+        after_send().await?;
+        link.record_submitted(Json(crate::request_lifecycle::SubmittedCommand {
+            command: command.clone(),
+            invocation_id,
+        }))
+        .call()
+        .await?;
+    }
+    Ok(())
 }
 
 #[restate_sdk::object]
@@ -348,11 +384,6 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
     };
     let repo = ghinvite_core::RepositoryIdentity::parse(command.repo_full_name.clone())
         .map_err(|_| TerminalError::new_with_code(400, "invalid repository"))?;
-    if let ghinvite_core::SelectedRepos::Subset(ids) = &account.selected_repos
-        && !ids.contains(&command.repo_id)
-    {
-        return Ok(blocked("repository unavailable").into());
-    }
     // A prerequisite GitHub would not answer for is not a prerequisite that went
     // away: it blocks on GitHub's wait rather than on the unavailability cadence.
     let unread = |error: &ghinvite_github::Error, unavailable: &str| match error.rate_limit() {
@@ -361,21 +392,22 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         }
         None => blocked(unavailable).into(),
     };
-    match state
-        .github
-        .get_repo(account.installation_id, repo.owner(), repo.name())
-        .await
-    {
-        Ok(r) if r.id == command.repo_id => (),
-        Err(error) => {
+    match verify_repository_access(&state.github, &account, command.repo_id, &repo).await {
+        RepositoryAccess::Verified => (),
+        RepositoryAccess::Unavailable(Unavailable::NotSelected) => {
+            return Ok(blocked("repository unavailable").into());
+        }
+        // A repository that answered with a different identity is verified as
+        // the wrong one, not unread.
+        RepositoryAccess::Unavailable(Unavailable::IdentityMismatch) => {
+            return Ok(blocked("repository unavailable or identity unverified").into());
+        }
+        RepositoryAccess::Unread(error) => {
             return Ok(unread(
                 &error,
                 "repository unavailable or identity unverified",
             ));
         }
-        // A repository that answered with a different identity is verified as
-        // the wrong one, not unread.
-        Ok(_) => return Ok(blocked("repository unavailable or identity unverified").into()),
     };
     let user = match state
         .github

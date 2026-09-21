@@ -25,6 +25,7 @@ pub mod installation;
 pub mod invitation_context;
 pub mod projection;
 pub mod reconcile;
+pub mod repository_access;
 pub mod request_lifecycle;
 pub mod settlement;
 pub mod state;

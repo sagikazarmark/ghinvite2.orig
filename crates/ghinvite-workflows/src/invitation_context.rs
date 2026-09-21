@@ -1,4 +1,5 @@
 use crate::error::{HandlerError, Result};
+use crate::repository_access::{RepositoryAccess, verify_repository_access};
 use crate::state::AppState;
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkRepo,
@@ -94,21 +95,17 @@ pub(crate) async fn load_verified_settlement_context(
     {
         return Ok(None);
     }
-    if let ghinvite_core::SelectedRepos::Subset(ids) = &account.selected_repos
-        && !ids.contains(&context.repo.repo_id)
+    match verify_repository_access(
+        &state.github,
+        &account,
+        context.repo.repo_id,
+        &context.repository,
+    )
+    .await
     {
-        return Ok(None);
-    }
-    let repo = state
-        .github
-        .get_repo(
-            account.installation_id,
-            context.repository.owner(),
-            context.repository.name(),
-        )
-        .await?;
-    if repo.id != context.repo.repo_id {
-        return Ok(None);
+        RepositoryAccess::Verified => (),
+        RepositoryAccess::Unavailable(_) => return Ok(None),
+        RepositoryAccess::Unread(error) => return Err(error.into()),
     }
     context.account = account;
     Ok(Some(context))

@@ -152,44 +152,36 @@ impl InvitationRequest {
                     None
                 };
                 if let Some(plan) = &dispatch {
-                    for command in &plan.commands {
-                        let invocation_id = ctx
-                            .object_client::<crate::delivery::GithubCreateClient>(
-                                command.invitation_id.to_string(),
-                            )
-                            .create(Json(command.clone()))
-                            .send()
-                            .await?
-                            .invocation_id()
-                            .to_owned();
-                        #[cfg(feature = "integration")]
-                        if let Some(faults) = &self.faults {
-                            ctx.run(|| async {
-                                use std::sync::atomic::Ordering;
-                                if faults.pause_after_send.load(Ordering::SeqCst) {
-                                    faults.sent_before_pause.fetch_add(1, Ordering::SeqCst);
-                                    return Err(std::io::Error::other(
-                                        "fixture: send acknowledged before checkpoint loss",
-                                    )
-                                    .into());
-                                }
-                                Ok::<_, HandlerError>(())
-                            })
-                            .name("after_repository_send")
-                            .retry_policy(
-                                restate_sdk::context::RunRetryPolicy::default()
-                                    .initial_delay(std::time::Duration::from_millis(100)),
-                            )
-                            .await?;
-                        }
-                        ctx.object_client::<InvitationLinkClient>(query.link_id.to_string())
-                            .record_submitted(Json(SubmittedCommand {
-                                command: command.clone(),
-                                invocation_id,
-                            }))
-                            .call()
-                            .await?;
-                    }
+                    crate::delivery::submit_plan(
+                        &ctx,
+                        &ctx.object_client::<InvitationLinkClient>(query.link_id.to_string()),
+                        plan,
+                        |_| async { Ok(()) },
+                        || async {
+                            #[cfg(feature = "integration")]
+                            if let Some(faults) = &self.faults {
+                                ctx.run(|| async {
+                                    use std::sync::atomic::Ordering;
+                                    if faults.pause_after_send.load(Ordering::SeqCst) {
+                                        faults.sent_before_pause.fetch_add(1, Ordering::SeqCst);
+                                        return Err(std::io::Error::other(
+                                            "fixture: send acknowledged before checkpoint loss",
+                                        )
+                                        .into());
+                                    }
+                                    Ok::<_, HandlerError>(())
+                                })
+                                .name("after_repository_send")
+                                .retry_policy(
+                                    restate_sdk::context::RunRetryPolicy::default()
+                                        .initial_delay(std::time::Duration::from_millis(100)),
+                                )
+                                .await?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await?;
                 }
                 let decision = request
                     .decision
