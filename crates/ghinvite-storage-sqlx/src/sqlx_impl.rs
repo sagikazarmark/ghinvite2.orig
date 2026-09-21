@@ -271,6 +271,16 @@ impl Storage for SqlxStorage {
             .map(|(id, payload)| StoredAttempt { id, payload })
             .collect())
     }
+    async fn release_admin_attempt(&self, scope: &str, id: &str) -> Result<()> {
+        use ghinvite_core::storage::admin_attempts::*;
+        sqlx::query(RELEASE)
+            .bind(scope)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        Ok(())
+    }
     async fn settle_github_invitation(
         &self,
         transition: &ghinvite_core::storage::settlement::Settlement,

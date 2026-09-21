@@ -417,16 +417,104 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, false)))
         .mount(&ingress)
         .await;
+    let detail = format!("/console/accounts/octocat/links/{id}");
+    let response = identity_request(&app, &cookie, "GET", &detail).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // The completed retry flashes once; the uncertain first submission and
+    // the status read did not.
+    let html = response_html(response).await;
+    assert_eq!(html.matches("Invitation link created.").count(), 1);
+    let html = response_html(identity_request(&app, &cookie, "GET", &detail).await).await;
+    assert!(!html.contains("Invitation link created."));
+}
+
+#[tokio::test]
+async fn recovered_revocation_retry_flashes_once_on_the_link_detail_page() {
+    let ingress = MockServer::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&ingress)
+        .await;
+    let (app, cookie) = recovery_app(&ingress).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let detail = format!("/console/accounts/octocat/links/{id}");
+    let response = post(
+        &app,
+        &cookie,
+        &format!("{detail}/revoke"),
+        &format!("csrf_token={csrf}"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    ingress.reset().await;
+    for method in ["revoke", "link_status"] {
+        Mock::given(path(format!("/{LINK_SERVICE}/{id}/{method}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, true)))
+            .mount(&ingress)
+            .await;
+    }
+    let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
+    let html = response_html(identity_request(&app, &cookie, "GET", &url).await).await;
+    assert!(html.contains("Invitation link stopped accepting new invitation requests."));
+    let response = post(&app, &cookie, &url, &format!("csrf_token={csrf}")).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], detail);
+    let html = response_html(identity_request(&app, &cookie, "GET", &detail).await).await;
     assert_eq!(
-        identity_request(
-            &app,
-            &cookie,
-            "GET",
-            &format!("/console/accounts/octocat/links/{id}")
-        )
-        .await
-        .status(),
-        StatusCode::OK
+        html.matches("Invitation link stopped accepting new invitation requests.")
+            .count(),
+        1
+    );
+    let html = response_html(identity_request(&app, &cookie, "GET", &detail).await).await;
+    assert!(!html.contains("stopped accepting new invitation requests."));
+}
+
+#[tokio::test]
+async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
+    let ingress = MockServer::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&ingress)
+        .await;
+    let (app, cookie) = recovery_app(&ingress).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let response = post(
+        &app,
+        &cookie,
+        &format!(
+            "/console/accounts/octocat/links?link_id={id}&anchor={}",
+            Utc::now().timestamp()
+        ),
+        &format!("csrf_token={csrf}&description=Recovery+fixture&permission=pull&repo_ids=10"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    ingress.reset().await;
+    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
+        .respond_with(ResponseTemplate::new(400).set_body_string("restate: expiry already past"))
+        .mount(&ingress)
+        .await;
+    let url = format!("/console/accounts/octocat/attempts/create-{id}");
+    let response = post(&app, &cookie, &url, &format!("csrf_token={csrf}")).await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        response.headers()["location"],
+        "/console/accounts/octocat/links/new"
+    );
+    let html = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/links/new").await,
+    )
+    .await;
+    assert!(html.contains(
+        "The invitation link could not be created with these values. Review them and try again."
+    ));
+    assert!(!html.contains("expiry already past"));
+    // The rejected input is released rather than left as an unknown outcome.
+    assert_eq!(
+        identity_request(&app, &cookie, "GET", &url).await.status(),
+        StatusCode::NOT_FOUND
     );
 }
 

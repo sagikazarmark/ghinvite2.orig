@@ -14,6 +14,7 @@ test('create, revoke, approve and decline recover their original attempts across
   await page.getByRole('button', { name: 'Retry original attempt' }).click();
   await expect(page).toHaveURL(detail);
   await expect(page.getByText('Browser recovery', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('Invitation link created.', { exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Stop accepting new requests' }).click();
   await page.getByRole('button', { name: 'Confirm stop' }).press('Enter');
   await expect(page.getByRole('status')).toContainText('Outcome unknown');
@@ -22,6 +23,7 @@ test('create, revoke, approve and decline recover their original attempts across
   await page.getByRole('link', { name: 'Recover attempts' }).click();
   await page.locator(`form[action="${revocation}"]`).getByRole('button', { name: 'Retry original attempt' }).click();
   await expect(page).toHaveURL(detail);
+  await expect(page.getByText('Invitation link stopped accepting new invitation requests.', { exact: true })).toBeVisible();
   await page.goto(revocation);
   await expect(page.getByRole('status')).toContainText('stopped accepting');
 

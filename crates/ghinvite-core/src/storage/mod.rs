@@ -106,6 +106,11 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Vec<admin_attempts::StoredAttempt>> {
         Err(Error::Database("attempt storage unavailable".into()))
     }
+    /// Forget a continuation the authority definitively rejected (nothing was
+    /// applied). Releasing a missing record succeeds.
+    async fn release_admin_attempt(&self, _scope: &str, _id: &str) -> Result<()> {
+        Err(Error::Database("attempt storage unavailable".into()))
+    }
     /// Atomically settle the observed Sent invitation and publish its audit.
     /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
     async fn settle_github_invitation(&self, _transition: &settlement::Settlement) -> Result<()> {

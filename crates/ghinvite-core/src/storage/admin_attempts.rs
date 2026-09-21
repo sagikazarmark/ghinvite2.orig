@@ -17,3 +17,6 @@ pub const GET: &str =
     "SELECT id,payload FROM admin_attempts WHERE scope=?1 AND id=?2 AND expires_at>?3";
 pub const LIST: &str =
     "SELECT id,payload FROM admin_attempts WHERE scope=?1 AND expires_at>?2 ORDER BY id";
+/// Forget a continuation the authority definitively rejected, so its identity
+/// can carry corrected input.
+pub const RELEASE: &str = "DELETE FROM admin_attempts WHERE scope=?1 AND id=?2";

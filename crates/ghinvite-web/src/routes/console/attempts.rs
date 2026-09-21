@@ -14,6 +14,19 @@ use ghinvite_core::storage::projection::CreateLink;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
+const CREATED: &str = "Invitation link created.";
+const REVOKED: &str = "Invitation link stopped accepting new invitation requests.";
+/// The authority refused the creation's input; nothing was created.
+pub(super) const CREATE_REJECTED: &str =
+    "The invitation link could not be created with these values. Review them and try again.";
+const REVOKE_REJECTED: &str = "This invitation link could not be stopped. Reload it and try again.";
+
+/// The authority definitively rejected a creation (400): nothing was created
+/// and the retained continuation was released, so the same creation identity
+/// can carry corrected values. The caller that holds the submitted form
+/// re-renders it.
+pub(super) struct CreateRejected;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) enum Command {
     Create(CreateLink),
@@ -241,15 +254,16 @@ pub(super) async fn page(
             .await
             .and_then(|link| {
                 if link.creation == *c {
-                    Ok(Some("Invitation link created."))
+                    Ok(Some(CREATED))
                 } else {
                     Err(crate::WebError::Conflict)
                 }
             }),
-        Command::Revoke(c) => state.admission.link_status(c.clone()).await.map(|link| {
-            link.revoked_at
-                .map(|_| "Invitation link stopped accepting new invitation requests.")
-        }),
+        Command::Revoke(c) => state
+            .admission
+            .link_status(c.clone())
+            .await
+            .map(|link| link.revoked_at.map(|_| REVOKED)),
     };
     match result {
         Ok(Some(message)) => render_attempt(&admin, &command, StatusCode::OK, message, false),
@@ -271,46 +285,96 @@ pub(super) async fn retry(
     }
 }
 
+/// Execute an attempt with no submitted form to return to (a retry from the
+/// recovery page, a revocation or a decision). A rejected creation starts over
+/// from a fresh creation form, since its retained input was released.
 pub(super) async fn execute(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     command: Command,
 ) -> Response {
+    match submit(state, admin, command).await {
+        Ok(response) => response,
+        Err(CreateRejected) => {
+            flash(admin, session::FlashLevel::Error, CREATE_REJECTED).await;
+            Redirect::to(&format!(
+                "/console/accounts/{}/links/new",
+                admin.account.account_login
+            ))
+            .into_response()
+        }
+    }
+}
+
+async fn flash(admin: &RequireConsoleAdminOf, level: session::FlashLevel, message: &str) {
+    let _ = session::set_flash(
+        &admin.tower,
+        session::Flash {
+            level,
+            message: message.into(),
+        },
+    )
+    .await;
+}
+
+/// A definitive rejection applied nothing, so its continuation must neither
+/// read as an unknown outcome nor bind the identity to the rejected input.
+async fn release(state: &AppState, admin: &RequireConsoleAdminOf, command: &Command) {
+    let released = match scope(admin) {
+        Ok(scope) => state
+            .storage
+            .release_admin_attempt(&scope, &command.id())
+            .await
+            .map_err(|_| ()),
+        Err(_) => Err(()),
+    };
+    if released.is_err() {
+        // Retained input then keeps binding the identity; resubmitting changed
+        // values reports a conflict rather than applying anything.
+        tracing::warn!("rejected admin attempt could not be released");
+    }
+}
+
+/// Execute an attempt. Only a creation the authority rejected is returned to
+/// the caller, which may hold the submitted form to re-render.
+pub(super) async fn submit(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    command: Command,
+) -> Result<Response, CreateRejected> {
     let original = match retain(state, admin, &command).await {
         Ok(c) => c,
-        Err(e) => return failed(admin, &command, e),
+        Err(e) => return Ok(failed(admin, &command, e)),
     };
     if original.id() != command.id() {
         if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
             && old.action != new.action
         {
-            return render_attempt(
+            return Ok(render_attempt(
                 admin,
                 &original,
                 StatusCode::CONFLICT,
                 "The requested decision was not applied. A different original decision attempt is retained. Check its status before deciding what to do next.",
                 false,
-            );
+            ));
         }
-        return Redirect::to(&url(admin, &original)).into_response();
+        return Ok(Redirect::to(&url(admin, &original)).into_response());
     }
     if serde_json::to_value(&original).unwrap() != serde_json::to_value(&command).unwrap() {
-        return failed(admin, &original, crate::WebError::Conflict);
+        return Ok(failed(admin, &original, crate::WebError::Conflict));
     }
-    let result = match &command {
+    let (result, completed) = match &command {
         Command::Decision(c) => {
             let result = state.request_lifecycle.decide(c.clone()).await;
-            return match result {
+            return Ok(match result {
                 Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
                     decision_response(admin, &command, &receipt)
                 }
                 Ok(receipt) => {
-                    let _ = session::set_flash(
-                        &admin.tower,
-                        session::Flash {
-                            level: session::FlashLevel::Success,
-                            message: decision_message(&receipt),
-                        },
+                    flash(
+                        admin,
+                        session::FlashLevel::Success,
+                        &decision_message(&receipt),
                     )
                     .await;
                     Redirect::to(&format!(
@@ -320,19 +384,36 @@ pub(super) async fn execute(
                     .into_response()
                 }
                 Err(e) => failed(admin, &command, e),
-            };
+            });
         }
-        Command::Create(c) => state.admission.create(c.clone()).await.map(|_| ()),
-        Command::Revoke(c) => state.admission.revoke(c.clone()).await.map(|_| ()),
+        Command::Create(c) => (state.admission.create(c.clone()).await.map(|_| ()), CREATED),
+        Command::Revoke(c) => (state.admission.revoke(c.clone()).await.map(|_| ()), REVOKED),
     };
+    let detail = format!(
+        "/console/accounts/{}/links/{}",
+        admin.account.account_login,
+        command.link_id()
+    );
     match result {
-        Ok(()) => Redirect::to(&format!(
-            "/console/accounts/{}/links/{}",
-            admin.account.account_login,
-            command.link_id()
-        ))
-        .into_response(),
-        Err(e) => failed(admin, &command, e),
+        // Every completing execution flashes once: a first submission, a
+        // retried recovered attempt, and an identical resubmission alike.
+        Ok(()) => {
+            flash(admin, session::FlashLevel::Success, completed).await;
+            Ok(Redirect::to(&detail).into_response())
+        }
+        // Invalid input for the authority (for a creation, typically an
+        // expiry already in the past); the authority applied nothing.
+        Err(crate::WebError::BadRequest(_)) => {
+            release(state, admin, &command).await;
+            match command {
+                Command::Create(_) => Err(CreateRejected),
+                _ => {
+                    flash(admin, session::FlashLevel::Error, REVOKE_REJECTED).await;
+                    Ok(Redirect::to(&detail).into_response())
+                }
+            }
+        }
+        Err(e) => Ok(failed(admin, &command, e)),
     }
 }
 

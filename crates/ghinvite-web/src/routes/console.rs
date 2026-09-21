@@ -530,7 +530,13 @@ async fn create_link(
             if !matches {
                 return attempts::failed(&admin, &command, crate::WebError::Conflict);
             }
-            return attempts::execute(&state, &admin, command).await;
+            return match attempts::submit(&state, &admin, command).await {
+                Ok(response) => response,
+                Err(attempts::CreateRejected) => {
+                    let repos = load_installation_repos_for_form(&state, &admin).await;
+                    rejected_creation_response(&admin, repos, form, now, link_id)
+                }
+            };
         }
         Ok(_) => {}
         Err(e) => return e.into_response(),
@@ -592,7 +598,35 @@ async fn create_link(
         repos: validated.repos,
     };
     command.repos.sort_by_key(|repo| repo.repo_id);
-    attempts::execute(&state, &admin, attempts::Command::Create(command)).await
+    match attempts::submit(&state, &admin, attempts::Command::Create(command)).await {
+        Ok(response) => response,
+        Err(attempts::CreateRejected) => {
+            rejected_creation_response(&admin, Ok(repos), form, now, link_id)
+        }
+    }
+}
+
+/// The authority refused a validated creation (for example, an expiry it
+/// considers already past). Re-render the submitted values under the same
+/// creation identity; the authority's reason is not shown.
+fn rejected_creation_response(
+    admin: &RequireConsoleAdminOf,
+    repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
+    form: CreateLinkSubmission,
+    now: chrono::DateTime<Utc>,
+    link_id: ghinvite_core::InvitationLinkId,
+) -> axum::response::Response {
+    let mut values = form.into_view_values(Default::default());
+    values
+        .errors
+        .summary
+        .push(attempts::CREATE_REJECTED.to_owned());
+    let mut response = creation_form_response(admin, None, repos, values, now, link_id);
+    // A repository load failure keeps its own status.
+    if response.status() == axum::http::StatusCode::OK {
+        *response.status_mut() = axum::http::StatusCode::BAD_REQUEST;
+    }
+    response
 }
 
 #[derive(serde::Deserialize)]
@@ -665,11 +699,21 @@ async fn save_link_details(
         })
         .await
     {
-        Ok(_) => axum::response::Redirect::to(&format!(
-            "/console/accounts/{}/links/{id}",
-            admin.account.account_login
-        ))
-        .into_response(),
+        Ok(_) => {
+            let _ = session::set_flash(
+                &admin.tower,
+                session::Flash {
+                    level: session::FlashLevel::Success,
+                    message: "Invitation link details updated.".into(),
+                },
+            )
+            .await;
+            axum::response::Redirect::to(&format!(
+                "/console/accounts/{}/links/{id}",
+                admin.account.account_login
+            ))
+            .into_response()
+        }
         Err(crate::WebError::Restate(failure)) => {
             tracing::warn!(
                 ingress_failure = %failure,

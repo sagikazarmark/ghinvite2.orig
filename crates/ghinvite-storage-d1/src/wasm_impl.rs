@@ -179,6 +179,20 @@ impl Storage for D1Storage {
         })
         .await
     }
+    async fn release_admin_attempt(&self, scope: &str, id: &str) -> Result<()> {
+        use ghinvite_core::storage::admin_attempts::*;
+        wasm_send(async {
+            self.db
+                .prepare(RELEASE)
+                .bind(&[scope.into(), id.into()])
+                .map_err(bind_err)?
+                .run()
+                .await
+                .map_err(classify_d1_error)?;
+            Ok(())
+        })
+        .await
+    }
     async fn settle_github_invitation(
         &self,
         transition: &ghinvite_core::storage::settlement::Settlement,

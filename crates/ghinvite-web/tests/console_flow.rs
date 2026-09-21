@@ -3835,3 +3835,229 @@ async fn console_post_missing_resource_stays_plain_404() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Not Found");
 }
+
+const LINK_CREATED: &str = "Invitation link created.";
+const LINK_DETAILS_UPDATED: &str = "Invitation link details updated.";
+const LINK_REVOKED: &str = "Invitation link stopped accepting new invitation requests.";
+const LINK_CREATE_REJECTED: &str =
+    "The invitation link could not be created with these values. Review them and try again.";
+const LINK_REVOKE_REJECTED: &str =
+    "This invitation link could not be stopped. Reload it and try again.";
+
+async fn post_form(
+    app: &axum::Router,
+    cookie: &str,
+    uri: &str,
+    body: &str,
+) -> axum::response::Response {
+    let token = common::csrf_token(app, cookie).await;
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={token}&{body}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Follow a redirect and return the page it lands on.
+async fn follow(
+    app: &axum::Router,
+    cookie: &str,
+    response: axum::response::Response,
+) -> (StatusCode, String) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    let response = identity_request(app, cookie, "GET", &location).await;
+    (response.status(), response_html(response).await)
+}
+
+/// The action of the new invitation link form, unescaped.
+fn creation_form_action(html: &str) -> String {
+    html.split("action=\"/console/accounts/acme/links?")
+        .nth(1)
+        .expect("creation form action")
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&#38;", "&")
+        .replace("&amp;", "&")
+}
+
+#[tokio::test]
+async fn create_link_success_flashes_once_on_the_link_detail_page() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
+    let link_id = ghinvite_core::InvitationLinkId::new();
+    let uri = format!(
+        "/console/accounts/acme/links?link_id={link_id}&anchor={}",
+        Utc::now().timestamp()
+    );
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=Flash+workshop&permission=pull&expires_in_days=5&repo_ids=10",
+    )
+    .await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Flash workshop</h1>"));
+    assert_eq!(html.matches(LINK_CREATED).count(), 1);
+    assert!(html.contains("alert-success"));
+    assert_eq!(authority.created().len(), 1);
+    let (_, again) = get_links(&app, &cookie, &format!("/{link_id}")).await;
+    assert!(!again.contains(LINK_CREATED), "a flash is shown once");
+}
+
+#[tokio::test]
+async fn create_link_authority_rejection_rerenders_form_with_values_and_identity() {
+    let mut expectations = oauth_expectations();
+    // The rejected submission and the corrected resubmission each read the
+    // installation's repositories.
+    expectations.push(installation_repos_expectation());
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
+    let link_id = ghinvite_core::InvitationLinkId::new();
+    let anchor = Utc::now().timestamp();
+    let uri = format!("/console/accounts/acme/links?link_id={link_id}&anchor={anchor}");
+    authority.fail("create", 400);
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=AI+coding+workshop&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let html = response_html(response).await;
+    assert!(html.contains("New invitation link"));
+    assert!(html.contains(LINK_CREATE_REJECTED));
+    assert_preserved_description_input(&html);
+    assert!(html.contains("value=\"push\" selected"));
+    assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert_numeric_input(&html, "max_uses", "7", None);
+    assert_numeric_input(&html, "expires_in_days", "45", None);
+    assert!(html.contains("Keep this note"));
+    assert!(html.contains("value=\"10\" checked"));
+    assert_eq!(
+        creation_form_action(&html),
+        format!("link_id={link_id}&anchor={anchor}"),
+        "the same creation identity is resubmitted"
+    );
+    // The authority's rejection is not disclosed.
+    assert!(!html.contains("Invalid command"));
+    assert!(!html.contains("Bad Request"));
+    assert_eq!(
+        authority.calls().iter().filter(|m| *m == "create").count(),
+        1
+    );
+    assert!(authority.link(link_id).is_none());
+    // A definitive rejection is not a recoverable attempt.
+    let attempts = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/acme/attempts").await,
+    )
+    .await;
+    assert!(!attempts.contains(&format!("create-{link_id}")));
+
+    // Corrected values under the same identity create the link.
+    authority.recover("create");
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=Corrected+workshop&permission=push&expires_in_days=45&repo_ids=10",
+    )
+    .await;
+    assert_eq!(
+        response.headers()["location"],
+        format!("/console/accounts/acme/links/{link_id}")
+    );
+    let (_, detail) = follow(&app, &cookie, response).await;
+    assert!(detail.contains(LINK_CREATED));
+    assert_eq!(
+        authority.link(link_id).unwrap().creation.description,
+        "Corrected workshop"
+    );
+}
+
+#[tokio::test]
+async fn link_detail_mutations_flash_once_after_the_redirect() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+
+    let response = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=Updated+workshop&internal_note=",
+    )
+    .await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Updated workshop</h1>"));
+    assert_eq!(html.matches(LINK_DETAILS_UPDATED).count(), 1);
+
+    let revoke = format!("/console/accounts/acme/links/{}/revoke", link.id);
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(html.matches(LINK_REVOKED).count(), 1);
+    assert!(!html.contains(LINK_DETAILS_UPDATED));
+    assert!(authority.link(link.id).unwrap().revoked_at.is_some());
+    let (_, again) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
+    assert!(!again.contains(LINK_REVOKED), "a flash is shown once");
+}
+
+#[tokio::test]
+async fn revoke_authority_rejection_returns_to_link_detail_with_an_error() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+    authority.fail("revoke", 400);
+
+    let revoke = format!("/console/accounts/acme/links/{}/revoke", link.id);
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    assert_eq!(
+        response.headers()["location"],
+        format!("/console/accounts/acme/links/{}", link.id)
+    );
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(html.matches(LINK_REVOKE_REJECTED).count(), 1);
+    assert!(html.contains("alert-error"));
+    assert!(!html.contains(LINK_REVOKED));
+    assert!(!html.contains("Invalid command"));
+    assert!(authority.link(link.id).unwrap().revoked_at.is_none());
+    // Nothing was applied, so no attempt is left reading as an unknown outcome.
+    let attempts = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/acme/attempts").await,
+    )
+    .await;
+    assert!(!attempts.contains(&format!("revoke-{}", link.id)));
+
+    authority.recover("revoke");
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    let (_, html) = follow(&app, &cookie, response).await;
+    assert!(html.contains(LINK_REVOKED));
+}
