@@ -1,5 +1,5 @@
 //! Shared SQLite/D1 seek query. Only closed enums select SQL fragments; all
-//! values are bound. Keep the ordering expression identical to migration 0003.
+//! values are bound. Keep the ordering expression identical to the audit order indexes.
 use crate::AuditEventId;
 use crate::audit::{AuditEvent, EventType};
 use chrono::{DateTime, SecondsFormat, Utc};

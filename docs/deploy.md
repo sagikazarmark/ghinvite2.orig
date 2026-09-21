@@ -118,7 +118,7 @@ done
 ```
 
 Expect no unapplied migrations and ledger entries matching every SQL file in
-`migrations/` for the release (currently 0001–0009). Compare the returned schema
+`migrations/` for the release (currently only `0001_initial.sql`). Compare the returned schema
 definitions with those migrations, including projection columns, delivery fences,
 settlement/member-webhook receipts, and the `admin_attempts_expiry` index. Expect
 no foreign-key violations. Stop on missing/mismatched schema, migration errors or

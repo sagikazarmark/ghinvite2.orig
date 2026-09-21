@@ -34,16 +34,16 @@ transaction ends. Verify deployed data with `PRAGMA foreign_key_check`.
 
 ### Audit ordering
 
-Migration 0003 adds account/order and account/event/order expression indexes.
+The account/order and account/event/order audit indexes use an expression key.
 Both audit writers serialize `DateTime<Utc>` with variable fractional precision
 and a `+00:00` suffix. The comparison key also handles equivalent `Z` timestamps:
 it right-pads the fractional seconds to nine digits without rounding. This avoids
 a stored-data normalization migration and preserves original event timestamps.
 Do not replace it with SQLite `datetime`/`julianday` (millisecond precision), or
-raw text sorting. Keep the expression in `storage::audit_read` and 0003 identical.
+raw text sorting. Keep the expression in `storage::audit_read` and the indexes identical.
 Non-UTC offsets are not a format emitted by either audit writer.
 
-Migration 0011 applies the same timestamp normalization to request admission
+`idx_request_history` applies the same timestamp normalization to request admission
 history, indexed by `(invitation_link_id, normalized-time/ID DESC)`. The single
 fixed-width key seeks past large equal-timestamp groups without scanning their
 earlier IDs.
@@ -62,9 +62,9 @@ wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
 cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignored
 ```
 
-## Adding a new migration
+### Pending queue
 
-Migration 0010 adds the pending queue's derived `queue_account_id`, backfilled
+`invitation_requests.queue_account_id` is the pending queue's derived key, taken
 from the owning invitation link. Portable SQLite triggers maintain it for both
 legacy and versioned projection writers (including link/request relationship
 updates and restoration of missing links). This is an indexing key, never an authorization source: the read also
@@ -86,26 +86,32 @@ and rows-read metadata through the authenticated Worker routes. Queue cursors
 are value boundaries, so a decided boundary row need not still exist; new or
 late-projected earlier requests appear on returning to the oldest page.
 
-Migration 0008 stores encrypted admin browser continuations separately from
+### Admin attempts
+
+`admin_attempts` stores encrypted admin browser continuations separately from
 authentication sessions. A unique session/account scope plus logical binding
 atomically retains the first submitted input, including on D1. These are
 recovery records, not authoritative business receipts. Their `expires_at`
 integer is a Unix-second browser-session deadline (like session storage), not a
 domain timestamp. Reads exclude expired records. Each retention call deletes at
-most 100 expired continuations across all sessions, using the expiry index from
-migration 0009, in both SQLite and D1. Cleanup runs with mutation traffic and
+most 100 expired continuations across all sessions, using the `admin_attempts_expiry`
+index, in both SQLite and D1. Cleanup runs with mutation traffic and
 does not affect authoritative Restate receipts or extend live session deadlines.
 
-Migration 0004 adds v1 projection revisions, content/identity checks, deadlines,
-and audit identities. Its `projection_assertions` table is transient within each
+### Admission projection
+
+The v1 projection columns hold revisions, content/identity checks, deadlines,
+and audit identities. The `projection_assertions` table is transient within each
 SQLx transaction/D1 batch: named CHECK failures abort the entire application,
 and successful batches remove the assertion rows before commit. NULL revisions
 remain legacy-owned. The legacy pending-only uniqueness guard excludes versioned
 rows so reordered projections can converge without becoming admission authority.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
+## Adding a new migration
+
 1. Choose the next `NNNN`.
-2. Write `NNNN_purpose.sql` using SQLite-portable schema statements. Derived indexing keys may use a data backfill and `CREATE TRIGGER` maintenance, as in 0010; verify these on both SQLx and D1.
+2. Write `NNNN_purpose.sql` using SQLite-portable schema statements. Derived indexing keys may use a data backfill and `CREATE TRIGGER` maintenance, as for `queue_account_id`; verify these on both SQLx and D1.
 3. **Avoid altering existing CHECK constraints** — SQLite cannot do this without a 12-step `ALTER TABLE` recreate. If unavoidable, write the recreate dance in plain SQL inside the migration file.
 4. Run `cargo test -p ghinvite-storage-sqlx` locally to verify migrations apply cleanly to a fresh in-memory DB.
 5. Rehearse `wrangler d1 migrations apply DB --local --config wrangler/web.toml`, then the disposable remote D1 gate before the operator-owned production procedure.

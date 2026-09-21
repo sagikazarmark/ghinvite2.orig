@@ -30,7 +30,7 @@ pub struct Page {
     pub older: Option<Boundary>,
 }
 
-// Match migration 0011. A single fixed-width time/ID key seeks past even a
+// Match `idx_request_history` in migrations. A single fixed-width time/ID key seeks past even a
 // large equal-timestamp prefix; SQLite tuple comparisons only seek the time.
 const SEEK_KEY: &str = "(substr(created_at,1,19) || '.' || substr(CASE WHEN substr(created_at,20,1) = '.' THEN replace(replace(substr(created_at,21),'+00:00',''),'Z','') ELSE '' END || '000000000',1,9) || '/' || id)";
 

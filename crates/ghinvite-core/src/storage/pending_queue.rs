@@ -64,7 +64,7 @@ impl PendingPage {
     }
 }
 
-// Keep this expression identical to migration 0010. One composite text key
+// Keep this expression identical to `idx_pending_queue_seek` in migrations. One composite text key
 // seeks past even a large equal-timestamp prefix (a tuple over an expression
 // index only seeks the timestamp on SQLite). Both components are fixed width.
 const SEEK_KEY: &str = "(substr(r.created_at,1,19) || '.' || substr(CASE WHEN substr(r.created_at,20,1) = '.' THEN replace(replace(substr(r.created_at,21),'+00:00',''),'Z','') ELSE '' END || '000000000',1,9) || '/' || r.id)";
