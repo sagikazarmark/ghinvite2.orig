@@ -113,6 +113,46 @@ impl Default for LinkFormValues {
     }
 }
 
+impl LinkFormValues {
+    /// The typed model these values describe, applied by the server to the raw
+    /// POST and by the island to the values it mounts with.
+    ///
+    /// Text fields are carried verbatim; the numeric guardrails go through
+    /// [`parse_max_uses`] and [`parse_expires_in_days`]. A guardrail that fails
+    /// to parse is left blank in the model and its message attached to the
+    /// returned errors, keyed by field identity, so the validators do not
+    /// report the same field twice. `self.errors` is not consulted.
+    pub fn to_model(&self) -> (CreateLinkForm, LinkFormErrors) {
+        let fields = CreateLinkForm::fields();
+        let mut errors = LinkFormErrors::default();
+
+        // A guardrail parses to its value, or to blank plus a message on its
+        // field.
+        let mut parsed = |field: FieldIdentity, parsed: Result<Option<u32>, String>| {
+            parsed.unwrap_or_else(|message| {
+                errors.attach(Some(&field), message);
+                None
+            })
+        };
+        let max_uses = parsed(fields.max_uses().identity(), parse_max_uses(&self.max_uses));
+        let expires_in_days = parsed(
+            fields.expires_in_days().identity(),
+            parse_expires_in_days(&self.expires_in_days),
+        );
+
+        let model = CreateLinkForm {
+            description: self.description.clone(),
+            internal_note: self.internal_note.clone(),
+            permission: self.permission.clone(),
+            approval_required: self.approval_required,
+            max_uses,
+            expires_in_days,
+            repo_ids: self.selected_repo_ids.clone(),
+        };
+        (model, errors)
+    }
+}
+
 // --- island props -----------------------------------------------------------
 
 /// `id` of the container the island mounts on; it wraps the server-rendered
@@ -499,6 +539,46 @@ mod tests {
         assert_eq!(fields.max_uses().field_name(), "max_uses");
         assert_eq!(fields.expires_in_days().field_name(), "expires_in_days");
         assert_eq!(fields.repo_ids().field_name(), "repo_ids");
+    }
+
+    #[test]
+    fn to_model_carries_text_verbatim_and_blanks_an_unparsable_guardrail() {
+        let values = LinkFormValues {
+            description: "  AI  ".into(),
+            permission: "owner".into(),
+            approval_required: true,
+            max_uses: "abc".into(),
+            expires_in_days: " 45 ".into(),
+            internal_note: "note".into(),
+            selected_repo_ids: vec![999, 10],
+            errors: LinkFormErrors {
+                description: Some("ignored".into()),
+                ..LinkFormErrors::default()
+            },
+        };
+
+        let (model, errors) = values.to_model();
+
+        assert_eq!(
+            model,
+            CreateLinkForm {
+                description: "  AI  ".into(),
+                internal_note: "note".into(),
+                permission: "owner".into(),
+                approval_required: true,
+                max_uses: None,
+                expires_in_days: Some(45),
+                repo_ids: vec![999, 10],
+            }
+        );
+        assert_eq!(
+            errors,
+            LinkFormErrors {
+                summary: vec![SUMMARY_MESSAGE.to_string()],
+                max_uses: Some(MAX_USES_NOT_POSITIVE.to_string()),
+                ..LinkFormErrors::default()
+            }
+        );
     }
 
     // --- parsers -----------------------------------------------------------

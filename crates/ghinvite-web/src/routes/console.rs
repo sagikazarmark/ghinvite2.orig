@@ -517,14 +517,15 @@ async fn create_link(
                     full_name: r.repo_full_name.clone(),
                 })
                 .collect::<Vec<_>>();
+            // Identity is the retained command's own; only the business input
+            // re-derived from this submission can differ.
             let matches = create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
-                v.description == original.description
-                    && v.internal_note == original.internal_note
-                    && v.expires_at == original.expires_at
-                    && v.max_uses == original.max_uses
-                    && v.permission == original.permission
-                    && v.approval_required == original.approval_required
-                    && v.repos == original.repos
+                v.into_command(
+                    original.link_id,
+                    original.admin.clone(),
+                    original.account_id,
+                    original.installation_id,
+                ) == original
             });
             let command = attempts::Command::Create(original);
             if !matches {
@@ -584,19 +585,12 @@ async fn create_link(
         }
     };
 
-    let command = ghinvite_core::storage::projection::CreateLink {
+    let command = validated.into_command(
         link_id,
-        admin: admin_assertion(&admin),
-        account_id: admin.account.account_id,
-        installation_id: admin.account.installation_id,
-        description: validated.description,
-        internal_note: validated.internal_note,
-        expires_at: validated.expires_at,
-        max_uses: validated.max_uses,
-        permission: validated.permission,
-        approval_required: validated.approval_required,
-        repos: validated.repos,
-    };
+        admin_assertion(&admin),
+        admin.account.account_id,
+        admin.account.installation_id,
+    );
     match attempts::submit(&state, &admin, attempts::Command::Create(command)).await {
         Ok(response) => response,
         Err(attempts::CreateRejected) => {

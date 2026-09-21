@@ -43,6 +43,7 @@ pub fn AccessVerificationRetryPage(
     action: String,
     values: LinkFormValues,
 ) -> Element {
+    let fields = CreateLinkForm::fields();
     rsx! {
         crate::layouts::HomeLayout {
             signed_in_login,
@@ -57,16 +58,16 @@ pub fn AccessVerificationRetryPage(
                     form { method: "post", action,
                         crate::csrf::CsrfField {}
                         input { r#type: "hidden", name: "reload_repos", value: "true" }
-                        input { r#type: "hidden", name: "description", value: values.description.clone() }
-                        input { r#type: "hidden", name: "internal_note", value: values.internal_note.clone() }
-                        input { r#type: "hidden", name: "permission", value: values.permission.clone() }
-                        input { r#type: "hidden", name: "max_uses", value: values.max_uses.clone() }
-                        input { r#type: "hidden", name: "expires_in_days", value: values.expires_in_days.clone() }
+                        input { r#type: "hidden", name: fields.description().field_name(), value: values.description.clone() }
+                        input { r#type: "hidden", name: fields.internal_note().field_name(), value: values.internal_note.clone() }
+                        input { r#type: "hidden", name: fields.permission().field_name(), value: values.permission.clone() }
+                        input { r#type: "hidden", name: fields.max_uses().field_name(), value: values.max_uses.clone() }
+                        input { r#type: "hidden", name: fields.expires_in_days().field_name(), value: values.expires_in_days.clone() }
                         if values.approval_required {
-                            input { r#type: "hidden", name: "approval_required", value: "true" }
+                            input { r#type: "hidden", name: fields.approval_required().field_name(), value: "true" }
                         }
                         for id in values.selected_repo_ids.iter() {
-                            input { r#type: "hidden", name: "repo_ids", value: "{id}" }
+                            input { r#type: "hidden", name: fields.repo_ids().field_name(), value: "{id}" }
                         }
                         p { "Description: {values.description}" }
                         button { r#type: "submit", class: "btn btn-primary", "Retry access verification" }

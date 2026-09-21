@@ -16,8 +16,11 @@ use crate::views::link_form::{
 };
 use crate::views::links::LinkFormValues;
 use chrono::{DateTime, Utc};
-use dioform_core::{FieldIdentity, Form, FormCore};
-use ghinvite_core::{Description, InternalNote, InvitationLinkRepo, Permission, RepositoryScope};
+use dioform_core::FormCore;
+use ghinvite_core::storage::projection::{AccountAdmin, CreateLink};
+use ghinvite_core::{
+    Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
+};
 use serde::Deserialize;
 use std::str::FromStr;
 
@@ -26,7 +29,7 @@ use std::str::FromStr;
 /// Text fields are `Option<String>` so a missing key and an empty value both
 /// reach [`Self::to_model`] unchanged; nothing is parsed or trimmed during
 /// deserialization.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CreateLinkSubmission {
     #[serde(default)]
     pub reload_repos: bool,
@@ -47,43 +50,13 @@ pub struct CreateLinkSubmission {
 impl CreateLinkSubmission {
     /// Parse the submission into the shared typed model.
     ///
-    /// Text fields are carried verbatim (a missing key becomes the empty
-    /// string, which is also what an empty control submits); the numeric
-    /// guardrails go through the shared parsers. A guardrail that fails to
-    /// parse is left blank in the model and its message attached to the
-    /// returned errors, keyed by field identity, so the validators do not
-    /// report the same field twice.
+    /// A missing key becomes the empty string, which is also what an empty
+    /// control submits; from there the mapping is the shared
+    /// [`LinkFormValues::to_model`], the same one the island mounts with.
     pub fn to_model(&self) -> (CreateLinkForm, LinkFormErrors) {
-        let fields = CreateLinkForm::fields();
-        let mut errors = LinkFormErrors::default();
-
-        // A guardrail parses to its value, or to blank plus a message on its
-        // field.
-        let mut parsed = |field: FieldIdentity, parsed: Result<Option<u32>, String>| {
-            parsed.unwrap_or_else(|message| {
-                errors.attach(Some(&field), message);
-                None
-            })
-        };
-        let max_uses = parsed(
-            fields.max_uses().identity(),
-            link_form::parse_max_uses(self.max_uses.as_deref().unwrap_or_default()),
-        );
-        let expires_in_days = parsed(
-            fields.expires_in_days().identity(),
-            link_form::parse_expires_in_days(self.expires_in_days.as_deref().unwrap_or_default()),
-        );
-
-        let model = CreateLinkForm {
-            description: self.description.clone().unwrap_or_default(),
-            internal_note: self.internal_note.clone().unwrap_or_default(),
-            permission: self.permission.clone().unwrap_or_default(),
-            approval_required: self.approval_required.is_some(),
-            max_uses,
-            expires_in_days,
-            repo_ids: self.repo_ids.clone(),
-        };
-        (model, errors)
+        self.clone()
+            .into_view_values(LinkFormErrors::default())
+            .to_model()
     }
 
     /// The submitted values as the form view model with `errors` attached.
@@ -125,6 +98,34 @@ pub struct ValidatedCreateLink {
     /// The repository scope: a non-empty subset of the available
     /// repositories, ordered by repository ID.
     pub repos: Vec<InvitationLinkRepo>,
+}
+
+impl ValidatedCreateLink {
+    /// The creation command carrying this data under a creation identity:
+    /// the allocated link, the asserting admin, and the account's
+    /// installation. A retried submission replays when its command equals the
+    /// retained one.
+    pub fn into_command(
+        self,
+        link_id: InvitationLinkId,
+        admin: AccountAdmin,
+        account_id: u64,
+        installation_id: u64,
+    ) -> CreateLink {
+        CreateLink {
+            link_id,
+            admin,
+            account_id,
+            installation_id,
+            description: self.description,
+            internal_note: self.internal_note,
+            expires_at: self.expires_at,
+            max_uses: self.max_uses,
+            permission: self.permission,
+            approval_required: self.approval_required,
+            repos: self.repos,
+        }
+    }
 }
 
 /// Validate a submitted new invitation link form.
