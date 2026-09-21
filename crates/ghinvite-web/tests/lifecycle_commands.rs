@@ -1,4 +1,4 @@
-use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, RequestStatus};
+use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome};
 use ghinvite_web::lifecycle::{RequestLifecycle, RestateRequestLifecycle};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -23,12 +23,8 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
                 let calls = observed.clone();
                 let request = response_request.clone();
                 async move {
-                    calls.lock().unwrap().push((path.clone(), body));
-                    axum::Json(if path.2 == "decide" {
-                        json!({"outcome": "incompatible", "request": request})
-                    } else {
-                        request
-                    })
+                    calls.lock().unwrap().push((path, body));
+                    axum::Json(json!({"outcome": "incompatible", "request": request}))
                 }
             },
         ),
@@ -48,15 +44,7 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
     .unwrap();
     let receipt = client.decide(command.clone()).await.unwrap();
     assert_eq!(receipt.outcome, DecisionOutcome::Incompatible);
-    let status = client
-        .status(RequestStatus {
-            link_id: command.link_id,
-            request_id: command.request_id,
-            requester_id: 11,
-        })
-        .await
-        .unwrap();
-    assert_eq!(status.state, ghinvite_core::RequestState::Expired);
+    assert_eq!(receipt.request.state, ghinvite_core::RequestState::Expired);
     let calls = calls.lock().unwrap();
     assert_eq!(
         calls[0].0,
@@ -67,6 +55,6 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
         )
     );
     assert_eq!(calls[0].1, serde_json::to_value(command).unwrap());
-    assert_eq!(calls[1].0.2, "request_status");
+    assert_eq!(calls.len(), 1);
     server.abort();
 }

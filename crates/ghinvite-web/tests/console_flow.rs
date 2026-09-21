@@ -372,7 +372,6 @@ async fn pending_decision_remains_accessible_after_uninstall() {
 #[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
-    use ghinvite_core::storage::projection::RequestSnapshot;
     struct Lifecycle(Arc<Mutex<Vec<DecideRequest>>>);
     #[async_trait::async_trait]
     impl ghinvite_web::lifecycle::RequestLifecycle for Lifecycle {
@@ -383,9 +382,6 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
                     "link_id": command.link_id, "account_id": 42, "requester_id": 99,
                     "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
                     "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2})).unwrap() })
-        }
-        async fn status(&self, _: RequestStatus) -> ghinvite_web::Result<RequestSnapshot> {
-            panic!("unexpected status")
         }
     }
     let storage = Arc::new(
