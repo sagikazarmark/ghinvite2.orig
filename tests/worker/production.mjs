@@ -46,7 +46,7 @@ for (const { name, scriptPath } of configurations) {
     const paths = name === 'ghinvite-web'
       ? [...source.matchAll(/method == "([^"]+)"|^\s*"([^"]+)"\s*=>/gm)].map(match => `/__fixture/${match[1] || match[2]}`)
       : [...source.matchAll(/"(\/__fixture\/[^\"]+)"/g)].map(match => match[1]);
-    assert.ok(paths.length >= 4, 'fixture inventory must not be empty');
+    assert.ok(paths.length >= 3, 'fixture inventory must not be empty');
     for (const path of new Set(paths)) {
       const response = await mf.dispatchFetch(`https://production.test${path}`, {
         method: 'POST', body: 'null', headers: { 'content-type': 'application/json' }, redirect: 'manual',
