@@ -286,14 +286,14 @@ pub trait Storage: Send + Sync + 'static {
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>>;
 
-    /// List all pending requests for any link belonging to the given account.
-    /// Legacy unbounded read (overview count and compatibility callers).
+    /// Number of pending requests in the account's decision queue: exactly the
+    /// rows [`Storage::pending_request_page`] pages through, counted by one
+    /// statement without loading them.
     ///
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn list_pending_requests_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationRequest>>;
+    async fn count_pending_requests_for_account(&self, _account_id: u64) -> Result<u64> {
+        Err(Error::Database("pending request count unsupported".into()))
+    }
 
     /// Oldest-first, account-authorized, bounded decision queue with joined
     /// context. A cursor is a value boundary, not a reference to a live row;

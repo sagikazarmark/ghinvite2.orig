@@ -97,12 +97,9 @@ impl Storage for LostAuditAcknowledgement {
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         self.inner.get_invitation_request(id).await
     }
-    async fn list_pending_requests_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationRequest>> {
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
         self.inner
-            .list_pending_requests_for_account(account_id)
+            .count_pending_requests_for_account(account_id)
             .await
     }
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {

@@ -150,7 +150,6 @@ mod tests {
 
     #[derive(Default)]
     struct FakeStorage {
-        pending_requests: Vec<InvitationRequest>,
         request: Option<InvitationRequest>,
         invitation_link: Option<InvitationLink>,
         user: Option<User>,
@@ -247,13 +246,6 @@ mod tests {
             _id: RequestId,
         ) -> ghinvite_core::storage::Result<Option<InvitationRequest>> {
             Ok(self.request.clone())
-        }
-
-        async fn list_pending_requests_for_account(
-            &self,
-            _account_id: u64,
-        ) -> ghinvite_core::storage::Result<Vec<InvitationRequest>> {
-            Ok(self.pending_requests.clone())
         }
 
         async fn insert_github_invitation(
@@ -390,7 +382,6 @@ mod tests {
             "2026-05-04T12:30:00Z",
         );
         let storage = FakeStorage {
-            pending_requests: Vec::new(),
             request: Some(request.clone()),
             invitation_link: None,
             user: None,

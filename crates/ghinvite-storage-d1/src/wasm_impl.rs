@@ -619,29 +619,25 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn list_pending_requests_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationRequest>> {
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            pending: i64,
+        }
         wasm_send(async {
-            let rows: Vec<InvitationRequestRow> = self
+            let row: Option<Row> = self
                 .db
-                .prepare(
-                    "SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
-                            r.decided_by, r.decided_at, r.decline_reason, r.created_at, r.decision_deadline
-                     FROM invitation_requests r
-                     JOIN invitation_links l ON l.id = r.invitation_link_id
-                     WHERE l.account_id = ?1 AND r.state = 'pending'
-                     ORDER BY r.created_at",
-                )
+                .prepare(ghinvite_core::storage::pending_queue::COUNT_QUERY)
                 .bind(&[JsValue::from_f64(account_id as f64)])
                 .map_err(bind_err)?
-                .all()
+                .first::<Row>(None)
                 .await
-                .map_err(classify_d1_error)?
-                .results::<InvitationRequestRow>()
-                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
-            rows.into_iter().map(|r| r.try_into_domain()).collect()
+                .map_err(classify_d1_error)?;
+            let pending = row.map(|r| r.pending).ok_or_else(|| {
+                ghinvite_core::storage::Error::Corrupt("pending count returned no row".into())
+            })?;
+            u64::try_from(pending)
+                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))
         })
         .await
     }

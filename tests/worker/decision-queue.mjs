@@ -185,6 +185,12 @@ try {
      VALUES(?,?,99,?,'2025-01-01T00:00:00Z',1)`
   ).bind(id(i + 200), i % 2 ? otherLink : link, i % 2 ? 'pending' : 'approved')));
   assert.ok(!(await page()).html.includes('Private other account'));
+  // The overview counts the same account-scoped pending rows in one D1 statement.
+  const overview = await mf.dispatchFetch('https://queue.test/console/accounts/octocat', { headers: { cookie, 'x-test-observe-d1': '1' } });
+  assert.equal(overview.status, 200, await overview.clone().text());
+  const overviewPlans = JSON.parse(overview.headers.get('x-test-d1-plans')).join('\n');
+  assert.match(overviewPlans, /idx_pending_queue_seek \(queue_account_id=\?/, overviewPlans);
+  assert.ok((await overview.text()).includes('53 pending invitation requests need an account admin decision.'));
   // A large equal-time prefix must be skipped by the index, not scanned then
   // filtered on request ID. Keep every earlier request pending while seeking.
   await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(

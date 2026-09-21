@@ -86,6 +86,11 @@ and rows-read metadata through the authenticated Worker routes. Queue cursors
 are value boundaries, so a decided boundary row need not still exist; new or
 late-projected earlier requests appear on returning to the oldest page.
 
+The console overview's pending count (`storage::pending_queue::COUNT_QUERY`) is
+one `COUNT(*)` statement with the same scoping (pending state, the
+`queue_account_id` seek, and the current owning link's account), so it counts
+exactly the rows the queue pages through without loading any of them.
+
 ### Admin attempts
 
 `admin_attempts` stores encrypted admin browser continuations separately from

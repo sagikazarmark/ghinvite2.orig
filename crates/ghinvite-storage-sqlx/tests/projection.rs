@@ -167,16 +167,24 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
         .unwrap();
     assert_eq!(link.uses_count, 1);
     assert_eq!(link.repos[0].repo_full_name, "acme/api");
-    let requests = storage
-        .list_pending_requests_for_account(100)
-        .await
-        .unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].justification.as_deref(), Some("Access please"));
-    for request in [
-        requests[0].clone(),
+    let pending = storage.pending_request_page(100, None).await.unwrap().rows;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].justification.as_deref(), Some("Access please"));
+    assert_eq!(
+        pending[0].decision_deadline,
+        Some("2026-09-21T01:00:00Z".parse().unwrap()),
+        "the pending queue must expose the persisted decision deadline"
+    );
+    assert_eq!(
         storage
-            .get_invitation_request(requests[0].id)
+            .count_pending_requests_for_account(100)
+            .await
+            .unwrap(),
+        1
+    );
+    for request in [
+        storage
+            .get_invitation_request(pending[0].request_id)
             .await
             .unwrap()
             .unwrap(),
@@ -195,7 +203,7 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
     }
     assert_eq!(
         storage
-            .get_invitation_request(requests[0].id)
+            .get_invitation_request(pending[0].request_id)
             .await
             .unwrap()
             .unwrap()
@@ -311,12 +319,12 @@ async fn conflicting_duplicate_events_roll_back_the_entire_envelope() {
             .unwrap()
             .is_empty()
     );
-    assert!(
+    assert_eq!(
         storage
-            .list_pending_requests_for_account(100)
+            .count_pending_requests_for_account(100)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        0
     );
     assert!(
         storage
@@ -458,10 +466,9 @@ async fn invariant_conflicts_are_observable_and_redrive_is_atomic() {
         );
         assert_eq!(
             storage
-                .list_pending_requests_for_account(100)
+                .count_pending_requests_for_account(100)
                 .await
-                .unwrap()
-                .len(),
+                .unwrap(),
             1
         );
     }
@@ -493,12 +500,16 @@ async fn reordered_readmission_does_not_require_old_request_projection_first() {
     expired.requests[0].state = ghinvite_core::RequestState::Expired;
     expired.requests[0].revision = 2;
     storage.apply_transition(&expired).await.unwrap();
-    let pending = storage
-        .list_pending_requests_for_account(100)
-        .await
-        .unwrap();
+    let pending = storage.pending_request_page(100, None).await.unwrap().rows;
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, fresh.requests[0].request_id);
+    assert_eq!(pending[0].request_id, fresh.requests[0].request_id);
+    assert_eq!(
+        storage
+            .count_pending_requests_for_account(100)
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         storage
             .get_invitation_link_by_id(old.link.link_id)

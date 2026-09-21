@@ -223,10 +223,8 @@ pub async fn scenario_recorded_request_deadlines<S: Storage + ProjectionStorage>
         s.get_invitation_request(request.id).await.unwrap(),
         Some(request.clone())
     );
-    assert_eq!(
-        s.list_pending_requests_for_account(9008).await.unwrap(),
-        vec![request.clone()]
-    );
+    assert_eq!(s.count_pending_requests_for_account(9008).await.unwrap(), 1);
+    assert_eq!(s.count_pending_requests_for_account(9009).await.unwrap(), 0);
     request.state = RequestState::Declined;
     request.decided_by = Some(708);
     request.decided_at = Some(dt("2026-05-05T12:00:00Z"));
@@ -235,12 +233,7 @@ pub async fn scenario_recorded_request_deadlines<S: Storage + ProjectionStorage>
         s.get_invitation_request(request.id).await.unwrap(),
         Some(request)
     );
-    assert!(
-        s.list_pending_requests_for_account(9008)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(s.count_pending_requests_for_account(9008).await.unwrap(), 0);
 }
 
 /// Confirmed create facts are account history, even after lifecycle advances.

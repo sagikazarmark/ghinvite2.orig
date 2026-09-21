@@ -15,8 +15,9 @@ export default {
           if (property === 'bind') return (...args) => observe(target.bind(...args), sql, args);
           if (['all', 'first', 'run', 'raw'].includes(property)) return async (...args) => {
             queries++;
-            if (sql.startsWith('WITH page')) {
-              if (request.headers.has('x-test-fail-queue')) throw new Error('private injected queue read failure');
+            const queueRead = sql.startsWith('WITH page');
+            if (queueRead || sql.startsWith('SELECT COUNT(*) AS pending')) {
+              if (queueRead && request.headers.has('x-test-fail-queue')) throw new Error('private injected queue read failure');
               const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`).bind(...values).all();
               plans.push(...plan.results.map(row => row.detail));
             }

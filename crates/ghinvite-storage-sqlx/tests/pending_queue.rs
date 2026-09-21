@@ -257,6 +257,23 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             "{detail}"
         );
     }
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+        "EXPLAIN QUERY PLAN {}",
+        pending_queue::COUNT_QUERY
+    ))
+    .bind(42)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    let detail = plan
+        .iter()
+        .map(|r| r.3.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        detail.contains("SEARCH r USING INDEX idx_pending_queue_seek (queue_account_id=?)"),
+        "the overview count seeks the pending index: {detail}"
+    );
     sqlx::query("UPDATE invitation_links SET permission='corrupt'")
         .execute(&db)
         .await
@@ -286,6 +303,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .len(),
         3
     );
+    let count = |account| storage.count_pending_requests_for_account(account);
+    assert_eq!((count(42).await.unwrap(), count(43).await.unwrap()), (0, 3));
     sqlx::query("DELETE FROM invitation_links")
         .execute(&db)
         .await
@@ -299,6 +318,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .is_empty(),
         "orphan ownership cannot be verified"
     );
+    assert_eq!(count(43).await.unwrap(), 0, "orphans are not counted");
     sqlx::query("UPDATE invitation_requests SET queue_account_id=NULL")
         .execute(&db)
         .await
@@ -312,6 +332,11 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .rows
             .len(),
         3
+    );
+    assert_eq!(
+        count(43).await.unwrap(),
+        3,
+        "restored owner is counted again"
     );
     sqlx::query("DROP TABLE users").execute(&db).await.unwrap();
     assert!(matches!(

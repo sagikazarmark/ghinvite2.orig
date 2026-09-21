@@ -628,23 +628,13 @@ impl Storage for SqlxStorage {
         row.map(|r| r.try_into_domain()).transpose()
     }
 
-    async fn list_pending_requests_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationRequest>> {
-        let rows: Vec<crate::records::InvitationRequestRow> = sqlx::query_as(
-            r#"SELECT r.id, r.invitation_link_id, r.requester_id, r.justification, r.state,
-                      r.decided_by, r.decided_at, r.decline_reason, r.created_at, r.decision_deadline
-               FROM invitation_requests r
-               JOIN invitation_links l ON l.id = r.invitation_link_id
-               WHERE l.account_id = ?1 AND r.state = 'pending'
-               ORDER BY r.created_at"#,
-        )
-        .bind(u64_to_i64(account_id))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(crate::to_db_err)?;
-        rows.into_iter().map(|r| r.try_into_domain()).collect()
+    async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
+        let count: i64 = sqlx::query_scalar(ghinvite_core::storage::pending_queue::COUNT_QUERY)
+            .bind(u64_to_i64(account_id))
+            .fetch_one(&self.pool)
+            .await
+            .map_err(crate::to_db_err)?;
+        u64::try_from(count).map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))
     }
 
     async fn pending_request_page(
@@ -1213,7 +1203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_pending_for_account_filters_by_account() {
+    async fn pending_count_and_queue_filter_by_account() {
         let s = SqlxStorage::in_memory().await.unwrap();
         s.insert_installation(&sample_account(1, 100, "acme"))
             .await
@@ -1231,13 +1221,18 @@ mod tests {
         seed(&s, &link_a, std::slice::from_ref(&r_a), 1).await;
         seed(&s, &link_b, std::slice::from_ref(&r_b), 1).await;
 
-        let pending_a = s.list_pending_requests_for_account(100).await.unwrap();
-        assert_eq!(pending_a.len(), 1);
-        assert_eq!(pending_a[0].id, r_a.id);
-
-        let pending_b = s.list_pending_requests_for_account(200).await.unwrap();
-        assert_eq!(pending_b.len(), 1);
-        assert_eq!(pending_b[0].id, r_b.id);
+        for (account_id, request) in [(100, &r_a), (200, &r_b)] {
+            assert_eq!(
+                s.count_pending_requests_for_account(account_id)
+                    .await
+                    .unwrap(),
+                1
+            );
+            let page = s.pending_request_page(account_id, None).await.unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].request_id, request.id);
+        }
+        assert_eq!(s.count_pending_requests_for_account(300).await.unwrap(), 0);
     }
 
     pub(crate) fn sample_ginv(req_id: RequestId, repo_id: u64) -> GithubInvitation {

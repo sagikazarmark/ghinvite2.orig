@@ -227,9 +227,8 @@ async fn overview(
     let now = Utc::now();
     let pending = state
         .storage
-        .list_pending_requests_for_account(admin.account.account_id)
+        .count_pending_requests_for_account(admin.account.account_id)
         .await
-        .map(|v| v.len() as u64)
         .map_err(|_| tracing::warn!("overview pending requests read failed"))
         .ok();
     let all_links = state
