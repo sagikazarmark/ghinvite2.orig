@@ -7,7 +7,9 @@
 //! Installation observations come from the account object, after receipt replay.
 
 mod keys;
+mod rules;
 
+use crate::availability::Eligibility;
 use crate::projection::InvitationProjectionClient;
 use crate::request_lifecycle::InvitationRequestClient;
 use chrono::{DateTime, Utc};
@@ -24,6 +26,9 @@ use restate_sdk::endpoint::{Builder, ServiceOptions};
 use restate_sdk::errors::{HandlerError, TerminalError};
 use restate_sdk::serde::Json;
 use restate_sdk::service::IntoServiceDefinition;
+use rules::{
+    AdmissionDecision, AdmissionOutcome, AdmissionView, OperationRecord, audit, projection,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -40,33 +45,10 @@ pub use ghinvite_core::admission::{
     AttemptQuery, Rejection, RequesterPage, UpdateMetadata,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct OperationRecord {
-    input: Admit,
-    receipt: AdmissionReceipt,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct LifecycleRecord {
     input: DecideRequest,
     receipt: DecisionReceipt,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct LifecycleDecision {
-    request: RequestSnapshot,
-    projection: Option<ProjectionEnvelope>,
-    clear_blocker: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct AdmissionDecision {
-    link: LinkSnapshot,
-    operation: Option<OperationRecord>,
-    request: Option<RequestSnapshot>,
-    projection: Option<ProjectionEnvelope>,
-    workflow: Option<WorkflowEnvelope>,
-    expired: Option<RequestSnapshot>,
 }
 
 /// Immutable startup input, sufficient before any projected request row exists.
@@ -89,36 +71,6 @@ impl WorkflowEnvelope {
             permission: link.creation.permission,
             approval_required: link.creation.approval_required,
         }
-    }
-}
-
-fn audit(
-    kind: EventType,
-    target: impl ToString,
-    actor_id: Option<u64>,
-    at: DateTime<Utc>,
-) -> AuditIntent {
-    let target_id = target.to_string();
-    AuditIntent {
-        event_id: format!("{kind}/{target_id}"),
-        kind,
-        actor_id,
-        target_id,
-        effective_at: at,
-        evaluated_at: at,
-    }
-}
-
-fn projection(
-    link: &LinkSnapshot,
-    requests: Vec<RequestSnapshot>,
-    events: Vec<AuditIntent>,
-) -> ProjectionEnvelope {
-    ProjectionEnvelope {
-        transition_id: format!("link/{}/{}", link.link_id, link.revision),
-        link: link.clone(),
-        requests,
-        events,
     }
 }
 
@@ -222,22 +174,9 @@ impl InvitationLink {
         self.checkpoint(ctx, "lifecycle-before-decision").await?;
         let Json(decision) = ctx
             .run(|| async {
-                let mut request = request.clone();
-                let now = self.now();
-                let event = transition_request(&mut request, command, now)?;
-                let projection = event.map(|event| {
-                    let mut envelope = projection(&link, vec![request.clone()], vec![event]);
-                    envelope.transition_id = request.decision.as_ref().unwrap().decision_id.clone();
-                    envelope
-                });
-                let clear_blocker = projection.is_some()
-                    && request.state != RequestState::Approved
-                    && blocker == Some(request.request_id);
-                Ok::<_, HandlerError>(Json(LifecycleDecision {
-                    request,
-                    projection,
-                    clear_blocker,
-                }))
+                let decision =
+                    rules::decide_lifecycle(&link, &request, blocker, command, self.now())?;
+                Ok::<_, HandlerError>(Json(decision))
             })
             .name("decide_lifecycle")
             .await?;
@@ -260,6 +199,64 @@ impl InvitationLink {
                 .await?;
         }
         Ok(decision.request)
+    }
+
+    /// Write the decision's after-images in ADR 0003 order — link, old
+    /// request, old blocker, request, blocker, outcome — then send
+    /// downstream work. Each fault checkpoint marks one journal boundary.
+    async fn apply_admission(
+        &self,
+        ctx: &ObjectContext<'_>,
+        input: &Admit,
+        decision: AdmissionDecision,
+    ) -> Result<AdmissionReceipt, TerminalError> {
+        let blocker_key = keys::blocker(input.requester_id);
+        if decision.projection.is_some() {
+            ctx.set(keys::LINK, Json(decision.link.clone()));
+            self.checkpoint(ctx, "after-link").await?;
+        }
+        if let Some(expired) = &decision.expired {
+            ctx.set(&keys::request(expired.request_id), Json(expired.clone()));
+            self.checkpoint(ctx, "after-old-request").await?;
+            ctx.clear(&blocker_key);
+            self.checkpoint(ctx, "after-old-blocker").await?;
+        }
+        if let Some(request) = &decision.request {
+            ctx.set(&keys::request(request.request_id), Json(request.clone()));
+            self.checkpoint(ctx, "after-request").await?;
+            ctx.set(&blocker_key, Json(request.request_id));
+            self.checkpoint(ctx, "after-blocker").await?;
+        }
+        if let AdmissionOutcome::Decided(operation) = &decision.outcome {
+            ctx.set(&keys::op(&input.operation_id), Json(operation.clone()));
+        }
+        ctx.set(
+            &keys::latest_attempt(input.requester_id),
+            Json(input.operation_id.clone()),
+        );
+        self.checkpoint(ctx, "after-outcome").await?;
+        if let Some(envelope) = decision.projection {
+            send_projection(ctx, envelope).await?;
+        }
+        self.checkpoint(ctx, "after-projection-send").await?;
+        if let Some(expired) = &decision.expired {
+            send_terminal(ctx, expired).await?;
+            self.checkpoint(ctx, "after-old-notification-send").await?;
+        }
+        if let Some(envelope) = decision.workflow {
+            ctx.workflow_client::<InvitationRequestClient>(envelope.request.request_id.to_string())
+                .run(Json(envelope))
+                .send()
+                .await?;
+        }
+        self.checkpoint(ctx, "after-workflow-send").await?;
+        match decision.outcome {
+            AdmissionOutcome::Decided(operation) => Ok(operation.receipt),
+            AdmissionOutcome::Undetermined => Err(TerminalError::new_with_code(
+                503,
+                "Repository availability could not be confirmed. Retry the same attempt.",
+            )),
+        }
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -305,61 +302,6 @@ impl InvitationLink {
         let _ = (ctx, stage);
         Ok(())
     }
-}
-
-/// All callers use the same evaluation-time arbitration, inside their complete
-/// journaled decision. Expiration is effective at the snapshotted deadline.
-fn transition_request(
-    request: &mut RequestSnapshot,
-    command: Option<&DecideRequest>,
-    now: DateTime<Utc>,
-) -> Result<Option<AuditIntent>, TerminalError> {
-    if request.state != RequestState::Pending {
-        return Ok(None);
-    }
-    let deadline = request
-        .decision_deadline
-        .ok_or_else(|| TerminalError::new_with_code(500, "pending deadline missing"))?;
-    let (state, kind, actor, effective_at, reason) = if now >= deadline {
-        (
-            RequestState::Expired,
-            EventType::RequestExpired,
-            None,
-            deadline,
-            None,
-        )
-    } else if let Some(command) = command {
-        match &command.action {
-            DecisionAction::Approve => (
-                RequestState::Approved,
-                EventType::RequestApproved,
-                Some(command.admin.user_id),
-                now,
-                None,
-            ),
-            DecisionAction::Decline { reason } => (
-                RequestState::Declined,
-                EventType::RequestDeclined,
-                Some(command.admin.user_id),
-                now,
-                reason.clone(),
-            ),
-        }
-    } else {
-        return Ok(None);
-    };
-    let mut event = audit(kind, request.request_id, actor, effective_at);
-    event.evaluated_at = now;
-    request.state = state;
-    request.revision += 1;
-    request.decision = Some(TerminalDecision {
-        decision_id: event.event_id.clone(),
-        decided_by: actor,
-        effective_at,
-        evaluated_at: now,
-        decline_reason: reason,
-    });
-    Ok(Some(event))
 }
 
 async fn send_terminal(
@@ -430,21 +372,6 @@ fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid command")
 }
 
-fn local_rejection(
-    link: &LinkSnapshot,
-    request: Option<&RequestSnapshot>,
-    now: DateTime<Utc>,
-) -> Option<Rejection> {
-    if let Some(inactive) = link.inactive(now) {
-        Some(inactive.into())
-    } else if request
-        .is_some_and(|r| matches!(r.state, RequestState::Pending | RequestState::Approved))
-    {
-        Some(Rejection::ExistingRequest)
-    } else {
-        None
-    }
-}
 fn missing() -> TerminalError {
     TerminalError::new_with_code(404, "not found")
 }
@@ -692,7 +619,7 @@ impl InvitationLink {
         } else {
             None
         };
-        let can_start_fresh = local_rejection(&link, blocker.as_ref(), self.now()).is_none();
+        let can_start_fresh = rules::local_rejection(&link, blocker.as_ref(), self.now()).is_none();
         if !can_start_fresh && attempt.is_none() && request.is_none() {
             return Err(missing());
         }
@@ -932,9 +859,10 @@ impl InvitationLink {
             .get::<Json<LinkSnapshot>>(keys::LINK)
             .await?
             .ok_or_else(missing)?;
-        let blocker_key = keys::blocker(input.requester_id);
-        let blocker = ctx.get::<Json<RequestId>>(&blocker_key).await?;
-        let blocking_request = if let Some(Json(id)) = blocker {
+        let blocker = ctx
+            .get::<Json<RequestId>>(&keys::blocker(input.requester_id))
+            .await?;
+        let blocking = if let Some(Json(id)) = blocker {
             Some(
                 ctx.get::<Json<RequestSnapshot>>(&keys::request(id))
                     .await?
@@ -946,210 +874,50 @@ impl InvitationLink {
         } else {
             None
         };
+        let view = AdmissionView { link, blocking };
         self.checkpoint(&ctx, "before-decision").await?;
         let check_availability = ctx
-            .run(|| async { Ok::<_, HandlerError>(link.inactive(self.now()).is_none()) })
+            .run(|| async {
+                Ok::<_, HandlerError>(rules::needs_availability(&view.link, self.now()))
+            })
             .name("needs_availability")
             .await?;
         #[cfg(feature = "integration")]
         let check_availability = check_availability && !self.skip_availability;
-        let (availability, availability_unknown) = if check_availability {
+        let eligibility = if check_availability {
+            let creation = &view.link.creation;
             let observation = ctx
                 .object_client::<crate::availability::AccountInstallationClient>(
-                    link.creation.account_id.to_string(),
+                    creation.account_id.to_string(),
                 )
                 .eligibility(Json(crate::availability::Scope {
-                    account_id: link.creation.account_id,
-                    repo_ids: link
-                        .creation
-                        .repos
-                        .iter()
-                        .map(|repo| repo.repo_id)
-                        .collect(),
+                    account_id: creation.account_id,
+                    repo_ids: creation.repos.iter().map(|repo| repo.repo_id).collect(),
                 }))
                 .call()
                 .await;
-            let observation = match observation {
-                Ok(Json(observation)) => observation,
-                Err(_) => crate::availability::Eligibility::Unknown,
-            };
             match observation {
-                crate::availability::Eligibility::Available => (None, false),
-                crate::availability::Eligibility::Unavailable { reason } => (Some(reason), false),
-                crate::availability::Eligibility::Unknown => (None, true),
+                Ok(Json(observation)) => observation,
+                Err(_) => Eligibility::Unknown,
             }
         } else {
-            (None, false)
+            Eligibility::Available
         };
         let Json(decision) = ctx
             .run(|| async {
-                let now = self.now();
-                let mut link = link.clone();
-                let mut blocking_request = blocking_request.clone();
-                let expiry_event = if let Some(request) = &mut blocking_request {
-                    transition_request(request, None, now)?
-                } else {
-                    None
-                };
-                let expired = expiry_event.as_ref().and(blocking_request.clone());
-                let reason = local_rejection(&link, blocking_request.as_ref(), now)
-                    .or_else(|| availability.clone());
-                let (result, request) = if let Some(reason) = reason {
-                    (Some(AdmissionResult::Rejected { reason }), None)
-                } else if availability_unknown {
-                    (None, None)
-                } else {
-                    let request_id = RequestId::new();
-                    let state = if link.creation.approval_required {
-                        RequestState::Pending
-                    } else {
-                        RequestState::Approved
-                    };
-                    let decision_deadline = link
-                        .creation
-                        .approval_required
-                        .then_some(now + PENDING_LIFETIME);
-                    link.uses = link.uses.checked_add(1).ok_or_else(|| {
-                        HandlerError::from(TerminalError::new_with_code(
-                            500,
-                            "use counter overflow",
-                        ))
-                    })?;
-                    link.revision += 1;
-                    let request = RequestSnapshot {
-                        request_id,
-                        link_id: link.link_id,
-                        account_id: link.creation.account_id,
-                        requester_id: input.requester_id,
-                        justification: input.justification.clone(),
-                        state,
-                        admitted_at: now,
-                        decision_deadline,
-                        revision: 1,
-                        decision: (state == RequestState::Approved).then(|| TerminalDecision {
-                            decision_id: format!("request.approved/{request_id}"),
-                            decided_by: None,
-                            effective_at: now,
-                            evaluated_at: now,
-                            decline_reason: None,
-                        }),
-                    };
-                    (
-                        Some(AdmissionResult::Accepted {
-                            request_id,
-                            state,
-                            decision_deadline,
-                        }),
-                        Some(request),
-                    )
-                };
-                let mut events: Vec<_> = expiry_event.into_iter().collect();
-                let mut touched: Vec<_> = expired.iter().cloned().collect();
-                if let Some(request) = &request {
-                    touched.push(request.clone());
-                    events.push(audit(
-                        EventType::RequestCreated,
-                        request.request_id,
-                        Some(input.requester_id),
-                        now,
-                    ));
-                    if request.state == RequestState::Approved {
-                        events.push(audit(
-                            EventType::RequestApproved,
-                            request.request_id,
-                            None,
-                            now,
-                        ));
-                    }
-                    if link
-                        .creation
-                        .max_uses
-                        .is_some_and(|max| link.uses == u64::from(max))
-                    {
-                        events.push(audit(
-                            EventType::InvitationLinkExhausted,
-                            link.link_id,
-                            None,
-                            now,
-                        ));
-                    }
-                }
-                let projection = if touched.is_empty() {
-                    None
-                } else {
-                    // Rejection plus expiry also gets a unique link revision.
-                    if request.is_none() {
-                        link.revision += 1;
-                    }
-                    Some(projection(&link, touched, events))
-                };
-                let workflow = request
-                    .as_ref()
-                    .map(|request| WorkflowEnvelope::from_authority(&link, request.clone()));
-                Ok::<_, HandlerError>(Json(AdmissionDecision {
-                    link,
-                    request,
-                    projection,
-                    workflow,
-                    expired,
-                    operation: result.map(|result| OperationRecord {
-                        input: input.clone(),
-                        receipt: AdmissionReceipt {
-                            decided_at: now,
-                            result,
-                        },
-                    }),
-                }))
+                let decision = rules::decide_admission(
+                    &view,
+                    &input,
+                    &eligibility,
+                    self.now(),
+                    RequestId::new(),
+                )?;
+                Ok::<_, HandlerError>(Json(decision))
             })
             .name("decide_admission")
             .await?;
         self.checkpoint(&ctx, "after-decision").await?;
-        if decision.projection.is_some() {
-            ctx.set(keys::LINK, Json(decision.link.clone()));
-            self.checkpoint(&ctx, "after-link").await?;
-        }
-        if let Some(expired) = &decision.expired {
-            ctx.set(&keys::request(expired.request_id), Json(expired.clone()));
-            self.checkpoint(&ctx, "after-old-request").await?;
-            ctx.clear(&blocker_key);
-            self.checkpoint(&ctx, "after-old-blocker").await?;
-        }
-        if let Some(request) = &decision.request {
-            ctx.set(&keys::request(request.request_id), Json(request.clone()));
-            self.checkpoint(&ctx, "after-request").await?;
-            ctx.set(&blocker_key, Json(request.request_id));
-            self.checkpoint(&ctx, "after-blocker").await?;
-        }
-        if let Some(operation) = &decision.operation {
-            ctx.set(&operation_key, Json(operation.clone()));
-        }
-        ctx.set(
-            &keys::latest_attempt(input.requester_id),
-            Json(input.operation_id.clone()),
-        );
-        self.checkpoint(&ctx, "after-outcome").await?;
-        if let Some(envelope) = decision.projection {
-            send_projection(&ctx, envelope).await?;
-        }
-        self.checkpoint(&ctx, "after-projection-send").await?;
-        if let Some(expired) = &decision.expired {
-            send_terminal(&ctx, expired).await?;
-            self.checkpoint(&ctx, "after-old-notification-send").await?;
-        }
-        if let Some(envelope) = decision.workflow {
-            ctx.workflow_client::<InvitationRequestClient>(envelope.request.request_id.to_string())
-                .run(Json(envelope))
-                .send()
-                .await?;
-        }
-        self.checkpoint(&ctx, "after-workflow-send").await?;
-        match decision.operation {
-            Some(operation) => Ok(Json(operation.receipt)),
-            None => Err(TerminalError::new_with_code(
-                503,
-                "Repository availability could not be confirmed. Retry the same attempt.",
-            )),
-        }
+        self.apply_admission(&ctx, &input, decision).await.map(Json)
     }
 
     #[handler]
