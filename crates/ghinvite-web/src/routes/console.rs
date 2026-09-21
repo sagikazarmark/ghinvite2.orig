@@ -365,10 +365,10 @@ fn creation_form_response(
         Ok(repos) => (axum::http::StatusCode::OK, repos, None),
         Err(error) => (error.status, vec![], Some(error.message.to_string())),
     };
-    let action = Some(format!(
+    let action = format!(
         "/console/accounts/{account_login}/links?link_id={link_id}&anchor={}",
         now.timestamp()
-    ));
+    );
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
