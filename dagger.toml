@@ -1,0 +1,45 @@
+# Dagger v1.0.0-beta.14 (selected by devenv.nix).
+# Keep local state and secrets out of container build contexts.
+ignore = [".git", ".devenv*", ".direnv", ".env", ".env.*", "**/.dev.vars*", "**/node_modules", "target", "dist", "**/build", "**/.wrangler", "**/*.sqlite*"]
+
+[modules.rust]
+source = "github.com/sagikazarmark/daggerverse-beta/rust@b0671fd12a040feaf0f811c70d66199cbbcd24ca"
+# Project checks below select workspace flags and deny warnings explicitly.
+check.skip = ["**"]
+generate.skip = ["**"]
+
+[modules.rust.settings]
+version = "1.92.0-bookworm"
+targets = ["wasm32-unknown-unknown"]
+
+[modules.dioxus]
+source = "github.com/sagikazarmark/daggerverse-beta/dioxus@b0671fd12a040feaf0f811c70d66199cbbcd24ca"
+check.skip = ["*"]
+
+[modules.dioxus.settings]
+# The upstream dx binary requires glibc >= 2.39.
+rustVersion = "1.92.0-trixie"
+version = "0.7.9"
+wasmBindgenVersion = "0.2.120"
+binaryenVersion = "version_129"
+esbuildVersion = "0.28.0"
+
+[modules.worker-build]
+source = "github.com/sagikazarmark/daggerverse-beta/worker-build@b0671fd12a040feaf0f811c70d66199cbbcd24ca"
+check.skip = ["*"]
+
+[modules.worker-build.settings]
+rustVersion = "1.92.0-bookworm"
+version = "0.8.1"
+wasmBindgenVersion = "0.2.120"
+esbuildVersion = "0.28.0"
+
+[modules.ghinvite]
+source = ".dagger"
+
+# Container outputs are wired directly; the project module has no SDK clients
+# or duplicate implementations of tool installation and Cargo dependency caches.
+[modules.ghinvite.settings]
+rust = "rust:container"
+dioxus = "dioxus:container"
+workerBuild = "worker-build:container"

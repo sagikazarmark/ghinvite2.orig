@@ -1,0 +1,86 @@
+"""
+Project commands using tool containers wired from daggerverse-beta.
+"""
+type Ghinvite {
+  let rust: Container!
+  let dioxus: Container!
+  let workerBuild: Container!
+  let source: Directory!
+
+  new(ws: Workspace!, rust: Container!, dioxus: Container!, workerBuild: Container!) {
+    self.rust = rust
+    self.dioxus = dioxus
+    self.workerBuild = workerBuild
+    self.source = ws.directory("/", gitignore: true)
+    self
+  }
+
+  let node: Container! {
+    Dagger.container.from("node:20.20.2-bookworm")
+      .withMountedCache("/root/.npm", Dagger.cacheVolume("ghinvite-npm"))
+  }
+
+  """
+  Native workspace tests (external-service acceptance gates are separate).
+  """
+  test: String! @check {
+    self.rust.withExec(["cargo", "test", "--workspace", "--locked"]).combinedOutput
+  }
+
+  fmt: String! @check {
+    self.rust.withExec(["cargo", "fmt", "--check"]).combinedOutput
+  }
+
+  clippy: String! @check {
+    self.rust.withExec(["cargo", "clippy", "--workspace", "--locked", "--", "-D", "warnings"]).combinedOutput
+  }
+
+  """
+  Build each Wasm crate separately to avoid unifying browser and Worker features.
+  """
+  wasm: String! @check {
+    let container = self.rust
+    ["ghinvite-ui", "ghinvite-island"].each { package =>
+      container = container.withExec(["cargo", "check", "--locked", "-p", package, "--target", "wasm32-unknown-unknown"])
+    }
+    ["ghinvite-storage-d1", "ghinvite-web-worker", "ghinvite-workflows-worker"].each { package =>
+      container = container.withExec(["cargo", "build", "--locked", "-p", package, "--target", "wasm32-unknown-unknown"])
+    }
+    container.combinedOutput
+  }
+
+  """
+  Build CSS and fail if the tracked stylesheet is stale.
+  """
+  css: String! @check {
+    self.node.withDirectory("/work/src", self.source)
+      .withWorkdir("/work/src/crates/ghinvite-web")
+      .withExec(["cp", "assets/styles.built.css", "/tmp/styles.built.css"])
+      .withExec(["npm", "ci"])
+      .withExec(["npm", "run", "build:css"])
+      .withExec(["diff", "-u", "/tmp/styles.built.css", "assets/styles.built.css"])
+      .combinedOutput
+  }
+
+  """
+  Build and stage Static Assets using the existing loader and size-budget script.
+  """
+  island: Directory! @check {
+    self.dioxus.withDirectory("/usr/local", self.node.directory("/usr/local"))
+      .withEnvVariable("CARGO_TARGET_DIR", "/work/src/target")
+      .withExec(["bash", "scripts/build-island.sh"])
+      .directory("/work/src/dist/public")
+  }
+
+  webWorker: Directory! @check {
+    self.workerBuild
+      .withExec(["worker-build", "crates/ghinvite-web-worker", "--release", "--", "--locked"])
+      .directory("/work/src/crates/ghinvite-web-worker/build")
+  }
+
+  workflowsWorker: Directory! @check {
+    self.workerBuild
+      .withExec(["worker-build", "crates/ghinvite-workflows-worker", "--release", "--", "--locked"])
+      .directory("/work/src/crates/ghinvite-workflows-worker/build")
+  }
+}

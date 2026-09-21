@@ -19,7 +19,57 @@ The Dioxus view components live in their own crate, `crates/ghinvite-ui`, which 
 - Node.js 20+ (for building CSS)
 - Docker (for Restate)
 
-With [devenv](https://devenv.sh): `devenv shell` gives you Rust + Node + lld in one step.
+With [devenv](https://devenv.sh) 2.3.1: `devenv shell` gives you Rust + Node + lld
+and Dagger v1.0.0-beta.14 in one step. The repository pins devenv's modules in
+`devenv.yaml`; upgrade an older host CLI using the
+[devenv installation instructions](https://devenv.sh/getting-started/).
+
+## Dagger checks and builds
+
+With Docker running, enter `devenv shell`, then run from the repository root:
+
+```bash
+dagger version                  # v1.0.0-beta.14
+dagger check -l                 # list project checks
+dagger check ghinvite:fmt ghinvite:clippy ghinvite:test
+dagger check ghinvite:wasm
+dagger check ghinvite:css
+dagger check ghinvite:island ghinvite:web-worker ghinvite:workflows-worker
+```
+
+`dagger check` runs all eight checks. The CSS check fails when the tracked
+stylesheet needs regeneration, just like CI. Builds run in containers and can be
+exported explicitly:
+
+```bash
+dagger api call ghinvite island --output dist/public
+dagger api call ghinvite web-worker --output crates/ghinvite-web-worker/build
+dagger api call ghinvite workflows-worker --output crates/ghinvite-workflows-worker/build
+```
+
+`dagger.toml` installs commit-pinned Rust, Dioxus, and worker-build modules from
+[`daggerverse-beta`](https://github.com/sagikazarmark/daggerverse-beta), wiring
+their `Container` outputs into `.dagger/main.dang`. That small project module
+selects workspace flags, builds Wasm crates individually, and runs the existing
+island staging/size-budget script. Tool installation and Cargo dependency caching
+are owned by the upstream modules. `dagger.lock` records resolved container images.
+
+The shell's packaged Dagger CLI uses `DAGGER_X_RELEASE=v1.0.0-beta.14` to download
+and cache the selected beta on first use. A directly installed beta.14 CLI also
+works. To update modules, change their commit references together in `dagger.toml`,
+run `dagger workspace update`, run the checks, and include `dagger.lock` with the
+configuration changes. Update the beta pin in both `devenv.nix` and
+`.dagger/dagger-module.toml` when upgrading Dagger.
+
+Refresh the pinned devenv and Dagger Nix inputs independently with
+`devenv update devenv` and `devenv update dagger`. The existing nixpkgs revision is retained;
+updating all inputs also upgrades the native Rust/Node toolchain and should be
+validated separately.
+
+The full Restate, Worker/D1 runtime, and Playwright acceptance suites are run by
+the existing CI workflow and the commands in [local testing](docs/local-testing.md).
+Dagger's Worker checks build production artifacts; the runtime gates additionally
+verify their behavior. See [deployment](docs/deploy.md) for rollout requirements.
 
 ## GitHub App setup
 
