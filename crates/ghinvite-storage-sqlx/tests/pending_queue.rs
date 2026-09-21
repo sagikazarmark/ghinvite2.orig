@@ -183,8 +183,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         .connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
-    // External storage boundary: legacy encodings, corruption, and missing rows
-    // cannot be written through the domain's validated interface.
+    // External storage boundary: alternate time encodings, corruption, and
+    // missing rows cannot be written through the domain's validated interface.
     sqlx::raw_sql("PRAGMA foreign_keys=OFF;
         INSERT INTO installations VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
         INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)

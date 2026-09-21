@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 
 /// Render a Dioxus component to a complete HTML document. Uses dioxus-ssr's
-/// pre-rendering — no client-side hydration is wired in Plan 4.
+/// pre-rendering — no client-side hydration.
 ///
 /// The component is a layout from `ghinvite_ui::layouts`, which renders a
 /// `<head>` and a `<body>`; the doctype and the `<html>` root around them come

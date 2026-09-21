@@ -204,8 +204,9 @@ pub fn delivery_presentation(
         (Some(InvitationState::Expired), _) => S::Expired,
         (Some(InvitationState::Cancelled), _) => S::Cancelled,
         (_, Some(CreateOutcome::AlreadyCollaborator)) => S::Collaborator,
-        // Legacy 204 responses have no upstream invitation to accept. A retained
-        // create ID, when present, still distinguishes a real invitation.
+        // A 204 (already-collaborator) create has no upstream invitation to
+        // accept. A retained create ID, when present, still distinguishes a
+        // real invitation.
         (Some(InvitationState::Accepted), None)
             if invitation.is_some_and(|r| r.github_invitation_id.is_none()) =>
         {

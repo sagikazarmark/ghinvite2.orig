@@ -277,7 +277,7 @@ mod tests {
     fn url_shape_for_keyed_send() {
         // We don't actually hit a server — just sanity check the URL builder
         // shape via a small introspection. The send method is async and
-        // does network I/O; deeper tests in Task 9+ use a wiremock server.
+        // does network I/O; `tests/restate_ingress.rs` uses a wiremock server.
         let c = RestateClient::new("http://127.0.0.1:8080").unwrap();
         // No public URL builder; we verified the test by inspection of the
         // method body. Construction and field check:

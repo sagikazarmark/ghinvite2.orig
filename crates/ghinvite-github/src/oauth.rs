@@ -137,10 +137,9 @@ pub struct UserApiClient {
 }
 
 impl UserApiClient {
-    /// `transport` typically wraps `ReqwestTransport` on native; on wasm /
-    /// Cloudflare Workers it wraps Plan 3's Workers-side transport
-    /// (`WorkerFetchTransport`), since reqwest's wasm response future is
-    /// `!Send`. `user_token` is the `access_token` from [`exchange_code`].
+    /// `transport` is typically `ReqwestTransport`, on native and on
+    /// Cloudflare Workers alike. `user_token` is the `access_token` from
+    /// [`exchange_code`].
     pub fn new(transport: Arc<dyn HttpTransport>, user_token: String) -> Self {
         Self::with_base(transport, user_token, "https://api.github.com".into())
     }
@@ -232,8 +231,8 @@ impl UserApiClient {
     /// signed-in user can see through this app installation. Used by the
     /// console's link-create form to render a repo-picker.
     ///
-    /// Paginates with `?per_page=100` (v1 simplification; installations with
-    /// >100 repos need paging in v1.1).
+    /// Reads a single `?per_page=100` page; repositories beyond the first 100
+    /// are not listed.
     #[tracing::instrument(
         skip(self),
         fields(method = "list_user_installation_repos", installation_id)

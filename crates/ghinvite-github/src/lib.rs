@@ -4,11 +4,9 @@
 //! the Restate Service Worker). Webhook reception lives in the web crate.
 //!
 //! Every HTTP call funnels through [`transport::HttpTransport`] so impls can be
-//! swapped (production native: [`transport::ReqwestTransport`]; tests:
-//! [`mocks::MockTransport`] behind the `test-mock` feature). The wasm32 /
-//! Cloudflare Workers production transport (`WorkerFetchTransport`) is owned
-//! by Plan 3 — reqwest's wasm response future is `!Send` and so cannot satisfy
-//! the [`transport::HttpTransport`] `Send + Sync + 'static` bound.
+//! swapped (production, native and Cloudflare Workers:
+//! [`transport::ReqwestTransport`]; tests: [`mocks::MockTransport`] behind the
+//! `test-mock` feature).
 
 pub mod error;
 pub mod installation;

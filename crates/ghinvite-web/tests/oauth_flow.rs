@@ -1,5 +1,5 @@
 //! End-to-end OAuth sign-in tests. Drives the full /login → /oauth/callback
-//! flow through axum + the in-process MockTransport from Plan 2.
+//! flow through axum + the in-process MockTransport.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

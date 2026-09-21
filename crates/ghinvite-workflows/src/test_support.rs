@@ -1,10 +1,7 @@
 //! Test-only fixture builders. Behind `#[cfg(test)]` (declared in `lib.rs`).
 //!
-//! `#[allow(dead_code)]` at the module level: each per-handler test in
-//! Tasks 6–21 picks up a different subset of these helpers, so individual
-//! fixtures can lag the call sites by a task or two. Silencing the lint
-//! here keeps the in-flight build noise-free without requiring a per-item
-//! annotation that would also have to be removed task by task.
+//! `#[allow(dead_code)]`: this is a shared fixture kit, and not every helper
+//! has a caller at all times.
 #![allow(dead_code)]
 
 use crate::state::AppState;

@@ -1,6 +1,6 @@
 //! Route-existence smoke tests. Each route from spec §11 must be registered
-//! and respond with a non-500. Some return 501 (Plans 5–6 fill them in);
-//! some return 200/302; auth-required ones return 302→/login.
+//! and respond with a non-500. Some return 200/302; auth-required ones return
+//! 302→/login.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

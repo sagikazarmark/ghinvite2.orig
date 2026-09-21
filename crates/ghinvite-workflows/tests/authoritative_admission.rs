@@ -904,7 +904,7 @@ async fn authoritative_admission_contract() {
         lifecycle_recovery(&runtime).await;
         interruption_recovery(&runtime).await;
         queued_expiry(&runtime).await;
-        imported_terminal_requests(&runtime).await;
+        seeded_terminal_requests(&runtime).await;
         retention_and_bounded_history(&runtime).await;
     })
     .await
@@ -1449,8 +1449,8 @@ async fn interruption_recovery(runtime: &Runtime) {
     }
 }
 
-async fn imported_terminal_requests(runtime: &Runtime) {
-    // Seed historical state through the runtime maintenance API on new fixture
+async fn seeded_terminal_requests(runtime: &Runtime) {
+    // Seed historical state through the Restate admin state API on new fixture
     // keys. This is fixture setup, not a cancellation/migration command.
     for terminal in ["cancelled", "declined", "expired"] {
         let mut input = creation();
@@ -1483,7 +1483,7 @@ async fn imported_terminal_requests(runtime: &Runtime) {
         assert_eq!(
             response.status(),
             202,
-            "fixture import: {}",
+            "fixture state seed: {}",
             response.text().await.unwrap()
         );
         let query = json!({"link_id": id, "request_id": request_id, "requester_id": 71});
@@ -1498,7 +1498,7 @@ async fn imported_terminal_requests(runtime: &Runtime) {
             }
         })
         .await
-        .expect("historical fixture not imported");
+        .expect("historical fixture state not visible");
         let attempt = json!({"link_id": id, "operation_id": ghinvite_core::RequestId::new(), "requester_id": 71});
         assert_eq!(
             runtime.ok(id, "admit", &attempt).await["result"]["kind"],

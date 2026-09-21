@@ -1,5 +1,5 @@
 //! Persistence boundary for ghinvite. The `Storage` trait is the single seam
-//! between domain logic and the database. Two impls in v1: `SqlxStorage`
+//! between domain logic and the database. Two impls: `SqlxStorage`
 //! (`ghinvite-storage-sqlx`, native dev & tests) and `D1Storage`
 //! (`ghinvite-storage-d1`, production on Cloudflare Workers).
 

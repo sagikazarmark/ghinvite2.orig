@@ -499,7 +499,6 @@ impl Storage for SqlxStorage {
         rows.into_iter().map(|r| r.try_into_domain()).collect()
     }
 
-    // --- stubs for the rest of the trait, filled in by later tasks ---
     async fn upsert_user(&self, user: &User) -> Result<()> {
         sqlx::query(
             r#"

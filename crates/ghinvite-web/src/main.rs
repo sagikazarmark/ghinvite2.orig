@@ -1,5 +1,5 @@
 //! Native binary: runs the axum app on a local hyper server.
-//! Plan 7 wraps `ghinvite_web::build_app()` in a Workers `#[event(fetch)]` instead.
+//! On Cloudflare Workers, `ghinvite-web-worker` serves `build_app()` instead.
 
 use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
 use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};

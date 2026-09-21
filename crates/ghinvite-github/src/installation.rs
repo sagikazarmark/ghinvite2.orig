@@ -1,5 +1,5 @@
 //! App-installation client: holds the App-JWT signer + a token cache, and
-//! exposes the v1 installation-side endpoints.
+//! exposes the installation-side endpoints.
 
 use crate::error::Result;
 use crate::jwt::AppJwtSigner;

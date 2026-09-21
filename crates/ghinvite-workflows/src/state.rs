@@ -5,8 +5,7 @@ use ghinvite_github::InstallationClient;
 use std::sync::Arc;
 
 /// Cloneable bundle of the I/O dependencies handlers need. Constructed once
-/// at startup (Plan 7's `#[event(fetch)]` will build it from `worker::Env`)
-/// and cloned into every service `impl` struct.
+/// at startup and cloned into every service `impl` struct.
 #[derive(Clone)]
 pub struct AppState {
     pub storage: Arc<dyn Storage>,

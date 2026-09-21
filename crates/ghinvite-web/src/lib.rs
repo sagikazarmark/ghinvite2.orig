@@ -1,6 +1,5 @@
 //! Web binary core. axum app builder + tower-sessions + OAuth flow + Dioxus
-//! layouts. Plan 7 wraps `build_app()` in a Workers `#[event(fetch)]`; Plans 5
-//! and 6 fill in the console and recipient routes.
+//! layouts. `ghinvite-web-worker` serves `build_app()` on Cloudflare Workers.
 
 pub(crate) mod account_admin_reads;
 pub mod commands;
