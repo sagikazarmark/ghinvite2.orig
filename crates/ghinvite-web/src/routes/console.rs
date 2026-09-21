@@ -2,6 +2,7 @@
 
 use crate::account_admin_reads::{find_account_admin_invitation_link, find_account_admin_request};
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
+use crate::link_authority::AuthorityError;
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::session;
@@ -528,7 +529,7 @@ async fn create_link(
             });
             let command = attempts::Command::Create(original);
             if !matches {
-                return attempts::failed(&admin, &command, crate::WebError::Conflict);
+                return attempts::conflict(&admin, &command);
             }
             return match attempts::submit(&state, &admin, command).await {
                 Ok(response) => response,
@@ -644,8 +645,8 @@ async fn edit_link_form(
     };
     let link = match authoritative_link(&state, &admin, id).await {
         Ok(link) => link,
-        Err(crate::error::WebError::NotFound) => return console_not_found_response(&admin),
-        Err(error) => return error.into_response(),
+        Err(AuthorityError::Missing) => return console_not_found_response(&admin),
+        Err(error) => return crate::WebError::from(error).into_response(),
     };
     edit_link_response(
         &admin,
@@ -670,7 +671,7 @@ async fn save_link_details(
     };
     if let Err(error) = authoritative_link(&state, &admin, id).await {
         return match error {
-            crate::error::WebError::NotFound => console_not_found_response(&admin),
+            AuthorityError::Missing => console_not_found_response(&admin),
             _ => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 edit_link_response(
@@ -689,7 +690,7 @@ async fn save_link_details(
         Err(errors) => return edit_link_response(&admin, id, values, errors, None),
     };
     match state
-        .admission
+        .link_authority
         .update_metadata(ghinvite_core::admission::UpdateMetadata {
             link_id: id,
             admin: admin_assertion(&admin),
@@ -713,7 +714,7 @@ async fn save_link_details(
             ))
             .into_response()
         }
-        Err(crate::WebError::Restate(failure)) => {
+        Err(AuthorityError::Unknown(failure)) => {
             tracing::warn!(
                 ingress_failure = %failure,
                 upstream_status = ?failure.upstream_status(),
@@ -723,7 +724,7 @@ async fn save_link_details(
             (axum::http::StatusCode::BAD_GATEWAY,
             edit_link_response(&admin, id, values, Default::default(), Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
         }
-        Err(error) => error.into_response_with_recovery(
+        Err(error) => crate::WebError::from(error).into_response_with_recovery(
             format!(
                 "/console/accounts/{}/links/{id}",
                 admin.account.account_login
@@ -778,8 +779,8 @@ async fn link_detail(
                 Ok(None) => {}
             }
             return match e {
-                crate::WebError::NotFound => console_not_found_response(&admin),
-                error => error.into_response_with_recovery(
+                AuthorityError::Missing => console_not_found_response(&admin),
+                error => crate::WebError::from(error).into_response_with_recovery(
                     format!("/console/accounts/{}/links", admin.account.account_login),
                     "Back to invitation links",
                 ),
@@ -1008,9 +1009,9 @@ async fn authoritative_link(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     link_id: ghinvite_core::InvitationLinkId,
-) -> crate::Result<ghinvite_core::InvitationLink> {
+) -> Result<ghinvite_core::InvitationLink, AuthorityError> {
     state
-        .admission
+        .link_authority
         .link_status(ghinvite_core::admission::AdminLinkCommand {
             link_id,
             admin: admin_assertion(admin),

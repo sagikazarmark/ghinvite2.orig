@@ -5,7 +5,7 @@
 //! JSON body that matches the handler's `input` parameter. Appending `/send`
 //! turns the request into a fire-and-forget invocation.
 //!
-//! Three invocation styles, chosen by what the caller must know before it
+//! Two invocation styles, chosen by what the caller must know before it
 //! responds:
 //!
 //! - [`RestateClient::send`] enqueues the invocation and returns once Restate
@@ -14,11 +14,8 @@
 //! - [`RestateClient::call`] waits for the handler to finish and decodes its
 //!   output. Used when the web must observe completion before responding
 //!   (e.g. the installation setup return). Any non-success status is reported
-//!   as a rejection.
-//! - [`RestateClient::authoritative_call`] also waits for completion, but for
-//!   handlers whose answer is the decision itself (invitation-link admission
-//!   and lifecycle). Their documented terminal statuses (400, 404, 409) map to
-//!   definitive errors; every other failure leaves the outcome unknown.
+//!   as a rejection; [`crate::link_authority`] gives the invitation link
+//!   authority's statuses their meaning.
 
 use crate::error::{IngressFailure, Result, WebError};
 use reqwest::Client;
@@ -192,29 +189,21 @@ impl RestateClient {
         method: &str,
         input: &I,
     ) -> Result<O> {
-        self.call_inner(service, key, method, input, false).await
+        self.invoke(service, key, method, input)
+            .await
+            .map_err(WebError::Restate)
     }
 
-    /// Confirm authoritative completion. Transport failures remain unknown;
-    /// only documented terminal command statuses are definitive.
-    pub async fn authoritative_call<I: Serialize, O: DeserializeOwned>(
+    /// [`RestateClient::call`] with the failure left for the caller to
+    /// classify. A non-success status is [`IngressFailure::Rejected`]; a
+    /// transport failure, deadline or unusable body leaves the outcome unknown.
+    pub(crate) async fn invoke<I: Serialize, O: DeserializeOwned>(
         &self,
         service: &str,
         key: &str,
         method: &str,
         input: &I,
-    ) -> Result<O> {
-        self.call_inner(service, key, method, input, true).await
-    }
-
-    async fn call_inner<I: Serialize, O: DeserializeOwned>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-        authoritative: bool,
-    ) -> Result<O> {
+    ) -> std::result::Result<O, IngressFailure> {
         // Same Send-bound rationale as `send` above.
         crate::wasm_compat::wasm_send(async move {
             let url = if key.is_empty() {
@@ -231,32 +220,20 @@ impl RestateClient {
                 .json(input)
                 .send()
                 .await
-                .map_err(|_| {
-                    WebError::Restate(IngressFailure::unreachable("ingress unreachable"))
-                })?;
+                .map_err(|_| IngressFailure::unreachable("ingress unreachable"))?;
             let status = resp.status();
             if !status.is_success() {
-                if authoritative {
-                    return Err(match status.as_u16() {
-                        400 => WebError::BadRequest("Invalid command.".into()),
-                        404 => WebError::NotFound,
-                        409 => WebError::Conflict,
-                        other => WebError::Restate(IngressFailure::OutcomeUnknown {
-                            detail: "ingress returned an unhandled status",
-                            status: Some(other),
-                        }),
-                    });
-                }
-                return Err(WebError::Restate(IngressFailure::Rejected {
+                return Err(IngressFailure::Rejected {
                     status: status.as_u16(),
-                }));
+                });
             }
-            let body = resp.bytes().await.map_err(|_| {
-                WebError::Restate(IngressFailure::OutcomeUnknown {
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|_| IngressFailure::OutcomeUnknown {
                     detail: "ingress response body unreadable",
                     status: Some(status.as_u16()),
-                })
-            })?;
+                })?;
             // Restate may return an empty body for unit-returning handlers.
             let body: &[u8] = if body.is_empty() { b"null" } else { &body };
             // Deserializer errors can quote untrusted response values, including
@@ -264,10 +241,10 @@ impl RestateClient {
             serde_json::from_slice::<O>(body).map_err(|_| {
                 // The ingress answered; we could not use it. Keep the status it
                 // answered with — the outcome is unknown, not statusless.
-                WebError::Restate(IngressFailure::OutcomeUnknown {
+                IngressFailure::OutcomeUnknown {
                     detail: "ingress response could not be decoded",
                     status: Some(status.as_u16()),
-                })
+                }
             })
         })
         .await

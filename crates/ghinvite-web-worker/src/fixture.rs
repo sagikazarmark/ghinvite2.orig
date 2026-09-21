@@ -26,11 +26,6 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<axum::response
                 .await
                 .map(|()| serde_json::Value::Null),
             "call" => client.call("Fixture", "key", "mutate", &input).await,
-            "authoritative_call" => {
-                client
-                    .authoritative_call("Fixture", "key", "mutate", &input)
-                    .await
-            }
             _ => return Err(super::worker_err("unknown fixture operation")),
         }
         .map_err(|error| error.to_string())

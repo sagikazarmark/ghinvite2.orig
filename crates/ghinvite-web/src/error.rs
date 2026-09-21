@@ -225,19 +225,6 @@ impl WebError {
         }
     }
 
-    /// Whether this failure leaves a command's effect in doubt.
-    ///
-    /// Restate may have persisted the invocation before the response went
-    /// wrong, so a route must never offer a plain "try again" on one of these:
-    /// applying the same mutation twice creates a second invitation link,
-    /// repeats a decision, or consumes another use of an invitation link.
-    pub fn outcome_unknown(&self) -> bool {
-        matches!(
-            self,
-            WebError::Restate(IngressFailure::OutcomeUnknown { .. })
-        )
-    }
-
     /// The status an upstream answered with, where one exists. Safe to log:
     /// it is a number, not a body.
     pub fn upstream_status(&self) -> Option<u16> {

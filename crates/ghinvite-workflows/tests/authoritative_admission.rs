@@ -609,6 +609,23 @@ async fn waiting_notification_and_timer_races(runtime: &Runtime) {
     }
 }
 
+/// A browser admission command, normalized as the invitation form submits it.
+fn admit_command(
+    link_id: InvitationLinkId,
+    operation_id: &str,
+    requester_id: u64,
+    justification: Option<String>,
+) -> ghinvite_core::admission::Admit {
+    let mut command = ghinvite_core::admission::Admit {
+        link_id,
+        operation_id: operation_id.to_owned().try_into().unwrap(),
+        requester_id,
+        justification,
+    };
+    command.normalize().unwrap();
+    command
+}
+
 fn creation() -> Value {
     json!({
         "link_id": InvitationLinkId::new(),
@@ -632,29 +649,32 @@ async fn authoritative_admission_contract() {
         assert_eq!(created["uses"], 0);
         // Browser command facade resolves fresh links without SQL and recovers
         // normalized input after navigation, even while projection is offline.
-        use ghinvite_web::admission::RestateAdmission;
-        let browser = RestateAdmission::new(Arc::new(
+        use ghinvite_web::{AuthorityError, LinkAuthority};
+        let browser = LinkAuthority::new(Arc::new(
             ghinvite_web::RestateClient::new(&runtime.ingress).unwrap(),
         ));
         let code = created["invitation_code"].as_str().unwrap();
-        let page = browser.lookup(code, 501, None).await.unwrap();
+        let page = browser.requester_page(code, 501, None).await.unwrap();
         assert_eq!(page.link_id.to_string(), id);
         assert!(page.attempt.is_none());
         assert!(page.can_start_fresh);
         let operation = ghinvite_core::RequestId::new().to_string();
-        let command = browser
-            .command(page.link_id, &operation, 501, Some("  access  ".into()))
-            .unwrap();
+        let command = admit_command(page.link_id, &operation, 501, Some("  access  ".into()));
         browser.prepare(command.clone()).await.unwrap();
         let recovered = browser
-            .lookup(code, 501, None)
+            .requester_page(code, 501, None)
             .await
             .unwrap()
             .attempt
             .unwrap();
         assert_eq!(recovered.input.justification.as_deref(), Some("access"));
         assert!(recovered.receipt.is_none());
-        assert!(browser.lookup(code, 502, Some(&operation)).await.is_err());
+        assert!(
+            browser
+                .requester_page(code, 502, Some(operation.clone().try_into().unwrap()))
+                .await
+                .is_err()
+        );
         let metadata_input = creation();
         let metadata_link = browser
             .create(serde_json::from_value(metadata_input.clone()).unwrap())
@@ -678,15 +698,13 @@ async fn authoritative_admission_contract() {
             .await
             .unwrap();
         let retry_operation = ghinvite_core::RequestId::new().to_string();
-        let retry = browser
-            .command(retry_link.link_id, &retry_operation, 601, None)
-            .unwrap();
+        let retry = admit_command(retry_link.link_id, &retry_operation, 601, None);
         browser.prepare(retry.clone()).await.unwrap();
         // Discard the first acknowledgement, then navigate back after revoke.
         let accepted = browser.admit(retry.clone()).await.unwrap();
         assert!(
             !browser
-                .lookup(&retry_link.invitation_code, 601, None)
+                .requester_page(&retry_link.invitation_code, 601, None)
                 .await
                 .unwrap()
                 .can_start_fresh
@@ -702,42 +720,38 @@ async fn authoritative_admission_contract() {
         normalized_retry.justification = Some(" \t\n ".into());
         assert_eq!(browser.admit(normalized_retry).await.unwrap(), accepted);
         let recovered = browser
-            .lookup(&retry_link.invitation_code, 601, None)
+            .requester_page(&retry_link.invitation_code, 601, None)
             .await
             .unwrap();
         assert!(!recovered.can_start_fresh);
         assert_eq!(recovered.attempt.unwrap().receipt.unwrap(), accepted);
         assert!(matches!(
-            browser.lookup(&retry_link.invitation_code, 602, None).await,
-            Err(ghinvite_web::WebError::NotFound)
+            browser
+                .requester_page(&retry_link.invitation_code, 602, None)
+                .await,
+            Err(AuthorityError::Missing)
         ));
-        let changed = browser
-            .command(
-                retry_link.link_id,
-                &retry_operation,
-                601,
-                Some("edited".into()),
-            )
-            .unwrap();
+        let changed = admit_command(
+            retry_link.link_id,
+            &retry_operation,
+            601,
+            Some("edited".into()),
+        );
         assert!(matches!(
             browser.admit(changed).await,
-            Err(ghinvite_web::WebError::Conflict)
+            Err(AuthorityError::Conflict)
         ));
-        let foreign = browser
-            .command(retry_link.link_id, &retry_operation, 602, None)
-            .unwrap();
+        let foreign = admit_command(retry_link.link_id, &retry_operation, 602, None);
         assert!(matches!(
             browser.admit(foreign).await,
-            Err(ghinvite_web::WebError::Conflict)
+            Err(AuthorityError::Conflict)
         ));
-        let second_tab = browser
-            .command(
-                retry_link.link_id,
-                &ghinvite_core::RequestId::new().to_string(),
-                601,
-                None,
-            )
-            .unwrap();
+        let second_tab = admit_command(
+            retry_link.link_id,
+            &ghinvite_core::RequestId::new().to_string(),
+            601,
+            None,
+        );
         assert!(matches!(
             browser.admit(second_tab).await.unwrap().result,
             ghinvite_core::admission::AdmissionResult::Rejected {

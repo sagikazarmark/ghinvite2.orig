@@ -2,6 +2,7 @@
 
 use crate::commands::GhinviteCommands;
 use crate::config::WebConfig;
+use crate::link_authority::LinkAuthority;
 use ghinvite_core::storage::Storage;
 use ghinvite_github::HttpTransport;
 use std::sync::Arc;
@@ -13,8 +14,7 @@ pub struct AppState {
     pub github_transport: Arc<dyn HttpTransport>,
     pub commands: Arc<dyn GhinviteCommands>,
     pub config: WebConfig,
-    pub request_lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
-    pub admission: Arc<crate::admission::RestateAdmission>,
+    pub link_authority: LinkAuthority,
     pub(crate) attempt_store: Option<Arc<dyn tower_sessions::SessionStore>>,
 }
 
@@ -33,20 +33,8 @@ impl AppState {
             github_transport,
             commands,
             config,
-            request_lifecycle: Arc::new(crate::lifecycle::RestateRequestLifecycle::new(
-                restate.clone(),
-            )),
-            admission: Arc::new(crate::admission::RestateAdmission::new(restate)),
+            link_authority: LinkAuthority::new(restate),
             attempt_store: None,
         }
-    }
-
-    /// Replace the request lifecycle client, e.g. with a test double.
-    pub fn with_request_lifecycle(
-        mut self,
-        lifecycle: Arc<dyn crate::lifecycle::RequestLifecycle>,
-    ) -> Self {
-        self.request_lifecycle = lifecycle;
-        self
     }
 }

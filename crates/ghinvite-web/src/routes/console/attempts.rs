@@ -238,15 +238,15 @@ pub(super) async fn page(
     };
     let result = match &command {
         Command::Decision(c) => {
-            let result = state.request_lifecycle.decision_status(c.clone()).await;
+            let result = state.link_authority.decision_status(c.clone()).await;
             return match result {
                 Ok(Some(receipt)) => decision_response(&admin, &command, &receipt),
-                Ok(None) | Err(crate::WebError::NotFound) => unknown(&admin, &command),
+                Ok(None) | Err(AuthorityError::Missing) => unknown(&admin, &command),
                 Err(e) => failed(&admin, &command, e),
             };
         }
         Command::Create(c) => state
-            .admission
+            .link_authority
             .link_status(AdminLinkCommand {
                 link_id: c.link_id,
                 admin: c.admin.clone(),
@@ -256,18 +256,18 @@ pub(super) async fn page(
                 if link.creation == *c {
                     Ok(Some(CREATED))
                 } else {
-                    Err(crate::WebError::Conflict)
+                    Err(AuthorityError::Conflict)
                 }
             }),
         Command::Revoke(c) => state
-            .admission
+            .link_authority
             .link_status(c.clone())
             .await
             .map(|link| link.revoked_at.map(|_| REVOKED)),
     };
     match result {
         Ok(Some(message)) => render_attempt(&admin, &command, StatusCode::OK, message, false),
-        Ok(None) | Err(crate::WebError::NotFound) => unknown(&admin, &command),
+        Ok(None) | Err(AuthorityError::Missing) => unknown(&admin, &command),
         Err(e) => failed(&admin, &command, e),
     }
 }
@@ -344,7 +344,7 @@ pub(super) async fn submit(
 ) -> Result<Response, CreateRejected> {
     let original = match retain(state, admin, &command).await {
         Ok(c) => c,
-        Err(e) => return Ok(failed(admin, &command, e)),
+        Err(e) => return Ok(back_to_link(admin, &command, e)),
     };
     if original.id() != command.id() {
         if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
@@ -361,11 +361,11 @@ pub(super) async fn submit(
         return Ok(Redirect::to(&url(admin, &original)).into_response());
     }
     if serde_json::to_value(&original).unwrap() != serde_json::to_value(&command).unwrap() {
-        return Ok(failed(admin, &original, crate::WebError::Conflict));
+        return Ok(conflict(admin, &original));
     }
     let (result, completed) = match &command {
         Command::Decision(c) => {
-            let result = state.request_lifecycle.decide(c.clone()).await;
+            let result = state.link_authority.decide(c.clone()).await;
             return Ok(match result {
                 Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
                     decision_response(admin, &command, &receipt)
@@ -386,8 +386,14 @@ pub(super) async fn submit(
                 Err(e) => failed(admin, &command, e),
             });
         }
-        Command::Create(c) => (state.admission.create(c.clone()).await.map(|_| ()), CREATED),
-        Command::Revoke(c) => (state.admission.revoke(c.clone()).await.map(|_| ()), REVOKED),
+        Command::Create(c) => (
+            state.link_authority.create(c.clone()).await.map(|_| ()),
+            CREATED,
+        ),
+        Command::Revoke(c) => (
+            state.link_authority.revoke(c.clone()).await.map(|_| ()),
+            REVOKED,
+        ),
     };
     let detail = format!(
         "/console/accounts/{}/links/{}",
@@ -403,7 +409,7 @@ pub(super) async fn submit(
         }
         // Invalid input for the authority (for a creation, typically an
         // expiry already in the past); the authority applied nothing.
-        Err(crate::WebError::BadRequest(_)) => {
+        Err(AuthorityError::Invalid) => {
             release(state, admin, &command).await;
             match command {
                 Command::Create(_) => Err(CreateRejected),
@@ -466,31 +472,42 @@ fn decision_response(
     render_attempt(admin, command, status, &decision_message(receipt), false)
 }
 
-pub(super) fn failed(
+/// Render what the authority's answer means for this attempt.
+fn failed(admin: &RequireConsoleAdminOf, command: &Command, error: AuthorityError) -> Response {
+    match error {
+        AuthorityError::Unknown(_) => unknown(admin, command),
+        AuthorityError::Conflict => conflict(admin, command),
+        // Anything else is not about this attempt's outcome.
+        e => back_to_link(admin, command, e.into()),
+    }
+}
+
+/// The attempt's identity is bound to input other than what was submitted.
+pub(super) fn conflict(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
+    render_attempt(
+        admin,
+        command,
+        StatusCode::CONFLICT,
+        "Operation conflict. This identity is bound to different input. Check the original attempt status; no replacement attempt was submitted.",
+        false,
+    )
+}
+
+/// Render the shared failure page pointing back at the link the attempt was
+/// acting on.
+fn back_to_link(
     admin: &RequireConsoleAdminOf,
     command: &Command,
     error: crate::WebError,
 ) -> Response {
-    match error {
-        crate::WebError::Restate(_) => unknown(admin, command),
-        crate::WebError::Conflict => render_attempt(
-            admin,
-            command,
-            StatusCode::CONFLICT,
-            "Operation conflict. This identity is bound to different input. Check the original attempt status; no replacement attempt was submitted.",
-            false,
+    error.into_response_with_recovery(
+        format!(
+            "/console/accounts/{}/links/{}",
+            admin.account.account_login,
+            command.link_id()
         ),
-        // Anything else is not about this attempt's outcome, so it renders the
-        // shared failure page pointing back at the link it was acting on.
-        e => e.into_response_with_recovery(
-            format!(
-                "/console/accounts/{}/links/{}",
-                admin.account.account_login,
-                command.link_id()
-            ),
-            "Back to link details",
-        ),
-    }
+        "Back to link details",
+    )
 }
 
 fn render_attempt(

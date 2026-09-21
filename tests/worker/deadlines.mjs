@@ -26,7 +26,7 @@ let watchdog;
 try {
   await Promise.race([
     (async () => {
-      const methods = ['github', 'call', 'authoritative_call', 'send'];
+      const methods = ['github', 'call', 'send'];
       await Promise.all(methods.map(async method => {
         const start = Date.now();
         const response = await mf.dispatchFetch(`https://worker.test/__fixture/${method}?original-operation`);
@@ -45,12 +45,12 @@ try {
       }));
       console.log(`PASS Worker ${phase} stalls bounded by production GitHub/Restate deadlines`);
       phase = 'healthy';
-      for (const method of ['call', 'authoritative_call', 'send']) {
+      for (const method of ['call', 'send']) {
         const response = await mf.dispatchFetch(`https://worker.test/__fixture/${method}?original-operation`);
         assert.equal(response.status, 200, await response.text());
       }
       const mutations = calls.filter(call => call.path !== '/github');
-      assert.equal(mutations.length, 6, 'one request per call, no automatic HTTP retry');
+      assert.equal(mutations.length, 4, 'one request per call, no automatic HTTP retry');
       assert.ok(mutations.every(call => JSON.parse(call.body).operation_id === 'original-operation'));
     })(),
     new Promise((_, reject) => { watchdog = setTimeout(() => reject(new Error('application deadline missing (35s watchdog)')), 35_000); }),

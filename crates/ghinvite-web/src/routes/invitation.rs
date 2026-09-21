@@ -72,7 +72,6 @@ async fn invitation_page(
     attempt::page(
         &state,
         &tower,
-        &state.admission,
         &session,
         &slug,
         query.operation_id.as_deref(),
@@ -120,7 +119,6 @@ async fn submit_request(
     attempt::submit(
         &state,
         &tower,
-        &state.admission,
         &session,
         &slug,
         &form.operation_id,

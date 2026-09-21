@@ -372,18 +372,19 @@ async fn pending_decision_remains_accessible_after_uninstall() {
 #[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
-    struct Lifecycle(Arc<Mutex<Vec<DecideRequest>>>);
-    #[async_trait::async_trait]
-    impl ghinvite_web::lifecycle::RequestLifecycle for Lifecycle {
-        async fn decide(&self, command: DecideRequest) -> ghinvite_web::Result<DecisionReceipt> {
-            self.0.lock().unwrap().push(command.clone());
-            Ok(DecisionReceipt { outcome: DecisionOutcome::Incompatible,
-                request: serde_json::from_value(serde_json::json!({"request_id": command.request_id,
-                    "link_id": command.link_id, "account_id": 42, "requester_id": 99,
-                    "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
-                    "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2})).unwrap() })
-        }
-    }
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let request = ghinvite_core::RequestId::new();
+    let link = ghinvite_core::InvitationLinkId::new();
+    let operation = ghinvite_core::RequestId::new();
+    let ingress = MockServer::start().await;
+    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "outcome": "incompatible", "request": {"request_id": request,
+            "link_id": link, "account_id": 42, "requester_id": 99,
+            "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
+            "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2}})))
+        .mount(&ingress)
+        .await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -393,20 +394,15 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
         .insert_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let calls = Arc::new(Mutex::new(vec![]));
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
         Arc::new(UnusedCommands),
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_request_lifecycle(Arc::new(Lifecycle(calls.clone())));
+    );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let csrf = common::csrf_token(&app, &cookie).await;
-    let request = ghinvite_core::RequestId::new();
-    let link = ghinvite_core::InvitationLinkId::new();
-    let operation = ghinvite_core::RequestId::new();
     // Missing projection is not evidence that the acknowledged request is absent.
     let response = app
         .clone()
@@ -429,7 +425,13 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
     let html = response_html(response).await;
     assert!(html.contains("expired"));
     assert!(!html.contains("Request approved"));
-    let calls = calls.lock().unwrap();
+    let calls = ingress
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| serde_json::from_slice::<DecideRequest>(&request.body).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].admin.user_id, 42);
     assert_eq!(calls[0].admin.account_id, 42);

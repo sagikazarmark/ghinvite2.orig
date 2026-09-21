@@ -6,7 +6,7 @@ pub mod commands;
 pub mod config;
 pub mod error;
 pub(crate) mod forms;
-pub mod lifecycle;
+pub mod link_authority;
 pub mod middleware;
 pub mod restate_client;
 pub mod routes;
@@ -20,6 +20,7 @@ pub mod wasm_compat;
 pub use commands::{GhinviteCommands, RestateCommands};
 pub use config::WebConfig;
 pub use error::{IngressFailure, OAuthFailure, Result, WebError};
+pub use link_authority::{AuthorityError, LinkAuthority};
 pub use restate_client::RestateClient;
 pub use state::AppState;
 
@@ -119,4 +120,3 @@ fn static_asset(content_type: &'static str, body: &'static str) -> axum::respons
     use axum::response::IntoResponse;
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
-pub mod admission;

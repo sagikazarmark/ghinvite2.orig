@@ -162,7 +162,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             "request_id": accepted["result"]["request_id"], "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 100, "user_id": 7}, "action": {"kind": "decline", "reason": "Admin-only context"}})).await;
         assert_eq!(decision["outcome"], "applied");
-        let browser = ghinvite_web::admission::RestateAdmission::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
+        let browser = ghinvite_web::LinkAuthority::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
         let metadata = browser.update_metadata(ghinvite_core::admission::UpdateMetadata {
             link_id, admin: ghinvite_core::storage::projection::AccountAdmin { account_id: 100, user_id: 7 },
             description: "Updated workshop".into(), internal_note: Some("Private updated note".into()),

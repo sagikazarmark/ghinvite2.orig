@@ -1,36 +1,83 @@
 //! Native forms for admission attempts, with optional SQL delivery observations.
-use crate::{WebError, admission::RestateAdmission, session::Session};
+use crate::link_authority::AuthorityError;
+use crate::{WebError, session::Session};
 use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use dioxus::prelude::*;
 use ghinvite_core::admission::{
-    AdmissionReceipt, AdmissionResult, Admit, Rejection, RequesterPage,
+    AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, Rejection, RequesterPage,
 };
 
 fn attempt_url(code: &str, id: &str) -> String {
     format!("/i/{code}?operation_id={id}")
 }
 
+/// Submitted attempt input that cannot become an [`Admit`] command.
+enum InvalidInput {
+    OperationId,
+    Justification,
+}
+
+impl From<InvalidInput> for WebError {
+    fn from(invalid: InvalidInput) -> Self {
+        WebError::BadRequest(match invalid {
+            InvalidInput::OperationId => "Missing or invalid operation ID. Return to the invitation link to start a fresh attempt.".into(),
+            InvalidInput::Justification => "Justification is too long.".into(),
+        })
+    }
+}
+
+/// Parse and normalize submitted input before any network call. The link is
+/// resolved later, so `link_id` is a placeholder.
+fn admit_command(
+    operation_id: &str,
+    requester_id: u64,
+    justification: Option<String>,
+) -> Result<Admit, InvalidInput> {
+    let operation_id = AdmissionOperationId::try_from(operation_id.to_owned())
+        .map_err(|_| InvalidInput::OperationId)?;
+    let mut command = Admit {
+        link_id: ghinvite_core::InvitationLinkId::new(),
+        operation_id,
+        requester_id,
+        justification,
+    };
+    command
+        .normalize()
+        .map_err(|_| InvalidInput::Justification)?;
+    Ok(command)
+}
+
 pub async fn page(
     state: &crate::AppState,
     tower: &tower_sessions::Session,
-    admission: &RestateAdmission,
     session: &Session,
     code: &str,
     operation: Option<&str>,
     fresh: bool,
 ) -> Response {
+    let authority = &state.link_authority;
+    let operation_id = match operation
+        .map(|id| AdmissionOperationId::try_from(id.to_owned()))
+        .transpose()
+    {
+        Ok(id) => id,
+        Err(_) => return safe_error(code, WebError::BadRequest("Invalid operation ID.".into())),
+    };
     let local = load_local(state, tower, session.user_id, code, operation).await;
-    let page = match admission.lookup(code, session.user_id, operation).await {
+    let page = match authority
+        .requester_page(code, session.user_id, operation_id)
+        .await
+    {
         Ok(page) => page,
         Err(error) => {
             if let Some(local) = local {
                 // The exact attempt may never have reached ingress. Recover
                 // current eligibility independently, without submitting it.
-                if matches!(error, WebError::NotFound)
-                    && let Ok(summary) = admission.lookup(code, session.user_id, None).await
+                if matches!(error, AuthorityError::Missing)
+                    && let Ok(summary) = authority.requester_page(code, session.user_id, None).await
                 {
                     let original = attempt_url(code, &String::from(local.operation_id.clone()));
                     let fresh = fresh && summary.can_start_fresh;
@@ -64,15 +111,8 @@ pub async fn page(
                         vec![],
                     );
                 }
-                if matches!(error, WebError::NotFound | WebError::Restate(_)) {
-                    return failed(
-                        session,
-                        code,
-                        &local,
-                        WebError::Restate(crate::error::IngressFailure::unreachable(
-                            "attempt status read failed",
-                        )),
-                    );
+                if matches!(error, AuthorityError::Missing | AuthorityError::Unknown(_)) {
+                    return unknown(session, code, &local);
                 }
             }
             return page_error(session, code, error);
@@ -120,7 +160,7 @@ pub async fn page(
         && request.state == ghinvite_core::RequestState::Approved
     {
         let progress = state
-            .request_lifecycle
+            .link_authority
             .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
                 link_id: page.link_id,
                 request_id: request.request_id,
@@ -173,12 +213,12 @@ pub async fn page(
 pub async fn submit(
     state: &crate::AppState,
     tower: &tower_sessions::Session,
-    admission: &RestateAdmission,
     session: &Session,
     code: &str,
     operation: &str,
     justification: Option<String>,
 ) -> Response {
+    let authority = &state.link_authority;
     if ghinvite_core::Slug::from_string(code.to_owned()).is_err() {
         return WebError::NotFound.into_response();
     }
@@ -187,26 +227,15 @@ pub async fn submit(
         justification.as_deref().unwrap_or_default(),
     )
     .is_some();
-    let mut command = match admission.command(
-        ghinvite_core::InvitationLinkId::new(),
-        operation,
-        session.user_id,
-        justification.clone(),
-    ) {
+    let mut command = match admit_command(operation, session.user_id, justification.clone()) {
         Ok(command) => command,
-        Err(WebError::BadRequest(_))
-            if invalid_justification
-                && ghinvite_core::admission::AdmissionOperationId::try_from(
-                    operation.to_owned(),
-                )
-                .is_ok() =>
-        {
-            let page = match admission.lookup(code, session.user_id, None).await {
+        Err(InvalidInput::Justification) if invalid_justification => {
+            let page = match authority.requester_page(code, session.user_id, None).await {
                 Ok(page) => page,
                 Err(error) => return page_error(session, code, error),
             };
             if !page.can_start_fresh {
-                return self::page(state, tower, admission, session, code, None, false).await;
+                return self::page(state, tower, session, code, None, false).await;
             }
             return render(
                 session,
@@ -221,23 +250,27 @@ pub async fn submit(
                 vec![],
             );
         }
-        Err(error) => return safe_error(code, error),
+        Err(invalid) => return safe_error(code, invalid.into()),
     };
     // Save a separate protected record before ingress. Each attempt has its own
     // key, so concurrent request-local session snapshots cannot erase it.
     if let Err(error) = save_local(state, tower, session.user_id, code, &command).await {
-        return failed(session, code, &command, error);
+        return match error {
+            WebError::Conflict => conflict(session, code, &command),
+            WebError::Session(_) => safe_error(code, error),
+            _ => unknown(session, code, &command),
+        };
     }
-    command.link_id = match admission.resolve(code).await {
+    command.link_id = match authority.resolve(code).await {
         Ok(id) => id,
         Err(error) => return failed(session, code, &command, error),
     };
     // Persist recovery input before admission. If the response is lost, the
     // link's per-user pointer and bookmark URL both recover this attempt.
-    let outcome = match admission.prepare(command.clone()).await {
+    let outcome = match authority.prepare(command.clone()).await {
         Ok(attempt) => match attempt.receipt {
             Some(receipt) => Ok(receipt),
-            None => admission.admit(command.clone()).await,
+            None => authority.admit(command.clone()).await,
         },
         Err(error) => Err(error),
     };
@@ -266,41 +299,47 @@ pub async fn submit(
     }
 }
 
-fn failed(session: &Session, code: &str, command: &Admit, error: WebError) -> Response {
+/// Render what the authority's answer means for this attempt.
+fn failed(session: &Session, code: &str, command: &Admit, error: AuthorityError) -> Response {
     match error {
-        WebError::BadRequest(_)
-        | WebError::NotFound
-        | WebError::Forbidden
-        | WebError::Session(_) => safe_error(code, error),
-        _ => {
-            let conflict = matches!(error, WebError::Conflict);
-            let id = String::from(command.operation_id.clone());
-            render(
-                session,
-                code,
-                &id,
-                command.justification.as_deref(),
-                None,
-                if conflict {
-                    "Operation conflict. This ID is bound to different input. Recover the original attempt to check its result and whether a fresh attempt is available."
-                } else {
-                    "Outcome unknown. Your request may have been accepted. Retry this same attempt or check its status."
-                },
-                Some(&attempt_url(code, &id)),
-                if conflict {
-                    FormMode::Closed
-                } else {
-                    FormMode::Retry
-                },
-                if conflict {
-                    StatusCode::CONFLICT
-                } else {
-                    StatusCode::BAD_GATEWAY
-                },
-                vec![],
-            )
-        }
+        AuthorityError::Invalid | AuthorityError::Missing => safe_error(code, error.into()),
+        AuthorityError::Conflict => conflict(session, code, command),
+        AuthorityError::Unknown(_) => unknown(session, code, command),
     }
+}
+
+/// The attempt's operation ID is bound to different input.
+fn conflict(session: &Session, code: &str, command: &Admit) -> Response {
+    let id = String::from(command.operation_id.clone());
+    render(
+        session,
+        code,
+        &id,
+        command.justification.as_deref(),
+        None,
+        "Operation conflict. This ID is bound to different input. Recover the original attempt to check its result and whether a fresh attempt is available.",
+        Some(&attempt_url(code, &id)),
+        FormMode::Closed,
+        StatusCode::CONFLICT,
+        vec![],
+    )
+}
+
+/// Whether the attempt was admitted is unknown; offer only the same attempt.
+fn unknown(session: &Session, code: &str, command: &Admit) -> Response {
+    let id = String::from(command.operation_id.clone());
+    render(
+        session,
+        code,
+        &id,
+        command.justification.as_deref(),
+        None,
+        "Outcome unknown. Your request may have been accepted. Retry this same attempt or check its status.",
+        Some(&attempt_url(code, &id)),
+        FormMode::Retry,
+        StatusCode::BAD_GATEWAY,
+        vec![],
+    )
 }
 
 fn local_key(
@@ -414,11 +453,10 @@ pub(crate) fn safe_error(code: &str, error: WebError) -> Response {
     error.into_response_with_recovery(format!("/i/{code}"), "Back to the invitation link")
 }
 
-fn page_error(session: &Session, code: &str, error: WebError) -> Response {
-    if matches!(error, WebError::NotFound) {
-        super::invitation_not_found_response(session)
-    } else {
-        safe_error(code, error)
+fn page_error(session: &Session, code: &str, error: AuthorityError) -> Response {
+    match error {
+        AuthorityError::Missing => super::invitation_not_found_response(session),
+        error => safe_error(code, error.into()),
     }
 }
 
