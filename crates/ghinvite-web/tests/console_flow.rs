@@ -874,11 +874,10 @@ async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
 }
 
 #[tokio::test]
-async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never_grant_access() {
-    for (cache_key, checked_at) in [
-        ("acme", Utc::now()),
-        ("42:9001", Utc::now() - Duration::seconds(61)),
-        ("42:9001", Utc::now() + Duration::minutes(5)),
+async fn expired_or_future_organization_authority_is_reverified_and_errors_never_grant_access() {
+    for checked_at in [
+        Utc::now() - Duration::seconds(61),
+        Utc::now() + Duration::minutes(5),
     ] {
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -890,14 +889,15 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
             .await
             .unwrap();
         let store = tower_sessions::MemoryStore::default();
-        // Seed an old persisted session; exercise all verification via HTTP.
+        // Seed a persisted session; exercise all verification via HTTP.
         let session = tower_sessions::Session::new(None, Arc::new(store.clone()), None);
         session
             .insert(
                 "ghinvite",
                 serde_json::json!({
                     "user_id": 42, "login": "octocat", "access_token": "u_xxx", "oauth_csrf": null,
-                    "admin_checks": {cache_key: {"is_admin": true, "checked_at": checked_at}}
+                    "csrf_token": "token", "return_to": null,
+                    "admin_checks": {"42:9001": {"is_admin": true, "checked_at": checked_at}}
                 }),
             )
             .await

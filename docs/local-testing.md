@@ -113,9 +113,10 @@ replaces the SSR form, and replaced with identity at every successful OAuth
 sign-in. Dynamic responses use `Cache-Control: private, no-store`. Tokens stay
 out of URLs and command payloads; rejected parser bodies are not logged/echoed.
 
-The session helper retains deterministic CSRF fallback coverage for injected
-test stores, but production protected storage rejects legacy unencrypted
-sessions outright. Users must restart sign-in after the protection upgrade.
+Every authenticated session stores its token. A stored authenticated session
+without one is malformed and confers no identity, like any unreadable record:
+protected storage treats it as absent, and the session helper reads it as
+signed out.
 
 Protected POST inventory:
 

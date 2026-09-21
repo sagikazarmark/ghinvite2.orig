@@ -72,7 +72,7 @@ const SEEK_KEY: &str = "(substr(r.created_at,1,19) || '.' || substr(CASE WHEN su
 /// One statement, at most 26 requests. Related links/repository scopes are
 /// materialized once per distinct page link, not once per request. No total count
 /// or all-account hydration. Missing users retain the historical ID fallback;
-/// links without a verifiable owner are excluded, as in the legacy queue.
+/// links without a verifiable owner are excluded.
 pub fn query(after: bool) -> String {
     let seek = if after {
         format!("AND {SEEK_KEY} > ?2")

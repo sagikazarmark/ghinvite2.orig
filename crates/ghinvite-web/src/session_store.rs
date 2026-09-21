@@ -50,7 +50,7 @@ fn backend_error(message: &str) -> Error {
 }
 
 fn authenticated(record: &Record) -> bool {
-    crate::session::from_record(record).is_ok_and(|session| session.is_authenticated())
+    crate::session::from_record(record).is_some_and(|session| session.is_authenticated())
 }
 
 impl Lifetime {
@@ -74,7 +74,7 @@ impl Lifetime {
         } else {
             ANONYMOUS_LIFETIME
         };
-        crate::session::from_record(record).is_ok()
+        crate::session::from_record(record).is_some()
             && self.authenticated == authenticated(record)
             && self.issued_at.checked_add(duration.whole_seconds()) == Some(self.deadline)
             && self.issued_at <= now().unix_timestamp()

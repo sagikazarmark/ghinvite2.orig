@@ -18,7 +18,6 @@ pub struct DailyRunInput {
 /// waits one out per account rather than once for every account at a time.
 #[derive(Debug, Deserialize, Serialize)]
 struct Candidate {
-    #[serde(flatten)]
     row: ghinvite_core::GithubInvitation,
     account_id: u64,
 }
@@ -26,7 +25,7 @@ struct Candidate {
 /// What one sweep step learned about an invitation: the settlement evidence, or
 /// the bounded wait GitHub asked for before it would answer at all.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(untagged)]
+#[serde(rename_all = "snake_case")]
 enum Observed {
     Throttled { throttled_for_secs: u64 },
     Evidence(Option<crate::settlement::ReconcileEvidence>),

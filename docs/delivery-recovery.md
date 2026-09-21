@@ -51,12 +51,11 @@ beyond Sending; identical event content replays, conflicting content fails the
 whole projection. Ordinary retry and `DeliveryRecovery/recover` repair missing
 history without another GitHub write, including after workflow retention cleanup.
 
-Pre-#64 receipts lack a reliable original confirmation time. On first create
-replay, the receiver journals a recovery observation time, retains it with
-`recovered: true`, and advances the receipt revision once. Historical SQL `Sent`
-rows with upstream IDs are likewise marked recovered. Console history labels
-these entries **Confirmed outcome observed during recovery**; their time is not
-the original send time. Existing audit history is preserved.
+A create outcome reconstructed from a SQL `Sent` row with an upstream ID (rather
+than observed from GitHub) is retained with `recovered: true`, and its
+`confirmed_at` is the recovery time. Console history labels these entries
+**Confirmed outcome observed during recovery**; their time is not the original
+send time. Existing audit history is preserved.
 
 The fence must be backed up alongside Restate and must never be reset or expired.
 Independent database restore requires closing writes and reconciling all
@@ -177,9 +176,9 @@ prerequisites do not block link commands or workflow submission.
 
 For #64, `cargo test -p ghinvite-storage-sqlx --test sqlx_suite` and `--test projection`
 verify all confirmed audit outcomes, uncertain/blocked exclusion, stale event
-delivery, immutable-content conflicts, old serialized receipt compatibility,
-audit-write rollback and retry. `retained_delivery` checks the same history through
-real Restate, including stable recovery observations and workflow cleanup.
+delivery, immutable-content conflicts, audit-write rollback and retry.
+`retained_delivery` checks the same history through real Restate, including
+workflow cleanup.
 `npm run test:admission --prefix tests/worker` runs the shared conformance scenario
 on actual D1, injects audit insertion failures into D1 batches, and checks events
 from actual Worker GitHub 201/204/422 delivery. Console HTTP

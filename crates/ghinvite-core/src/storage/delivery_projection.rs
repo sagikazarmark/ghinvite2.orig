@@ -45,8 +45,9 @@ pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
     } else {
         serde_json::Value::Null
     };
-    // Preserve the original typed receipt encoding: existing SQL receipts use
-    // struct field order, and SQLite's immutable JSON comparison is textual.
+    // Always use the typed receipt encoding (struct field order): a replayed
+    // receipt must match the stored text, because SQLite's immutable JSON
+    // comparison is textual.
     let receipt =
         serde_json::to_string(receipt).map_err(|e| super::Error::Corrupt(e.to_string()))?;
     Ok(format!("{{\"receipt\":{receipt},\"event\":{event}}}"))

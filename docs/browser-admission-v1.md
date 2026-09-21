@@ -74,10 +74,10 @@ provides manual recovery; terminal status stops automatic refresh.
 
 `requester_page.can_start_fresh` is advisory, derived from authoritative link
 guardrails and the requester's current blocker (even when recovering an older
-receipt). Older responses missing this field default to false. Fresh inactive
-visits return the generic invitation-flow 404; existing authorized attempts and
-requests remain recoverable. Submission still reaches the replay lookup before
-admission eligibility, independently of page-time hints.
+receipt). Fresh inactive visits return the generic invitation-flow 404;
+existing authorized attempts and requests remain recoverable. Submission still
+reaches the replay lookup before admission eligibility, independently of
+page-time hints.
 
 ## Link routing and account admins
 
@@ -93,7 +93,8 @@ expiration across retries. Current GitHub-derived account authorization and
 repository selection still run before creation. Metadata/detail/revoke use the
 link object with immutable account/user assertions rather than projected link
 authorization. Metadata has a separate optional current snapshot: retained
-creation input never changes, and older snapshot encodings remain readable.
+creation input never changes; the snapshot carries metadata only once it has
+been edited.
 The shared SQLx/D1 projection updates metadata using monotonic link revisions.
 
 ## Verification

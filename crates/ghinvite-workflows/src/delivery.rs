@@ -167,14 +167,13 @@ impl GithubCreate for GithubCreateImpl {
                 "unsupported command version",
             ));
         }
-        let mut previous = ctx
+        let previous = ctx
             .get::<Json<CreateReceipt>>("v1/receipt")
             .await?
             .map(|r| r.0);
-        if let Some(receipt) = &mut previous
+        if let Some(receipt) = &previous
             && receipt.outcome.confirmed()
         {
-            retain_recovery_time(&ctx, receipt).await?;
             ctx.run(|| async { project(&self.state, receipt).await })
                 .name("repair_create_projection")
                 .await?;
@@ -276,13 +275,8 @@ impl GithubCreate for GithubCreateImpl {
 
 /// One create attempt's receipt, plus the bounded wait to recheck after when
 /// GitHub throttled it rather than deciding it.
-///
-/// The receipt is flattened so this reads back from journals written before
-/// throttling was classified: their `guarded_github_create` value is a bare
-/// receipt, which deserializes here with no wait.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Attempt {
-    #[serde(flatten)]
     receipt: CreateReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     throttled_for_secs: Option<u64>,
@@ -570,23 +564,6 @@ fn permission_matches(value: &str, permission: ghinvite_core::Permission) -> boo
             }
 }
 
-async fn retain_recovery_time(
-    ctx: &ObjectContext<'_>,
-    receipt: &mut CreateReceipt,
-) -> Result<(), TerminalError> {
-    if receipt.outcome.confirmed() && receipt.confirmed_at.is_none() {
-        let Json(at) = ctx
-            .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
-            .name("observe_retained_create_outcome")
-            .await?;
-        receipt.confirmed_at = Some(at);
-        receipt.recovered = true;
-        receipt.revision += 1;
-        ctx.set("v1/receipt", Json(receipt.clone()));
-    }
-    Ok(())
-}
-
 async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), HandlerError> {
     let command = &receipt.command;
     if let Some(existing) = state
@@ -806,37 +783,6 @@ mod tests {
         // and no PUT was attempted, so the fence is untouched.
         assert!(fence_is_open(&state, &command).await);
         mock.assert_exhausted();
-    }
-
-    #[test]
-    fn receipt_journaled_before_throttling_reads_back_with_no_wait() {
-        let receipt = serde_json::json!({
-            "command": {
-                "version": 1,
-                "invitation_id": GithubInvitationId::new(),
-                "link_id": ghinvite_core::InvitationLinkId::new(),
-                "request_id": ghinvite_core::RequestId::new(),
-                "approval_id": "approval-1",
-                "account_id": 100,
-                "installation_id": 9,
-                "requester_id": 8,
-                "repo_id": 10,
-                "repo_full_name": "acme/api",
-                "permission": "push",
-                "approved_at": "2026-05-04T13:00:00Z",
-            },
-            "outcome": {"kind": "created", "upstream_id": 9977},
-            "revision": 1,
-            "confirmed_at": "2026-05-04T13:01:00Z",
-        });
-        let attempted: Attempt = serde_json::from_value(receipt.clone()).unwrap();
-        assert_eq!(attempted.throttled_for_secs, None);
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Created { upstream_id: 9977 }
-        );
-        // And a receipt with no wait still journals in the old shape.
-        assert_eq!(serde_json::to_value(&attempted).unwrap(), receipt);
     }
 
     /// Seed the projections `attempt` reads, then burn the delivery claim the

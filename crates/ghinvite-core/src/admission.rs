@@ -94,8 +94,7 @@ pub struct RequesterPage {
     pub permission: Permission,
     pub approval_required: bool,
     /// Advisory only: current link guardrails and requester suppression permit
-    /// a fresh attempt. Missing on older responses means do not offer a form.
-    #[serde(default)]
+    /// a fresh attempt.
     pub can_start_fresh: bool,
     pub attempt: Option<Attempt>,
     pub request: Option<crate::storage::projection::RequestSnapshot>,

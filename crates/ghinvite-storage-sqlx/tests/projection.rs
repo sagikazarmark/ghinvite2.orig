@@ -97,19 +97,13 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
         })).unwrap();
-        // Pre-#64 rows used typed serde encoding rather than a sorted JSON Value.
-        let mut legacy = receipt.clone();
-        legacy.confirmed_at = None;
-        sqlx::query(
-            "INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?, ?, ?)",
-        )
-        .bind(id.to_string())
-        .bind(receipt.command.request_id.to_string())
-        .bind(serde_json::to_string(&legacy).unwrap())
-        .execute(&fault)
-        .await
-        .unwrap();
-        storage.project_delivery(&legacy).await.unwrap();
+        // An earlier unconfirmed observation is already projected.
+        let unknown = ghinvite_core::delivery::CreateReceipt {
+            outcome: ghinvite_core::delivery::CreateOutcome::OutcomeUnknown,
+            confirmed_at: None,
+            ..receipt.clone()
+        };
+        storage.project_delivery(&unknown).await.unwrap();
         let receipt = ghinvite_core::delivery::CreateReceipt {
             revision: 2,
             ..receipt
@@ -122,7 +116,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .unwrap()
                 .iter()
-                .any(|row| row == &legacy)
+                .any(|row| row == &unknown)
         );
         assert!(
             storage

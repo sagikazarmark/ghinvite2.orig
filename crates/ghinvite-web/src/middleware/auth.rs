@@ -27,8 +27,6 @@ pub async fn check_admin(
     if account.account_type == ghinvite_core::AccountType::User {
         return Ok(session.user_id == account.account_id);
     }
-    // A GitHub login cannot contain ':', so legacy login-keyed entries cannot
-    // collide with an identity-bound key and are never trusted.
     let cache_key = format!("{}:{}", session.user_id, account.account_id);
     let now = Utc::now();
     if let Some(cached) = session.admin_checks.get(&cache_key)
