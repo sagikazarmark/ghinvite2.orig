@@ -24,13 +24,6 @@ struct LostAcknowledgement {
 }
 #[async_trait::async_trait]
 impl ProjectionStorage for LostAcknowledgement {
-    async fn get_projected_request(
-        &self,
-        id: ghinvite_core::RequestId,
-    ) -> ghinvite_core::storage::Result<Option<ghinvite_core::storage::projection::RequestSnapshot>>
-    {
-        self.storage.get_projected_request(id).await
-    }
     async fn apply_transition(
         &self,
         envelope: &ProjectionEnvelope,
@@ -178,7 +171,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             if body["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["last_failure"].as_str().is_some_and(|s| s.contains("injected audit failure")))) { break; }
             sleep(Duration::from_millis(100)).await;
         }
-        assert!(storage.list_requests_for_link(link_id).await.unwrap().is_empty());
+        assert!(storage.request_history(100, link_id, None).await.unwrap().requests.is_empty());
         assert!(storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap().events.is_empty());
         storage.debug_set_projection_invariant_failure(true).await.unwrap();
         storage.debug_set_audit_failure(false).await.unwrap();
@@ -192,11 +185,11 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             if body["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["last_failure"].as_str().is_some_and(|s| s.contains("projection invariant")))) { break; }
             sleep(Duration::from_millis(100)).await;
         }
-        assert!(storage.list_requests_for_link(link_id).await.unwrap().is_empty());
+        assert!(storage.request_history(100, link_id, None).await.unwrap().requests.is_empty());
         storage.debug_set_projection_invariant_failure(false).await.unwrap();
         loop {
             let link = storage.get_invitation_link_by_id(link_id).await.unwrap();
-            let requests = storage.list_requests_for_link(link_id).await.unwrap();
+            let requests = storage.request_history(100, link_id, None).await.unwrap().requests;
             let events = storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap();
             if link.as_ref().is_some_and(|l| l.revoked_at.is_some() && l.description == "Updated workshop") && requests.len() == 1 && events.events.len() == 6
                 && acknowledgements.committed_attempts.load(Ordering::SeqCst) >= 5 {
@@ -208,8 +201,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
                 assert_eq!(requests[0].decided_by, Some(7));
                 assert_eq!(requests[0].decline_reason.as_deref(), Some("Admin-only context"));
                 assert_eq!(serde_json::to_value(requests[0].decided_at).unwrap(), decision["request"]["decision"]["effective_at"]);
-                let projected = storage.get_projected_request(requests[0].id).await.unwrap().unwrap();
-                assert_eq!(serde_json::to_value(projected.decision_deadline).unwrap(), accepted["result"]["decision_deadline"]);
+                assert_eq!(serde_json::to_value(requests[0].decision_deadline).unwrap(), accepted["result"]["decision_deadline"]);
                 let revisions = acknowledgements.committed_revisions.lock().unwrap().clone();
                 assert!(revisions.is_sorted(), "link transitions committed out of order: {revisions:?}");
                 break;

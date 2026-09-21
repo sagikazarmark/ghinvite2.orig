@@ -44,11 +44,11 @@ try {
   for (const user of [42, 99]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   let request = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
-  await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-    VALUES (?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture')`).bind(link).run();
+  await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+    VALUES (?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture',1)`).bind(link).run();
   await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(link).run();
-  await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline)
-    VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z')`).bind(request, link).run();
+  await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline,projection_revision)
+    VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z',1)`).bind(request, link).run();
 
   const login = await mf.dispatchFetch('https://queue.test/login', { redirect: 'manual' });
   const state = new URL(login.headers.get('location')).searchParams.get('state');
@@ -178,8 +178,8 @@ try {
   assert.ok(first.html.includes('>Deadline fixture</a>'));
   // Work stays page-bounded as another account and terminal history grow.
   const otherLink = '01ARZ3NDEKTSV4RRFFQ69G5FD0';
-  await db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-    VALUES(?,'OtherQueue000001',1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account')`).bind(otherLink).run();
+  await db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+    VALUES(?,'OtherQueue000001',1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account',1)`).bind(otherLink).run();
   await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
     `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,projection_revision)
      VALUES(?,?,99,?,'2025-01-01T00:00:00Z',1)`
@@ -229,8 +229,8 @@ try {
     db.prepare('PRAGMA defer_foreign_keys=ON'),
     db.prepare('DELETE FROM invitation_links WHERE id=?').bind(link),
     db.prepare('UPDATE invitation_requests SET queue_account_id=NULL WHERE invitation_link_id=?').bind(link),
-    db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-      VALUES(?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored')`).bind(link),
+    db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+      VALUES(?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored',1)`).bind(link),
   ]);
   assert.ok((await page()).html.includes('>Restored</a>'));
   const failed = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', {

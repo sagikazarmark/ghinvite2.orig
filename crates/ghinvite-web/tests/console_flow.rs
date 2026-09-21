@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
 use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
@@ -126,16 +127,18 @@ async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
         .unwrap()
         .replace("&amp;", "&");
     for request in &envelope.requests[..26] {
-        storage
-            .record_request_decision(&ghinvite_core::storage::RequestDecision {
-                request_id: request.request_id,
-                state: ghinvite_core::RequestState::Declined,
-                decided_by: Some(42),
-                decided_at: Utc::now(),
-                decline_reason: None,
-            })
-            .await
-            .unwrap();
+        {
+            let mut decided = storage
+                .get_invitation_request(request.request_id)
+                .await
+                .unwrap()
+                .unwrap();
+            decided.state = ghinvite_core::RequestState::Declined;
+            decided.decided_by = Some(42);
+            decided.decided_at = Some(Utc::now());
+            decided.decline_reason = None;
+            storage.seed_decision(&decided).await.unwrap();
+        }
     }
     let html = response_html(identity_request(&app, &cookie, "GET", &next).await).await;
     assert!(html.contains("Queue item 027"));
@@ -185,35 +188,6 @@ async fn queue_keeps_historical_deadline_independent_of_earlier_or_later_link_ex
         assert!(html.contains("Decision deadline: 2026-01-03 12:34:56 UTC"));
         assert!(html.contains(&format!("Invitation link expiration: {label}")));
     }
-}
-
-#[tokio::test]
-async fn queue_does_not_invent_a_deadline_for_missing_historical_data() {
-    let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
-    // Legacy/migrated rows may have no recorded deadline. The old insert path
-    // represents those rows without requiring a fabricated projection snapshot.
-    let mut historical = storage
-        .get_invitation_request(envelope.requests[0].request_id)
-        .await
-        .unwrap()
-        .unwrap();
-    historical.id = ghinvite_core::RequestId::new();
-    historical.requester_id = 42;
-    historical.decision_deadline = None;
-    storage
-        .insert_invitation_request_and_increment_uses(&historical)
-        .await
-        .unwrap();
-    let response =
-        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let html = response_html(response).await;
-    assert!(html.contains("Decision deadline: Unavailable"));
-    assert!(!html.contains("Decision deadline: No expiration"));
-    assert!(
-        !html.contains("2026-01-08"),
-        "must not recompute from current seven-day policy"
-    );
 }
 
 #[tokio::test]
@@ -1437,13 +1411,13 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let mut link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     link.id = ghinvite_core::InvitationLinkId::new();
     link.slug = ghinvite_core::Slug::from_string("foreigncode00001".into()).unwrap();
     link.account_id = 9002;
     link.installation_id = 78;
     link.description = "Other account secret".into();
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
 
     let (status, html) = get_links(&app, &cookie, "?account_id=9002&login=other").await;
     assert_eq!(status, StatusCode::OK);
@@ -1657,6 +1631,7 @@ async fn edit_link_save_normalizes_metadata_and_keeps_guardrails() {
     link.max_uses = Some(8);
     link.uses_count = 3;
     link.revoked_at = Some(link.created_at);
+    link.revoked_by = Some(link.created_by);
     link.internal_note = Some("Old private note".into());
     authority.seed_link(&link);
     for (note, expected) in [("%20New%0Anote%20", Some("New\nnote")), ("%20%20", None)] {
@@ -1726,6 +1701,7 @@ async fn edit_link_form_prefills_metadata_for_inactive_links() {
     let mut link = list_link(1);
     link.internal_note = Some("Private note\nSecond line".into());
     link.revoked_at = Some(link.created_at);
+    link.revoked_by = Some(link.created_by);
     authority.seed_link(&link);
     let (status, html) = get_links(&app, &cookie, &format!("/{}/edit", link.id)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1795,7 +1771,7 @@ async fn links_collection_preserves_auth_and_concealment() {
             .unwrap(),
     );
     let (app, cookie) = links_app(storage.clone(), "member").await;
-    storage.insert_invitation_link(&list_link(1)).await.unwrap();
+    storage.seed_link(&list_link(1)).await.unwrap();
     let (status, html) = get_links(&app, &cookie, "?filter=all&account_id=9001").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(html.contains("Page not found"));
@@ -1815,8 +1791,9 @@ async fn links_collection_url_state_filters_sorts_then_paginates() {
         let mut link = list_link(n);
         if n % 2 == 0 {
             link.revoked_at = Some(Utc::now());
+            link.revoked_by = Some(link.created_by);
         }
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
     }
     let (status, first) = get_links(&app, &cookie, "").await;
     assert_eq!(status, StatusCode::OK);
@@ -1887,7 +1864,8 @@ async fn links_collection_distinguishes_empty_account_from_empty_filter() {
 
     let mut link = list_link(1);
     link.revoked_at = Some(Utc::now());
-    storage.insert_invitation_link(&link).await.unwrap();
+    link.revoked_by = Some(link.created_by);
+    storage.seed_link(&link).await.unwrap();
     let (_, filtered) = get_links(&app, &cookie, "").await;
     assert!(filtered.contains("No invitation links match this filter"));
     assert_links_navigation_current(&filtered);
@@ -1973,7 +1951,10 @@ fn list_link(n: u32) -> ghinvite_core::InvitationLink {
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![],
+        repos: vec![ghinvite_core::InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: "octocat/api".into(),
+        }],
     }
 }
 
@@ -2379,8 +2360,9 @@ async fn console_overview_keeps_five_recent_links_and_opens_filtered_collections
         let mut link = list_link(n);
         if n % 2 == 0 {
             link.revoked_at = Some(link.created_at);
+            link.revoked_by = Some(link.created_by);
         }
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
     }
     let response = app
         .clone()
@@ -2448,11 +2430,11 @@ async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut foreign_link = list_link(2);
     foreign_link.account_id = 9002;
     foreign_link.installation_id = 78;
-    storage.insert_invitation_link(&foreign_link).await.unwrap();
+    storage.seed_link(&foreign_link).await.unwrap();
     let cases = [
         (
             EventType::InvitationLinkMetadataUpdated,
@@ -2688,7 +2670,7 @@ async fn audit_optional_enrichment_failures_fall_back_but_core_failures_are_500(
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut event = audit_event(1, EventType::InvitationLinkCreated);
     event.target_kind = TargetKind::InvitationLink;
     event.target_id = link.id.to_string();

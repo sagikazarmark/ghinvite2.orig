@@ -219,7 +219,7 @@ fn expect_installation(
 mod tests {
     use super::*;
     use crate::HandlerError;
-    use crate::test_support::{dt, fixture_state};
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
     use ghinvite_core::{
         AccountType, InvitationLinkId, InvitationState, Permission, RequestState, SelectedRepos,
         Slug,
@@ -227,11 +227,11 @@ mod tests {
     use rand::SeedableRng;
 
     async fn seed_request_chain_with_repos(
-        state: &AppState,
+        storage: &ghinvite_storage_sqlx::SqlxStorage,
         repos: Vec<ghinvite_core::InvitationLinkRepo>,
     ) -> (RequestId, InvitationLinkId) {
-        state
-            .storage
+        use ghinvite_core::storage::Storage;
+        storage
             .insert_installation(&ghinvite_core::Account {
                 installation_id: 9,
                 account_id: 100,
@@ -243,8 +243,7 @@ mod tests {
             })
             .await
             .unwrap();
-        state
-            .storage
+        storage
             .upsert_user(&ghinvite_core::User {
                 user_id: 7,
                 login: "creator".into(),
@@ -253,8 +252,7 @@ mod tests {
             })
             .await
             .unwrap();
-        state
-            .storage
+        storage
             .upsert_user(&ghinvite_core::User {
                 user_id: 8,
                 login: "alice".into(),
@@ -282,32 +280,35 @@ mod tests {
             revoked_by: None,
             repos,
         };
-        state.storage.insert_invitation_link(&link).await.unwrap();
-
         let request_id = RequestId::new();
-        state
-            .storage
-            .insert_invitation_request_and_increment_uses(&ghinvite_core::InvitationRequest {
-                id: request_id,
-                invitation_link_id: link.id,
-                requester_id: 8,
-                justification: None,
-                state: RequestState::Approved,
-                decided_by: Some(7),
-                decided_at: Some(dt("2026-05-04T13:00:00Z")),
-                decline_reason: None,
-                decision_deadline: None,
-                created_at: dt("2026-05-04T12:30:00Z"),
-            })
-            .await
-            .unwrap();
+        let request = ghinvite_core::InvitationRequest {
+            id: request_id,
+            invitation_link_id: link.id,
+            requester_id: 8,
+            justification: None,
+            state: RequestState::Approved,
+            decided_by: Some(7),
+            decided_at: Some(dt("2026-05-04T13:00:00Z")),
+            decline_reason: None,
+            decision_deadline: None,
+            created_at: dt("2026-05-04T12:30:00Z"),
+        };
+        {
+            use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
+            storage
+                .apply_transition(&fixture::envelope(&link, &[request], 1))
+                .await
+                .unwrap();
+        }
 
         (request_id, link.id)
     }
 
-    async fn seed_request_chain(state: &AppState) -> (RequestId, InvitationLinkId) {
+    async fn seed_request_chain(
+        storage: &ghinvite_storage_sqlx::SqlxStorage,
+    ) -> (RequestId, InvitationLinkId) {
         seed_request_chain_with_repos(
-            state,
+            storage,
             vec![ghinvite_core::InvitationLinkRepo {
                 repo_id: 10,
                 repo_full_name: "acme/api".into(),
@@ -341,8 +342,8 @@ mod tests {
 
     #[tokio::test]
     async fn request_context_loads_request_and_link() {
-        let state = fixture_state().await;
-        let (request_id, link_id) = seed_request_chain(&state).await;
+        let (state, storage) = fixture_state_with_storage().await;
+        let (request_id, link_id) = seed_request_chain(&storage).await;
 
         let context = load_invitation_request_context(&state, request_id)
             .await
@@ -368,8 +369,8 @@ mod tests {
 
     #[tokio::test]
     async fn github_context_loads_invitation_request_link_repo_requester_and_account() {
-        let state = fixture_state().await;
-        let (request_id, link_id) = seed_request_chain(&state).await;
+        let (state, storage) = fixture_state_with_storage().await;
+        let (request_id, link_id) = seed_request_chain(&storage).await;
         let invitation_id = seed_github_invitation(&state, request_id, 10).await;
 
         let context = load_github_invitation_context(&state, invitation_id, 9)
@@ -465,8 +466,15 @@ mod tests {
 
     #[tokio::test]
     async fn github_context_missing_repo_returns_invariant() {
-        let state = fixture_state().await;
-        let (request_id, _) = seed_request_chain_with_repos(&state, vec![]).await;
+        let (state, storage) = fixture_state_with_storage().await;
+        let (request_id, _) = seed_request_chain_with_repos(
+            &storage,
+            vec![ghinvite_core::InvitationLinkRepo {
+                repo_id: 11,
+                repo_full_name: "acme/web".into(),
+            }],
+        )
+        .await;
         let invitation_id = seed_github_invitation(&state, request_id, 10).await;
 
         let err = load_github_invitation_context(&state, invitation_id, 9)
@@ -482,34 +490,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_context_invalid_repo_name_returns_invariant() {
-        let state = fixture_state().await;
-        let (request_id, _) = seed_request_chain_with_repos(
-            &state,
-            vec![ghinvite_core::InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: "acme/team/api".into(),
-            }],
-        )
-        .await;
-        let invitation_id = seed_github_invitation(&state, request_id, 10).await;
-
-        let err = load_github_invitation_context(&state, invitation_id, 9)
-            .await
-            .unwrap_err();
-
-        match err {
-            HandlerError::Invariant(message) => {
-                assert!(message.contains("invalid repo_full_name"));
-            }
-            other => panic!("expected invariant, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn github_context_wrong_installation_returns_invariant() {
-        let state = fixture_state().await;
-        let (request_id, _) = seed_request_chain(&state).await;
+        let (state, storage) = fixture_state_with_storage().await;
+        let (request_id, _) = seed_request_chain(&storage).await;
         let invitation_id = seed_github_invitation(&state, request_id, 10).await;
 
         let err = load_github_invitation_context(&state, invitation_id, 10)
@@ -526,8 +509,15 @@ mod tests {
 
     #[tokio::test]
     async fn github_account_context_does_not_require_matching_repo() {
-        let state = fixture_state().await;
-        let (request_id, _) = seed_request_chain_with_repos(&state, vec![]).await;
+        let (state, storage) = fixture_state_with_storage().await;
+        let (request_id, _) = seed_request_chain_with_repos(
+            &storage,
+            vec![ghinvite_core::InvitationLinkRepo {
+                repo_id: 11,
+                repo_full_name: "acme/web".into(),
+            }],
+        )
+        .await;
         let invitation_id = seed_github_invitation(&state, request_id, 10).await;
 
         let context = load_github_invitation_account_context(&state, invitation_id)

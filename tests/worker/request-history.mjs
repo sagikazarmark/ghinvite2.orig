@@ -32,8 +32,8 @@ try {
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   const foreign = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
   for (const [id, account, code] of [[link, 42, 'HistoryCode00001'], [foreign, 999, 'ForeignCode00001']]) {
-    await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-      VALUES (?,?,1,?,42,'2026-01-01T00:00:00Z','pull',1,'History fixture')`).bind(id, code, account).run();
+    await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+      VALUES (?,?,1,?,42,'2026-01-01T00:00:00Z','pull',1,'History fixture',1)`).bind(id, code, account).run();
     await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(id).run();
   }
   const login = await mf.dispatchFetch('https://history.test/login', { redirect: 'manual' });
@@ -54,8 +54,8 @@ try {
   const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
   for (let n = 0; n < 53; n++) {
     ids[n] = '0'.repeat(24) + alphabet[Math.floor(n / 32)] + alphabet[n % 32];
-    await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decided_at,decline_reason)
-      VALUES (?,?,42,'declined',?,'2026-01-02T00:00:00Z','private decision')`)
+    await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decided_at,decline_reason,projection_revision)
+      VALUES (?,?,42,'declined',?,'2026-01-02T00:00:00Z','private decision',1)`)
       .bind(ids[n], n === 52 ? foreign : link, n === 51 ? '2026-01-01T00:00:00.000000001Z' : n % 2 ? '2026-01-01T00:00:00+00:00' : '2026-01-01T00:00:00Z').run();
   }
   const found = [];

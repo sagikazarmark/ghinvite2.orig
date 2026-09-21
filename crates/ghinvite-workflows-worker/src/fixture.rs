@@ -67,7 +67,7 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/request" => storage
-            .get_projected_request(serde_json::from_value(input).map_err(super::worker_err)?)
+            .get_invitation_request(serde_json::from_value(input).map_err(super::worker_err)?)
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/audit" => storage

@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::AuditEvent;
-use ghinvite_core::storage::{GithubInvitationUpdate, RequestDecision, Result, Storage};
+use ghinvite_core::storage::{Result, Storage};
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
     InvitationRequest, RequestId, SelectedRepos, User,
@@ -72,21 +72,6 @@ unsafe impl Sync for D1Storage {}
 
 #[async_trait]
 impl ghinvite_core::storage::projection::ProjectionStorage for D1Storage {
-    async fn get_projected_request(
-        &self,
-        id: ghinvite_core::RequestId,
-    ) -> Result<Option<ghinvite_core::storage::projection::RequestSnapshot>> {
-        wasm_send(async {
-            #[derive(serde::Deserialize)]
-            struct Row { projection_content: String }
-            let row = self.db.prepare("SELECT projection_content FROM invitation_requests WHERE id = ?1 AND projection_revision IS NOT NULL")
-                .bind(&[JsValue::from_str(&id.to_string())]).map_err(bind_err)?
-                .first::<Row>(None).await.map_err(classify_d1_error)?;
-            row.map(|row| serde_json::from_str(&row.projection_content)
-                .map_err(|_| ghinvite_core::storage::Error::Corrupt("projected request".into()))).transpose()
-        }).await
-    }
-
     async fn apply_transition(
         &self,
         envelope: &ghinvite_core::storage::projection::ProjectionEnvelope,
@@ -553,166 +538,6 @@ impl Storage for D1Storage {
 
     // -------- invitation links --------
 
-    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()> {
-        // Pre-compute all values that need references to `link` before entering wasm_send.
-        let id_str = link.id.to_string();
-        let slug_str = link.slug.as_str().to_string();
-        let installation_id = link.installation_id;
-        let account_id = link.account_id;
-        let created_by = link.created_by;
-        let created_at = link.created_at.to_rfc3339();
-        let expires_at = link
-            .expires_at
-            .map(|d| JsValue::from_str(&d.to_rfc3339()))
-            .unwrap_or(JsValue::null());
-        let max_uses = link
-            .max_uses
-            .map(|m| JsValue::from_f64(m as f64))
-            .unwrap_or(JsValue::null());
-        let uses_count = link.uses_count;
-        let permission_str = link.permission.to_string();
-        let approval_required = link.approval_required;
-        let description = link.description.clone();
-        let internal_note = link
-            .internal_note
-            .as_deref()
-            .map(JsValue::from_str)
-            .unwrap_or(JsValue::null());
-        let revoked_at = link
-            .revoked_at
-            .map(|d| JsValue::from_str(&d.to_rfc3339()))
-            .unwrap_or(JsValue::null());
-        let revoked_by = link
-            .revoked_by
-            .map(|r| JsValue::from_f64(r as f64))
-            .unwrap_or(JsValue::null());
-        let repos: Vec<(String, u64, String)> = link
-            .repos
-            .iter()
-            .map(|r| (id_str.clone(), r.repo_id, r.repo_full_name.clone()))
-            .collect();
-
-        wasm_send(async {
-            let mut stmts = Vec::new();
-
-            stmts.push(
-                self.db
-                    .prepare(
-                        "INSERT INTO invitation_links
-                           (id, slug, installation_id, account_id, created_by, created_at,
-                            expires_at, max_uses, uses_count, permission, approval_required,
-                            description, internal_note, revoked_at, revoked_by)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                    )
-                    .bind(&[
-                        JsValue::from_str(&id_str),
-                        JsValue::from_str(&slug_str),
-                        JsValue::from_f64(installation_id as f64),
-                        JsValue::from_f64(account_id as f64),
-                        JsValue::from_f64(created_by as f64),
-                        JsValue::from_str(&created_at),
-                        expires_at,
-                        max_uses,
-                        JsValue::from_f64(uses_count as f64),
-                        JsValue::from_str(&permission_str),
-                        JsValue::from_f64(if approval_required { 1.0 } else { 0.0 }),
-                        JsValue::from_str(&description),
-                        internal_note,
-                        revoked_at,
-                        revoked_by,
-                    ])
-                    .map_err(bind_err)?,
-            );
-
-            for (link_id, repo_id, repo_full_name) in &repos {
-                stmts.push(
-                    self.db
-                        .prepare(
-                            "INSERT INTO invitation_link_repos (invitation_link_id, repo_id, repo_full_name)
-                             VALUES (?1, ?2, ?3)",
-                        )
-                        .bind(&[
-                            JsValue::from_str(link_id),
-                            JsValue::from_f64(*repo_id as f64),
-                            JsValue::from_str(repo_full_name),
-                        ])
-                        .map_err(bind_err)?,
-                );
-            }
-
-            self.db.batch(stmts).await.map_err(classify_d1_error)?;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn update_invitation_link_metadata(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-        description: &str,
-        internal_note: Option<&str>,
-    ) -> Result<()> {
-        let id_str = id.to_string();
-        wasm_send(async {
-            let result = self
-                .db
-                .prepare(
-                    "UPDATE invitation_links SET description = ?1, internal_note = ?2
-                     WHERE account_id = ?3 AND id = ?4",
-                )
-                .bind(&[
-                    JsValue::from_str(description),
-                    internal_note
-                        .map(JsValue::from_str)
-                        .unwrap_or(JsValue::NULL),
-                    JsValue::from_f64(account_id as f64),
-                    JsValue::from_str(&id_str),
-                ])
-                .map_err(bind_err)?
-                .run()
-                .await
-                .map_err(classify_d1_error)?;
-            if rows_changed(&result)? == 0 {
-                return Err(ghinvite_core::storage::Error::NotFound);
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    async fn mark_invitation_link_revoked(
-        &self,
-        id: InvitationLinkId,
-        by_user: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()> {
-        let id_str = id.to_string();
-        let when_str = when.to_rfc3339();
-        wasm_send(async {
-            let result = self
-                .db
-                .prepare(
-                    "UPDATE invitation_links SET revoked_at = ?1, revoked_by = ?2
-                     WHERE id = ?3 AND revoked_at IS NULL",
-                )
-                .bind(&[
-                    JsValue::from_str(&when_str),
-                    JsValue::from_f64(by_user as f64),
-                    JsValue::from_str(&id_str),
-                ])
-                .map_err(bind_err)?
-                .run()
-                .await
-                .map_err(classify_d1_error)?;
-            if rows_changed(&result)? == 0 {
-                return Err(ghinvite_core::storage::Error::NotFound);
-            }
-            Ok(())
-        })
-        .await
-    }
-
     async fn get_invitation_link_by_id(
         &self,
         id: InvitationLinkId,
@@ -732,33 +557,6 @@ impl Storage for D1Storage {
                      ORDER BY r.repo_id",
                 )
                 .bind(&[JsValue::from_str(&id_str)])
-                .map_err(bind_err)?
-                .all()
-                .await
-                .map_err(classify_d1_error)?
-                .results::<InvitationLinkJoinRow>()
-                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
-            try_one_invitation_link(rows)
-        })
-        .await
-    }
-
-    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
-        let slug = slug.to_string();
-        wasm_send(async {
-            let rows: Vec<InvitationLinkJoinRow> = self
-                .db
-                .prepare(
-                    "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by,
-                            l.created_at, l.expires_at, l.max_uses, l.uses_count, l.permission,
-                            l.approval_required, l.description, l.internal_note, l.revoked_at, l.revoked_by,
-                            r.repo_id, r.repo_full_name
-                     FROM invitation_links l
-                     LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id
-                     WHERE l.slug = ?1
-                     ORDER BY r.repo_id",
-                )
-                .bind(&[JsValue::from_str(&slug)])
                 .map_err(bind_err)?
                 .all()
                 .await
@@ -800,124 +598,6 @@ impl Storage for D1Storage {
     }
 
     // -------- invitation requests --------
-
-    async fn insert_invitation_request_and_increment_uses(
-        &self,
-        request: &InvitationRequest,
-    ) -> Result<()> {
-        let id_str = request.id.to_string();
-        let invitation_link_id_str = request.invitation_link_id.to_string();
-        let requester_id = request.requester_id;
-        let justification = request
-            .justification
-            .as_deref()
-            .map(JsValue::from_str)
-            .unwrap_or(JsValue::null());
-        let state_str = request.state.to_string();
-        let decided_by = request
-            .decided_by
-            .map(|d| JsValue::from_f64(d as f64))
-            .unwrap_or(JsValue::null());
-        let decided_at = request
-            .decided_at
-            .map(|d| JsValue::from_str(&d.to_rfc3339()))
-            .unwrap_or(JsValue::null());
-        let decline_reason = request
-            .decline_reason
-            .as_deref()
-            .map(JsValue::from_str)
-            .unwrap_or(JsValue::null());
-        let created_at_str = request.created_at.to_rfc3339();
-        let decision_deadline = request
-            .decision_deadline
-            .map(|d| JsValue::from_str(&d.to_rfc3339()))
-            .unwrap_or(JsValue::null());
-
-        wasm_send(async {
-            let stmt1 = self
-                .db
-                .prepare(
-                    "INSERT INTO invitation_requests
-                       (id, invitation_link_id, requester_id, justification, state,
-                        decided_by, decided_at, decline_reason, created_at, decision_deadline)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                )
-                .bind(&[
-                    JsValue::from_str(&id_str),
-                    JsValue::from_str(&invitation_link_id_str),
-                    JsValue::from_f64(requester_id as f64),
-                    justification,
-                    JsValue::from_str(&state_str),
-                    decided_by,
-                    decided_at,
-                    decline_reason,
-                    JsValue::from_str(&created_at_str),
-                    decision_deadline,
-                ])
-                .map_err(bind_err)?;
-
-            let stmt2 = self
-                .db
-                .prepare("UPDATE invitation_links SET uses_count = uses_count + 1 WHERE id = ?1")
-                .bind(&[JsValue::from_str(&invitation_link_id_str)])
-                .map_err(bind_err)?;
-
-            let results = self
-                .db
-                .batch(vec![stmt1, stmt2])
-                .await
-                .map_err(classify_d1_error)?;
-            // results[1] is the UPDATE on invitation_links; 0 rows_changed means link not found.
-            if let Some(update_result) = results.get(1) {
-                if rows_changed(update_result)? == 0 {
-                    return Err(ghinvite_core::storage::Error::NotFound);
-                }
-            }
-            Ok(())
-        })
-        .await
-    }
-
-    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()> {
-        let state_str = decision.state.to_string();
-        let decided_by = decision
-            .decided_by
-            .map(|d| JsValue::from_f64(d as f64))
-            .unwrap_or(JsValue::null());
-        let decided_at_str = decision.decided_at.to_rfc3339();
-        let decline_reason = decision
-            .decline_reason
-            .as_deref()
-            .map(JsValue::from_str)
-            .unwrap_or(JsValue::null());
-        let request_id_str = decision.request_id.to_string();
-
-        wasm_send(async {
-            let result = self
-                .db
-                .prepare(
-                    "UPDATE invitation_requests
-                     SET state = ?1, decided_by = ?2, decided_at = ?3, decline_reason = ?4
-                     WHERE id = ?5 AND state = 'pending'",
-                )
-                .bind(&[
-                    JsValue::from_str(&state_str),
-                    decided_by,
-                    JsValue::from_str(&decided_at_str),
-                    decline_reason,
-                    JsValue::from_str(&request_id_str),
-                ])
-                .map_err(bind_err)?
-                .run()
-                .await
-                .map_err(classify_d1_error)?;
-            if rows_changed(&result)? == 0 {
-                return Err(ghinvite_core::storage::Error::NotFound);
-            }
-            Ok(())
-        })
-        .await
-    }
 
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         let id_str = id.to_string();
@@ -993,32 +673,6 @@ impl Storage for D1Storage {
                 .results::<Row>()
                 .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
             PendingPage::from_json(rows.into_iter().map(|r| r.row_json).collect())
-        })
-        .await
-    }
-
-    async fn list_requests_for_link(
-        &self,
-        link_id: InvitationLinkId,
-    ) -> Result<Vec<InvitationRequest>> {
-        let link_id_str = link_id.to_string();
-        wasm_send(async {
-            let rows: Vec<InvitationRequestRow> = self
-                .db
-                .prepare(
-                    "SELECT id, invitation_link_id, requester_id, justification, state,
-                            decided_by, decided_at, decline_reason, created_at, decision_deadline
-                     FROM invitation_requests WHERE invitation_link_id = ?1
-                     ORDER BY created_at DESC",
-                )
-                .bind(&[JsValue::from_str(&link_id_str)])
-                .map_err(bind_err)?
-                .all()
-                .await
-                .map_err(classify_d1_error)?
-                .results::<InvitationRequestRow>()
-                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
-            rows.into_iter().map(|r| r.try_into_domain()).collect()
         })
         .await
     }
@@ -1108,50 +762,6 @@ impl Storage for D1Storage {
         .await
     }
 
-    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
-        let state_str = update.state.to_string();
-        let github_invitation_id = update
-            .github_invitation_id
-            .map(|g| JsValue::from_f64(g as f64))
-            .unwrap_or(JsValue::null());
-        let error_message = update
-            .error_message
-            .as_deref()
-            .map(JsValue::from_str)
-            .unwrap_or(JsValue::null());
-        let updated_at_str = update.updated_at.to_rfc3339();
-        let id_str = update.id.to_string();
-
-        wasm_send(async {
-            let result = self
-                .db
-                .prepare(
-                    "UPDATE github_invitations
-                     SET state = ?1,
-                         github_invitation_id = ?2,
-                         error_message = ?3,
-                         updated_at = ?4
-                     WHERE id = ?5",
-                )
-                .bind(&[
-                    JsValue::from_str(&state_str),
-                    github_invitation_id,
-                    error_message,
-                    JsValue::from_str(&updated_at_str),
-                    JsValue::from_str(&id_str),
-                ])
-                .map_err(bind_err)?
-                .run()
-                .await
-                .map_err(classify_d1_error)?;
-            if rows_changed(&result)? == 0 {
-                return Err(ghinvite_core::storage::Error::NotFound);
-            }
-            Ok(())
-        })
-        .await
-    }
-
     async fn get_github_invitation(
         &self,
         id: GithubInvitationId,
@@ -1193,35 +803,6 @@ impl Storage for D1Storage {
                 .await
                 .map_err(classify_d1_error)?;
             row.map(|r| r.try_into_domain()).transpose()
-        })
-        .await
-    }
-
-    async fn list_pending_github_invitations_for_installation(
-        &self,
-        installation_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        wasm_send(async {
-            let rows: Vec<GithubInvitationRow> = self
-                .db
-                .prepare(
-                    "SELECT g.id, g.invitation_request_id, g.repo_id, g.github_invitation_id,
-                            g.state, g.error_message, g.created_at, g.updated_at
-                     FROM github_invitations g
-                     JOIN invitation_requests r ON r.id = g.invitation_request_id
-                     JOIN invitation_links l ON l.id = r.invitation_link_id
-                     WHERE l.installation_id = ?1
-                       AND g.state IN ('sending', 'sent')
-                     ORDER BY g.created_at",
-                )
-                .bind(&[JsValue::from_f64(installation_id as f64)])
-                .map_err(bind_err)?
-                .all()
-                .await
-                .map_err(classify_d1_error)?
-                .results::<GithubInvitationRow>()
-                .map_err(|e| ghinvite_core::storage::Error::Corrupt(e.to_string()))?;
-            rows.into_iter().map(|r| r.try_into_domain()).collect()
         })
         .await
     }

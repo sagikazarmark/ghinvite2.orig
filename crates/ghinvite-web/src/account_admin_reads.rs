@@ -47,7 +47,8 @@ pub(crate) async fn find_account_admin_request(
 mod tests {
     use chrono::{DateTime, Utc};
     use ghinvite_core::audit::AuditEvent;
-    use ghinvite_core::storage::{GithubInvitationUpdate, RequestDecision, Storage};
+    use ghinvite_core::storage::Storage;
+    use ghinvite_core::storage::projection::fixture::Seed;
     use ghinvite_core::{
         Account, AccountType, GithubInvitation, GithubInvitationId, InvitationLink,
         InvitationLinkId, InvitationLinkRepo, InvitationRequest, Permission, RequestId,
@@ -221,32 +222,6 @@ mod tests {
             Ok(self.user.clone())
         }
 
-        async fn insert_invitation_link(
-            &self,
-            _link: &InvitationLink,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!("insert_invitation_link is not used by Account Admin read tests")
-        }
-
-        async fn update_invitation_link_metadata(
-            &self,
-            _account_id: u64,
-            _id: InvitationLinkId,
-            _description: &str,
-            _internal_note: Option<&str>,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!("update_invitation_link_metadata is not used by Account Admin read tests")
-        }
-
-        async fn mark_invitation_link_revoked(
-            &self,
-            _id: InvitationLinkId,
-            _by_user: u64,
-            _when: DateTime<Utc>,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!("mark_invitation_link_revoked is not used by Account Admin read tests")
-        }
-
         async fn get_invitation_link_by_id(
             &self,
             _id: InvitationLinkId,
@@ -260,34 +235,11 @@ mod tests {
             Ok(self.invitation_link.clone())
         }
 
-        async fn get_invitation_link_by_slug(
-            &self,
-            _slug: &str,
-        ) -> ghinvite_core::storage::Result<Option<InvitationLink>> {
-            panic!("get_invitation_link_by_slug is not used by Account Admin read tests")
-        }
-
         async fn list_invitation_links_for_account(
             &self,
             _account_id: u64,
         ) -> ghinvite_core::storage::Result<Vec<InvitationLink>> {
             panic!("list_invitation_links_for_account is not used by Account Admin read tests")
-        }
-
-        async fn insert_invitation_request_and_increment_uses(
-            &self,
-            _request: &InvitationRequest,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!(
-                "insert_invitation_request_and_increment_uses is not used by Account Admin read tests"
-            )
-        }
-
-        async fn record_request_decision(
-            &self,
-            _decision: &RequestDecision,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!("record_request_decision is not used by Account Admin read tests")
         }
 
         async fn get_invitation_request(
@@ -304,25 +256,11 @@ mod tests {
             Ok(self.pending_requests.clone())
         }
 
-        async fn list_requests_for_link(
-            &self,
-            _link_id: InvitationLinkId,
-        ) -> ghinvite_core::storage::Result<Vec<InvitationRequest>> {
-            panic!("list_requests_for_link is not used by Account Admin read tests")
-        }
-
         async fn insert_github_invitation(
             &self,
             _invitation: &GithubInvitation,
         ) -> ghinvite_core::storage::Result<()> {
             panic!("insert_github_invitation is not used by Account Admin read tests")
-        }
-
-        async fn update_github_invitation(
-            &self,
-            _update: &GithubInvitationUpdate,
-        ) -> ghinvite_core::storage::Result<()> {
-            panic!("update_github_invitation is not used by Account Admin read tests")
         }
 
         async fn get_github_invitation(
@@ -337,15 +275,6 @@ mod tests {
             _github_id: u64,
         ) -> ghinvite_core::storage::Result<Option<GithubInvitation>> {
             panic!("get_github_invitation_by_github_id is not used by Account Admin read tests")
-        }
-
-        async fn list_pending_github_invitations_for_installation(
-            &self,
-            _installation_id: u64,
-        ) -> ghinvite_core::storage::Result<Vec<GithubInvitation>> {
-            panic!(
-                "list_pending_github_invitations_for_installation is not used by Account Admin read tests"
-            )
         }
 
         async fn list_audit_events(
@@ -374,7 +303,7 @@ mod tests {
     async fn account_admin_invitation_link_lookup_returns_owning_accounts_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9001, 1, 701, "QueueSlug0000001");
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
 
         let found = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
@@ -389,7 +318,7 @@ mod tests {
     async fn account_admin_invitation_link_lookup_hides_wrong_account_link() {
         let storage = storage_with_accounts().await;
         let link = sample_link(9002, 2, 701, "QueueSlug0000002");
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
 
         let err = super::find_account_admin_invitation_link(&storage, 9001, link.id)
             .await
@@ -406,13 +335,10 @@ mod tests {
             .await
             .unwrap();
         let link = sample_link(9001, 1, 701, "QueueSlug0000003");
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
         let request_id = RequestId::new();
         let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
-        storage
-            .insert_invitation_request_and_increment_uses(&request)
-            .await
-            .unwrap();
+        storage.seed_request(&request).await.unwrap();
 
         let found = super::find_account_admin_request(&storage, 9001, request_id)
             .await
@@ -432,13 +358,10 @@ mod tests {
             .await
             .unwrap();
         let link = sample_link(9002, 2, 701, "QueueSlug0000004");
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
         let request_id = RequestId::new();
         let request = sample_request(request_id, link.id, 802, "2026-05-04T12:30:00Z");
-        storage
-            .insert_invitation_request_and_increment_uses(&request)
-            .await
-            .unwrap();
+        storage.seed_request(&request).await.unwrap();
 
         let err = super::find_account_admin_request(&storage, 9001, request_id)
             .await

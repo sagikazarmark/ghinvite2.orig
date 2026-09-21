@@ -17,16 +17,6 @@ pub mod wasm_impl {
     pub fn classify_d1_error(e: worker::Error) -> Error {
         let msg = e.to_string();
         if msg.contains("UNIQUE constraint failed") {
-            if msg.contains("invitation_links.slug") {
-                return Error::Conflict(ConflictKind::DuplicateSlug);
-            }
-            // DuplicatePendingRequest: partial unique index covers BOTH columns.
-            // Check both to avoid misclassifying PK collisions on invitation_requests.id.
-            if msg.contains("invitation_requests.invitation_link_id")
-                && msg.contains("invitation_requests.requester_id")
-            {
-                return Error::Conflict(ConflictKind::DuplicatePendingRequest);
-            }
             // DuplicateActiveInstallation: partial unique index on installations.account_id
             if msg.contains("installations.account_id") {
                 return Error::Conflict(ConflictKind::DuplicateActiveInstallation);

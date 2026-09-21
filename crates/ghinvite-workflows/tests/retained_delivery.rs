@@ -498,13 +498,29 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(outcomes.len(), 1);
     assert_eq!(serde_json::to_value(&outcomes[0]).unwrap(), result);
     // The independent lifecycle can decline without resetting create authority.
+    let invitation_id: ghinvite_core::GithubInvitationId =
+        command["invitation_id"].as_str().unwrap().parse().unwrap();
+    let sent = storage
+        .get_github_invitation(invitation_id)
+        .await
+        .unwrap()
+        .unwrap();
     storage
-        .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-            id: command["invitation_id"].as_str().unwrap().parse().unwrap(),
+        .settle_github_invitation(&ghinvite_core::storage::settlement::Settlement {
+            expected: sent,
             state: ghinvite_core::InvitationState::Declined,
-            github_invitation_id: None,
-            error_message: None,
-            updated_at: chrono::Utc::now(),
+            event: ghinvite_core::audit::AuditEvent {
+                id: ghinvite_core::AuditEventId::new(),
+                account_id: 100,
+                occurred_at: chrono::Utc::now(),
+                event_type: ghinvite_core::audit::EventType::InvitationDeclined,
+                actor_kind: ghinvite_core::audit::ActorKind::Github,
+                actor_id: None,
+                target_kind: ghinvite_core::audit::TargetKind::GithubInvitation,
+                target_id: invitation_id.to_string(),
+                metadata: serde_json::Value::Null,
+                request_id: None,
+            },
         })
         .await
         .unwrap();
@@ -1445,6 +1461,8 @@ async fn assert_create_audit(
     let events: Vec<_> = events
         .into_iter()
         .filter(|event| event.target_id == receipt["command"]["invitation_id"].as_str().unwrap())
+        // Only create outcomes; a later settlement publishes its own event.
+        .filter(|event| event.event_type != EventType::InvitationDeclined)
         .collect();
     let (kind, actor) = match receipt["outcome"]["kind"].as_str().unwrap() {
         "created" => (EventType::InvitationSent, ActorKind::System),

@@ -100,12 +100,13 @@ does not affect authoritative Restate receipts or extend live session deadlines.
 
 ### Admission projection
 
-The v1 projection columns hold revisions, content/identity checks, deadlines,
-and audit identities. The `projection_assertions` table is transient within each
-SQLx transaction/D1 batch: named CHECK failures abort the entire application,
-and successful batches remove the assertion rows before commit. The pending-only
-uniqueness index excludes versioned rows, so projections never become admission
-authority.
+Links and requests are written only by the projector. `projection_revision` is
+the snapshot revision it last applied, so a stale snapshot cannot regress a row;
+there is no SQL uniqueness on requests, because Restate alone owns admission.
+Audit events keep their logical ID and content for immutability checks. The
+`projection_assertions` table is transient within each SQLx transaction/D1
+batch: named CHECK failures abort the entire application, and successful batches
+remove the assertion rows before commit.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
 ## Adding a new migration

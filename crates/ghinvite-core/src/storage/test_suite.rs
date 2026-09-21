@@ -1,9 +1,11 @@
 //! Cross-cutting Storage behavior tests, parameterized over any `Storage` impl.
 //! Per-impl test files (e.g. `ghinvite-storage-sqlx/tests/sqlx_suite.rs`)
 //! call `run_suite(make_storage)`
-//! with a factory so each scenario gets a fresh database.
+//! with a factory so each scenario gets a fresh database. Links and requests
+//! are seeded through the projector, their only production writer.
 
-use super::{GithubInvitationUpdate, RequestDecision, Storage};
+use super::Storage;
+use super::projection::{ProjectionStorage, fixture};
 use crate::audit::{ActorKind, AuditEvent, EventType, TargetKind};
 use crate::{
     Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationLink,
@@ -87,6 +89,17 @@ fn sample_request(link: InvitationLinkId, requester: u64) -> InvitationRequest {
     }
 }
 
+async fn seed<S: ProjectionStorage>(
+    s: &S,
+    link: &InvitationLink,
+    requests: &[InvitationRequest],
+    revision: u64,
+) {
+    s.apply_transition(&fixture::envelope(link, requests, revision))
+        .await
+        .unwrap();
+}
+
 /// Run the full cross-cutting suite against any `Storage` impl.
 ///
 /// `make_storage` is invoked once per scenario so every scenario starts against
@@ -94,15 +107,12 @@ fn sample_request(link: InvitationLinkId, requester: u64) -> InvitationRequest {
 /// cross-scenario collisions.
 pub async fn run_suite<S, F, Fut>(make_storage: F)
 where
-    S: Storage,
+    S: Storage + ProjectionStorage,
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = S>,
 {
     scenario_install_uninstall_reinstall(make_storage().await).await;
     scenario_invitation_link_lifecycle(make_storage().await).await;
-    scenario_invitation_link_metadata(make_storage().await).await;
-    scenario_request_uses_and_uniqueness(make_storage().await).await;
-    scenario_request_decision(make_storage().await).await;
     scenario_recorded_request_deadlines(make_storage().await).await;
     scenario_request_history(make_storage().await).await;
     scenario_github_invitation_lifecycle(make_storage().await).await;
@@ -114,14 +124,14 @@ where
 
 /// Equal timestamps, mixed precision, terminal rows and foreign cursors must not
 /// skip, duplicate or disclose records while traversing bounded pages.
-pub async fn scenario_request_history<S: Storage>(s: S) {
+pub async fn scenario_request_history<S: Storage + ProjectionStorage>(s: S) {
     use super::request_history::Boundary;
     s.insert_installation(&sample_account(1, 9001, "acme"))
         .await
         .unwrap();
     s.upsert_user(&sample_user(701, "admin")).await.unwrap();
     let link = sample_link(9001, 1, 701, 900);
-    s.insert_invitation_link(&link).await.unwrap();
+    seed(&s, &link, &[], 1).await;
     assert!(
         s.request_history(9001, link.id, None)
             .await
@@ -144,9 +154,7 @@ pub async fn scenario_request_history<S: Storage>(s: S) {
         } else {
             "2026-05-04T12:30:00Z"
         });
-        s.insert_invitation_request_and_increment_uses(&request)
-            .await
-            .unwrap();
+        seed(&s, &link, &[request.clone()], i as u64 + 2).await;
         ids.push(request.id);
     }
     ids.reverse();
@@ -201,55 +209,42 @@ pub async fn scenario_request_history<S: Storage>(s: S) {
 }
 
 /// Historical deadlines survive every request read, including after a decision.
-pub async fn scenario_recorded_request_deadlines<S: Storage>(s: S) {
+pub async fn scenario_recorded_request_deadlines<S: Storage + ProjectionStorage>(s: S) {
     s.insert_installation(&sample_account(1, 9008, "acme8"))
         .await
         .unwrap();
     s.upsert_user(&sample_user(708, "admin")).await.unwrap();
     let link = sample_link(9008, 1, 708, 800);
-    s.insert_invitation_link(&link).await.unwrap();
-    for deadline in [Some(dt("2026-05-06T14:15:16.123456789Z")), None] {
-        let mut request = sample_request(link.id, 708);
-        request.decision_deadline = deadline;
-        s.insert_invitation_request_and_increment_uses(&request)
+    let deadline = Some(dt("2026-05-06T14:15:16.123456789Z"));
+    let mut request = sample_request(link.id, 708);
+    request.decision_deadline = deadline;
+    seed(&s, &link, &[request.clone()], 1).await;
+    assert_eq!(
+        s.get_invitation_request(request.id).await.unwrap(),
+        Some(request.clone())
+    );
+    assert_eq!(
+        s.list_pending_requests_for_account(9008).await.unwrap(),
+        vec![request.clone()]
+    );
+    request.state = RequestState::Declined;
+    request.decided_by = Some(708);
+    request.decided_at = Some(dt("2026-05-05T12:00:00Z"));
+    seed(&s, &link, &[request.clone()], 2).await;
+    assert_eq!(
+        s.get_invitation_request(request.id).await.unwrap(),
+        Some(request)
+    );
+    assert!(
+        s.list_pending_requests_for_account(9008)
             .await
-            .unwrap();
-        assert_eq!(
-            s.get_invitation_request(request.id).await.unwrap(),
-            Some(request.clone())
-        );
-        assert_eq!(
-            s.list_pending_requests_for_account(9008).await.unwrap(),
-            vec![request.clone()]
-        );
-        assert!(
-            s.list_requests_for_link(link.id)
-                .await
-                .unwrap()
-                .contains(&request)
-        );
-        s.record_request_decision(&RequestDecision {
-            request_id: request.id,
-            state: RequestState::Declined,
-            decided_by: Some(708),
-            decided_at: dt("2026-05-05T12:00:00Z"),
-            decline_reason: None,
-        })
-        .await
-        .unwrap();
-        assert_eq!(
-            s.get_invitation_request(request.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .decision_deadline,
-            deadline
-        );
-    }
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Confirmed create facts are account history, even after lifecycle advances.
-pub async fn scenario_delivery_audit<S: Storage>(s: S) {
+pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
     use super::AuditPosition;
     s.insert_installation(&sample_account(1, 100, "acme"))
         .await
@@ -257,11 +252,8 @@ pub async fn scenario_delivery_audit<S: Storage>(s: S) {
     s.upsert_user(&sample_user(7, "admin")).await.unwrap();
     s.upsert_user(&sample_user(8, "requester")).await.unwrap();
     let link = sample_link(100, 1, 7, 64);
-    s.insert_invitation_link(&link).await.unwrap();
     let request = sample_request(link.id, 8);
-    s.insert_invitation_request_and_increment_uses(&request)
-        .await
-        .unwrap();
+    seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let id = GithubInvitationId::new();
     s.insert_github_invitation(&GithubInvitation {
         id,
@@ -305,18 +297,29 @@ pub async fn scenario_delivery_audit<S: Storage>(s: S) {
         event.metadata,
         serde_json::json!({"repo_full_name":"acme/api","requester_id":8,"github_invitation_id":99123})
     );
-    s.update_github_invitation(&GithubInvitationUpdate {
-        id,
+    // The invitation settles; replaying the create receipt changes nothing.
+    let sent = s.get_github_invitation(id).await.unwrap().unwrap();
+    s.settle_github_invitation(&super::settlement::Settlement {
+        expected: sent,
         state: InvitationState::Declined,
-        github_invitation_id: None,
-        error_message: None,
-        updated_at: dt("2026-05-05T12:00:00Z"),
+        event: AuditEvent {
+            id: AuditEventId::new(),
+            account_id: 100,
+            occurred_at: dt("2026-05-05T12:00:00Z"),
+            event_type: EventType::InvitationDeclined,
+            actor_kind: ActorKind::Github,
+            actor_id: None,
+            target_kind: TargetKind::GithubInvitation,
+            target_id: id.to_string(),
+            metadata: serde_json::Value::Null,
+            request_id: None,
+        },
     })
     .await
     .unwrap();
     s.project_delivery(&receipt).await.unwrap();
     assert_eq!(
-        s.list_audit_events(100, None, AuditPosition::Latest)
+        s.list_audit_events(100, Some(EventType::InvitationSent), AuditPosition::Latest)
             .await
             .unwrap()
             .events,
@@ -563,195 +566,37 @@ async fn scenario_install_uninstall_reinstall<S: Storage>(s: S) {
     assert_eq!(active.installation_id, 2);
 }
 
-async fn scenario_invitation_link_lifecycle<S: Storage>(s: S) {
+async fn scenario_invitation_link_lifecycle<S: Storage + ProjectionStorage>(s: S) {
     s.insert_installation(&sample_account(1, 9002, "acme2"))
         .await
         .unwrap();
     s.upsert_user(&sample_user(701, "creator")).await.unwrap();
 
-    let link = sample_link(9002, 1, 701, 100);
-    s.insert_invitation_link(&link).await.unwrap();
+    let mut link = sample_link(9002, 1, 701, 100);
+    seed(&s, &link, &[], 1).await;
+    assert_eq!(
+        s.get_invitation_link_by_id(link.id).await.unwrap(),
+        Some(link.clone())
+    );
 
-    let by_slug = s
-        .get_invitation_link_by_slug(link.slug.as_str())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(by_slug.id, link.id);
-    assert_eq!(by_slug.description, "AI coding workshop");
-
-    s.mark_invitation_link_revoked(link.id, 701, dt("2026-05-04T20:00:00Z"))
-        .await
-        .unwrap();
+    link.revoked_by = Some(701);
+    link.revoked_at = Some(dt("2026-05-04T20:00:00Z"));
+    seed(&s, &link, &[], 2).await;
     let revoked = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(revoked.revoked_by, Some(701));
     assert!(!revoked.is_active(dt("2026-05-04T21:00:00Z")));
-}
 
-async fn scenario_invitation_link_metadata<S: Storage>(s: S) {
-    s.insert_installation(&sample_account(1, 9002, "acme2"))
-        .await
-        .unwrap();
-    s.upsert_user(&sample_user(701, "creator")).await.unwrap();
-    let mut expected = sample_link(9002, 1, 701, 101);
-    expected.permission = Permission::Push;
-    expected.approval_required = true;
-    expected.max_uses = Some(1);
-    expected.expires_at = Some(dt("2026-06-04T12:00:00Z"));
-    expected.internal_note = Some("Original private note".into());
-    s.insert_invitation_link(&expected).await.unwrap();
-
-    s.update_invitation_link_metadata(
-        9002,
-        expected.id,
-        "Corrected description",
-        Some("Private\ncontext"),
-    )
-    .await
-    .unwrap();
-    expected.description = "Corrected description".into();
-    expected.internal_note = Some("Private\ncontext".into());
+    // A stale snapshot cannot regress the row.
+    link.revoked_by = None;
+    link.revoked_at = None;
+    seed(&s, &link, &[], 1).await;
     assert_eq!(
-        s.get_invitation_link_by_id(expected.id).await.unwrap(),
-        Some(expected.clone())
-    );
-    assert_eq!(
-        s.list_invitation_links_for_account(9002).await.unwrap(),
-        vec![expected.clone()]
-    );
-
-    for (account_id, id) in [(9999, expected.id), (9002, InvitationLinkId::new())] {
-        assert!(matches!(
-            s.update_invitation_link_metadata(account_id, id, "Forbidden", None)
-                .await,
-            Err(super::Error::NotFound)
-        ));
-    }
-    assert_eq!(
-        s.get_invitation_link_by_id(expected.id).await.unwrap(),
-        Some(expected.clone())
-    );
-
-    // A request and a revocation can land after the editor loaded its metadata.
-    s.insert_invitation_request_and_increment_uses(&sample_request(expected.id, 701))
-        .await
-        .unwrap();
-    expected.uses_count = 1;
-    s.mark_invitation_link_revoked(expected.id, 701, dt("2026-05-04T20:00:00Z"))
-        .await
-        .unwrap();
-    expected.revoked_by = Some(701);
-    expected.revoked_at = Some(dt("2026-05-04T20:00:00Z"));
-
-    // Repeating an edit is successful, including clearing an already-absent note.
-    for _ in 0..2 {
-        s.update_invitation_link_metadata(9002, expected.id, "Inactive link", None)
-            .await
-            .unwrap();
-        expected.description = "Inactive link".into();
-        expected.internal_note = None;
-        let actual = s
-            .get_invitation_link_by_id(expected.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(actual, expected);
-        assert!(!actual.is_active(dt("2026-07-04T12:00:00Z")));
-    }
-}
-
-async fn scenario_request_uses_and_uniqueness<S: Storage>(s: S) {
-    s.insert_installation(&sample_account(1, 9003, "acme3"))
-        .await
-        .unwrap();
-    s.upsert_user(&sample_user(702, "creator")).await.unwrap();
-    s.upsert_user(&sample_user(802, "asker")).await.unwrap();
-
-    let mut link = sample_link(9003, 1, 702, 200);
-    link.max_uses = Some(2);
-    s.insert_invitation_link(&link).await.unwrap();
-
-    let r1 = sample_request(link.id, 802);
-    s.insert_invitation_request_and_increment_uses(&r1)
-        .await
-        .unwrap();
-
-    let after_one = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
-    assert_eq!(after_one.uses_count, 1);
-
-    // Second pending for same (link, requester) should conflict.
-    let r2 = sample_request(link.id, 802);
-    let err = s
-        .insert_invitation_request_and_increment_uses(&r2)
-        .await
-        .unwrap_err();
-    assert!(matches!(err, super::Error::Conflict(_)));
-
-    // After we decide r1, requester can ask again.
-    s.record_request_decision(&RequestDecision {
-        request_id: r1.id,
-        state: RequestState::Declined,
-        decided_by: Some(702),
-        decided_at: dt("2026-05-04T13:00:00Z"),
-        decline_reason: Some("not yet".into()),
-    })
-    .await
-    .unwrap();
-
-    let r3 = sample_request(link.id, 802);
-    s.insert_invitation_request_and_increment_uses(&r3)
-        .await
-        .unwrap();
-
-    let after_two = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
-    assert_eq!(after_two.uses_count, 2);
-    assert!(
-        !after_two.is_active(dt("2026-05-04T20:00:00Z")),
-        "max_uses exhausted"
+        s.get_invitation_link_by_id(link.id).await.unwrap(),
+        Some(revoked)
     );
 }
 
-async fn scenario_request_decision<S: Storage>(s: S) {
-    s.insert_installation(&sample_account(1, 9004, "acme4"))
-        .await
-        .unwrap();
-    s.upsert_user(&sample_user(703, "creator")).await.unwrap();
-    s.upsert_user(&sample_user(803, "asker")).await.unwrap();
-
-    let link = sample_link(9004, 1, 703, 300);
-    s.insert_invitation_link(&link).await.unwrap();
-    let req = sample_request(link.id, 803);
-    s.insert_invitation_request_and_increment_uses(&req)
-        .await
-        .unwrap();
-
-    // First decision wins; second on the same row should NotFound.
-    s.record_request_decision(&RequestDecision {
-        request_id: req.id,
-        state: RequestState::Approved,
-        decided_by: Some(703),
-        decided_at: dt("2026-05-04T13:00:00Z"),
-        decline_reason: None,
-    })
-    .await
-    .unwrap();
-    let err = s
-        .record_request_decision(&RequestDecision {
-            request_id: req.id,
-            state: RequestState::Declined,
-            decided_by: Some(703),
-            decided_at: dt("2026-05-04T13:01:00Z"),
-            decline_reason: Some("changed mind".into()),
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(err, super::Error::NotFound));
-
-    let pending = s.list_pending_requests_for_account(9004).await.unwrap();
-    assert!(pending.is_empty());
-}
-
-async fn scenario_github_invitation_lifecycle<S: Storage>(s: S) {
+async fn scenario_github_invitation_lifecycle<S: Storage + ProjectionStorage>(s: S) {
     s.insert_installation(&sample_account(1, 9005, "acme5"))
         .await
         .unwrap();
@@ -759,33 +604,20 @@ async fn scenario_github_invitation_lifecycle<S: Storage>(s: S) {
     s.upsert_user(&sample_user(804, "asker")).await.unwrap();
 
     let link = sample_link(9005, 1, 704, 400);
-    s.insert_invitation_link(&link).await.unwrap();
     let req = sample_request(link.id, 804);
-    s.insert_invitation_request_and_increment_uses(&req)
-        .await
-        .unwrap();
+    seed(&s, &link, std::slice::from_ref(&req), 1).await;
 
     let g = GithubInvitation {
         id: GithubInvitationId::new(),
         invitation_request_id: req.id,
         repo_id: 10,
-        github_invitation_id: None,
-        state: InvitationState::Sending,
+        github_invitation_id: Some(99001),
+        state: InvitationState::Sent,
         error_message: None,
         created_at: dt("2026-05-04T13:00:00Z"),
-        updated_at: dt("2026-05-04T13:00:00Z"),
+        updated_at: dt("2026-05-04T13:01:00Z"),
     };
     s.insert_github_invitation(&g).await.unwrap();
-
-    s.update_github_invitation(&GithubInvitationUpdate {
-        id: g.id,
-        state: InvitationState::Sent,
-        github_invitation_id: Some(99001),
-        error_message: None,
-        updated_at: dt("2026-05-04T13:01:00Z"),
-    })
-    .await
-    .unwrap();
 
     let by_gid = s
         .get_github_invitation_by_github_id(99001)
@@ -793,39 +625,40 @@ async fn scenario_github_invitation_lifecycle<S: Storage>(s: S) {
         .unwrap()
         .unwrap();
     assert_eq!(by_gid.id, g.id);
+    assert_eq!(
+        s.list_pending_github_invitations_for_account(9005)
+            .await
+            .unwrap(),
+        vec![g.clone()]
+    );
 
-    let pending = s
-        .list_pending_github_invitations_for_installation(1)
-        .await
-        .unwrap();
-    assert_eq!(pending.len(), 1);
-
-    s.update_github_invitation(&GithubInvitationUpdate {
-        id: g.id,
+    s.settle_github_invitation(&super::settlement::Settlement {
+        expected: g.clone(),
         state: InvitationState::Accepted,
-        github_invitation_id: None,
-        error_message: None,
-        updated_at: dt("2026-05-04T13:05:00Z"),
+        event: AuditEvent {
+            id: AuditEventId::new(),
+            account_id: 9005,
+            occurred_at: dt("2026-05-04T13:05:00Z"),
+            event_type: EventType::InvitationAccepted,
+            actor_kind: ActorKind::Github,
+            actor_id: None,
+            target_kind: TargetKind::GithubInvitation,
+            target_id: g.id.to_string(),
+            metadata: serde_json::Value::Null,
+            request_id: None,
+        },
     })
     .await
     .unwrap();
 
     let accepted = s.get_github_invitation(g.id).await.unwrap().unwrap();
     assert_eq!(accepted.state, InvitationState::Accepted);
-    assert_eq!(accepted.github_invitation_id, None);
-
     assert!(
-        s.get_github_invitation_by_github_id(99001)
+        s.list_pending_github_invitations_for_account(9005)
             .await
             .unwrap()
-            .is_none()
+            .is_empty()
     );
-
-    let now_done = s
-        .list_pending_github_invitations_for_installation(1)
-        .await
-        .unwrap();
-    assert!(now_done.is_empty());
 }
 
 async fn scenario_audit_appends<S: Storage>(s: S) {
@@ -857,7 +690,7 @@ async fn scenario_audit_appends<S: Storage>(s: S) {
     // (No read on the trait; per-impl tests can verify via their own debug helpers.)
 }
 
-async fn scenario_timestamp_precision<S: Storage>(s: S) {
+async fn scenario_timestamp_precision<S: Storage + ProjectionStorage>(s: S) {
     use chrono::TimeZone;
     s.insert_installation(&sample_account(1, 9007, "acme7"))
         .await
@@ -867,7 +700,7 @@ async fn scenario_timestamp_precision<S: Storage>(s: S) {
     // 123_456 microseconds added to a zero-second base
     link.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()
         + chrono::Duration::microseconds(123_456);
-    s.insert_invitation_link(&link).await.unwrap();
+    seed(&s, &link, &[], 1).await;
     let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
     assert_eq!(
         got.created_at, link.created_at,

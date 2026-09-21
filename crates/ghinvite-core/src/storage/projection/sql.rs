@@ -54,16 +54,10 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         }
     }
     let mut value = serde_json::to_value(envelope).map_err(|_| invalid())?;
-    value["link"]["identity"] = json!([creation, link.invitation_code, link.created_at]);
-    value["link"]["content"] = serde_json::to_value(link).map_err(|_| invalid())?;
     value["link"]["current_description"] = json!(link.description());
     value["link"]["current_internal_note"] = json!(link.internal_note());
     let mut requests = std::collections::BTreeSet::new();
-    for (request, encoded) in envelope
-        .requests
-        .iter()
-        .zip(value["requests"].as_array_mut().unwrap())
-    {
+    for request in &envelope.requests {
         if request.link_id != link.link_id
             || request.account_id != creation.account_id
             || !valid_id(request.requester_id)
@@ -81,16 +75,6 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         {
             return Err(invalid());
         }
-        encoded["identity"] = json!([
-            request.request_id,
-            request.link_id,
-            request.account_id,
-            request.requester_id,
-            request.justification,
-            request.admitted_at,
-            request.decision_deadline
-        ]);
-        encoded["content"] = serde_json::to_value(request).map_err(|_| invalid())?;
     }
     let mut events = std::collections::BTreeMap::new();
     for (event, encoded) in envelope
@@ -157,7 +141,7 @@ pub fn classify(message: String) -> Error {
     } else if message.contains("projection_invariant")
         || message.contains("UNIQUE constraint failed")
     {
-        Error::ProjectionInvariant("identity or revision content conflict".into())
+        Error::ProjectionInvariant("immutable identity conflict".into())
     } else {
         Error::Database(message)
     }
@@ -179,7 +163,6 @@ pub const STATEMENTS: &[&str] = &[
         AND account_id != json_extract(?1,'$.link.creation.account_id'))"#,
     r#"INSERT INTO projection_assertions(invariant)
     SELECT NOT EXISTS(SELECT 1 FROM invitation_links WHERE id = json_extract(?1,'$.link.link_id') AND (
-      projection_identity IS NOT json_extract(?1,'$.link.identity') OR
       slug IS NOT json_extract(?1,'$.link.invitation_code') OR
       installation_id IS NOT json_extract(?1,'$.link.creation.installation_id') OR
       account_id IS NOT json_extract(?1,'$.link.creation.account_id') OR
@@ -188,28 +171,16 @@ pub const STATEMENTS: &[&str] = &[
       expires_at IS NOT json_extract(?1,'$.link.creation.expires_at') OR
       max_uses IS NOT json_extract(?1,'$.link.creation.max_uses') OR
       permission IS NOT json_extract(?1,'$.link.creation.permission') OR
-      approval_required IS NOT json_extract(?1,'$.link.creation.approval_required') OR
-      uses_count IS NOT json_extract(projection_content,'$.uses') OR
-      revoked_at IS NOT json_extract(projection_content,'$.revoked_at') OR
-      revoked_by IS NOT json_extract(projection_content,'$.revoked_by') OR
-      description IS NOT CASE WHEN json_type(projection_content,'$.metadata') = 'object' THEN json_extract(projection_content,'$.metadata.description') ELSE json_extract(projection_content,'$.creation.description') END OR
-      internal_note IS NOT CASE WHEN json_type(projection_content,'$.metadata') = 'object' THEN json_extract(projection_content,'$.metadata.internal_note') ELSE json_extract(projection_content,'$.creation.internal_note') END OR
-      (projection_revision = json_extract(?1,'$.link.revision') AND projection_content IS NOT json_extract(?1,'$.link.content'))))
+      approval_required IS NOT json_extract(?1,'$.link.creation.approval_required')))
     AND NOT EXISTS(SELECT 1 FROM invitation_link_repos r WHERE r.invitation_link_id = json_extract(?1,'$.link.link_id')
       AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.link.creation.repos') j
         WHERE r.repo_id = json_extract(j.value,'$.repo_id') AND r.repo_full_name = json_extract(j.value,'$.repo_full_name')))
     AND NOT EXISTS(SELECT 1 FROM invitation_requests r JOIN json_each(?1,'$.requests') j ON r.id = json_extract(j.value,'$.request_id') WHERE
-      r.projection_identity IS NOT json_extract(j.value,'$.identity') OR
       r.invitation_link_id IS NOT json_extract(j.value,'$.link_id') OR
       r.requester_id IS NOT json_extract(j.value,'$.requester_id') OR
       r.justification IS NOT json_extract(j.value,'$.justification') OR
       r.created_at IS NOT json_extract(j.value,'$.admitted_at') OR
-      r.decision_deadline IS NOT json_extract(j.value,'$.decision_deadline') OR
-      r.state IS NOT json_extract(r.projection_content,'$.state') OR
-      r.decided_by IS NOT json_extract(r.projection_content,'$.decision.decided_by') OR
-      r.decided_at IS NOT json_extract(r.projection_content,'$.decision.effective_at') OR
-      r.decline_reason IS NOT json_extract(r.projection_content,'$.decision.decline_reason') OR
-      (r.projection_revision = json_extract(j.value,'$.revision') AND r.projection_content IS NOT json_extract(j.value,'$.content')))
+      r.decision_deadline IS NOT json_extract(j.value,'$.decision_deadline'))
     AND NOT EXISTS(SELECT 1 FROM audit_events a JOIN json_each(?1,'$.events') j
       ON a.id = json_extract(j.value,'$.id') OR a.projection_event_id = json_extract(j.value,'$.event_id')
       WHERE a.projection_content IS NOT json_extract(j.value,'$.content') OR
@@ -226,7 +197,7 @@ pub const STATEMENTS: &[&str] = &[
         a.metadata IS NOT NULL OR a.request_id IS NOT NULL)"#,
     r#"INSERT INTO invitation_links(id, slug, installation_id, account_id, created_by, created_at,
       expires_at, max_uses, uses_count, permission, approval_required, description, internal_note,
-      revoked_at, revoked_by, projection_revision, projection_content, projection_identity)
+      revoked_at, revoked_by, projection_revision)
     SELECT json_extract(?1,'$.link.link_id'), json_extract(?1,'$.link.invitation_code'),
       json_extract(?1,'$.link.creation.installation_id'), json_extract(?1,'$.link.creation.account_id'),
       json_extract(?1,'$.link.creation.admin.user_id'), json_extract(?1,'$.link.created_at'),
@@ -234,26 +205,24 @@ pub const STATEMENTS: &[&str] = &[
       json_extract(?1,'$.link.uses'), json_extract(?1,'$.link.creation.permission'),
       json_extract(?1,'$.link.creation.approval_required'), json_extract(?1,'$.link.current_description'),
       json_extract(?1,'$.link.current_internal_note'), json_extract(?1,'$.link.revoked_at'),
-      json_extract(?1,'$.link.revoked_by'), json_extract(?1,'$.link.revision'),
-      json_extract(?1,'$.link.content'), json_extract(?1,'$.link.identity') WHERE true
+      json_extract(?1,'$.link.revoked_by'), json_extract(?1,'$.link.revision') WHERE true
     ON CONFLICT(id) DO UPDATE SET uses_count=excluded.uses_count, revoked_at=excluded.revoked_at,
       revoked_by=excluded.revoked_by, projection_revision=excluded.projection_revision,
-      projection_content=excluded.projection_content, description=excluded.description, internal_note=excluded.internal_note
+      description=excluded.description, internal_note=excluded.internal_note
     WHERE excluded.projection_revision > invitation_links.projection_revision"#,
     r#"INSERT INTO invitation_link_repos(invitation_link_id, repo_id, repo_full_name)
     SELECT json_extract(?1,'$.link.link_id'), json_extract(value,'$.repo_id'), json_extract(value,'$.repo_full_name')
     FROM json_each(?1,'$.link.creation.repos') WHERE true
     ON CONFLICT(invitation_link_id, repo_id) DO NOTHING"#,
     r#"INSERT INTO invitation_requests(id, invitation_link_id, requester_id, justification, state, created_at,
-      decision_deadline, projection_revision, projection_content, projection_identity, decided_by, decided_at, decline_reason)
+      decision_deadline, projection_revision, decided_by, decided_at, decline_reason)
     SELECT json_extract(value,'$.request_id'), json_extract(value,'$.link_id'), json_extract(value,'$.requester_id'),
       json_extract(value,'$.justification'), json_extract(value,'$.state'), json_extract(value,'$.admitted_at'),
       json_extract(value,'$.decision_deadline'), json_extract(value,'$.revision'),
-      json_extract(value,'$.content'), json_extract(value,'$.identity'),
       json_extract(value,'$.decision.decided_by'), json_extract(value,'$.decision.effective_at'),
       json_extract(value,'$.decision.decline_reason') FROM json_each(?1,'$.requests') WHERE true
     ON CONFLICT(id) DO UPDATE SET state=excluded.state, projection_revision=excluded.projection_revision,
-      projection_content=excluded.projection_content, decided_by=excluded.decided_by,
+      decided_by=excluded.decided_by,
       decided_at=excluded.decided_at, decline_reason=excluded.decline_reason
     WHERE excluded.projection_revision > invitation_requests.projection_revision"#,
     r#"INSERT INTO audit_events(id, account_id, occurred_at, event_type, actor_kind, actor_id,

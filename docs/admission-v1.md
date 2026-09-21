@@ -131,22 +131,24 @@ the expanded batch payload is capped at 2 MiB, allowing worst-case JSON escaping
 of every bounded input. No accumulated history is sent.
 
 SQLx uses a transaction; D1 uses the same fixed seven-statement batch. Named CHECK
-assertions validate dependency and content conflicts inside the atomic application.
-Link and repository records precede requests. Newer snapshots replace older ones;
-equal revisions require equal content; lower revisions cannot regress records.
+assertions validate missing parents and immutable-identity conflicts (a link's
+code, account, installation, creator, guardrails and repositories; a request's
+link, requester, justification, admission time and deadline) inside the atomic
+application. Link and repository records precede requests. Newer snapshots
+replace older ones; equal or lower revisions are no-ops, so replays are harmless
+and stale snapshots cannot regress records.
 Request revisions are independent of link revisions. Audit insertions always run,
 even alongside stale snapshots, and uses are assigned from authoritative snapshots.
 The v1 `creation` field is immutable command input, including original metadata;
 future metadata commands must add a separate current-metadata snapshot rather than
 rewrite retained creation identity. `update_metadata` now writes a separate optional current metadata snapshot.
 
-The initial schema carries revision/content/identity columns, request deadlines,
-and logical audit IDs/evaluation times. Projected rows lag Restate, which alone
+The initial schema carries projection revisions, request deadlines, and logical
+audit IDs/content/evaluation times. Projected rows lag Restate, which alone
 enforces eligibility. No rows are deleted or uses refunded to resolve that lag.
 
-The existing Console storage reads remain eventually consistent. The additional
-`ProjectionStorage::get_projected_request` read exposes the versioned snapshot and
-admission deadline; absent rows return `None`, never proof of rejection.
+Console storage reads, including request admission deadlines, remain eventually
+consistent; an absent row is never proof of rejection.
 Existing audit pagination retains ULID IDs: projectors derive them deterministically
 from the domain-separated SHA-256 of the logical event ID (first 128 bits), retain
 the logical ID, and compare immutable content. Collisions fail rather than silently

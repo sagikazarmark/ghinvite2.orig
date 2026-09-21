@@ -128,10 +128,10 @@ pub struct AuditIntent {
 #[async_trait::async_trait]
 pub trait ProjectionStorage: Send + Sync + 'static {
     async fn apply_transition(&self, envelope: &ProjectionEnvelope) -> super::Result<()>;
-
-    /// Eventually consistent versioned request read, including its immutable
-    /// admission deadline. None means absent or legacy, never admission rejection.
-    async fn get_projected_request(&self, id: RequestId) -> super::Result<Option<RequestSnapshot>>;
 }
 
 pub mod sql;
+
+/// Test seeding through the projector.
+#[cfg(feature = "test-suite")]
+pub mod fixture;

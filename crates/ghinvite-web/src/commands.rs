@@ -441,6 +441,7 @@ mod tests {
     use axum::routing::post;
     use chrono::Utc;
     use ghinvite_core::storage::Storage;
+    use ghinvite_core::storage::projection::fixture::Seed;
     use octoevents::{Envelope, Match};
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -678,7 +679,7 @@ mod tests {
 
         let link_id = ghinvite_core::InvitationLinkId::new();
         storage
-            .insert_invitation_link(&ghinvite_core::InvitationLink {
+            .seed_link(&ghinvite_core::InvitationLink {
                 id: link_id,
                 slug: ghinvite_core::Slug::from_string("0123456789ABCDEF".into()).unwrap(),
                 installation_id: 1,
@@ -704,7 +705,7 @@ mod tests {
 
         let request_id = ghinvite_core::RequestId::new();
         storage
-            .insert_invitation_request_and_increment_uses(&ghinvite_core::InvitationRequest {
+            .seed_request(&ghinvite_core::InvitationRequest {
                 id: request_id,
                 invitation_link_id: link_id,
                 requester_id: 99,
@@ -734,13 +735,11 @@ mod tests {
             .await
             .unwrap();
         storage
-            .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                id: invitation_id,
-                state: ghinvite_core::InvitationState::Sent,
-                github_invitation_id: Some(github_invitation_id),
-                error_message: None,
-                updated_at: at("2026-05-20T13:41:00Z"),
-            })
+            .debug_set_github_invitation(
+                invitation_id,
+                ghinvite_core::InvitationState::Sent,
+                Some(github_invitation_id),
+            )
             .await
             .unwrap();
 
@@ -1048,13 +1047,7 @@ mod tests {
         }
         // Uncertain create placeholders belong to the retained create owner.
         storage
-            .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                id,
-                state: ghinvite_core::InvitationState::Sending,
-                github_invitation_id: None,
-                error_message: None,
-                updated_at: Utc::now(),
-            })
+            .debug_set_github_invitation(id, ghinvite_core::InvitationState::Sending, None)
             .await
             .unwrap();
         let body = valid.to_string();
@@ -1082,13 +1075,7 @@ mod tests {
         // An initially untracked/uncertain delivery cannot bind to a later Sent row,
         // even if its unsigned delivery header changes on replay.
         storage
-            .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                id,
-                state: ghinvite_core::InvitationState::Sent,
-                github_invitation_id: Some(99001),
-                error_message: None,
-                updated_at: Utc::now(),
-            })
+            .debug_set_github_invitation(id, ghinvite_core::InvitationState::Sent, Some(99001))
             .await
             .unwrap();
         let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
@@ -1162,13 +1149,10 @@ mod tests {
             .unwrap();
         link.id = ghinvite_core::InvitationLinkId::new();
         link.slug = ghinvite_core::Slug::from_string("FEDCBA9876543210".into()).unwrap();
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
         request.id = ghinvite_core::RequestId::new();
         request.invitation_link_id = link.id;
-        storage
-            .insert_invitation_request_and_increment_uses(&request)
-            .await
-            .unwrap();
+        storage.seed_request(&request).await.unwrap();
         let mut newer = old.clone();
         newer.id = ghinvite_core::GithubInvitationId::new();
         newer.invitation_request_id = request.id;
@@ -1195,13 +1179,7 @@ mod tests {
             ghinvite_core::InvitationState::Accepted,
         ] {
             storage
-                .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                    id: old_id,
-                    state,
-                    github_invitation_id: Some(99001),
-                    error_message: None,
-                    updated_at: Utc::now(),
-                })
+                .debug_set_github_invitation(old_id, state, Some(99001))
                 .await
                 .unwrap();
             let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();

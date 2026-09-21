@@ -293,7 +293,7 @@ try {
   const audit = await storage('audit', 100);
   assert.equal(audit.events.filter(row => row.target_id === projection.link_id).length, 1);
   await storage('apply', { ...newer, events: [{ ...event, event_id: 'must-rollback' }],
-    link: { ...newer.link, uses: 1 } }, 409);
+    link: { ...newer.link, invitation_code: 'projection654321' } }, 409);
   assert.equal((await storage('link', projection.link_id)).uses_count, 0);
   assert.deepEqual(await storage('audit', 100), audit, 'conflicting batch must roll back events too');
   await storage('apply', { ...old, events: [{ ...event, actor_id: 91 }] }, 409);

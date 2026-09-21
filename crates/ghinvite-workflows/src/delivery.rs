@@ -622,7 +622,7 @@ async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), Handle
 mod tests {
     use super::*;
     use crate::test_support::{
-        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page, refusal,
+        dt, fixture_github_client, invitation_item, invitation_page, refusal,
         seed_pending_invitation, token_mint,
     };
     use ghinvite_core::GithubInvitationId;
@@ -668,11 +668,13 @@ mod tests {
     /// Seed the projections `attempt` reads, leaving the delivery fence
     /// unclaimed so the first guarded PUT may go out.
     async fn state_with_pending_create(mock: MockTransport) -> (AppState, CreateCommand) {
-        let state = AppState::new(
-            fixture_storage().await,
-            fixture_github_client(Arc::new(mock)),
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
         );
-        let seeded = seed_pending_invitation(&state, "acme/api").await;
+        let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
+        let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let command = CreateCommand {
             version: 1,
             invitation_id: GithubInvitationId::new(),
@@ -841,11 +843,13 @@ mod tests {
     /// way a create whose GitHub response was never journaled does. The retry
     /// can no longer write, so it has to recover the outcome by observation.
     async fn state_with_retained_create(mock: MockTransport) -> (AppState, CreateCommand) {
-        let state = AppState::new(
-            fixture_storage().await,
-            fixture_github_client(Arc::new(mock)),
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
         );
-        let seeded = seed_pending_invitation(&state, "acme/api").await;
+        let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
+        let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let command = CreateCommand {
             version: 1,
             // A create whose invitation row was never projected: the recovery

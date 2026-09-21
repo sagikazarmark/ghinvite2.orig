@@ -67,6 +67,7 @@ send_wrapper = { version = "0.6", features = ["futures"] }
 [dev-dependencies]
 ghinvite-github = { workspace = true, features = ["test-mock"] }
 ghinvite-core = { workspace = true, features = ["test-suite"] }
+ghinvite-storage-sqlx = { workspace = true, features = ["test-util"] }
 http-body-util = "0.1"
 sqlx.workspace = true
 tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }

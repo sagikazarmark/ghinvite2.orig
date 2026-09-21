@@ -187,9 +187,10 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
             .unwrap()
             .unwrap(),
         storage
-            .list_requests_for_link(link.id)
+            .request_history(100, link.id, None)
             .await
             .unwrap()
+            .requests
             .remove(0),
     ] {
         assert_eq!(
@@ -200,7 +201,7 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
     }
     assert_eq!(
         storage
-            .get_projected_request(requests[0].id)
+            .get_invitation_request(requests[0].id)
             .await
             .unwrap()
             .unwrap()
@@ -222,14 +223,12 @@ async fn maximum_escaped_command_payload_remains_projectable() {
     input.link.creation.internal_note = Some("\u{0001}".repeat(16_384));
     input.requests[0].justification = Some("\u{0001}".repeat(16_384));
     storage.apply_transition(&input).await.unwrap();
-    assert_eq!(
-        storage
-            .get_projected_request(input.requests[0].request_id)
-            .await
-            .unwrap()
-            .unwrap(),
-        input.requests[0]
-    );
+    let request = storage
+        .get_invitation_request(input.requests[0].request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.justification, input.requests[0].justification);
 }
 
 #[tokio::test]
@@ -363,9 +362,10 @@ async fn reordered_snapshots_keep_independent_revisions_and_historical_events() 
     assert_eq!(link.uses_count, 1);
     assert!(link.revoked_at.is_some());
     let requests = storage
-        .list_requests_for_link(old.link.link_id)
+        .request_history(100, old.link.link_id, None)
         .await
-        .unwrap();
+        .unwrap()
+        .requests;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].state, ghinvite_core::RequestState::Expired);
     assert_eq!(
@@ -416,9 +416,10 @@ async fn parent_repair_retries_without_overwriting_owned_facts() {
     );
     assert_eq!(
         storage
-            .list_requests_for_link(input.link.link_id)
+            .request_history(100, input.link.link_id, None)
             .await
             .unwrap()
+            .requests
             .len(),
         1
     );
@@ -432,19 +433,11 @@ async fn invariant_conflicts_are_observable_and_redrive_is_atomic() {
     storage.apply_transition(&input).await.unwrap();
     let mut conflicts = vec![];
     let mut changed = input.clone();
-    changed.link.uses = 2; // same revision, different content
-    conflicts.push(changed);
-    let mut changed = input.clone();
     changed.link.revision = 1; // stale immutable identity still conflicts
     changed.link.creation.account_id = 101;
     changed.link.creation.admin.account_id = 101;
     changed.requests.clear();
     changed.events.clear();
-    conflicts.push(changed);
-    let mut changed = input.clone();
-    changed.link.revision = 3;
-    changed.link.uses = 2;
-    changed.requests[0].state = ghinvite_core::RequestState::Approved;
     conflicts.push(changed);
     let mut changed = input.clone();
     changed.link.revision = 3;

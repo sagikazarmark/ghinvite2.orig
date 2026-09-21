@@ -303,19 +303,21 @@ async fn cancel_or_expire(
 mod tests {
     use super::*;
     use crate::test_support::{
-        dt, fixture_github_client, fixture_storage, invitation_item, invitation_page,
-        seed_pending_invitation, token_mint,
+        dt, fixture_github_client, invitation_item, invitation_page, seed_pending_invitation,
+        token_mint,
     };
     use ghinvite_github::mocks::{Expectation, MockTransport};
     use ghinvite_github::transport::Method;
     use std::sync::Arc;
 
     async fn seeded_state(mock: MockTransport) -> (AppState, GithubInvitation) {
-        let state = AppState::new(
-            fixture_storage().await,
-            fixture_github_client(Arc::new(mock)),
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
         );
-        let seeded = seed_pending_invitation(&state, "acme/api").await;
+        let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
+        let seeded = seed_pending_invitation(&storage, "acme/api").await;
         let row = state
             .storage
             .get_github_invitation(seeded.invitation_id)

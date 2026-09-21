@@ -17,6 +17,7 @@ use common::link_authority::FakeLinkAuthority;
 use ghinvite_core::admission::RequesterPage;
 use ghinvite_core::storage::Storage;
 use ghinvite_core::storage::projection::RequestSnapshot;
+use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
@@ -301,13 +302,13 @@ async fn document_fixture() -> (axum::Router, String) {
     let authority = FakeLinkAuthority::start().await;
     for (code, link_id) in [(FORM_CODE, FORM_LINK_ID), (STATUS_CODE, STATUS_LINK_ID)] {
         let link = active_link(code, link_id);
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
         authority.seed_link(&link);
         if code == STATUS_CODE {
             let request = RequestId::new();
             authority.set_requester_page(pending_page(&link, request));
             storage
-                .insert_invitation_request_and_increment_uses(&InvitationRequest {
+                .seed_request(&InvitationRequest {
                     id: request,
                     invitation_link_id: link.id,
                     requester_id: USER_ID,

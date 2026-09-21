@@ -34,7 +34,7 @@ expiry/readmission touches at most two requests. Uses are never refunded.
 
 One immutable logical terminal event is projected with the terminal request.
 Decision actor/time/reason update the existing SQLx/D1 request columns, with the
-same revision/conflict checks as other projected fields. Audit payloads exclude
+same revision and identity checks as other projected fields. Audit payloads exclude
 decline reasons. Requester status removes the reason; the web page renders only
 lifecycle state. `/i/<code>?request_id=<id>` can read an acknowledged request before
 its projected row arrives. The complete [v1 browser path](browser-admission-v1.md)

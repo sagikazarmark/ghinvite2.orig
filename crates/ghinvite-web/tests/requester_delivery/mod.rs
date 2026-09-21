@@ -1,5 +1,6 @@
 use super::*;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
+use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
 use ghinvite_storage_sqlx::SqlxStorage;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
@@ -53,7 +54,7 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
         repo_full_name: format!("acme/{name}"),
     })
     .collect();
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut request = request_with_state(
         RequestId::new(),
         link.id,
@@ -61,10 +62,7 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
         RequestState::Approved,
     );
     request.justification = Some("private internal justification".into());
-    storage
-        .insert_invitation_request_and_increment_uses(&request)
-        .await
-        .unwrap();
+    storage.seed_request(&request).await.unwrap();
     let mut invitations = vec![];
     for (i, repo) in link.repos.iter().take(9).enumerate() {
         let invitation = GithubInvitation {
@@ -220,13 +218,7 @@ async fn settle(fixture: &DeliveryFixture) {
     ]) {
         fixture
             .storage
-            .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                id: invitation.id,
-                state,
-                github_invitation_id: invitation.github_invitation_id,
-                error_message: None,
-                updated_at: Utc::now(),
-            })
+            .debug_set_github_invitation(invitation.id, state, invitation.github_invitation_id)
             .await
             .unwrap();
     }

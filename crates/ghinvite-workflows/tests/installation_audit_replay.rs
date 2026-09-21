@@ -71,30 +71,6 @@ impl Storage for LostAuditAcknowledgement {
     async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
         self.inner.get_user(user_id).await
     }
-    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()> {
-        self.inner.insert_invitation_link(link).await
-    }
-    async fn update_invitation_link_metadata(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-        description: &str,
-        internal_note: Option<&str>,
-    ) -> Result<()> {
-        self.inner
-            .update_invitation_link_metadata(account_id, id, description, internal_note)
-            .await
-    }
-    async fn mark_invitation_link_revoked(
-        &self,
-        id: InvitationLinkId,
-        by_user: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()> {
-        self.inner
-            .mark_invitation_link_revoked(id, by_user, when)
-            .await
-    }
     async fn get_invitation_link_by_id(
         &self,
         id: InvitationLinkId,
@@ -110,9 +86,6 @@ impl Storage for LostAuditAcknowledgement {
             .invitation_link_belongs_to_account(account_id, id)
             .await
     }
-    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
-        self.inner.get_invitation_link_by_slug(slug).await
-    }
     async fn list_invitation_links_for_account(
         &self,
         account_id: u64,
@@ -120,17 +93,6 @@ impl Storage for LostAuditAcknowledgement {
         self.inner
             .list_invitation_links_for_account(account_id)
             .await
-    }
-    async fn insert_invitation_request_and_increment_uses(
-        &self,
-        request: &InvitationRequest,
-    ) -> Result<()> {
-        self.inner
-            .insert_invitation_request_and_increment_uses(request)
-            .await
-    }
-    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()> {
-        self.inner.record_request_decision(decision).await
     }
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         self.inner.get_invitation_request(id).await
@@ -143,17 +105,8 @@ impl Storage for LostAuditAcknowledgement {
             .list_pending_requests_for_account(account_id)
             .await
     }
-    async fn list_requests_for_link(
-        &self,
-        link_id: InvitationLinkId,
-    ) -> Result<Vec<InvitationRequest>> {
-        self.inner.list_requests_for_link(link_id).await
-    }
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
         self.inner.insert_github_invitation(invitation).await
-    }
-    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
-        self.inner.update_github_invitation(update).await
     }
     async fn get_github_invitation(
         &self,
@@ -167,14 +120,6 @@ impl Storage for LostAuditAcknowledgement {
     ) -> Result<Option<GithubInvitation>> {
         self.inner
             .get_github_invitation_by_github_id(github_id)
-            .await
-    }
-    async fn list_pending_github_invitations_for_installation(
-        &self,
-        installation_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        self.inner
-            .list_pending_github_invitations_for_installation(installation_id)
             .await
     }
     async fn list_audit_events(

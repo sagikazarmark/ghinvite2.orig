@@ -121,17 +121,17 @@ pub(crate) struct SeededInvitation {
 /// repo (repo ID 10), one approved invitation request, and one
 /// `github_invitation` row in `Sent` state with upstream ID 9988.
 pub(crate) async fn seed_pending_invitation(
-    state: &AppState,
+    storage: &ghinvite_storage_sqlx::SqlxStorage,
     repo_full_name: &str,
 ) -> SeededInvitation {
+    use ghinvite_core::storage::{Storage, projection::ProjectionStorage};
     use ghinvite_core::{
         AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
         InvitationState, Permission, RequestId, RequestState, SelectedRepos, Slug,
     };
     use rand::SeedableRng;
 
-    state
-        .storage
+    storage
         .insert_installation(&ghinvite_core::Account {
             installation_id: 9,
             account_id: 100,
@@ -144,8 +144,7 @@ pub(crate) async fn seed_pending_invitation(
         .await
         .unwrap();
     for (user_id, login) in [(7, "creator"), (8, "alice")] {
-        state
-            .storage
+        storage
             .upsert_user(&ghinvite_core::User {
                 user_id,
                 login: login.into(),
@@ -176,27 +175,29 @@ pub(crate) async fn seed_pending_invitation(
             repo_full_name: repo_full_name.into(),
         }],
     };
-    state.storage.insert_invitation_link(&link).await.unwrap();
     let request_id = RequestId::new();
-    state
-        .storage
-        .insert_invitation_request_and_increment_uses(&ghinvite_core::InvitationRequest {
-            id: request_id,
-            invitation_link_id: link.id,
-            requester_id: 8,
-            justification: None,
-            state: RequestState::Approved,
-            decided_by: Some(7),
-            decided_at: Some(dt("2026-05-04T13:00:00Z")),
-            decline_reason: None,
-            decision_deadline: None,
-            created_at: dt("2026-05-04T12:30:00Z"),
-        })
+    let request = ghinvite_core::InvitationRequest {
+        id: request_id,
+        invitation_link_id: link.id,
+        requester_id: 8,
+        justification: None,
+        state: RequestState::Approved,
+        decided_by: Some(7),
+        decided_at: Some(dt("2026-05-04T13:00:00Z")),
+        decline_reason: None,
+        decision_deadline: None,
+        created_at: dt("2026-05-04T12:30:00Z"),
+    };
+    storage
+        .apply_transition(&ghinvite_core::storage::projection::fixture::envelope(
+            &link,
+            &[request],
+            1,
+        ))
         .await
         .unwrap();
     let invitation_id = GithubInvitationId::new();
-    state
-        .storage
+    storage
         .insert_github_invitation(&ghinvite_core::GithubInvitation {
             id: invitation_id,
             invitation_request_id: request_id,

@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
 use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
@@ -1072,7 +1073,7 @@ async fn build_test_app(link: InvitationLink, mock: MockTransport) -> axum::Rout
         .upsert_user(&sample_user(CREATOR_ID, "creator"))
         .await
         .unwrap();
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(mock),

@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::Utc;
 use common::link_authority::{self, CODE_SERVICE, LINK_SERVICE};
+use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, storage::Storage,
@@ -85,10 +86,10 @@ impl Browser {
                 repo_full_name: "octocat/api".into(),
             }],
         };
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
         let request_id = RequestId::new();
         storage
-            .insert_invitation_request_and_increment_uses(&InvitationRequest {
+            .seed_request(&InvitationRequest {
                 id: request_id,
                 invitation_link_id: link.id,
                 requester_id: 99,

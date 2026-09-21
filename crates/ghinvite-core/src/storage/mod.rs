@@ -6,7 +6,7 @@
 use crate::audit::AuditEvent;
 use crate::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
-    InvitationRequest, InvitationState, RequestId, RequestState, SelectedRepos, User,
+    InvitationRequest, RequestId, SelectedRepos, User,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -47,10 +47,6 @@ pub const MEMBER_INVITATION_CANDIDATES: &str = "SELECT g.id, g.invitation_reques
 /// specific unique-constraint or invariant the storage layer enforced.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConflictKind {
-    #[error("invitation_link slug already in use")]
-    DuplicateSlug,
-    #[error("a pending request already exists for this (link, requester)")]
-    DuplicatePendingRequest,
     #[error("primary key already exists")]
     DuplicateId,
     #[error("active installation already exists for this account")]
@@ -79,26 +75,6 @@ pub enum Error {
 
     #[error("data corruption: {0}")]
     Corrupt(String),
-}
-
-/// Decision recorded against a previously-pending invitation request.
-#[derive(Clone, Debug)]
-pub struct RequestDecision {
-    pub request_id: RequestId,
-    pub state: RequestState,
-    pub decided_by: Option<u64>,
-    pub decided_at: DateTime<Utc>,
-    pub decline_reason: Option<String>,
-}
-
-/// Update payload for github_invitations row state transitions.
-#[derive(Clone, Debug)]
-pub struct GithubInvitationUpdate {
-    pub id: GithubInvitationId,
-    pub state: InvitationState,
-    pub github_invitation_id: Option<u64>,
-    pub error_message: Option<String>,
-    pub updated_at: DateTime<Utc>,
 }
 
 #[async_trait]
@@ -264,45 +240,6 @@ pub trait Storage: Send + Sync + 'static {
 
     // -------- invitation links --------
 
-    /// Insert an invitation link plus its repo set in one transaction.
-    ///
-    /// **Errors:**
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateSlug`] if `link.slug`
-    ///   collides with an existing link.
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] if `link.id` collides.
-    /// - [`Error::Conflict`] with [`ConflictKind::ForeignKey`] if `installation_id`
-    ///   or `created_by` reference rows that do not exist.
-    /// - [`Error::Database`] for any other failure.
-    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()>;
-
-    /// Replace only the description and internal note of an account's link.
-    /// `None` clears the note. Inactive links and unchanged values are accepted;
-    /// all guardrails, identity, usage counters and revocation fields are preserved.
-    /// The caller supplies validated, normalized metadata.
-    ///
-    /// **Errors:** [`Error::NotFound`] for an unknown or foreign-account link;
-    /// [`Error::Database`] otherwise. Safe to retry with the same values.
-    async fn update_invitation_link_metadata(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-        description: &str,
-        internal_note: Option<&str>,
-    ) -> Result<()>;
-
-    /// Mark an invitation link as revoked (idempotent guard: only updates rows where
-    /// `revoked_at IS NULL`).
-    ///
-    /// **Errors:**
-    /// - [`Error::NotFound`] if the link is unknown *or* was already revoked.
-    /// - [`Error::Database`] otherwise.
-    async fn mark_invitation_link_revoked(
-        &self,
-        id: InvitationLinkId,
-        by_user: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()>;
-
     /// Read an invitation link plus its repo set by primary key.
     ///
     /// **Errors:**
@@ -320,13 +257,6 @@ pub trait Storage: Send + Sync + 'static {
         account_id: u64,
         id: InvitationLinkId,
     ) -> Result<bool>;
-
-    /// Read an invitation link by its public slug. Slug is the URL-facing identifier;
-    /// callers MUST compare in constant time against `Slug::ct_eq` *before* trusting
-    /// the result, to defend against timing-based slug enumeration.
-    ///
-    /// **Errors:** as for [`Self::get_invitation_link_by_id`].
-    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>>;
 
     /// List every invitation link belonging to an account, newest first. Each link
     /// includes its repo set (single LEFT JOIN — no N+1).
@@ -350,38 +280,6 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<request_history::Page> {
         Err(Error::Database("request history unavailable".into()))
     }
-
-    /// Insert a new `InvitationRequest` row and atomically increment
-    /// `invitation_links.uses_count` for the link this request was filed against.
-    ///
-    /// **Precondition:** the caller must have just verified that the invitation link is
-    /// `InvitationLink::is_active(now)`. This method does *not* re-check active status —
-    /// the partial unique index on `(invitation_link_id, requester_id) WHERE state = 'pending'`
-    /// only defends against duplicate pending requests, not against exhaustion or expiry.
-    ///
-    /// **Errors:**
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicatePendingRequest`] if a pending
-    ///   request already exists for this `(link, requester)`.
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] if `request.id` collides.
-    /// - [`Error::NotFound`] if `invitation_link_id` doesn't reference an existing link.
-    /// - [`Error::Database`] for any other SQLite/D1 failure.
-    ///
-    /// **Idempotency:** safe to retry on [`Error::Database`] (timeout etc.) — the
-    /// unique constraints will surface a [`Error::Conflict`] if the prior attempt
-    /// actually succeeded.
-    async fn insert_invitation_request_and_increment_uses(
-        &self,
-        request: &InvitationRequest,
-    ) -> Result<()>;
-
-    /// Record a decision on a pending request. Only updates rows currently in
-    /// state `pending` (so a second decision returns `NotFound` rather than
-    /// silently overwriting).
-    ///
-    /// **Errors:**
-    /// - [`Error::NotFound`] if the request is unknown *or* already decided.
-    /// - [`Error::Database`] otherwise.
-    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()>;
 
     /// Look up a single invitation request by id.
     ///
@@ -409,14 +307,6 @@ pub trait Storage: Send + Sync + 'static {
         Err(Error::Database("pending queue read unsupported".into()))
     }
 
-    /// List every request (any state) for a given invitation link, newest first.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn list_requests_for_link(
-        &self,
-        link_id: InvitationLinkId,
-    ) -> Result<Vec<InvitationRequest>>;
-
     // -------- github invitations --------
 
     /// Insert a new github_invitations row in `Sending` state. Caller is the
@@ -428,15 +318,6 @@ pub trait Storage: Send + Sync + 'static {
     ///   `invitation_request_id` references a row that does not exist.
     /// - [`Error::Database`] for any other failure.
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
-
-    /// Update an existing github_invitations row to a new state. The
-    /// `github_invitation_id` field is assigned exactly: passing `None` clears
-    /// any previously stored upstream GitHub invitation id.
-    ///
-    /// **Errors:**
-    /// - [`Error::NotFound`] if `update.id` doesn't match any row.
-    /// - [`Error::Database`] otherwise.
-    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()>;
 
     /// Look up a github_invitations row by primary key.
     ///
@@ -480,15 +361,6 @@ pub trait Storage: Send + Sync + 'static {
     ) -> Result<Option<GithubInvitationId>> {
         Err(Error::Database("member webhook binding unavailable".into()))
     }
-
-    /// List github_invitations rows for a given installation that are still
-    /// in flight (state `sending` or `sent`). Used by the daily reconcile sweep.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn list_pending_github_invitations_for_installation(
-        &self,
-        installation_id: u64,
-    ) -> Result<Vec<GithubInvitation>>;
 
     /// In-flight GitHub invitations across all historical installations of an
     /// immutable account. Installation IDs on links remain original provenance.

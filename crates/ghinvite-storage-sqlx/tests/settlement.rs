@@ -1,13 +1,16 @@
 use ghinvite_core::{
     audit::*,
-    storage::{AuditPosition, Storage, settlement::Settlement},
+    storage::{AuditPosition, Storage, projection::ProjectionStorage, settlement::Settlement},
     *,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 use rand::SeedableRng;
 
 async fn fixture() -> (SqlxStorage, GithubInvitation) {
-    let s = SqlxStorage::in_memory().await.unwrap();
+    fixture_with(SqlxStorage::in_memory().await.unwrap()).await
+}
+
+async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, GithubInvitation) {
     let at = "2026-09-17T12:00:00Z".parse().unwrap();
     s.insert_installation(&Account {
         installation_id: 9,
@@ -44,9 +47,11 @@ async fn fixture() -> (SqlxStorage, GithubInvitation) {
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![],
+        repos: vec![InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: "acme/api".into(),
+        }],
     };
-    s.insert_invitation_link(&link).await.unwrap();
     let request = InvitationRequest {
         id: RequestId::new(),
         invitation_link_id: link.id,
@@ -59,9 +64,13 @@ async fn fixture() -> (SqlxStorage, GithubInvitation) {
         decision_deadline: None,
         created_at: at,
     };
-    s.insert_invitation_request_and_increment_uses(&request)
-        .await
-        .unwrap();
+    s.apply_transition(&storage::projection::fixture::envelope(
+        &link,
+        std::slice::from_ref(&request),
+        1,
+    ))
+    .await
+    .unwrap();
     let row = GithubInvitation {
         id: GithubInvitationId::new(),
         invitation_request_id: request.id,
@@ -137,22 +146,25 @@ async fn conflicting_audit_cannot_silently_omit_settlement_event() {
 }
 
 #[tokio::test]
-async fn late_legacy_writer_cannot_overwrite_committed_settlement() {
-    let (s, row) = fixture().await;
+async fn late_writer_cannot_overwrite_committed_settlement() {
+    let path = std::env::temp_dir().join(format!("settlement-fence-{}.sqlite", RequestId::new()));
+    let (s, row) = fixture_with(SqlxStorage::at_path(&path).await.unwrap()).await;
     s.settle_github_invitation(&transition(&row, InvitationState::Accepted))
         .await
         .unwrap();
+    // A delayed write from an older invocation, outside the settlement API.
+    let db =
+        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
     assert!(
-        s.update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-            id: row.id,
-            state: InvitationState::Cancelled,
-            github_invitation_id: None,
-            error_message: None,
-            updated_at: row.updated_at,
-        })
-        .await
-        .is_err()
+        sqlx::query("UPDATE github_invitations SET state = 'cancelled' WHERE id = ?1")
+            .bind(row.id.to_string())
+            .execute(&db)
+            .await
+            .is_err()
     );
+    db.close().await;
     assert_eq!(
         s.get_github_invitation(row.id)
             .await
@@ -161,6 +173,8 @@ async fn late_legacy_writer_cannot_overwrite_committed_settlement() {
             .state,
         InvitationState::Accepted
     );
+    drop(s);
+    std::fs::remove_file(&path).ok();
 }
 
 #[cfg(feature = "test-util")]
