@@ -343,7 +343,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        // A record retained while its session was live is invisible once it ends.
+        // A record retained while its session was live cannot be read once it ends.
         storage
             .retain_attempt_continuation(&expired.key, "b", "b", "sealed", 1, 0)
             .await
