@@ -19,6 +19,7 @@ use dioxus::prelude::*;
 
 mod attempts;
 mod audit;
+mod cursor;
 mod request_history;
 
 pub fn router() -> Router<AppState> {
@@ -830,18 +831,12 @@ async fn requests_queue(
     admin: RequireConsoleAdminOf,
     axum::extract::Query(query): axum::extract::Query<QueueQuery>,
 ) -> impl IntoResponse {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    let after = match query.after.as_deref().map(|token| {
-        if token.len() > 512 {
-            return None;
-        }
-        let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
-        let boundary: ghinvite_core::storage::pending_queue::PendingBoundary =
-            serde_json::from_slice(&bytes).ok()?;
-        (1..=9999)
-            .contains(&chrono::Datelike::year(&boundary.created_at))
-            .then_some(boundary)
-    }) {
+    use ghinvite_core::storage::pending_queue::PendingBoundary;
+    let after = match query
+        .after
+        .as_deref()
+        .map(|token| cursor::decode(token, |boundary: &PendingBoundary| boundary.created_at))
+    {
         Some(Some(boundary)) => Some(boundary),
         None => None,
         Some(None) => {
@@ -863,7 +858,7 @@ async fn requests_queue(
         format!(
             "/console/accounts/{}/requests?after={}",
             admin.account.account_login,
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&boundary).expect("queue cursor serializes"))
+            cursor::encode(&boundary)
         )
     });
     let rows = page
