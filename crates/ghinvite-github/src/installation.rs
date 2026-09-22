@@ -67,6 +67,18 @@ impl CollaboratorRole {
     }
 }
 
+/// GitHub's answer to deleting a pending repository invitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationDeletion {
+    /// 204: GitHub deleted the pending invitation.
+    Deleted,
+    /// 404: GitHub holds no such invitation this installation can see. It was
+    /// already accepted, declined or deleted — or the installation no longer
+    /// sees the repository, which GitHub answers the same way. Nothing is left
+    /// for this installation to delete either way.
+    NotFound,
+}
+
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
 #[derive(Clone)]
@@ -358,9 +370,10 @@ impl InstallationClient {
     /// `DELETE /repos/{owner}/{repo}/invitations/{invitation_id}` — used to
     /// cancel a pending invitation.
     ///
-    /// **Errors:** `Error::Status { status: 404 }` if the invitation no longer
-    /// exists (already accepted/declined/cancelled), and `Error::RateLimited`
-    /// when GitHub throttled the delete rather than performing it.
+    /// **Errors:** `Error::RateLimited` when GitHub throttled the delete rather
+    /// than performing it, and any failure minting the installation token —
+    /// a mint's 404 means the installation is gone, never the invitation, so
+    /// it is not [`InvitationDeletion::NotFound`].
     #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn delete_invitation(
         &self,
@@ -368,7 +381,7 @@ impl InstallationClient {
         owner: &str,
         repo: &str,
         invitation_id: u64,
-    ) -> Result<()> {
+    ) -> Result<InvitationDeletion> {
         let path = format!(
             "/repos/{}/{}/invitations/{}",
             path_segment(owner),
@@ -378,8 +391,12 @@ impl InstallationClient {
         let req = self
             .auth_request(installation_id, Method::Delete, &path)
             .await?;
-        match self.transport.send(req).await?.ensure_success() {
-            Ok(_) => Ok(()),
+        let resp = self.transport.send(req).await?;
+        if resp.status == 404 {
+            return Ok(InvitationDeletion::NotFound);
+        }
+        match resp.ensure_success() {
+            Ok(_) => Ok(InvitationDeletion::Deleted),
             Err(err) => {
                 tracing::warn!(status = ?err.status(), "github request failed");
                 Err(err)
@@ -822,10 +839,54 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        client
+        assert_eq!(
+            client
+                .delete_invitation(9, "acme", "api", 777)
+                .await
+                .unwrap(),
+            InvitationDeletion::Deleted
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn delete_invitation_reports_an_invitation_github_does_not_hold() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::status(
+                Method::Delete,
+                "https://api.github.test/repos/acme/api/invitations/777",
+                404,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert_eq!(
+            client
+                .delete_invitation(9, "acme", "api", 777)
+                .await
+                .unwrap(),
+            InvitationDeletion::NotFound
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_token_mint_404_is_not_a_missing_invitation() {
+        // The installation is gone, not the invitation: GitHub may still hold it.
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Post,
+            "https://api.github.test/app/installations/9/access_tokens",
+            404,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client
             .delete_invitation(9, "acme", "api", 777)
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(err.status(), Some(404));
+        mock.assert_exhausted();
     }
 }
 

@@ -30,7 +30,7 @@ pub mod wasm_smoke;
 
 // Re-exports filled in as each module gains its public types:
 pub use error::{Error, RateLimit, RateLimitScope, Result};
-pub use installation::{CollaboratorRole, InstallationClient};
+pub use installation::{CollaboratorRole, InstallationClient, InvitationDeletion};
 pub use oauth::{AuthorizeUrl, OAuthConfig, OrgMembership, UserApiClient};
 // `redact` itself stays private — bodies are summarised inside this crate —
 // but the rule for bounding an upstream-supplied code is needed by the web

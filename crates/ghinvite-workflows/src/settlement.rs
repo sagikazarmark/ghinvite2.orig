@@ -6,6 +6,7 @@ use ghinvite_core::{
     audit::{ActorKind, AuditEvent, TargetKind},
     storage::settlement::Settlement,
 };
+use ghinvite_github::InvitationDeletion;
 use restate_sdk::{
     context::{ContextSideEffects, ObjectContext, RunFuture},
     errors::TerminalError,
@@ -279,10 +280,9 @@ async fn cancel_or_expire(
             return Ok(());
         }
     } else {
-        // Minted first so a 404 below can only be the invitation's own: a
-        // mint's 404 means the installation is gone, while GitHub may still
-        // hold the invitation.
-        state.github.installation_token(installation).await?;
+        // Either answer leaves nothing for this installation to cancel. A
+        // failed token mint is an error here, never `NotFound`: the
+        // installation being gone says nothing about the invitation.
         match state
             .github
             .delete_invitation(
@@ -291,10 +291,9 @@ async fn cancel_or_expire(
                 context.repository.name(),
                 row.github_invitation_id.unwrap(),
             )
-            .await
+            .await?
         {
-            Ok(()) | Err(ghinvite_github::Error::Status { status: 404, .. }) => (),
-            Err(e) => return Err(e.into()),
+            InvitationDeletion::Deleted | InvitationDeletion::NotFound => (),
         }
     }
     settle(state, row, if expire { InvitationState::Expired } else { InvitationState::Cancelled }, at, if by_user.is_some() { ActorKind::User } else { ActorKind::System }, by_user, serde_json::json!({"reason": if expire { "tick_expire" } else { "cancel" }, "by_user": by_user})).await

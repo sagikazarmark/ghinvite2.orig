@@ -478,10 +478,13 @@ mod tests {
         assert_eq!(pending[0].id, id);
         assert_eq!(pending[0].invitee.login, "alice");
         assert_eq!(pending[0].permissions, "write");
-        github
-            .delete_invitation(1, "acme", "api", id)
-            .await
-            .unwrap();
+        assert_eq!(
+            github
+                .delete_invitation(1, "acme", "api", id)
+                .await
+                .unwrap(),
+            crate::InvitationDeletion::Deleted
+        );
         assert!(
             github
                 .list_invitations(1, "acme", "api")
@@ -493,9 +496,8 @@ mod tests {
             github
                 .delete_invitation(1, "acme", "api", id)
                 .await
-                .unwrap_err()
-                .status(),
-            Some(404)
+                .unwrap(),
+            crate::InvitationDeletion::NotFound
         );
     }
 }
