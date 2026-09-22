@@ -29,7 +29,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     )
     .await
     .unwrap();
-    for user_id in [7, 8, 12] {
+    for user_id in [7, 8, 12, 31, 32, 33] {
         storage
             .upsert_user(&ghinvite_core::User {
                 user_id,
@@ -52,8 +52,14 @@ async fn availability_preserves_admission_and_pending_decisions() {
         axum::serve(stub, axum::Router::new().fallback(move |request: axum::extract::Request| {
             let data = data.clone();
             async move {
-                let data = data.lock().unwrap();
+                let mut data = data.lock().unwrap();
                 let path = request.uri().path();
+                // Counted so a scenario can say how many times GitHub was read,
+                // not merely what it answered. A repository listing is counted
+                // once per observation, at its first page.
+                let observation = if path == "/installation/repositories" && !request.uri().query().unwrap_or_default().contains("page=2") { Some("repo_reads") }
+                else if path.starts_with("/app/installations/") && !path.ends_with("/access_tokens") { Some("identity_reads") }
+                else { None };
                 let (status, body) = if data["failed"] == true { (503, json!({})) }
                 else if path.ends_with("/access_tokens") { (201, json!({"token":"fixture","expires_at":"2099-01-01T00:00:00Z"})) }
                 else if path == "/installation/repositories" && data["rate_limited"] == true { (403, json!({"message":"API rate limit exceeded"})) }
@@ -65,6 +71,10 @@ async fn availability_preserves_admission_and_pending_decisions() {
                 else if path == format!("/app/installations/{}", data["adopted"]) { (200, json!({"id":data["adopted"],"account":{"id":300,"login":"adopted","type":"Organization"},"suspended_at":null})) }
                 else if path == format!("/app/installations/{}", data["id"]) { (200, json!({"id":data["id"],"account":{"id":data.get("account_id").unwrap_or(&json!(100)),"login":"renamed","type":"Organization"},"suspended_at":null})) }
                 else { (404, json!({})) };
+                if let Some(counter) = observation {
+                    let read = data[counter].as_u64().unwrap_or(0);
+                    data[counter] = json!(read + 1);
+                }
                 (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(body))
             }
         })).await.unwrap();
@@ -239,20 +249,32 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .unwrap(),
         accepted
     );
+    // The outage reaches the account through the refresh its own webhook
+    // acknowledged. Only then has this account nothing recent and available to
+    // admit on, so admission reads GitHub again and fails through promptly.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status: Value = client
+                .post(format!("{ingress}/AccountInstallation/100/status"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if status["observation"]["kind"] == "unknown" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
     let fresh = json!({"link_id":link,"requester_id":12,"operation_id":RequestId::new()});
     assert_eq!(
         call("admit", fresh.clone()).send().await.unwrap().status(),
         503
     );
-    let status: Value = client
-        .post(format!("{ingress}/AccountInstallation/100/status"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(status["observation"]["kind"], "unknown");
     let query =
         json!({"link_id":link,"request_id":accepted["result"]["request_id"],"requester_id":8});
     let pending: Value = call("request_status", query.clone())
@@ -670,7 +692,79 @@ async fn availability_preserves_admission_and_pending_decisions() {
         101
     );
     assert_eq!(status["observation"]["repo_ids"][100], 110);
+    // A scope the account's recent observation does not cover is never refused
+    // from that observation: the refusal is read from GitHub first, because it
+    // is retained permanently.
+    let scoped_link = ghinvite_core::InvitationLinkId::new().to_string();
+    let scoped = |handler: &str, input: Value| {
+        client
+            .post(format!("{ingress}/InvitationLink/{scoped_link}/{handler}"))
+            .json(&input)
+    };
+    assert!(
+        scoped(
+            "create",
+            json!({"link_id":scoped_link,"account_id":100,"installation_id":20,"admin":{"account_id":100,"user_id":7},
+                "description":"Recent observation","max_uses":3,"approval_required":true,"permission":"pull",
+                "repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":200,"repo_full_name":"acme/extra"}]})
+        )
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success()
+    );
+    let scoped_attempt = |requester_id: u64| json!({"link_id":scoped_link,"requester_id":requester_id,"operation_id":RequestId::new()});
+    observed.lock().unwrap()["repo_reads"] = json!(0);
+    let refused: Value = scoped("admit", scoped_attempt(15))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        refused["result"],
+        json!({"kind":"rejected","reason":"repository_unavailable"})
+    );
+    assert_eq!(
+        observed.lock().unwrap()["repo_reads"],
+        json!(1),
+        "a rejection rests on a live read"
+    );
+    // GitHub gains the repository without a webhook. The attempts below still
+    // read GitHub once between them — the first, whose scope the retained
+    // observation does not cover — and the rest rest on what it observed.
+    observed.lock().unwrap()["repos"] = json!((10..=110).chain([200]).collect::<Vec<_>>());
+    observed.lock().unwrap()["repo_reads"] = json!(0);
+    for requester_id in [31, 32, 33] {
+        let admitted: Value = scoped("admit", scoped_attempt(requester_id))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(admitted["result"]["kind"], "accepted", "{admitted}");
+    }
+    assert_eq!(
+        observed.lock().unwrap()["repo_reads"],
+        json!(1),
+        "one observation admits every attempt it covers"
+    );
     observed.lock().unwrap()["account_id"] = json!(200);
+    // A changed installation identity reaches the account through its own
+    // observation; admission then confirms the refusal against GitHub.
+    assert!(
+        client
+            .post(format!("{ingress}/AccountInstallation/100/recheck"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    observed.lock().unwrap()["identity_reads"] = json!(0);
     let foreign = json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
     assert_eq!(
         call("admit", foreign)
@@ -681,6 +775,10 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .await
             .unwrap()["result"]["reason"],
         "installation_unavailable"
+    );
+    assert!(
+        observed.lock().unwrap()["identity_reads"].as_u64().unwrap() > 0,
+        "a rejection rests on a live read"
     );
     observed.lock().unwrap()["account_id"] = json!(100);
     let restored: Value = call("admit", fresh)

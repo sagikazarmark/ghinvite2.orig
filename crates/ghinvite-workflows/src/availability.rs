@@ -7,7 +7,7 @@ use ghinvite_core::{Account, SelectedRepos, admission::Rejection};
 use restate_sdk::{
     context::{
         ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
-        RunFuture,
+        RunFuture, SharedObjectContext,
     },
     errors::{HandlerError, TerminalError},
     serde::Json,
@@ -41,6 +41,17 @@ pub enum Observation {
 pub struct InstallationStatus {
     pub account: Option<Account>,
     pub observation: Observation,
+    /// When GitHub was read for `observation`. Absent when nothing read it:
+    /// adoption of an existing installation, and retirement by uninstall.
+    #[serde(default)]
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One reading of an installation's availability, and when it was taken.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Observed {
+    observation: Observation,
+    at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a refresh follows: the identity an event named, or the periodic
@@ -305,6 +316,7 @@ impl AccountInstallation {
         let status = InstallationStatus {
             account,
             observation: Observation::Unknown,
+            observed_at: None,
         };
         ctx.set("installation", Json(status.clone()));
         Ok(status)
@@ -342,19 +354,27 @@ impl AccountInstallation {
         mut status: InstallationStatus,
     ) -> Result<InstallationStatus, TerminalError> {
         if let Some(account) = &mut status.account {
-            let observation = if ctx
+            let retired = ctx
                 .get::<bool>(&retired_key(account.installation_id))
                 .await?
-                .is_some()
-            {
-                Observation::Unavailable
-            } else {
-                let Json(observation) = ctx
-                    .run(|| async { Ok::<_, HandlerError>(Json(self.observe(account).await)) })
-                    .name("refresh_github_scope")
-                    .await?;
-                observation
-            };
+                .is_some();
+            // The reading and the time it was taken are one journal entry, so
+            // a replay never dates an observation by when it was replayed.
+            let Json(observed) = ctx
+                .run(|| async {
+                    let observation = if retired {
+                        Observation::Unavailable
+                    } else {
+                        self.observe(account).await
+                    };
+                    Ok::<_, HandlerError>(Json(Observed {
+                        observation,
+                        at: chrono::Utc::now(),
+                    }))
+                })
+                .name("refresh_github_scope")
+                .await?;
+            let Observed { observation, at } = observed;
             let refresh = Refresh::of(account, &observation);
             if let Some(selected) = refresh.selected_repos {
                 project(
@@ -377,8 +397,10 @@ impl AccountInstallation {
                     .await?;
             }
             status.observation = observation;
+            status.observed_at = Some(at);
         } else {
             status.observation = Observation::Unavailable;
+            status.observed_at = None;
         }
         ctx.set("installation", Json(status.clone()));
         Ok(status)
@@ -491,6 +513,7 @@ impl AccountInstallation {
             project(ctx, InstallationChange::Uninstall { input }).await?;
             status.account = None;
             status.observation = Observation::Unavailable;
+            status.observed_at = None;
             ctx.set("installation", Json(status));
         }
         Ok(())
@@ -553,6 +576,30 @@ fn eligibility(observation: &Observation, scope: &Scope) -> Eligibility {
     }
 }
 
+/// The answer a retained observation may give on its own, if it may give one.
+///
+/// Only an acceptance rests on a retained observation, and only while that
+/// observation is recent and covers the whole scope. A rejection is a
+/// permanently retained receipt that restoration never revisits, so every
+/// answer that would reject — and every account with nothing recent to answer
+/// from — reads GitHub again instead (ADR 0004).
+fn retained_eligibility(
+    status: &InstallationStatus,
+    scope: &Scope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Eligibility> {
+    let observed_at = status.observed_at?;
+    let recent = (now - observed_at)
+        .to_std()
+        .is_ok_and(|age| age < RECENT_OBSERVATION);
+    (recent
+        && matches!(
+            eligibility(&status.observation, scope),
+            Eligibility::Available
+        ))
+    .then_some(Eligibility::Available)
+}
+
 /// What admission makes of its `eligibility` call. A call fails only with the
 /// callee's terminal error: an adoption outage is transient by design, so
 /// eligibility is unknown and the same attempt can retry. Anything else (an
@@ -588,6 +635,11 @@ fn adoption_unavailable() -> TerminalError {
 /// reserving its single scheduled invocation.
 const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const RECHECK_SLOT: &str = "refresh_scheduled";
+
+/// How long an observation stays recent enough to admit on its own. Access lost
+/// inside this window is not an admission error: it surfaces as blocked
+/// delivery, exactly as a change made after any observation does (ADR 0004).
+const RECENT_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Bounded backoff for a retained refresh continuation: short first retries so a
 /// brief storage outage converges quickly, settling on the recheck cadence so a
@@ -795,8 +847,37 @@ impl AccountInstallation {
     ) -> Result<Json<InstallationStatus>, TerminalError> {
         self.load(&ctx).await.map(Json)
     }
+    /// Answers an admission without taking this account's exclusivity whenever
+    /// the retained observation may accept the scope on its own. A shared
+    /// handler holds no object lock, so the reading path below is an ordinary
+    /// call: it queues behind the account's other writers, not behind this.
     #[handler]
     async fn eligibility(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<Eligibility>, TerminalError> {
+        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
+            return Err(invalid());
+        }
+        if let Some(Json(status)) = ctx.get::<Json<InstallationStatus>>("installation").await? {
+            let Json(now) = ctx
+                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
+                .name("eligibility_time")
+                .await?;
+            if let Some(answer) = retained_eligibility(&status, &scope, now) {
+                return Ok(Json(answer));
+            }
+        }
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
+            .observed_eligibility(Json(scope))
+            .call()
+            .await
+    }
+    /// Reads GitHub for this account and answers from what it observed. Every
+    /// answer that can reject an admission comes from here.
+    #[handler]
+    async fn observed_eligibility(
         &self,
         ctx: ObjectContext<'_>,
         Json(scope): Json<Scope>,
@@ -1273,6 +1354,80 @@ mod tests {
             assert_eq!(
                 eligibility(&observation, &scope(&[10, 11])),
                 expected,
+                "observation={observation:?}"
+            );
+        }
+    }
+
+    /// An account whose retained observation was taken at `observed_at`.
+    fn observed(observation: Observation, observed_at: Option<&str>) -> InstallationStatus {
+        InstallationStatus {
+            account: Some(account_selecting(SelectedRepos::Subset(vec![10, 11]))),
+            observation,
+            observed_at: observed_at.map(dt),
+        }
+    }
+
+    const NOW: &str = "2026-05-04T12:00:00Z";
+
+    #[test]
+    fn a_recent_available_observation_admits_its_whole_scope_on_its_own() {
+        let status = observed(available(&[10, 11]), Some("2026-05-04T11:56:00Z"));
+
+        assert_eq!(
+            retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+            Some(Eligibility::Available)
+        );
+    }
+
+    #[test]
+    fn an_observation_that_no_longer_speaks_for_now_is_read_again() {
+        // The window's own edge, anything past it, and — for a clock that went
+        // backwards between observation and admission — anything that claims to
+        // postdate the admission reading it.
+        for at in [
+            "2026-05-04T11:55:00Z",
+            "2026-05-04T11:54:00Z",
+            "2026-05-04T12:00:01Z",
+        ] {
+            let status = observed(available(&[10, 11]), Some(at));
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
+                "observed_at={at}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_that_would_reject_is_answered_from_a_retained_observation() {
+        // Every rejection is a permanently retained receipt, so it has to rest
+        // on a live read however recent the retained observation is.
+        for observation in [
+            Observation::Unavailable,
+            Observation::Unknown,
+            available(&[10]),
+        ] {
+            let status = observed(observation.clone(), Some(NOW));
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
+                "observation={observation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_never_observed_is_read_live() {
+        // Adoption retains an installation without reading GitHub for it.
+        for observation in [Observation::Unknown, available(&[10, 11])] {
+            let status = observed(observation.clone(), None);
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
                 "observation={observation:?}"
             );
         }

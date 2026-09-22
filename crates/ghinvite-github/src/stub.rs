@@ -16,6 +16,10 @@ use serde_json::json;
 #[derive(Default)]
 struct StubState {
     installation_account: Option<serde_json::Value>,
+    /// The repository IDs the installation makes available, when a fixture
+    /// needs the scope to change under it. Defaults to `acme/api` and
+    /// `acme/web`.
+    installation_repos: Option<Vec<u64>>,
     user_login: Option<String>,
     addressed_id: Option<u64>,
     access_role: Option<String>,
@@ -79,7 +83,15 @@ fn routes(state: SharedState) -> Router {
         .route("/app/installations/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move {
             Json(json!({"id":id,"account":state.lock().unwrap().installation_account.clone().unwrap_or(json!({"id":100,"login":"acme","type":"Organization"})),"suspended_at":null}))
         }))
-        .route("/installation/repositories", get(|| async { Json(json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]})) }))
+        .route("/installation-repositories", post(|State(state): State<SharedState>, Json(input): Json<Vec<u64>>| async move {
+            state.lock().unwrap().installation_repos = Some(input);
+            StatusCode::NO_CONTENT
+        }))
+        .route("/installation/repositories", get(|State(state): State<SharedState>| async move {
+            let repos = state.lock().unwrap().installation_repos.clone().unwrap_or_else(|| vec![10, 11]);
+            let repositories: Vec<_> = repos.iter().map(|id| json!({"id":id,"full_name":repo_full_name(*id),"private":true})).collect();
+            Json(json!({"total_count":repositories.len(),"repositories":repositories}))
+        }))
         .route("/user/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move { Json(json!({"id":id,"login":state.lock().unwrap().user_login.as_deref().unwrap_or("alice")})) }))
         .route("/users/{login}", get(|Path(login): Path<String>, State(state): State<SharedState>| async move { Json(json!({"id":state.lock().unwrap().addressed_id.unwrap_or(8),"login":login})) }))
         .route("/identity", post(|State(state): State<SharedState>, Json(input): Json<serde_json::Value>| async move {
@@ -323,6 +335,16 @@ async fn get_calls(State(state): State<SharedState>) -> impl IntoResponse {
         count: s.calls.len(),
         requests: s.calls.clone(),
     })
+}
+
+/// The two repositories every other fixture already names, and a stable name
+/// for any further ID a fixture makes available.
+fn repo_full_name(id: u64) -> String {
+    match id {
+        10 => "acme/api".to_owned(),
+        11 => "acme/web".to_owned(),
+        other => format!("acme/repo-{other}"),
+    }
 }
 
 async fn reset(State(state): State<SharedState>) -> impl IntoResponse {
