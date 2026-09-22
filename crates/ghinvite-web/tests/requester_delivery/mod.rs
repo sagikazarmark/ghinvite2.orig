@@ -1,15 +1,18 @@
 use super::*;
+use common::link_authority::FakeLinkAuthority;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
+use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
+use ghinvite_core::request_lifecycle::TerminalDecision;
+use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
 use ghinvite_storage_sqlx::SqlxStorage;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
 
 struct DeliveryFixture {
     app: axum::Router,
     storage: Arc<SqlxStorage>,
-    ingress: MockServer,
+    authority: FakeLinkAuthority,
     invitations: Vec<GithubInvitation>,
 }
 
@@ -113,39 +116,51 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
             .unwrap();
         invitations.push(invitation);
     }
-    let ingress = MockServer::start().await;
-    Mock::given(path_regex("/resolve$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(link.id))
-        .mount(&ingress)
-        .await;
-    Mock::given(path_regex("/requester_page$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "link_id": link.id, "invitation_code": ACTIVE_SLUG, "repos": link.repos,
-            "permission": "pull", "approval_required": true, "can_start_fresh": false, "attempt": null,
-            "request": { "request_id": request.id, "link_id": link.id, "account_id": link.account_id,
-                "requester_id": REQUESTER_ID, "justification": "private internal justification",
-                "state": "approved", "admitted_at": "2026-09-14T12:00:00Z",
-                "decision_deadline": "2026-09-21T12:00:00Z", "revision": 1 }
-        }))).mount(&ingress).await;
-    Mock::given(path_regex("/delivery_progress$"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"repo_id": 10, "stage": "approved"}, {"repo_id": 11, "stage": "planned"},
-            {"repo_id": 12, "stage": "submitted"}
-        ])))
-        .mount(&ingress)
-        .await;
+    // The authority approved the request; delivery has reached different
+    // stages per repository.
+    let authority = FakeLinkAuthority::start().await;
+    authority.seed_link(&link);
+    let approved_at = Utc::now();
+    authority.seed_request(RequestSnapshot {
+        request_id: request.id,
+        link_id: link.id,
+        account_id: link.account_id,
+        requester_id: REQUESTER_ID,
+        justification: request.justification.clone(),
+        state: RequestState::Approved,
+        admitted_at: approved_at,
+        decision_deadline: Some(approved_at + chrono::Duration::days(7)),
+        revision: 2,
+        decision: Some(TerminalDecision {
+            decision_id: format!("request.approved/{}", request.id),
+            decided_by: Some(CREATOR_ID),
+            effective_at: approved_at,
+            evaluated_at: approved_at,
+            decline_reason: None,
+        }),
+    });
+    authority.set_delivery_progress(
+        request.id,
+        [
+            (10, DispatchStage::Approved),
+            (11, DispatchStage::Planned),
+            (12, DispatchStage::Submitted),
+        ]
+        .map(|(repo_id, stage)| RepositoryProgress { repo_id, stage })
+        .into(),
+    );
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(oauth_expectations(
             GithubUser::new("octocat", REQUESTER_ID),
         ))),
-        Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     DeliveryFixture {
         app: build_app(state, tower_sessions::MemoryStore::default()),
         storage,
-        ingress,
+        authority,
         invitations,
     }
 }
@@ -174,11 +189,7 @@ async fn failed_observations_preserve_known_outcomes_and_mark_updates_unavailabl
     std::fs::remove_file(path).unwrap();
 
     let fixture = fixture().await;
-    Mock::given(path_regex("/delivery_progress$"))
-        .respond_with(ResponseTemplate::new(503).set_body_string("private upstream diagnostic"))
-        .with_priority(1)
-        .mount(&fixture.ingress)
-        .await;
+    fixture.authority.fail("delivery_progress", 503);
     let cookie = sign_in(&fixture.app).await;
     let html = status_html(&fixture, &cookie).await;
     assert!(html.contains("GitHub invitation created"));
@@ -260,16 +271,9 @@ async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes
     assert!(!html.contains("private "));
     assert!(!html.contains("AI coding workshop"));
     assert!(!html.contains("Submit request"));
-    assert!(
-        fixture
-            .ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| ["resolve", "requester_page", "delivery_progress"]
-                .contains(&r.url.path().rsplit('/').next().unwrap()))
-    );
+    assert!(fixture.authority.calls().iter().all(|method| {
+        ["resolve", "requester_page", "delivery_progress"].contains(&method.as_str())
+    }));
 }
 
 #[tokio::test]
