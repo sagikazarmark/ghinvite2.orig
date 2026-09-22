@@ -1,13 +1,13 @@
 //! `GET /` — public home page.
 
+use crate::render::render_with_csrf;
 use crate::session;
 use crate::state::AppState;
-use crate::views::home::HomePage;
-use crate::views::render::render_with_csrf;
 use axum::Router;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use dioxus::prelude::*;
+use ghinvite_ui::home::HomePage;
 use tower_sessions::Session as TowerSession;
 
 pub fn router() -> Router<AppState> {

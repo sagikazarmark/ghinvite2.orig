@@ -139,7 +139,7 @@ register with metadata. The help `p`
 retains its styling because registry FieldDescription forces the unsuitable
 `label` class even with appearance disabled. Metadata reduces duplication; it
 does not eliminate all application wiring. Only the new-link numeric fields
-migrated; legacy `FieldKind::Number` controls elsewhere, textarea, and checkboxes
+migrated; native `FieldKind::Text` controls, textarea, and checkboxes
 keep their existing native rendering and listeners. Installed upstream source
 and installation instructions are unchanged, with no new dependencies. See
 [component provenance and update instructions](src/components/README.md) and the
@@ -163,8 +163,8 @@ plain form keeps working.
 
 ## Consumers
 
-- `ghinvite-web` re-exports this crate as `ghinvite_web::views::*`, adds
-  `views::render` (the `dioxus_ssr` renderer; `dioxus-ssr` is deliberately not
+- `ghinvite-web` imports this crate directly, adds `ghinvite_web::render`
+  (the `dioxus_ssr` renderer; `dioxus-ssr` is deliberately not
   a dependency here), and re-exports `flash::{Flash, FlashLevel}` from
   `ghinvite_web::session`.
 - `ghinvite-island` (the browser island, `dioxus-web` + the `dioform` facade)

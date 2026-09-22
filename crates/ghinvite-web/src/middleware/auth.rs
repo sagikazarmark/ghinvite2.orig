@@ -53,9 +53,9 @@ pub async fn check_admin(
 
 fn generic_not_found_response(session: &Session) -> axum::response::Response {
     let signed_in_login = Some(session.login.clone());
-    let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
+    let html = crate::render::render_with_csrf(session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::not_found::PublicNotFoundPage {
+            ghinvite_ui::not_found::PublicNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
             }
         }

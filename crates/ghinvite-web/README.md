@@ -103,12 +103,12 @@ and the shared new-invitation-link form model (`link_form`) live in
 `crates/ghinvite-ui`, which depends only on `dioxus`, `dioform-core` +
 `dioform-derive`, `ghinvite-core`, `chrono`, and `serde` — never on this
 crate, the GitHub client, or storage
-([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). This crate
-re-exports them as `ghinvite_web::views::*` and adds `views::render`, the
+([ADR 0001](../../docs/adr/0001-ssr-first-with-dioxus-islands.md)). Routes
+import them from `ghinvite_ui` directly; this crate adds only `render`, the
 `dioxus_ssr` renderer the routes call. `session::Flash` is a re-export of
 `ghinvite_ui::flash::Flash`. Data crosses into the views as plain props: for
 example the console route maps the GitHub `GhRepo` payload into
-`views::link_form::RepositoryChoice` once, where repositories are loaded, and
+`ghinvite_ui::link_form::RepositoryChoice` once, where repositories are loaded, and
 both validation and the form page work on that type.
 
 Browser mutation authority is a request-local exception to page props:
@@ -162,7 +162,7 @@ Every HTML response carries an enforced `Content-Security-Policy`
 - **No inline `<script>` blocks.** Not in layouts, not in pages, not in
   components. The browser will refuse to run them. Rendered HTML may contain
   only these script elements: `<script src="/static/app.js"></script>` in the
-  layout `<head>` (`views::components::AppScript`); on a page that hosts a
+  layout `<head>` (`ghinvite_ui::components::AppScript`); on a page that hosts a
   Dioxus island, one `<script type="application/json" id="…">` data block
   (inert — the browser never executes it, and the CSP does not apply to it)
   and one `<script type="module" src="/assets/…">` tag. Data blocks are

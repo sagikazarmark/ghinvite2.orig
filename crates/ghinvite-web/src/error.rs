@@ -261,9 +261,9 @@ impl Problem {
             primary_label,
             secondary,
         } = self;
-        let html = crate::views::render::render(move || {
+        let html = crate::render::render(move || {
             rsx! {
-                crate::views::problem::ProblemPage {
+                ghinvite_ui::problem::ProblemPage {
                     // The session is not reachable from here, so the page
                     // renders signed-out chrome. Its links go to public routes
                     // that work either way.

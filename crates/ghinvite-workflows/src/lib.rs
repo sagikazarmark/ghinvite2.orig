@@ -16,7 +16,6 @@
 //! `scripts/test-restate.sh`.
 
 pub mod admission;
-pub mod audit;
 pub mod availability;
 pub mod delivery;
 pub mod error;

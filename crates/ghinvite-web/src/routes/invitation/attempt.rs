@@ -465,7 +465,7 @@ impl View<'_> {
             .and_then(|p| p.request.as_ref())
             .filter(|r| r.state == ghinvite_core::RequestState::Pending)
             .map(|_| ghinvite_ui::invitation::PENDING_REFRESH_SECONDS);
-        let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
+        let html = crate::render::render_with_csrf(session.csrf_token.clone(), move || {
             rsx! {
                 ghinvite_ui::layouts::InvitationLayout {
                     signed_in_login: Some(login.clone()), title: "Request repository access · ghinvite".to_owned(),

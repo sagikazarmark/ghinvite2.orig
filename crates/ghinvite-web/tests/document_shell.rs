@@ -2,7 +2,7 @@
 //!
 //! `ghinvite_ui::document` unit-tests the shell itself and `ghinvite_ui::layouts`
 //! the viewport meta. These tests pin both to the real router, so a page that
-//! stops rendering through `views::render`, or a layout that loses its `<head>`,
+//! stops rendering through `render::render`, or a layout that loses its `<head>`,
 //! fails here rather than in a browser.
 //!
 //! What only a browser can decide — quirks vs. standards mode, and whether a

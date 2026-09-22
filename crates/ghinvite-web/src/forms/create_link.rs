@@ -1,6 +1,6 @@
 //! The new invitation link form on the server.
 //!
-//! A thin adapter over the shared model in [`crate::views::link_form`]: the
+//! A thin adapter over the shared model in [`ghinvite_ui::link_form`]: the
 //! raw POST body ([`CreateLinkSubmission`]) is parsed into the typed
 //! `CreateLinkForm`, the shared validators run through `dioform-core`, and the
 //! route gets back either the guardrails the command facade may act on
@@ -11,16 +11,16 @@
 //! No rule lives here. Adding one is a validator in `register_validators`
 //! (and, for a typed text field, a parser) in the shared module.
 
-use crate::views::link_form::{
-    self, CreateLinkForm, LinkFormErrors, RepositoryChoice, register_validators,
-};
-use crate::views::links::LinkFormValues;
 use chrono::{DateTime, Utc};
 use dioform_core::FormCore;
 use ghinvite_core::storage::projection::{AccountAdmin, CreateLink};
 use ghinvite_core::{
     Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
 };
+use ghinvite_ui::link_form::{
+    self, CreateLinkForm, LinkFormErrors, RepositoryChoice, register_validators,
+};
+use ghinvite_ui::links::LinkFormValues;
 use serde::Deserialize;
 use std::str::FromStr;
 

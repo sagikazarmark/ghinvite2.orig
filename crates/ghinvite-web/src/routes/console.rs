@@ -4,11 +4,9 @@ use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::link_authority::AuthorityError;
 use crate::middleware::auth::RequireConsoleAdminOf;
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
+use crate::render::render_with_csrf as render;
 use crate::session;
 use crate::state::AppState;
-use crate::views::link_edit::{self, LinkEditValues};
-use crate::views::link_form::{RepositoryChoice, missing_repository_notice};
-use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
 use axum::http::{Method, Uri};
@@ -16,6 +14,8 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
+use ghinvite_ui::link_edit::{self, LinkEditValues};
+use ghinvite_ui::link_form::{RepositoryChoice, missing_repository_notice};
 
 mod attempts;
 mod audit;
@@ -117,9 +117,9 @@ async fn console_index(
             let signed_in_login = Some(session.login.clone());
             let html = render(session.csrf_token.clone(), move || {
                 rsx! {
-                    crate::views::console::ConsoleIndexPage {
+                    ghinvite_ui::console::ConsoleIndexPage {
                         signed_in_login: signed_in_login.clone(),
-                        state: crate::views::console::ConsoleIndexState::LoadError,
+                        state: ghinvite_ui::console::ConsoleIndexState::LoadError,
                     }
                 }
             });
@@ -135,14 +135,14 @@ async fn console_index(
     }
 
     let state_view = if accounts.is_empty() {
-        crate::views::console::ConsoleIndexState::Empty
+        ghinvite_ui::console::ConsoleIndexState::Empty
     } else {
-        crate::views::console::ConsoleIndexState::AccountPicker { accounts }
+        ghinvite_ui::console::ConsoleIndexState::AccountPicker { accounts }
     };
     let signed_in_login = Some(session.login.clone());
     let html = render(session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::console::ConsoleIndexPage {
+            ghinvite_ui::console::ConsoleIndexPage {
                 signed_in_login: signed_in_login.clone(),
                 state: state_view.clone(),
             }
@@ -154,7 +154,7 @@ async fn console_index(
 async fn load_console_accounts(
     state: &AppState,
     session: &mut session::Session,
-) -> Result<Vec<crate::views::console::ConsoleAccountChoice>, crate::error::WebError> {
+) -> Result<Vec<ghinvite_ui::console::ConsoleAccountChoice>, crate::error::WebError> {
     let user_api = ghinvite_github::oauth::UserApiClient::new(
         state.github_transport.clone(),
         session.access_token.clone(),
@@ -174,9 +174,9 @@ async fn load_console_accounts(
         let is_admin = crate::middleware::auth::check_admin(state, session, &account).await?;
 
         if is_admin {
-            accounts.push(crate::views::console::ConsoleAccountChoice {
+            accounts.push(ghinvite_ui::console::ConsoleAccountChoice {
                 login: account.account_login,
-                account_type: crate::views::components::account_type_label(account.account_type)
+                account_type: ghinvite_ui::components::account_type_label(account.account_type)
                     .to_string(),
             });
         }
@@ -212,7 +212,7 @@ fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::
     let account_login = admin.account.account_login.clone();
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::not_found::ConsoleNotFoundPage {
+            ghinvite_ui::not_found::ConsoleNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
                 account_login: account_login.clone(),
             }
@@ -260,7 +260,7 @@ async fn overview(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::console::OverviewPage {
+            ghinvite_ui::console::OverviewPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -281,7 +281,7 @@ async fn links_list(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let value = |key: &str| params.get(key).map(String::as_str).unwrap_or_default();
-    let query = crate::views::link_list::LinkListQuery::new(
+    let query = ghinvite_ui::link_list::LinkListQuery::new(
         value("filter"),
         value("sort"),
         value("direction"),
@@ -302,7 +302,7 @@ async fn links_list(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::link_list::LinkListPage {
+            ghinvite_ui::link_list::LinkListPage {
                 signed_in_login: Some(admin.session.login.clone()),
                 flash: flash.clone(),
                 account_login: admin.account.account_login.clone(),
@@ -321,7 +321,7 @@ async fn new_link_form(
 ) -> impl IntoResponse {
     let repos = load_installation_repos_for_form(&state, &admin).await;
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
-    let form = crate::views::links::LinkFormValues::default();
+    let form = ghinvite_ui::links::LinkFormValues::default();
 
     creation_form_response(
         &admin,
@@ -344,7 +344,7 @@ fn creation_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
     repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
-    mut form: crate::views::links::LinkFormValues,
+    mut form: ghinvite_ui::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
     link_id: ghinvite_core::InvitationLinkId,
 ) -> axum::response::Response {
@@ -372,7 +372,7 @@ fn creation_form_response(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::links::LinkCreateFormPage {
+            ghinvite_ui::links::LinkCreateFormPage {
                 action: action.clone(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
@@ -481,7 +481,7 @@ async fn create_link(
             let values = form.into_view_values(Default::default());
             let html = render(session.csrf_token, move || {
                 rsx! {
-                    crate::views::links::AccessVerificationRetryPage {
+                    ghinvite_ui::links::AccessVerificationRetryPage {
                         signed_in_login: Some(session.login.clone()),
                         action: action.clone(),
                         values: values.clone(),
@@ -785,7 +785,7 @@ async fn link_detail(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::links::LinkDetailPage {
+            ghinvite_ui::links::LinkDetailPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -859,7 +859,7 @@ async fn requests_queue(
     let rows = page
         .rows
         .into_iter()
-        .map(|row| crate::views::requests::PendingRequestRow {
+        .map(|row| ghinvite_ui::requests::PendingRequestRow {
             request_id: row.request_id.to_string(),
             link_slug: row.link_slug,
             link_description: row.link_description,
@@ -881,7 +881,7 @@ async fn requests_queue(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::requests::RequestsQueuePage {
+            ghinvite_ui::requests::RequestsQueuePage {
                 now: Utc::now(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
@@ -1022,7 +1022,7 @@ async fn settings_page(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::settings::SettingsPage {
+            ghinvite_ui::settings::SettingsPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account: account.clone(),

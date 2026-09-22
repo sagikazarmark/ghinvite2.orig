@@ -1,10 +1,10 @@
 use super::*;
-use crate::views::request_history::{
-    HistoryRow, RepositoryDelivery, RequestDetailPage, RequestHistoryPage,
-};
 use axum::{extract::Path, http::StatusCode};
 use ghinvite_core::storage::{RecordStorage, request_history::Boundary};
 use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, RequestState};
+use ghinvite_ui::request_history::{
+    HistoryRow, RepositoryDelivery, RequestDetailPage, RequestHistoryPage,
+};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,7 +169,7 @@ pub(super) async fn detail(
         .iter()
         .map(|repo| RepositoryDelivery {
             repo_id: repo.repo_id,
-            presentation: crate::views::invitation::delivery_presentation(
+            presentation: ghinvite_ui::invitation::delivery_presentation(
                 repo,
                 &receipts,
                 &[],

@@ -3019,21 +3019,17 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
     let blob_at = text.find(props_open).expect("props blob present");
     let blob = &text[blob_at + props_open.len()..];
     let blob = &blob[..blob.find("</script>").unwrap()];
-    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
-        serde_json::from_str(blob).unwrap();
+    let props: ghinvite_ui::link_form::LinkFormIslandProps = serde_json::from_str(blob).unwrap();
     assert_eq!(props.action, action);
-    assert_eq!(
-        props.values,
-        ghinvite_web::views::links::LinkFormValues::default()
-    );
+    assert_eq!(props.values, ghinvite_ui::links::LinkFormValues::default());
     assert_eq!(
         props.repos,
         vec![
-            ghinvite_web::views::link_form::RepositoryChoice {
+            ghinvite_ui::link_form::RepositoryChoice {
                 id: 10,
                 full_name: "acme/api".to_string(),
             },
-            ghinvite_web::views::link_form::RepositoryChoice {
+            ghinvite_ui::link_form::RepositoryChoice {
                 id: 11,
                 full_name: "acme/web".to_string(),
             },
@@ -3089,8 +3085,7 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
     let blob_at = text.find(props_open).expect("props blob present");
     let blob = &text[blob_at + props_open.len()..];
     let blob = &blob[..blob.find("</script>").unwrap()];
-    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
-        serde_json::from_str(blob).unwrap();
+    let props: ghinvite_ui::link_form::LinkFormIslandProps = serde_json::from_str(blob).unwrap();
 
     // Values verbatim, errors as the server attached them.
     assert_eq!(
