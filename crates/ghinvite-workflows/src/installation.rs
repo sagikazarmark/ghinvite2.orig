@@ -109,6 +109,11 @@ impl Installation {
     ) -> std::result::Result<(), TerminalError> {
         let Json(input) = input;
         validate_key(&ctx, input.installation_id)?;
+        // A redelivered uninstall has nothing left to pass on: the first one
+        // already reached the account, which retains its own continuation.
+        if ctx.get::<bool>("uninstalled").await?.is_some() {
+            return Ok(());
+        }
         ctx.set("uninstalled", true);
         if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
             ctx.object_client::<crate::availability::AccountInstallationClient>(

@@ -455,6 +455,43 @@ async fn availability_preserves_admission_and_pending_decisions() {
         503
     );
     assert!(started.elapsed() < Duration::from_secs(15));
+    // A redelivered uninstall during the outage joins the continuation already
+    // retained for its identity instead of starting a parallel retry chain.
+    let uninstall_41 = json!({"installation_id":41,"uninstalled_at":chrono::Utc::now()});
+    for _ in 0..2 {
+        assert!(
+            client
+                .post(format!("{ingress}/AccountInstallation/300/uninstall"))
+                .json(&uninstall_41)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+    }
+    let retries: Value = client
+        .post(format!("{admin}/query"))
+        .header("accept", "application/json")
+        .json(&json!({"query":"SELECT id FROM sys_invocation WHERE target_service_name = 'AccountInstallation' AND target_service_key = '300' AND target_handler_name = 'retry_uninstall' AND status <> 'completed'"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retries["rows"].as_array().unwrap().len(), 1, "{retries}");
+    // An unusable account key is refused, not retried as if it were an outage.
+    assert_eq!(
+        client
+            .post(format!("{ingress}/AccountInstallation/0/uninstall"))
+            .json(&uninstall_41)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
     sqlx::query("ALTER TABLE installations_offline RENAME TO installations")
         .execute(&failures)
         .await

@@ -449,6 +449,52 @@ impl AccountInstallation {
             .await?;
         Ok(())
     }
+
+    /// Shared body of `uninstall` and its retained continuation. The identity
+    /// is retired at once; an adoption outage keeps one continuation per
+    /// identity, which a redelivered event joins rather than competing with.
+    async fn continue_uninstall(
+        &self,
+        ctx: &ObjectContext<'_>,
+        input: UninstallInput,
+        continuation: bool,
+    ) -> Result<(), TerminalError> {
+        ctx.set(&retired_key(input.installation_id), true);
+        let slot = uninstall_slot(input.installation_id);
+        let mut status = match self.load(ctx).await {
+            Ok(status) => status,
+            // An unusable key is not an outage; only unreadable storage is
+            // worth waiting for.
+            Err(error) if error.code() != ADOPTION_UNAVAILABLE => return Err(error),
+            Err(_) => {
+                if !continuation && ctx.get::<bool>(&slot).await?.is_some() {
+                    return Ok(());
+                }
+                ctx.set(&slot, true);
+                ctx.object_client::<AccountInstallationClient>(ctx.key())
+                    .retry_uninstall(Json(input))
+                    .send_after(UNINSTALL_RETRY)
+                    .await?;
+                return Ok(());
+            }
+        };
+        // Only the continuation retires its slot; a fresh event that found
+        // storage readable leaves the pending one to finish as a no-op.
+        if continuation {
+            ctx.clear(&slot);
+        }
+        if status
+            .account
+            .as_ref()
+            .is_some_and(|a| a.installation_id == input.installation_id)
+        {
+            project(ctx, InstallationChange::Uninstall { input }).await?;
+            status.account = None;
+            status.observation = Observation::Unavailable;
+            ctx.set("installation", Json(status));
+        }
+        Ok(())
+    }
 }
 
 /// The state key marking an installation identity retired. A retired
@@ -456,6 +502,14 @@ impl AccountInstallation {
 fn retired_key(installation_id: u64) -> String {
     format!("retired/{installation_id}")
 }
+
+/// The state key holding an uninstall's single scheduled continuation.
+fn uninstall_slot(installation_id: u64) -> String {
+    format!("uninstall_retry/{installation_id}")
+}
+
+/// Delay before a retained uninstall continuation tries adoption again.
+const UNINSTALL_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What a refresh does with an observation of the current installation.
 #[derive(Debug)]
@@ -550,7 +604,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        self.uninstall(ctx, Json(input)).await
+        self.continue_uninstall(&ctx, input, true).await
     }
     #[handler]
     async fn retry_refresh(
@@ -732,28 +786,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        ctx.set(&retired_key(input.installation_id), true);
-        let mut status = match self.load(&ctx).await {
-            Ok(status) => status,
-            Err(_) => {
-                ctx.object_client::<AccountInstallationClient>(ctx.key())
-                    .retry_uninstall(Json(input))
-                    .send_after(std::time::Duration::from_secs(60))
-                    .await?;
-                return Ok(());
-            }
-        };
-        if status
-            .account
-            .as_ref()
-            .is_some_and(|a| a.installation_id == input.installation_id)
-        {
-            project(&ctx, InstallationChange::Uninstall { input }).await?;
-            status.account = None;
-            status.observation = Observation::Unavailable;
-            ctx.set("installation", Json(status));
-        }
-        Ok(())
+        self.continue_uninstall(&ctx, input, false).await
     }
     #[handler]
     async fn status(
@@ -1277,5 +1310,13 @@ mod tests {
     fn retired_identities_have_one_key_each() {
         assert_eq!(retired_key(1), "retired/1");
         assert_ne!(retired_key(1), retired_key(2));
+    }
+
+    #[test]
+    fn each_uninstalled_identity_has_its_own_continuation_slot() {
+        assert_eq!(uninstall_slot(1), "uninstall_retry/1");
+        assert_ne!(uninstall_slot(1), uninstall_slot(2));
+        let refresh = RefreshTarget::Identity { installation_id: 1 };
+        assert_ne!(uninstall_slot(1), refresh.slot());
     }
 }
