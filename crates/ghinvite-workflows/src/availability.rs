@@ -499,6 +499,24 @@ fn eligibility(observation: &Observation, scope: &Scope) -> Eligibility {
     }
 }
 
+/// What admission makes of its `eligibility` call. A call fails only with the
+/// callee's terminal error: an adoption outage is transient by design, so
+/// eligibility is unknown and the same attempt can retry. Anything else (an
+/// unusable key or an undecodable scope) means caller and callee disagree,
+/// an invariant failure admission must not present as an outage.
+pub(crate) fn called_eligibility(
+    called: Result<Eligibility, TerminalError>,
+) -> Result<Eligibility, TerminalError> {
+    match called {
+        Ok(eligibility) => Ok(eligibility),
+        Err(error) if error.code() == ADOPTION_UNAVAILABLE => Ok(Eligibility::Unknown),
+        Err(error) => Err(TerminalError::new_with_code(
+            500,
+            format!("installation eligibility refused: {}", error.message()),
+        )),
+    }
+}
+
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
 }
@@ -1224,6 +1242,34 @@ mod tests {
                 expected,
                 "observation={observation:?}"
             );
+        }
+    }
+
+    #[test]
+    fn an_answered_eligibility_call_is_the_eligibility() {
+        assert_eq!(
+            called_eligibility(Ok(Eligibility::Available)).unwrap(),
+            Eligibility::Available
+        );
+    }
+
+    #[test]
+    fn an_adoption_outage_leaves_eligibility_unknown() {
+        assert_eq!(
+            called_eligibility(Err(adoption_unavailable())).unwrap(),
+            Eligibility::Unknown
+        );
+    }
+
+    #[test]
+    fn a_refused_eligibility_call_is_an_invariant_failure_not_unknown() {
+        for refusal in [
+            invalid(),
+            TerminalError::new_with_code(400, "Cannot decode input payload"),
+        ] {
+            let error = called_eligibility(Err(refusal.clone())).unwrap_err();
+            assert_eq!(error.code(), 500, "refusal={refusal}");
+            assert!(error.message().contains(refusal.message()));
         }
     }
 

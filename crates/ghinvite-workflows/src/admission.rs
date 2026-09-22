@@ -860,10 +860,7 @@ impl InvitationLink {
                 }))
                 .call()
                 .await;
-            match observation {
-                Ok(Json(observation)) => observation,
-                Err(_) => Eligibility::Unknown,
-            }
+            crate::availability::called_eligibility(observation.map(|Json(o)| o))?
         } else {
             Eligibility::Available
         };
