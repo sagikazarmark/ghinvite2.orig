@@ -5,15 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "ghinvite-workflows"
-path = "src/main.rs"
+# Handler services only. The two deployment shapes live in their own crates —
+# `ghinvite-workflows-server` (native: tokio + SqlxStorage + restate-sdk's
+# hyper server) and `ghinvite-workflows-worker` (Workers: D1Storage) — so
+# nothing here needs a `cfg(target_arch)` to pick a runtime.
 
 [features]
+# Native-only: runs the handlers against the local `restate-server`
+# (compose.yaml) via `scripts/test-restate.sh`. Never enabled for the Workers
+# build, which is why `axum` and `ghinvite-web` can be plain optional deps.
 integration = ["dep:ghinvite-web", "dep:axum", "ghinvite-github/test-stub"]
 
 [dependencies]
 async-trait.workspace = true
+axum = { workspace = true, optional = true }
+ghinvite-web = { workspace = true, optional = true }
 restate-sdk.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
@@ -27,18 +33,9 @@ sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
-# The native binary (src/main.rs) wires up SqlxStorage and serves the endpoint
-# over restate-sdk's hyper HTTP server; the Workers build
-# (ghinvite-workflows-worker) wires up D1Storage and drives the endpoint via
-# the `worker` runtime instead. `http_server` pulls tokio's `net`/mio, which
-# does not compile on wasm32 — keep it native-only.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = { workspace = true, optional = true }
-ghinvite-web = { workspace = true, optional = true }
-ghinvite-storage-sqlx.workspace = true
-restate-sdk = { workspace = true, features = ["http_server"] }
-tokio.workspace = true
-
+# `http_server` pulls tokio's `net`/mio and belongs to the native deployment
+# shape, so it is enabled by `ghinvite-workflows-server` and by this crate's
+# own tests — never by the library itself.
 [dev-dependencies]
 hmac.workspace = true
 ghinvite-github = { workspace = true, features = ["test-mock"] }

@@ -58,7 +58,7 @@ npm run watch:css
 docker compose up -d restate
 
 # Run the web binary.
-cargo run -p ghinvite-web
+cargo run -p ghinvite-web-server
 ```
 
 The server binds `127.0.0.1:8787`. Hit `http://127.0.0.1:8787` to see the home
@@ -83,9 +83,15 @@ point. `state` carries `Arc<dyn WebStorage>`, `Arc<dyn HttpTransport>`,
 `Arc<RestateClient>`, and `WebConfig`. `session_store` is any
 `tower_sessions::SessionStore` impl. In practice it is this crate's own
 `session_store::ProtectedStore`, which encrypts every record before it reaches
-a `Backend`: `SqliteBackend` for native dev, the Workers KV backend in
-`ghinvite-web-worker` for production. Tests use `MemoryStore` directly where
-the protection layer is not what is under test.
+a `Backend`. Each backend lives with its deployment shape: `SqliteBackend` in
+`ghinvite-web-server` for native dev, the KV backend in `ghinvite-web-worker`
+for production. Tests use `MemoryStore` directly where the protection layer is
+not what is under test.
+
+This crate is the router, handlers and views — it names no runtime and no
+storage backend. `build_app_with` takes an optional extra `Router` so a
+deployment can merge in routes of its own (today: the native `/assets` mount)
+and still sit under the shared CSP, cache-control and session layers.
 
 Every route handler that touches Restate calls
 `state.restate.send::<Input>("Service", "key", "method", &input)`. The web
@@ -223,12 +229,13 @@ SSR page never learns the hash, and the Rust build has no dependency on the
   `LinkFormHandlers` bundle for the island's listeners; SSR ignores
   listeners, so the server passes none and the markup is unchanged (tested in
   `ghinvite-ui` too).
-- **Native dev** (`cargo run -p ghinvite-web` from the repo root): `build_app`
-  nests a `tower_http::services::ServeDir` at `/assets` over
-  `WebConfig::island_assets_dir` — `dist/public/assets` relative to the
-  working directory by default, overridable with `GHINVITE_ISLAND_ASSETS_DIR`,
-  `None` to register no route. `tower-http/fs` is a non-wasm32 dependency
-  only. Smoke test: run `scripts/build-island.sh`, start the server, open
+- **Native dev** (`cargo run -p ghinvite-web-server` from the repo root):
+  `ghinvite_web_server::island_assets` builds a `tower_http::services::ServeDir`
+  router at `/assets` over `WebConfig::island_assets_dir` — `dist/public/assets`
+  relative to the working directory by default, overridable with
+  `GHINVITE_ISLAND_ASSETS_DIR`, `None` to register no route — and the binary
+  passes it to `build_app_with`. `tower-http/fs` is a dependency of the native
+  server crate only. Smoke test: run `scripts/build-island.sh`, start the server, open
   the new-link page; `#link-form-island` gains `data-island="mounted"`,
   submitting with an empty description shows the errors without navigating,
   and a valid submit is a normal POST. Without the full stack,

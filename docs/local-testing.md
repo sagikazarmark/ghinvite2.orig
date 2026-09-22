@@ -322,7 +322,7 @@ scripts/build-island.sh          # dx bundle → dist/public, prints sizes, enfo
 cargo test -p ghinvite-island    # markup parity: island first frame == server HTML
 ```
 
-Then browser-check it: `cargo run -p ghinvite-web` from the repo root serves
+Then browser-check it: `cargo run -p ghinvite-web-server` from the repo root serves
 `dist/public/assets` under `/assets/`, or render a static fixture with
 `cargo run -p ghinvite-island --example ssr_fixture > dist/public/index.html`
 (local only — see `crates/ghinvite-island/README.md`).

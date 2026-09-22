@@ -1,8 +1,9 @@
 //! Native binary: runs the axum app on a local hyper server.
 //! On Cloudflare Workers, `ghinvite-web-worker` serves `build_app()` instead.
 
-use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
-use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
+use ghinvite_web::session_store::ProtectedStore;
+use ghinvite_web::{AppState, RestateClient, WebConfig, build_app_with};
+use ghinvite_web_server::{SqliteBackend, island_assets};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -47,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_store = ProtectedStore::new(backend, config.session_secret);
 
     let state = AppState::new(storage, transport, restate, config);
-    let app = build_app(state, session_store);
+    let assets = island_assets(&state.config);
+    let app = build_app_with(state, session_store, assets);
 
     let addr = "127.0.0.1:8787".parse::<std::net::SocketAddr>()?;
     let listener = TcpListener::bind(&addr).await?;

@@ -21,7 +21,7 @@ use tower_sessions::{
 
 async fn build_app_with_mock(mock: MockTransport) -> axum::Router {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    let backend = ghinvite_web::session_store::SqliteBackend::new(pool);
+    let backend = ghinvite_web_server::SqliteBackend::new(pool);
     backend.migrate().await.unwrap();
     build_app_with_store(
         mock,
@@ -157,7 +157,8 @@ async fn signin_happy_path() {
 
 #[tokio::test]
 async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destructive_overlap() {
-    use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
+    use ghinvite_web::session_store::ProtectedStore;
+    use ghinvite_web_server::SqliteBackend;
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
@@ -325,7 +326,8 @@ async fn unchanged_console_reads_do_not_write_or_refresh_the_session() {
 
 #[tokio::test]
 async fn aged_authenticated_deadlines_survive_requests_but_fresh_signin_renews_them() {
-    use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
+    use ghinvite_web::session_store::ProtectedStore;
+    use ghinvite_web_server::SqliteBackend;
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool);
     backend.migrate().await.unwrap();
@@ -771,7 +773,7 @@ async fn sqlite_rotation_preserves_only_valid_return_destinations() {
         ("//evil.example/console", "/"),
     ] {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let backend = ghinvite_web::session_store::SqliteBackend::new(pool);
+        let backend = ghinvite_web_server::SqliteBackend::new(pool);
         backend.migrate().await.unwrap();
         let store = ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]);
         let app = build_app_with_store(MockTransport::scripted(signin_expectations()), store).await;

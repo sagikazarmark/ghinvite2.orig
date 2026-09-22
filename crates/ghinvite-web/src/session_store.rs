@@ -266,7 +266,6 @@ impl<B: Backend> SessionStore for ProtectedStore<B> {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-mod sqlite;
-#[cfg(not(target_arch = "wasm32"))]
-pub use sqlite::SqliteBackend;
+// Backends live with their deployment shape: `SqliteBackend` in
+// `ghinvite-web-server`, the KV backend in `ghinvite-web-worker`. This module
+// owns the envelope format they both store opaquely.

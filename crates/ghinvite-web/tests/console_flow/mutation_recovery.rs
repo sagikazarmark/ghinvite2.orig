@@ -654,8 +654,8 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
 }
 
 async fn protected_store()
--> ghinvite_web::session_store::ProtectedStore<ghinvite_web::session_store::SqliteBackend> {
-    let backend = ghinvite_web::session_store::SqliteBackend::new(
+-> ghinvite_web::session_store::ProtectedStore<ghinvite_web_server::SqliteBackend> {
+    let backend = ghinvite_web_server::SqliteBackend::new(
         sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
     );
     backend.migrate().await.unwrap();

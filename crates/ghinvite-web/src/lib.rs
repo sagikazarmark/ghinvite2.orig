@@ -35,6 +35,26 @@ pub fn build_app<S>(state: AppState, session_store: S) -> Router
 where
     S: tower_sessions::SessionStore + Clone + 'static,
 {
+    build_app_with(state, session_store, None)
+}
+
+/// [`build_app`] plus an optional extra router merged in before the shared
+/// layers, so whatever it mounts is covered by CSP, cache-control and the
+/// session layer just like a built-in route.
+///
+/// Its one caller is the native server's `/assets` mount
+/// (`ghinvite_web_server::island_assets`): serving files off the filesystem is
+/// a property of that deployment, not of the app, and keeping it out of here
+/// keeps `tower-http/fs` — and the tokio filesystem support behind it — out of
+/// the Workers build.
+pub fn build_app_with<S>(
+    state: AppState,
+    session_store: S,
+    extra: Option<Router<AppState>>,
+) -> Router
+where
+    S: tower_sessions::SessionStore + Clone + 'static,
+{
     use tower_sessions::{Expiry, SessionManagerLayer};
 
     let session_layer = SessionManagerLayer::new(session_store)
@@ -56,7 +76,10 @@ where
         .route("/static/styles.css", axum::routing::get(serve_styles_css))
         .route("/static/app.js", axum::routing::get(serve_app_js));
 
-    let router = island_assets(router, &state.config);
+    let router = match extra {
+        Some(extra) => router.merge(extra),
+        None => router,
+    };
 
     router
         .fallback(routes::not_found::public)
@@ -75,27 +98,6 @@ where
         ))
         .layer(session_layer)
         .with_state(state)
-}
-
-/// Serve the Dioxus island bundle under `/assets/*` from
-/// `WebConfig::island_assets_dir` — native builds only. A missing file is a
-/// plain 404, which is what the new-link page's `<script type="module">`
-/// relies on to degrade to the server-rendered form when no bundle is built.
-///
-/// On Workers, Cloudflare Static Assets answer `/assets/*` before the Worker
-/// is invoked (`[assets]` in `wrangler/web.toml`), so no route exists there
-/// and `tower-http/fs` is not compiled in.
-#[cfg(not(target_arch = "wasm32"))]
-fn island_assets(router: Router<AppState>, config: &WebConfig) -> Router<AppState> {
-    match &config.island_assets_dir {
-        Some(dir) => router.nest_service("/assets", tower_http::services::ServeDir::new(dir)),
-        None => router,
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn island_assets(router: Router<AppState>, _config: &WebConfig) -> Router<AppState> {
-    router
 }
 
 /// Built Tailwind/DaisyUI stylesheet (`npm run build:css`), embedded at
