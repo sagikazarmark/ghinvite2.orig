@@ -69,7 +69,7 @@ pub async fn observe(
         )
         .await
     {
-        Ok((id, permission)) if id == context.request.requester_id => permission != "none",
+        Ok((id, role)) if id == context.request.requester_id => role.has_access(),
         Ok(_) => return Ok(None), // rename/reassignment raced identity lookup
         Err(ghinvite_github::Error::Status { status: 404, .. }) => {
             // Recheck identity after negative login-addressed evidence.

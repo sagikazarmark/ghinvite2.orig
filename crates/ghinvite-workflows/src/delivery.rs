@@ -530,7 +530,8 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         match pending {
             Ok(items) => match items.iter().find(|i| {
                 i.invitee.id == command.requester_id
-                    && permission_matches(&i.permissions, command.permission)
+                    && ghinvite_github::CollaboratorRole::parse(&i.permissions)
+                        .matches(command.permission)
             }) {
                 Some(item) => CreateOutcome::Created {
                     upstream_id: item.id,
@@ -545,9 +546,8 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
                     )
                     .await
                 {
-                    Ok((id, permission))
-                        if id == command.requester_id
-                            && permission_matches(&permission, command.permission) =>
+                    Ok((id, role))
+                        if id == command.requester_id && role.matches(command.permission) =>
                     {
                         CreateOutcome::AlreadyCollaborator
                     }
@@ -570,18 +570,6 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         Some(error) => Attempt::throttled_by(receipt, error),
         None => receipt.into(),
     })
-}
-
-fn permission_matches(value: &str, permission: ghinvite_core::Permission) -> bool {
-    value == permission.to_string()
-        || value
-            == match permission {
-                ghinvite_core::Permission::Pull => "read",
-                ghinvite_core::Permission::Push => "write",
-                ghinvite_core::Permission::Triage => "triage",
-                ghinvite_core::Permission::Maintain => "maintain",
-                ghinvite_core::Permission::Admin => "admin",
-            }
 }
 
 async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), HandlerError> {

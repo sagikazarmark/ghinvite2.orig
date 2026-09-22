@@ -14,6 +14,59 @@ use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
+/// A user's role on a repository, in GitHub's collaborator vocabulary — the
+/// `role_name` of a permission read, or the `permissions` of a pending
+/// invitation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CollaboratorRole {
+    Read,
+    Triage,
+    Write,
+    Maintain,
+    Admin,
+    /// GitHub's answer that the user has no access to the repository.
+    None,
+    /// A custom repository role an organization defined. It is access, but
+    /// not the grant of any [`ghinvite_core::Permission`].
+    Other(String),
+}
+
+impl CollaboratorRole {
+    /// Read a role off the wire. Every value is a role: an unrecognized name
+    /// is a custom repository role, never an error. The legacy `pull`/`push`
+    /// names read as the roles they became.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "read" | "pull" => Self::Read,
+            "triage" => Self::Triage,
+            "write" | "push" => Self::Write,
+            "maintain" => Self::Maintain,
+            "admin" => Self::Admin,
+            "none" => Self::None,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// Whether this is exactly the role `permission` grants. A higher role is
+    /// not a match: it is evidence of somebody else's grant, not of this one.
+    pub fn matches(&self, permission: ghinvite_core::Permission) -> bool {
+        use ghinvite_core::Permission;
+        matches!(
+            (self, permission),
+            (Self::Read, Permission::Pull)
+                | (Self::Triage, Permission::Triage)
+                | (Self::Write, Permission::Push)
+                | (Self::Maintain, Permission::Maintain)
+                | (Self::Admin, Permission::Admin)
+        )
+    }
+
+    /// Whether the user has any access to the repository at all.
+    pub fn has_access(&self) -> bool {
+        *self != Self::None
+    }
+}
+
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
 #[derive(Clone)]
@@ -85,13 +138,15 @@ impl InstallationClient {
 
     /// Read collaborator permission and the identity returned with it. Unlike
     /// a login-only 204 membership probe this provides numeric identity evidence.
+    /// The role is GitHub's `role_name` when it sends one (custom roles only
+    /// appear there), otherwise its coarser `permission`.
     pub async fn collaborator_permission(
         &self,
         installation_id: u64,
         owner: &str,
         repo: &str,
         login: &str,
-    ) -> Result<(u64, String)> {
+    ) -> Result<(u64, CollaboratorRole)> {
         #[derive(serde::Deserialize)]
         struct Permission {
             user: crate::payloads::GhUser,
@@ -111,9 +166,10 @@ impl InstallationClient {
         let result: Permission = self.transport.send(req).await?.ensure_success()?.json()?;
         Ok((
             result.user.id,
-            result.role_name.unwrap_or(result.permission),
+            CollaboratorRole::parse(&result.role_name.unwrap_or(result.permission)),
         ))
     }
+
     /// Resolve immutable user identity to addressing data and revalidate that
     /// address. These are read-only calls; a mismatch must never authorize PUT.
     pub async fn verified_user(
@@ -997,5 +1053,153 @@ mod reconcile_tests {
         let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
         assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
         mock.assert_exhausted();
+    }
+}
+
+#[cfg(test)]
+mod collaborator_role_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::Response;
+    use ghinvite_core::Permission;
+    use std::collections::BTreeMap;
+
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
+
+    fn signer() -> AppJwtSigner {
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
+    }
+
+    fn token_mint_expectation() -> Expectation {
+        Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+            },
+        }
+    }
+
+    const PERMISSIONS: [Permission; 5] = [
+        Permission::Pull,
+        Permission::Triage,
+        Permission::Push,
+        Permission::Maintain,
+        Permission::Admin,
+    ];
+
+    #[test]
+    fn each_role_matches_exactly_the_permission_that_grants_it() {
+        for (wire, role, granted) in [
+            ("read", CollaboratorRole::Read, Permission::Pull),
+            ("triage", CollaboratorRole::Triage, Permission::Triage),
+            ("write", CollaboratorRole::Write, Permission::Push),
+            ("maintain", CollaboratorRole::Maintain, Permission::Maintain),
+            ("admin", CollaboratorRole::Admin, Permission::Admin),
+        ] {
+            assert_eq!(CollaboratorRole::parse(wire), role);
+            for permission in PERMISSIONS {
+                assert_eq!(
+                    role.matches(permission),
+                    permission == granted,
+                    "{role:?} against {permission:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_permission_names_read_as_their_roles() {
+        assert_eq!(CollaboratorRole::parse("pull"), CollaboratorRole::Read);
+        assert_eq!(CollaboratorRole::parse("push"), CollaboratorRole::Write);
+    }
+
+    #[test]
+    fn none_is_no_access_and_matches_no_permission() {
+        let role = CollaboratorRole::parse("none");
+        assert_eq!(role, CollaboratorRole::None);
+        assert!(!role.has_access());
+        assert!(PERMISSIONS.iter().all(|p| !role.matches(*p)));
+    }
+
+    #[test]
+    fn a_custom_role_is_access_but_matches_no_permission() {
+        let role = CollaboratorRole::parse("security-auditor");
+        assert_eq!(role, CollaboratorRole::Other("security-auditor".into()));
+        assert!(role.has_access());
+        assert!(PERMISSIONS.iter().all(|p| !role.matches(*p)));
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_prefers_the_role_name() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "read",
+                    "role_name": "triage"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (id, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!((id, role), (42, CollaboratorRole::Triage));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_reads_a_custom_role_not_an_error() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "write",
+                    "role_name": "security-auditor"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!(role, CollaboratorRole::Other("security-auditor".into()));
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_without_a_role_name_reads_the_permission() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "none"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!(role, CollaboratorRole::None);
     }
 }
