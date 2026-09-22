@@ -2,7 +2,7 @@
 
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::link_authority::AuthorityError;
-use crate::middleware::auth::RequireConsoleAdminOf;
+use crate::middleware::auth::{ConsoleAdminRejection, RequireConsoleAdminOf};
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
 use crate::render::render_with_csrf as render;
 use crate::session;
@@ -454,7 +454,7 @@ async fn load_installation_repos_for_form(
 
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: Result<RequireConsoleAdminOf, axum::response::Response>,
+    admin: Result<RequireConsoleAdminOf, ConsoleAdminRejection>,
     tower: tower_sessions::Session,
     uri: Uri,
     axum::extract::Query(identity): axum::extract::Query<CreationIdentity>,
@@ -462,14 +462,10 @@ async fn create_link(
 ) -> impl IntoResponse {
     let admin = match admin {
         Ok(admin) => admin,
-        Err(response)
-            if matches!(
-                response.status(),
-                axum::http::StatusCode::BAD_GATEWAY
-                    | axum::http::StatusCode::SERVICE_UNAVAILABLE
-                    | axum::http::StatusCode::GATEWAY_TIMEOUT
-            ) =>
-        {
+        // GitHub could not say whether this user may create links here. Keep
+        // the submission so verification can be retried without retyping it.
+        Err(rejection @ ConsoleAdminRejection::AdminCheckUnavailable(_)) => {
+            let response = rejection.into_response();
             let Ok(CsrfForm(form)) = form else {
                 return response;
             };
@@ -490,7 +486,7 @@ async fn create_link(
             });
             return (response.status(), Html(html)).into_response();
         }
-        Err(response) => return response,
+        Err(rejection) => return rejection.into_response(),
     };
     let form = match form {
         Ok(CsrfForm(form)) => form,
