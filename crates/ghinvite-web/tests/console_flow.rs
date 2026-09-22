@@ -11,12 +11,12 @@ use ghinvite_github::transport::{Method, Response};
 use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 mod common;
 
-use common::link_authority::{FakeLinkAuthority, LINK_SERVICE};
+use common::link_authority::FakeLinkAuthority;
 use common::sign_in::{
     ACME_ADMIN, GithubUser, OCTOCAT, acme_installation, oauth_expectations, session_cookie,
     sign_in, sign_in_with_cookie, signed_in_app, unreachable_restate,
@@ -227,42 +227,73 @@ async fn overdue_queue_row_warns_about_projection_lag_without_claiming_a_decisio
     assert!(html.contains("Decline request"));
 }
 
-#[tokio::test]
-async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let ingress = MockServer::start().await;
-    let id = ghinvite_core::InvitationLinkId::new();
-    let snapshot = serde_json::json!({"link_id": id, "creation": {
-        "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
-        "installation_id": 1, "description": "Original", "internal_note": null, "expires_at": null,
-        "max_uses": null, "permission": "pull", "approval_required": true,
-        "repos": [{"repo_id": 1, "repo_full_name": "octocat/api"}]},
-        "metadata": {"description": "Authoritative details", "internal_note": null},
-        "invitation_code": "abcdEFGH01234567", "created_at": "2026-09-14T12:00:00Z",
-        "uses": 0, "revision": 2, "revoked_at": null, "revoked_by": null});
-    for method in ["link_status", "update_metadata", "revoke"] {
-        Mock::given(path(format!("/{LINK_SERVICE}/{id}/{method}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(snapshot.clone()))
-            .mount(&ingress)
-            .await;
+/// A link of the `octocat` user account, which `sign_in` administers.
+fn octocat_link() -> ghinvite_core::InvitationLink {
+    ghinvite_core::InvitationLink {
+        account_id: 42,
+        created_by: 42,
+        ..list_link(1)
     }
+}
+
+/// A request the authority admitted for `link`, pending until `deadline`.
+fn pending_request(
+    link: ghinvite_core::InvitationLinkId,
+    deadline: DateTime<Utc>,
+) -> ghinvite_core::storage::projection::RequestSnapshot {
+    ghinvite_core::storage::projection::RequestSnapshot {
+        request_id: ghinvite_core::RequestId::new(),
+        link_id: link,
+        account_id: 42,
+        requester_id: 99,
+        justification: None,
+        state: ghinvite_core::RequestState::Pending,
+        admitted_at: deadline - Duration::days(7),
+        decision_deadline: Some(deadline),
+        revision: 1,
+        decision: None,
+    }
+}
+
+/// An app signed in as `octocat`, with the account installed unless
+/// `uninstalled`, and no projected links.
+async fn octocat_app(authority: &FakeLinkAuthority, uninstalled: bool) -> (axum::Router, String) {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
-    storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
-        .await
-        .unwrap();
+    let account = identity_account(42, "octocat", AccountType::User);
+    storage.insert_installation(&account).await.unwrap();
+    if uninstalled {
+        storage
+            .mark_installation_uninstalled(account.installation_id, Utc::now())
+            .await
+            .unwrap();
+    }
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
     let cookie = sign_in(&app).await;
+    (app, cookie)
+}
+
+#[tokio::test]
+async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    let id = link.id;
+    let mut authoritative = common::link_authority::snapshot(&link);
+    authoritative.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
+        description: "Authoritative details".into(),
+        internal_note: None,
+    });
+    authority.seed(authoritative);
+    let (app, cookie) = octocat_app(&authority, false).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
         .clone()
@@ -299,46 +330,29 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
-    for request in ingress.received_requests().await.unwrap() {
-        assert!(!request.url.path().ends_with("/send"));
-        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(
-            body["admin"],
-            serde_json::json!({"account_id": 42, "user_id": 42})
-        );
+    // Each is a call awaiting the authority's answer, never a one-way send.
+    assert_eq!(
+        authority.calls(),
+        ["link_status", "update_metadata", "revoke"]
+    );
+    for method in ["link_status", "update_metadata", "revoke"] {
+        for body in authority.received::<serde_json::Value>(method) {
+            assert_eq!(
+                body["admin"],
+                serde_json::json!({"account_id": 42, "user_id": 42})
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn pending_decision_remains_accessible_after_uninstall() {
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let ingress = MockServer::start().await;
-    let link = ghinvite_core::InvitationLinkId::new();
-    let request = ghinvite_core::RequestId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":"applied","request":{
-            "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":"approved",
-            "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
-        .expect(1).mount(&ingress).await;
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let account = identity_account(42, "octocat", AccountType::User);
-    storage.insert_installation(&account).await.unwrap();
-    storage
-        .mark_installation_uninstalled(account.installation_id, Utc::now())
-        .await
-        .unwrap();
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let app = build_app(state, tower_sessions::MemoryStore::default());
-    let cookie = sign_in(&app).await;
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    authority.seed_link(&link);
+    let request = pending_request(link.id, Utc::now() + Duration::days(7));
+    authority.seed_request(request.clone());
+    let (app, cookie) = octocat_app(&authority, true).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
         .clone()
@@ -346,12 +360,14 @@ async fn pending_decision_remains_accessible_after_uninstall() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/console/accounts/octocat/requests/{request}/approve"
+                    "/console/accounts/octocat/requests/{}/approve",
+                    request.request_id
                 ))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf_token={csrf}&link_id={link}&operation_id={}",
+                    "csrf_token={csrf}&link_id={}&operation_id={}",
+                    link.id,
                     ghinvite_core::RequestId::new()
                 )))
                 .unwrap(),
@@ -359,6 +375,7 @@ async fn pending_decision_remains_accessible_after_uninstall() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(authority.calls(), ["decide"]);
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -372,36 +389,14 @@ async fn pending_decision_remains_accessible_after_uninstall() {
 #[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let request = ghinvite_core::RequestId::new();
-    let link = ghinvite_core::InvitationLinkId::new();
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    authority.seed_link(&link);
+    // Past its deadline, so the authority expires it rather than deciding.
+    let request = pending_request(link.id, "2026-01-08T00:00:00Z".parse().unwrap());
+    authority.seed_request(request.clone());
     let operation = ghinvite_core::RequestId::new();
-    let ingress = MockServer::start().await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "outcome": "incompatible", "request": {"request_id": request,
-            "link_id": link, "account_id": 42, "requester_id": 99,
-            "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
-            "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2}})))
-        .mount(&ingress)
-        .await;
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
-        .await
-        .unwrap();
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let app = build_app(state, tower_sessions::MemoryStore::default());
-    let cookie = sign_in(&app).await;
+    let (app, cookie) = octocat_app(&authority, false).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     // Missing projection is not evidence that the acknowledged request is absent.
     let response = app
@@ -410,12 +405,14 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/console/accounts/octocat/requests/{request}/approve"
+                    "/console/accounts/octocat/requests/{}/approve",
+                    request.request_id
                 ))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf_token={csrf}&link_id={link}&operation_id={operation}&user_id=666"
+                    "csrf_token={csrf}&link_id={}&operation_id={operation}&user_id=666",
+                    link.id
                 )))
                 .unwrap(),
         )
@@ -425,17 +422,11 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
     let html = response_html(response).await;
     assert!(html.contains("expired"));
     assert!(!html.contains("Request approved"));
-    let calls = ingress
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .map(|request| serde_json::from_slice::<DecideRequest>(&request.body).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(authority.calls(), ["decide"]);
+    let calls = authority.received::<DecideRequest>("decide");
     assert_eq!(calls[0].admin.user_id, 42);
     assert_eq!(calls[0].admin.account_id, 42);
-    assert_eq!(calls[0].link_id, link);
+    assert_eq!(calls[0].link_id, link.id);
     assert_eq!(
         String::from(calls[0].operation_id.clone()),
         operation.to_string()

@@ -3,9 +3,16 @@
 //! It answers the ingress paths the web calls for invitation links
 //! (`/{LINK_SERVICE}/{link_id}/{method}`) and codes
 //! (`/{CODE_SERVICE}/{code}/resolve`) with the same status codes the real
-//! virtual object uses: 404 for an unknown link or a foreign account, 409 for a
-//! creation identity reused with different input, 400 for invalid input. It
-//! records every command so tests can assert what reached the authority.
+//! virtual object uses: 404 for an unknown link or request or a foreign
+//! account, 409 for a command identity reused with different input, 400 for
+//! invalid input. Like the real object, a replayed creation or decision
+//! answers its original receipt and takes no effect again. It records every
+//! call so tests can assert what reached the authority.
+//!
+//! Tests script the failures web recovery depends on: a failure answered
+//! before the command applied ([`FakeLinkAuthority::fail`],
+//! [`FakeLinkAuthority::fail_once`]), and a command that applied but whose
+//! acknowledgement was lost ([`FakeLinkAuthority::lose_acknowledgements`]).
 //!
 //! The server runs on the test's tokio runtime, so it outlives this handle and
 //! keeps serving long-running browser fixtures.
@@ -17,8 +24,15 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use ghinvite_core::admission::{AdminLinkCommand, RequesterPage, UpdateMetadata};
-use ghinvite_core::storage::projection::{CreateLink, LinkMetadata, LinkSnapshot};
-use ghinvite_core::{InvitationLink, InvitationLinkId};
+use ghinvite_core::request_lifecycle::{
+    DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, TerminalDecision,
+};
+use ghinvite_core::storage::projection::{
+    AccountAdmin, CreateLink, LinkMetadata, LinkSnapshot, RequestSnapshot,
+};
+use ghinvite_core::{InvitationLink, InvitationLinkId, RequestId, RequestState};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -27,15 +41,31 @@ pub const LINK_SERVICE: &str = "InvitationLink";
 /// The Restate virtual object that resolves invitation codes to links.
 pub const CODE_SERVICE: &str = "InvitationCode";
 
+/// How a scripted method fails.
+#[derive(Clone, Copy)]
+enum Failure {
+    /// Answer `status` without applying the command.
+    Before { status: u16, once: bool },
+    /// Apply the command, then answer 503 as if the acknowledgement was lost.
+    LostAcknowledgement,
+}
+
 #[derive(Default)]
 struct Inner {
     links: BTreeMap<String, LinkSnapshot>,
+    /// Each link's original creation receipt, which a replayed `create`
+    /// answers even after later mutations.
+    creations: BTreeMap<String, LinkSnapshot>,
+    requests: BTreeMap<String, RequestSnapshot>,
+    /// Retained decisions by link and operation.
+    decisions: BTreeMap<(String, String), (DecideRequest, DecisionReceipt)>,
     requester_pages: BTreeMap<String, RequesterPage>,
-    failures: BTreeMap<String, u16>,
+    failures: BTreeMap<String, Failure>,
     created: Vec<CreateLink>,
     metadata_updates: Vec<UpdateMetadata>,
     revocations: Vec<AdminLinkCommand>,
-    calls: Vec<String>,
+    calls: Vec<(String, Value)>,
+    applied: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -66,14 +96,29 @@ impl FakeLinkAuthority {
 
     /// Make the authority hold `snapshot`, as if it had been created earlier.
     pub fn seed(&self, snapshot: LinkSnapshot) {
-        self.lock()
-            .links
-            .insert(snapshot.link_id.to_string(), snapshot);
+        let mut inner = self.lock();
+        let key = snapshot.link_id.to_string();
+        inner.creations.insert(key.clone(), snapshot.clone());
+        inner.links.insert(key, snapshot);
     }
 
     /// Seed the authoritative counterpart of a projected link.
     pub fn seed_link(&self, link: &InvitationLink) {
         self.seed(snapshot(link));
+    }
+
+    /// Make the authority hold `request`, as if it had admitted it earlier.
+    pub fn seed_request(&self, request: RequestSnapshot) {
+        self.lock()
+            .requests
+            .insert(request.request_id.to_string(), request);
+    }
+
+    /// Make the authority retain `receipt` for `command`'s operation, as if it
+    /// had decided that command earlier.
+    pub fn seed_decision(&self, command: DecideRequest, receipt: DecisionReceipt) {
+        let key = decision_key(&command);
+        self.lock().decisions.insert(key, (command, receipt));
     }
 
     /// Answer `requester_page` for the page's link with `page` instead of the
@@ -84,11 +129,30 @@ impl FakeLinkAuthority {
             .insert(page.link_id.to_string(), page);
     }
 
-    /// Answer every later call of `method` with `status`.
+    /// Answer every later call of `method` with `status`, without applying it.
     pub fn fail(&self, method: &str, status: u16) {
-        self.lock().failures.insert(method.into(), status);
+        self.script(
+            method,
+            Failure::Before {
+                status,
+                once: false,
+            },
+        );
     }
 
+    /// Answer the next call of `method` with `status`, without applying it.
+    pub fn fail_once(&self, method: &str, status: u16) {
+        self.script(method, Failure::Before { status, once: true });
+    }
+
+    /// Apply every later call of `method` that takes effect, then answer 503
+    /// as if the acknowledgement was lost. Replays and reads take no effect,
+    /// so they are still answered.
+    pub fn lose_acknowledgements(&self, method: &str) {
+        self.script(method, Failure::LostAcknowledgement);
+    }
+
+    /// Answer `method` normally again.
     pub fn recover(&self, method: &str) {
         self.lock().failures.remove(method);
     }
@@ -97,7 +161,11 @@ impl FakeLinkAuthority {
         self.lock().links.get(&id.to_string()).cloned()
     }
 
-    /// Every `create` command received, including replays.
+    pub fn request(&self, id: RequestId) -> Option<RequestSnapshot> {
+        self.lock().requests.get(&id.to_string()).cloned()
+    }
+
+    /// Every `create` command answered, including replays.
     pub fn created(&self) -> Vec<CreateLink> {
         self.lock().created.clone()
     }
@@ -112,7 +180,31 @@ impl FakeLinkAuthority {
 
     /// The method name of every call received, in order.
     pub fn calls(&self) -> Vec<String> {
-        self.lock().calls.clone()
+        self.lock()
+            .calls
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect()
+    }
+
+    /// The input of every call of `method` received, in order, including
+    /// calls that failed.
+    pub fn received<T: DeserializeOwned>(&self, method: &str) -> Vec<T> {
+        self.lock()
+            .calls
+            .iter()
+            .filter(|(called, _)| called == method)
+            .map(|(_, body)| serde_json::from_value(body.clone()).unwrap())
+            .collect()
+    }
+
+    /// The method name of every call that took effect, in order.
+    pub fn applied(&self) -> Vec<String> {
+        self.lock().applied.clone()
+    }
+
+    fn script(&self, method: &str, failure: Failure) {
+        self.lock().failures.insert(method.into(), failure);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
@@ -130,7 +222,7 @@ pub fn snapshot(link: &InvitationLink) -> LinkSnapshot {
         link_id: link.id,
         creation: CreateLink {
             link_id: link.id,
-            admin: ghinvite_core::storage::projection::AccountAdmin {
+            admin: AccountAdmin {
                 account_id: link.account_id,
                 user_id: link.created_by,
             },
@@ -153,12 +245,31 @@ pub fn snapshot(link: &InvitationLink) -> LinkSnapshot {
     }
 }
 
+/// The real handlers' terminal errors, with their messages.
 fn status(code: u16) -> Response {
-    StatusCode::from_u16(code).unwrap().into_response()
+    let message = match code {
+        400 => "invalid command",
+        404 => "not found",
+        409 => "operation conflict",
+        _ => "",
+    };
+    (StatusCode::from_u16(code).unwrap(), message).into_response()
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Response {
     axum::Json(serde_json::to_value(value).unwrap()).into_response()
+}
+
+fn decision_key(command: &DecideRequest) -> (String, String) {
+    (
+        command.link_id.to_string(),
+        String::from(command.operation_id.clone()),
+    )
+}
+
+/// The admin acts for the link's account, as the real `validate_admin` checks.
+fn admits(admin: &AccountAdmin, link: &LinkSnapshot) -> bool {
+    admin.account_id == link.creation.account_id && admin.account_id != 0 && admin.user_id != 0
 }
 
 async fn handle(
@@ -167,14 +278,36 @@ async fn handle(
     body: Bytes,
 ) -> Response {
     let mut inner = inner.lock().unwrap();
-    inner.calls.push(method.clone());
-    if let Some(code) = inner.failures.get(&method) {
-        return status(*code);
-    }
-    let parse = |body: &[u8]| serde_json::from_slice::<serde_json::Value>(body).ok();
-    let Some(body) = parse(&body) else {
+    let body = serde_json::from_slice::<Value>(&body).ok();
+    inner
+        .calls
+        .push((method.clone(), body.clone().unwrap_or(Value::Null)));
+    let lose_acknowledgement = match inner.failures.get(&method).copied() {
+        Some(Failure::Before { status: code, once }) => {
+            if once {
+                inner.failures.remove(&method);
+            }
+            return status(code);
+        }
+        Some(Failure::LostAcknowledgement) => true,
+        None => false,
+    };
+    let Some(body) = body else {
         return status(400);
     };
+    let applied = inner.applied.len();
+    let response = answer(&mut inner, &service, key, &method, body);
+    if lose_acknowledgement && inner.applied.len() > applied {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fixture: applied, acknowledgement lost",
+        )
+            .into_response();
+    }
+    response
+}
+
+fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Value) -> Response {
     if service == CODE_SERVICE && method == "resolve" {
         return match inner.links.values().find(|l| l.invitation_code == key) {
             Some(link) => json(&link.link_id),
@@ -191,30 +324,31 @@ async fn handle(
     if body.get("link_id").and_then(|id| id.as_str()) != Some(key.as_str()) {
         return status(404);
     }
-    match method.as_str() {
+    match method {
         "create" => {
             let Ok(command) = serde_json::from_value::<CreateLink>(body) else {
                 return status(400);
             };
             inner.created.push(command.clone());
+            let creation = match normalize_creation(command) {
+                Ok(creation) => creation,
+                Err(code) => return status(code),
+            };
             if let Some(link) = inner.links.get(&key) {
-                return if link.creation == command {
-                    json(link)
+                return if link.creation == creation {
+                    json(&inner.creations[&key])
                 } else {
                     status(409)
                 };
             }
             let now = Utc::now();
-            if command.description.trim().is_empty()
-                || command.repos.is_empty()
-                || command.expires_at.is_some_and(|expiry| expiry <= now)
-            {
+            if creation.expires_at.is_some_and(|expiry| expiry <= now) {
                 return status(400);
             }
             let link = LinkSnapshot {
                 metadata: None,
                 link_id,
-                creation: command,
+                creation,
                 invitation_code: key[key.len() - 16..].into(),
                 created_at: now,
                 uses: 0,
@@ -222,7 +356,9 @@ async fn handle(
                 revoked_at: None,
                 revoked_by: None,
             };
-            inner.links.insert(key, link.clone());
+            inner.links.insert(key.clone(), link.clone());
+            inner.creations.insert(key, link.clone());
+            inner.applied.push(method.into());
             json(&link)
         }
         "link_status" | "revoke" => {
@@ -232,15 +368,19 @@ async fn handle(
             let Some(link) = inner.links.get_mut(&key) else {
                 return status(404);
             };
-            if command.admin.account_id != link.creation.account_id {
+            if !admits(&command.admin, link) {
                 return status(404);
             }
-            if method == "revoke" && link.revoked_at.is_none() {
+            let revoke = method == "revoke" && link.revoked_at.is_none();
+            if revoke {
                 link.revoked_at = Some(Utc::now());
                 link.revoked_by = Some(command.admin.user_id);
                 link.revision += 1;
             }
             let link = link.clone();
+            if revoke {
+                inner.applied.push(method.into());
+            }
             if method == "revoke" {
                 inner.revocations.push(command);
             }
@@ -253,7 +393,7 @@ async fn handle(
             let Some(link) = inner.links.get_mut(&key) else {
                 return status(404);
             };
-            if command.admin.account_id != link.creation.account_id {
+            if !admits(&command.admin, link) {
                 return status(404);
             }
             let Ok(description) = ghinvite_core::Description::parse(&command.description) else {
@@ -264,14 +404,75 @@ async fn handle(
             else {
                 return status(400);
             };
-            link.metadata = Some(LinkMetadata {
+            let metadata = LinkMetadata {
                 description: description.into(),
                 internal_note: internal_note.map(String::from),
-            });
-            link.revision += 1;
+            };
+            // Saving the current details again changes nothing.
+            let changed = link.description() != metadata.description
+                || link.internal_note() != metadata.internal_note.as_deref();
+            if changed {
+                link.metadata = Some(metadata);
+                link.revision += 1;
+            }
             let link = link.clone();
+            if changed {
+                inner.applied.push(method.into());
+            }
             inner.metadata_updates.push(command);
             json(&link)
+        }
+        "decide" | "decision_status" => {
+            let Ok(mut command) = serde_json::from_value::<DecideRequest>(body) else {
+                return status(400);
+            };
+            let Some(link) = inner.links.get(&key) else {
+                return status(404);
+            };
+            if !admits(&command.admin, link) {
+                return status(404);
+            }
+            if let DecisionAction::Decline { reason } = &mut command.action {
+                *reason = reason
+                    .take()
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty());
+                if reason.as_ref().is_some_and(|s| s.len() > 16_384) {
+                    return status(400);
+                }
+            }
+            let retained = inner.decisions.get(&decision_key(&command));
+            if method == "decision_status" {
+                return match retained {
+                    Some((old, receipt)) if *old == command => json(&Some(receipt)),
+                    Some(_) => status(409),
+                    None => json(&None::<DecisionReceipt>),
+                };
+            }
+            if let Some((old, receipt)) = retained {
+                return if *old == command {
+                    json(receipt)
+                } else {
+                    status(409)
+                };
+            }
+            let Some(request) = inner.requests.get_mut(&command.request_id.to_string()) else {
+                return status(404);
+            };
+            if request.link_id != link_id {
+                return status(404);
+            }
+            let was_pending = request.state == RequestState::Pending;
+            transition(request, &command);
+            let receipt = DecisionReceipt {
+                outcome: outcome(was_pending, &command.action, request),
+                request: request.clone(),
+            };
+            inner
+                .decisions
+                .insert(decision_key(&command), (command, receipt.clone()));
+            inner.applied.push(method.into());
+            json(&receipt)
         }
         "requester_page" => {
             if let Some(page) = inner.requester_pages.get(&key) {
@@ -292,5 +493,94 @@ async fn handle(
             })
         }
         _ => status(404),
+    }
+}
+
+/// The real `normalize_creation`: the input the creation identity binds.
+fn normalize_creation(mut command: CreateLink) -> Result<CreateLink, u16> {
+    if command.admin.account_id != command.account_id
+        || command.account_id == 0
+        || command.admin.user_id == 0
+    {
+        return Err(404);
+    }
+    if command.installation_id == 0 || command.max_uses == Some(0) {
+        return Err(400);
+    }
+    command.description = ghinvite_core::Description::parse(&command.description)
+        .map_err(|_| 400u16)?
+        .into();
+    command.internal_note = match command.internal_note {
+        Some(note) => ghinvite_core::InternalNote::parse(&note)
+            .map_err(|_| 400u16)?
+            .map(String::from),
+        None => None,
+    };
+    command.repos = ghinvite_core::RepositoryScope::parse(command.repos)
+        .map_err(|_| 400u16)?
+        .into();
+    Ok(command)
+}
+
+/// The real `transition_request` for an admin decision: a pending request
+/// past its deadline expires, otherwise the decision applies. A request that
+/// already left pending is unchanged.
+fn transition(request: &mut RequestSnapshot, command: &DecideRequest) {
+    if request.state != RequestState::Pending {
+        return;
+    }
+    let now = Utc::now();
+    let deadline = request.decision_deadline.expect("pending deadline");
+    let (state, decided_by, effective_at, decline_reason) = if now >= deadline {
+        (RequestState::Expired, None, deadline, None)
+    } else {
+        match &command.action {
+            DecisionAction::Approve => (
+                RequestState::Approved,
+                Some(command.admin.user_id),
+                now,
+                None,
+            ),
+            DecisionAction::Decline { reason } => (
+                RequestState::Declined,
+                Some(command.admin.user_id),
+                now,
+                reason.clone(),
+            ),
+        }
+    };
+    request.state = state;
+    request.revision += 1;
+    request.decision = Some(TerminalDecision {
+        decision_id: format!("request.{state}/{}", request.request_id),
+        decided_by,
+        effective_at,
+        evaluated_at: now,
+        decline_reason,
+    });
+}
+
+/// The real `decision_outcome`.
+fn outcome(
+    was_pending: bool,
+    action: &DecisionAction,
+    request: &RequestSnapshot,
+) -> DecisionOutcome {
+    let matching = match action {
+        DecisionAction::Approve => request.state == RequestState::Approved,
+        DecisionAction::Decline { reason } => {
+            request.state == RequestState::Declined
+                && request
+                    .decision
+                    .as_ref()
+                    .is_some_and(|d| &d.decline_reason == reason)
+        }
+    };
+    if !matching {
+        DecisionOutcome::Incompatible
+    } else if was_pending {
+        DecisionOutcome::Applied
+    } else {
+        DecisionOutcome::AlreadyCompleted
     }
 }

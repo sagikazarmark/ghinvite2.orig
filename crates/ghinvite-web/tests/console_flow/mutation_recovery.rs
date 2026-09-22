@@ -1,8 +1,10 @@
 use super::*;
+use common::link_authority::snapshot;
+use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
+use ghinvite_core::storage::projection::{CreateLink, RequestSnapshot};
 use ghinvite_core::storage::{ContinuationStorage, InstallationStorage, RecordStorage};
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
-async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {
+async fn recovery_app(authority: &FakeLinkAuthority) -> (axum::Router, String) {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -15,7 +17,7 @@ async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {
     let state = AppState::new(
         storage,
         Arc::new(BrowserGithub),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
@@ -43,27 +45,38 @@ async fn post(
         .unwrap()
 }
 
-fn snapshot(id: ghinvite_core::InvitationLinkId, revoked: bool) -> serde_json::Value {
-    serde_json::json!({"link_id":id,"creation":{
-        "link_id":id,"admin":{"account_id":42,"user_id":42},"account_id":42,
-        "installation_id":77,"description":"Recovery fixture","internal_note":null,
-        "expires_at":null,"max_uses":null,"permission":"pull","approval_required":true,
-        "repos":[{"repo_id":10,"repo_full_name":"octocat/api"}]},
-        "invitation_code":"RecoveryCode0001","created_at":"2026-09-14T12:00:00Z",
-        "uses":0,"revision":if revoked {2} else {1},
-        "revoked_at":if revoked {Some("2026-09-15T12:00:00Z")} else {None},
-        "revoked_by":if revoked {Some(42)} else {None}})
+/// The octocat link the recovery tests act on.
+fn recovery_link(id: ghinvite_core::InvitationLinkId) -> ghinvite_core::InvitationLink {
+    ghinvite_core::InvitationLink {
+        id,
+        slug: ghinvite_core::Slug::from_string("RecoveryCode0001".into()).unwrap(),
+        installation_id: 77,
+        account_id: 42,
+        created_by: 42,
+        created_at: "2026-09-14T12:00:00Z".parse().unwrap(),
+        expires_at: None,
+        max_uses: None,
+        uses_count: 0,
+        permission: ghinvite_core::Permission::Pull,
+        approval_required: true,
+        description: "Recovery fixture".into(),
+        internal_note: None,
+        revoked_at: None,
+        revoked_by: None,
+        repos: vec![ghinvite_core::InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: "octocat/api".into(),
+        }],
+    }
 }
 
 #[tokio::test]
 async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retry() {
-    let ingress = MockServer::start().await;
+    let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    authority.seed_link(&recovery_link(id));
+    authority.lose_acknowledgements("revoke");
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = post(
         &app,
@@ -84,28 +97,22 @@ async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retr
         post(&app, &cookie, &url, "").await.status(),
         StatusCode::FORBIDDEN
     );
-    ingress.reset().await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, true)))
-        .mount(&ingress)
-        .await;
+    let before = authority.calls().len();
     let html = response_html(identity_request(&app, &cookie, "GET", &url).await).await;
     assert!(html.contains("Invitation link stopped accepting new invitation requests."));
     assert!(!html.contains("Retry original attempt"));
     assert_eq!(
-        ingress.received_requests().await.unwrap().len(),
-        1,
+        authority.calls()[before..],
+        ["link_status"],
         "status must not mutate"
     );
+    assert_eq!(authority.applied(), ["revoke"]);
 }
 
 #[tokio::test]
 async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_live_input() {
-    let ingress = MockServer::start().await;
-    Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
+    let authority = FakeLinkAuthority::start().await;
+    authority.fail("revoke", 503);
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -118,7 +125,7 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
     let state = AppState::new(
         storage.clone(),
         Arc::new(BrowserGithub),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, protected_store().await);
@@ -132,7 +139,7 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         &format!("csrf_token={csrf}"),
     )
     .await;
-    let original = ingress.received_requests().await.unwrap()[0].body.clone();
+    let original = authority.received::<serde_json::Value>("revoke")[0].clone();
     // Seed expired records after the initial submission so the retry drives cleanup.
     for i in 0..205 {
         let id = format!("expired-{i}");
@@ -157,15 +164,10 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
             .await
             .unwrap();
         assert_eq!(unreclaimed.len(), remaining);
+        assert_eq!(authority.calls().last().unwrap(), "revoke");
         assert_eq!(
-            ingress
-                .received_requests()
-                .await
-                .unwrap()
-                .last()
-                .unwrap()
-                .body,
-            original
+            authority.received::<serde_json::Value>("revoke").last(),
+            Some(&original)
         );
     }
     let html = response_html(
@@ -177,12 +179,10 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
 
 #[tokio::test]
 async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_success() {
-    let ingress = MockServer::start().await;
-    Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    let authority = FakeLinkAuthority::start().await;
+    authority.fail("decide", 503);
+    authority.fail("revoke", 503);
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
     let request = ghinvite_core::RequestId::new();
@@ -209,7 +209,7 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
     let html = response_html(response).await;
     assert!(html.contains("requested decision was not applied"));
     assert!(html.contains(&original));
-    assert_eq!(ingress.received_requests().await.unwrap().len(), 1);
+    assert_eq!(authority.calls().len(), 1);
     post(
         &app,
         &cookie,
@@ -227,12 +227,9 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
 
 #[tokio::test]
 async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_recoverable() {
-    let ingress = MockServer::start().await;
-    Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    let authority = FakeLinkAuthority::start().await;
+    authority.fail("decide", 503);
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
     let request = ghinvite_core::RequestId::new();
@@ -247,10 +244,13 @@ async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_reco
         (StatusCode::BAD_GATEWAY, StatusCode::SEE_OTHER)
             | (StatusCode::SEE_OTHER, StatusCode::BAD_GATEWAY)
     ));
-    let calls = ingress.received_requests().await.unwrap();
-    assert_eq!(calls.len(), 1);
-    let input: serde_json::Value = serde_json::from_slice(&calls[0].body).unwrap();
-    let winner = input["operation_id"].as_str().unwrap();
+    assert_eq!(authority.calls(), ["decide"]);
+    let winner = String::from(
+        authority.received::<DecideRequest>("decide")[0]
+            .operation_id
+            .clone(),
+    );
+    let winner = winner.as_str();
     let html = response_html(
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
     )
@@ -266,12 +266,9 @@ async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_reco
 
 #[tokio::test]
 async fn exact_operation_conflict_takes_precedence_over_request_recovery() {
-    let ingress = MockServer::start().await;
-    Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    let authority = FakeLinkAuthority::start().await;
+    authority.fail("decide", 503);
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
     let first_request = ghinvite_core::RequestId::new();
@@ -301,17 +298,14 @@ async fn exact_operation_conflict_takes_precedence_over_request_recovery() {
     let html = response_html(response).await;
     assert!(html.contains("Operation conflict"));
     assert!(html.contains(first_operation));
-    assert_eq!(ingress.received_requests().await.unwrap().len(), 2);
+    assert_eq!(authority.calls().len(), 2);
 }
 
 #[tokio::test]
 async fn creation_recovery_retains_canonical_input_before_eligibility_and_projection() {
-    let ingress = MockServer::start().await;
+    let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
+    authority.fail("create", 503);
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -330,7 +324,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
@@ -349,8 +343,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     let url = format!("/console/accounts/octocat/attempts/create-{id}");
     assert!(html.contains(&url));
     assert!(html.contains(&format!("/console/accounts/octocat/links/{id}")));
-    let original: serde_json::Value =
-        serde_json::from_slice(&ingress.received_requests().await.unwrap()[0].body).unwrap();
+    let original = authority.received::<CreateLink>("create")[0].clone();
     let response = identity_request(
         &app,
         &cookie,
@@ -363,16 +356,11 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         StatusCode::NOT_FOUND,
         "uncertain does not mean absent"
     );
-    let mut confirmed = snapshot(id, false);
-    confirmed["creation"] = original.clone();
-    confirmed["creation"]["repos"]
-        .as_array_mut()
-        .unwrap()
-        .sort_by_key(|r| r["repo_id"].as_u64().unwrap());
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(confirmed))
-        .mount(&ingress)
-        .await;
+    // The authority confirms it created the link from the canonical input.
+    let mut confirmed = snapshot(&recovery_link(id));
+    confirmed.creation = original.clone();
+    confirmed.creation.repos.sort_by_key(|repo| repo.repo_id);
+    authority.seed(confirmed);
     assert_eq!(
         identity_request(&app, &cookie, "GET", &url).await.status(),
         StatusCode::OK
@@ -386,28 +374,20 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
     assert!(response_html(response).await.contains(&url));
-    assert_eq!(ingress.received_requests().await.unwrap().len(), 3);
-    ingress.reset().await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, false)))
-        .mount(&ingress)
-        .await;
+    assert_eq!(authority.calls().len(), 3);
+    authority.recover("create");
     assert_eq!(
         post(&app, &cookie, &url, &format!("csrf_token={csrf}"))
             .await
             .status(),
         StatusCode::SEE_OTHER
     );
-    let retry: serde_json::Value =
-        serde_json::from_slice(&ingress.received_requests().await.unwrap()[0].body).unwrap();
+    assert_eq!(authority.calls()[3..], ["create"]);
+    let retry = authority.received::<CreateLink>("create").pop().unwrap();
     assert_eq!(
         original, retry,
         "absolute expiry and repository identities stay fixed"
     );
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/link_status")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, false)))
-        .mount(&ingress)
-        .await;
     let detail = format!("/console/accounts/octocat/links/{id}");
     let response = identity_request(&app, &cookie, "GET", &detail).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -421,13 +401,11 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
 
 #[tokio::test]
 async fn recovered_revocation_retry_flashes_once_on_the_link_detail_page() {
-    let ingress = MockServer::start().await;
+    let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    authority.seed_link(&recovery_link(id));
+    authority.lose_acknowledgements("revoke");
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let detail = format!("/console/accounts/octocat/links/{id}");
     let response = post(
@@ -438,13 +416,6 @@ async fn recovered_revocation_retry_flashes_once_on_the_link_detail_page() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    ingress.reset().await;
-    for method in ["revoke", "link_status"] {
-        Mock::given(path(format!("/{LINK_SERVICE}/{id}/{method}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(snapshot(id, true)))
-            .mount(&ingress)
-            .await;
-    }
     let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
     let html = response_html(identity_request(&app, &cookie, "GET", &url).await).await;
     assert!(html.contains("Invitation link stopped accepting new invitation requests."));
@@ -463,13 +434,10 @@ async fn recovered_revocation_retry_flashes_once_on_the_link_detail_page() {
 
 #[tokio::test]
 async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
-    let ingress = MockServer::start().await;
+    let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
-    let (app, cookie) = recovery_app(&ingress).await;
+    authority.fail("create", 503);
+    let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = post(
         &app,
@@ -482,11 +450,8 @@ async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    ingress.reset().await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/create")))
-        .respond_with(ResponseTemplate::new(400).set_body_string("restate: expiry already past"))
-        .mount(&ingress)
-        .await;
+    // The authority rejects the retried input.
+    authority.fail("create", 400);
     let url = format!("/console/accounts/octocat/attempts/create-{id}");
     let response = post(&app, &cookie, &url, &format!("csrf_token={csrf}")).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -501,7 +466,10 @@ async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
     assert!(html.contains(
         "The invitation link could not be created with these values. Review them and try again."
     ));
-    assert!(!html.contains("expiry already past"));
+    assert!(
+        !html.contains("invalid command"),
+        "the authority's wording stays internal"
+    );
     // The rejected input is released rather than left as an unknown outcome.
     assert_eq!(
         identity_request(&app, &cookie, "GET", &url).await.status(),
@@ -511,16 +479,15 @@ async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
 
 #[tokio::test]
 async fn decision_recovery_reads_original_receipt_and_retries_identical_input() {
+    use ghinvite_core::RequestState::{Approved, Declined, Expired};
     for action in ["approve", "decline"] {
-        let ingress = MockServer::start().await;
+        let authority = FakeLinkAuthority::start().await;
         let link = ghinvite_core::InvitationLinkId::new();
         let request = ghinvite_core::RequestId::new();
         let operation = ghinvite_core::RequestId::new();
-        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&ingress)
-            .await;
-        let (app, cookie) = recovery_app(&ingress).await;
+        authority.seed_link(&recovery_link(link));
+        authority.fail("decide", 503);
+        let (app, cookie) = recovery_app(&authority).await;
         let csrf = common::csrf_token(&app, &cookie).await;
         let response = post(
             &app,
@@ -532,7 +499,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
         let url = format!("/console/accounts/octocat/attempts/decision-{link}-{operation}");
         assert!(response_html(response).await.contains(&url));
-        let original = ingress.received_requests().await.unwrap()[0].body.clone();
+        let original = authority.received::<DecideRequest>("decide")[0].clone();
         let response = post(
             &app,
             &cookie,
@@ -545,26 +512,18 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers()["location"], url);
-        assert_eq!(ingress.received_requests().await.unwrap().len(), 1);
+        assert_eq!(authority.calls().len(), 1);
         let latest = response_html(
             identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
         )
         .await;
         assert!(latest.contains(&url));
-        ingress.reset().await;
-        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decision_status")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
-            .mount(&ingress)
-            .await;
+        // The authority retained no receipt for the operation.
         assert!(
             response_html(identity_request(&app, &cookie, "GET", &url).await)
                 .await
                 .contains("Outcome unknown")
         );
-        Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&ingress)
-            .await;
         assert_eq!(
             post(
                 &app,
@@ -579,60 +538,50 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
             .status(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(ingress.received_requests().await.unwrap()[1].body, original);
+        assert_eq!(authority.calls()[1..], ["decision_status", "decide"]);
+        assert_eq!(authority.received::<DecideRequest>("decide")[1], original);
+        let (same, opposite) = if action == "approve" {
+            (Approved, Declined)
+        } else {
+            (Declined, Approved)
+        };
         for (outcome, state, expected) in [
-            (
-                "applied",
-                if action == "approve" {
-                    "approved"
-                } else {
-                    "declined"
-                },
-                "Request",
-            ),
-            (
-                "already_completed",
-                if action == "approve" {
-                    "approved"
-                } else {
-                    "declined"
-                },
-                "already",
-            ),
-            (
-                "incompatible",
-                if action == "approve" {
-                    "declined"
-                } else {
-                    "approved"
-                },
-                "not applied",
-            ),
-            ("incompatible", "expired", "decision deadline"),
+            (DecisionOutcome::Applied, same, "Request"),
+            (DecisionOutcome::AlreadyCompleted, same, "already"),
+            (DecisionOutcome::Incompatible, opposite, "not applied"),
+            (DecisionOutcome::Incompatible, Expired, "decision deadline"),
         ] {
-            ingress.reset().await;
-            Mock::given(path(format!("/{LINK_SERVICE}/{link}/decision_status")))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":outcome,"request":{
-                    "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":state,
-                    "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
-                .mount(&ingress).await;
+            let receipt = DecisionReceipt {
+                outcome,
+                request: RequestSnapshot {
+                    request_id: request,
+                    link_id: link,
+                    account_id: 42,
+                    requester_id: 99,
+                    justification: None,
+                    state,
+                    admitted_at: "2026-09-14T12:00:00Z".parse().unwrap(),
+                    decision_deadline: Some("2026-09-21T12:00:00Z".parse().unwrap()),
+                    revision: 2,
+                    decision: None,
+                },
+            };
+            authority.seed_decision(original.clone(), receipt);
+            let before = authority.calls().len();
             let html = response_html(identity_request(&app, &cookie, "GET", &url).await).await;
             assert!(html.contains(expected));
-            assert!(html.contains(state));
+            assert!(html.contains(&state.to_string()));
             assert!(!html.contains("Retry original attempt"));
-            assert_eq!(ingress.received_requests().await.unwrap().len(), 1);
+            assert_eq!(authority.calls()[before..], ["decision_status"]);
         }
     }
 }
 
 #[tokio::test]
 async fn recovery_requires_current_account_authority_session_ownership_and_csrf() {
-    let ingress = MockServer::start().await;
+    let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{id}/revoke")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
+    authority.fail("revoke", 503);
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -643,7 +592,7 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
     let state = AppState::new(
         storage.clone(),
         Arc::new(BrowserGithub),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let app = build_app(state, protected_store().await);
@@ -699,13 +648,7 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
         StatusCode::NOT_FOUND
     );
     assert_eq!(
-        ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.url.path().ends_with("/revoke"))
-            .count(),
+        authority.calls().iter().filter(|m| *m == "revoke").count(),
         1
     );
 }
@@ -717,72 +660,6 @@ async fn protected_store()
     );
     backend.migrate().await.unwrap();
     ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32])
-}
-
-/// Retain the first command/result, then lose its acknowledgement. SQL lags.
-#[derive(Default)]
-struct LostAcknowledgements {
-    links: BTreeMap<String, serde_json::Value>,
-    receipts: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    effects: BTreeMap<String, usize>,
-    calls: BTreeMap<String, usize>,
-}
-struct LostAcknowledgementTransport(Arc<Mutex<LostAcknowledgements>>);
-impl wiremock::Respond for LostAcknowledgementTransport {
-    fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
-        let parts = request.url.path().split('/').collect::<Vec<_>>();
-        let id = parts[2];
-        let method = parts[3];
-        let input: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        let mut state = self.0.lock().unwrap();
-        if method == "link_status" {
-            return state
-                .links
-                .get(id)
-                .map(|s| ResponseTemplate::new(200).set_body_json(s))
-                .unwrap_or(ResponseTemplate::new(404));
-        }
-        let key = if matches!(method, "decide" | "decision_status") {
-            format!("{id}/decide/{}", input["operation_id"].as_str().unwrap())
-        } else {
-            format!("{id}/{method}")
-        };
-        if method == "decision_status" {
-            return ResponseTemplate::new(200)
-                .set_body_json(state.receipts.get(&key).map(|(_, receipt)| receipt));
-        }
-        *state.calls.entry(method.into()).or_default() += 1;
-        if let Some((old, receipt)) = state.receipts.get(&key) {
-            return if *old == input {
-                ResponseTemplate::new(200).set_body_json(receipt)
-            } else {
-                ResponseTemplate::new(409)
-            };
-        }
-        let receipt = match method {
-            "create" => {
-                let mut link = snapshot(id.parse().unwrap(), false);
-                link["creation"] = input.clone();
-                state.links.insert(id.into(), link.clone());
-                link
-            }
-            "revoke" => {
-                let link = state.links.get_mut(id).unwrap();
-                link["revoked_at"] = serde_json::json!("2026-09-18T12:00:00Z");
-                link["revoked_by"] = serde_json::json!(42);
-                link["revision"] = serde_json::json!(2);
-                link.clone()
-            }
-            "decide" => serde_json::json!({"outcome":"applied", "request":{
-                "request_id":input["request_id"],"link_id":id,"account_id":42,"requester_id":99,
-                "state":if input["action"]["kind"] == "approve" {"approved"} else {"declined"},
-                "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}}),
-            _ => panic!("unexpected method {method}"),
-        };
-        *state.effects.entry(method.into()).or_default() += 1;
-        state.receipts.insert(key, (input, receipt));
-        ResponseTemplate::new(503).set_body_string("fixture: committed, acknowledgement lost")
-    }
 }
 
 struct BrowserGithub;
@@ -807,13 +684,12 @@ impl ghinvite_github::HttpTransport for BrowserGithub {
 #[ignore = "long-running Playwright fixture"]
 async fn mutation_recovery_browser_server() {
     use axum::response::IntoResponse;
-    use ghinvite_core::storage::projection::ProjectionStorage;
-    let ingress = MockServer::start().await;
-    let effects = Arc::new(Mutex::new(LostAcknowledgements::default()));
-    Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(LostAcknowledgementTransport(effects.clone()))
-        .mount(&ingress)
-        .await;
+    use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
+    // Every mutation applies, then loses its acknowledgement. SQL lags.
+    let authority = FakeLinkAuthority::start().await;
+    for method in ["create", "revoke", "decide"] {
+        authority.lose_acknowledgements(method);
+    }
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -834,28 +710,39 @@ async fn mutation_recovery_browser_server() {
             .await
             .unwrap();
     }
-    let link = ghinvite_core::InvitationLinkId::new();
-    let link_snapshot = snapshot(link, false);
-    effects
-        .lock()
-        .unwrap()
-        .links
-        .insert(link.to_string(), link_snapshot.clone());
-    let requests = (0..2).map(|_| serde_json::json!({"request_id":ghinvite_core::RequestId::new(),"link_id":link,"account_id":42,
-        "requester_id":99,"state":"pending","admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":1})).collect::<Vec<_>>();
+    let link = snapshot(&recovery_link(ghinvite_core::InvitationLinkId::new()));
+    authority.seed(link.clone());
+    let requests = (0..2)
+        .map(|_| RequestSnapshot {
+            request_id: ghinvite_core::RequestId::new(),
+            link_id: link.link_id,
+            account_id: 42,
+            requester_id: 99,
+            justification: None,
+            state: ghinvite_core::RequestState::Pending,
+            admitted_at: Utc::now(),
+            decision_deadline: Some(Utc::now() + Duration::days(7)),
+            revision: 1,
+            decision: None,
+        })
+        .collect::<Vec<_>>();
+    for request in &requests {
+        authority.seed_request(request.clone());
+    }
     storage
-        .apply_transition(
-            &serde_json::from_value(serde_json::json!({"transition_id":format!("link/{link}/1"),
-        "link":link_snapshot,"requests":requests,"events":[]}))
-            .unwrap(),
-        )
+        .apply_transition(&ProjectionEnvelope {
+            transition_id: format!("link/{}/1", link.link_id),
+            link,
+            requests,
+            events: vec![],
+        })
         .await
         .unwrap();
     let app = build_app(
         AppState::new(
             storage,
             Arc::new(BrowserGithub),
-            Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+            authority.client(),
             WebConfig::for_local_dev_with_secret([7; 32]),
         ),
         protected_store().await,
@@ -882,10 +769,23 @@ async fn mutation_recovery_browser_server() {
         .route(
             "/fixture-effects",
             axum::routing::get(move || {
-                let effects = effects.clone();
+                let authority = authority.clone();
                 async move {
-                    let e = effects.lock().unwrap();
-                    axum::Json(serde_json::json!({"effects":e.effects,"calls":e.calls}))
+                    // Per mutation: how many took effect, and how many calls
+                    // (first attempts and retries) reached the authority.
+                    let count = |methods: Vec<String>| {
+                        let mut counts = BTreeMap::<String, usize>::new();
+                        for method in methods {
+                            if matches!(method.as_str(), "create" | "revoke" | "decide") {
+                                *counts.entry(method).or_default() += 1;
+                            }
+                        }
+                        counts
+                    };
+                    axum::Json(serde_json::json!({
+                        "effects": count(authority.applied()),
+                        "calls": count(authority.calls()),
+                    }))
                 }
             }),
         )
