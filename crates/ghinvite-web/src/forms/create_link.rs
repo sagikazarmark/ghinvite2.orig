@@ -658,6 +658,23 @@ mod tests {
     }
 
     #[test]
+    fn a_scope_core_refuses_is_a_field_error_not_a_silent_rerender() {
+        // Only GitHub supplies these: a full name that is not `owner/name`,
+        // and one repository listed twice.
+        let malformed = vec![repo(10, "acme")];
+        let listed_twice = vec![repo(10, "acme/api"), repo(10, "acme/api")];
+
+        for available in [malformed, listed_twice] {
+            let errors = validate(&with_repo_ids(vec![10]), &available, now()).unwrap_err();
+            assert_eq!(
+                single_field_errors(&errors).repo_scope.as_deref(),
+                Some(link_form::REPO_SCOPE_UNUSABLE),
+                "available={available:?}"
+            );
+        }
+    }
+
+    #[test]
     fn internal_note_over_16384_bytes_is_a_field_error() {
         let with_note = |note: String| CreateLinkSubmission {
             internal_note: Some(note),
