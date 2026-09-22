@@ -79,17 +79,25 @@ pub struct InstallationClient {
 
 impl InstallationClient {
     /// App-authenticated identity/status observation, independent of cached tokens.
+    ///
+    /// `Ok(None)` is GitHub's answer that this App has no such installation:
+    /// it was uninstalled or never existed. The request carries the App's own
+    /// JWT and names no repository, so a 404 here has no other meaning.
     pub async fn get_installation(
         &self,
         installation_id: u64,
-    ) -> Result<crate::payloads::GhAppInstallation> {
+    ) -> Result<Option<crate::payloads::GhAppInstallation>> {
         let jwt = self.signer.sign(Utc::now())?;
         let request = github_request(
             Method::Get,
             format!("{}/app/installations/{installation_id}", self.base_url),
             &jwt,
         );
-        self.transport.send(request).await?.ensure_success()?.json()
+        let resp = self.transport.send(request).await?;
+        if resp.status == 404 {
+            return Ok(None);
+        }
+        resp.ensure_success()?.json().map(Some)
     }
 
     /// Complete numeric repository scope. A partial or changing pagination result
@@ -604,6 +612,49 @@ mod read_tests {
             .with_base("https://api.github.test");
         let err = client.get_repo(9, "acme", "gone").await.unwrap_err();
         assert_eq!(err.status(), Some(404));
+    }
+
+    #[tokio::test]
+    async fn get_installation_reads_the_installation_github_holds() {
+        let mock = MockTransport::scripted(vec![Expectation::ok_json(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            serde_json::json!({"id": 9, "account": {"id": 100, "login": "acme"}, "suspended_at": null}),
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let installation = client.get_installation(9).await.unwrap().unwrap();
+        assert_eq!((installation.id, installation.account.id), (9, 100));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_missing_installation_is_none_not_an_error() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            404,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert!(client.get_installation(9).await.unwrap().is_none());
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_would_not_answer_for_is_an_error() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            502,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert_eq!(
+            client.get_installation(9).await.unwrap_err().status(),
+            Some(502)
+        );
+        mock.assert_exhausted();
     }
 }
 

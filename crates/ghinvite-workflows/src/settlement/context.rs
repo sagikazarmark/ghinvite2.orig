@@ -72,10 +72,13 @@ pub(super) async fn load_verified(
     else {
         return Ok(None);
     };
-    let verified = state
+    let Some(verified) = state
         .github
         .get_installation(account.installation_id)
-        .await?;
+        .await?
+    else {
+        return Ok(None);
+    };
     if verified.id != account.installation_id
         || verified.account.id != context.link.account_id
         || account.account_id != context.link.account_id

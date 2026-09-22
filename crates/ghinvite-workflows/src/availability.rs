@@ -317,12 +317,11 @@ impl AccountInstallation {
             .get_installation(account.installation_id)
             .await
         {
-            Ok(installation)
+            Ok(Some(installation))
                 if installation.id == account.installation_id
                     && installation.account.id == account.account_id
                     && installation.suspended_at.is_none() => {}
             Ok(_) => return Observation::Unavailable,
-            Err(error) if error.status() == Some(404) => return Observation::Unavailable,
             Err(_) => return Observation::Unknown,
         }
         match self
@@ -612,8 +611,7 @@ impl AccountInstallation {
                     .get_installation(input.installation_id)
                     .await
                 {
-                    Ok(value) => Ok::<_, HandlerError>(Json(Some(value))),
-                    Err(error) if error.status() == Some(404) => Ok(Json(None)),
+                    Ok(value) => Ok::<_, HandlerError>(Json(value)),
                     Err(_) => Err(TerminalError::new_with_code(
                         503,
                         "installation identity could not be confirmed",
@@ -640,7 +638,7 @@ impl AccountInstallation {
                     .get_installation(old.installation_id)
                     .await
                 {
-                    Err(error) if error.status() == Some(404) => Ok(()),
+                    Ok(None) => Ok(()),
                     _ => Err(HandlerError::from(TerminalError::new_with_code(
                         503,
                         "previous installation is not confirmed obsolete",
@@ -785,6 +783,56 @@ mod tests {
             selected_repos: SelectedRepos::All,
             installed_at: dt("2026-05-04T12:00:00Z"),
         }
+    }
+
+    async fn observed_installation(response: ghinvite_github::mocks::Expectation) -> Observation {
+        let mock = ghinvite_github::mocks::MockTransport::scripted(vec![response]);
+        let installation = AccountInstallation {
+            state: crate::test_support::fixture_state_with_transport(std::sync::Arc::new(
+                mock.clone(),
+            ))
+            .await,
+        };
+        let account = Account {
+            installation_id: 9,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        };
+        let observation = installation.observe(&account).await;
+        mock.assert_exhausted();
+        observation
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_no_longer_holds_is_unavailable() {
+        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
+            ghinvite_github::Method::Get,
+            "https://api.github.test/app/installations/9",
+            404,
+        ))
+        .await;
+        assert!(
+            matches!(observation, Observation::Unavailable),
+            "{observation:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_would_not_answer_for_is_unknown() {
+        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
+            ghinvite_github::Method::Get,
+            "https://api.github.test/app/installations/9",
+            502,
+        ))
+        .await;
+        assert!(
+            matches!(observation, Observation::Unknown),
+            "{observation:?}"
+        );
     }
 
     #[tokio::test]

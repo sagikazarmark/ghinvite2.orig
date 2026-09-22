@@ -364,6 +364,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_uninstalled_installation_cannot_observe_rather_than_failing() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            404,
+        )]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        let evidence = observe(&state, &row, dt("2026-05-05T13:00:00Z"))
+            .await
+            .unwrap();
+
+        assert!(evidence.is_none(), "got {evidence:?}");
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
     async fn observe_fails_rather_than_settling_when_a_later_page_fails() {
         let mock = MockTransport::scripted(vec![
             Expectation::ok_json(
