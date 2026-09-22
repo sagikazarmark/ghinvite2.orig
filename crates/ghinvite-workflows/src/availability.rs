@@ -21,7 +21,7 @@ pub struct Scope {
     pub repo_ids: Vec<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Eligibility {
     Available,
@@ -344,7 +344,7 @@ impl AccountInstallation {
     ) -> Result<InstallationStatus, TerminalError> {
         if let Some(account) = &mut status.account {
             let observation = if ctx
-                .get::<bool>(&format!("retired/{}", account.installation_id))
+                .get::<bool>(&retired_key(account.installation_id))
                 .await?
                 .is_some()
             {
@@ -356,12 +356,8 @@ impl AccountInstallation {
                     .await?;
                 observation
             };
-            // Delivery's existing local prerequisite check must also fail closed.
-            let selected = match &observation {
-                Observation::Available { repo_ids } => SelectedRepos::Subset(repo_ids.clone()),
-                _ => SelectedRepos::Subset(vec![]),
-            };
-            if account.selected_repos != selected {
+            let refresh = Refresh::of(account, &observation);
+            if let Some(selected) = refresh.selected_repos {
                 project(
                     ctx,
                     InstallationChange::Repos {
@@ -374,9 +370,7 @@ impl AccountInstallation {
                 .await?;
                 account.selected_repos = selected;
             }
-            if !matches!(observation, Observation::Available { .. })
-                && ctx.get::<bool>(RECHECK_SLOT).await?.is_none()
-            {
+            if refresh.recheck && ctx.get::<bool>(RECHECK_SLOT).await?.is_none() {
                 ctx.set(RECHECK_SLOT, true);
                 ctx.object_client::<AccountInstallationClient>(ctx.key())
                     .recheck()
@@ -458,6 +452,54 @@ impl AccountInstallation {
     }
 }
 
+/// The state key marking an installation identity retired. A retired
+/// identity is never adopted again and observes as unavailable.
+fn retired_key(installation_id: u64) -> String {
+    format!("retired/{installation_id}")
+}
+
+/// What a refresh does with an observation of the current installation.
+#[derive(Debug)]
+struct Refresh {
+    /// The available repositories to project, when they differ from what
+    /// `account` already selects.
+    selected_repos: Option<SelectedRepos>,
+    /// Whether the observation recheck must be scheduled.
+    recheck: bool,
+}
+
+impl Refresh {
+    fn of(account: &Account, observation: &Observation) -> Self {
+        // Delivery's existing local prerequisite check must also fail closed.
+        let selected = match observation {
+            Observation::Available { repo_ids } => SelectedRepos::Subset(repo_ids.clone()),
+            _ => SelectedRepos::Subset(vec![]),
+        };
+        Self {
+            selected_repos: (account.selected_repos != selected).then_some(selected),
+            recheck: !matches!(observation, Observation::Available { .. }),
+        }
+    }
+}
+
+/// Whether a link's repository scope may be admitted under `observation`.
+fn eligibility(observation: &Observation, scope: &Scope) -> Eligibility {
+    match observation {
+        Observation::Unavailable => Eligibility::Unavailable {
+            reason: Rejection::InstallationUnavailable,
+        },
+        Observation::Unknown => Eligibility::Unknown,
+        Observation::Available { repo_ids }
+            if scope.repo_ids.iter().any(|id| !repo_ids.contains(id)) =>
+        {
+            Eligibility::Unavailable {
+                reason: Rejection::RepositoryUnavailable,
+            }
+        }
+        Observation::Available { .. } => Eligibility::Available,
+    }
+}
+
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
 }
@@ -523,7 +565,7 @@ impl AccountInstallation {
         }
         let mut status = self.load(&ctx).await?;
         if ctx
-            .get::<bool>(&format!("retired/{}", input.installation_id))
+            .get::<bool>(&retired_key(input.installation_id))
             .await?
             .is_some()
         {
@@ -558,7 +600,7 @@ impl AccountInstallation {
                 return Err(invalid());
             }
             if existing.uninstalled_at.is_some() {
-                ctx.set(&format!("retired/{}", input.installation_id), true);
+                ctx.set(&retired_key(input.installation_id), true);
                 return Ok(());
             }
         }
@@ -582,7 +624,7 @@ impl AccountInstallation {
             .name("verify_onboard_identity")
             .await?;
         let Some(verified) = verified else {
-            ctx.set(&format!("retired/{}", input.installation_id), true);
+            ctx.set(&retired_key(input.installation_id), true);
             return Ok(());
         };
         if verified.id != input.installation_id || verified.account.id != input.account_id {
@@ -621,7 +663,7 @@ impl AccountInstallation {
                 },
             )
             .await?;
-            ctx.set(&format!("retired/{}", old.installation_id), true);
+            ctx.set(&retired_key(old.installation_id), true);
         }
         input.account_login = verified.account.login;
         input.account_type = verified
@@ -674,7 +716,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        ctx.set(&format!("retired/{}", input.installation_id), true);
+        ctx.set(&retired_key(input.installation_id), true);
         let mut status = match self.load(&ctx).await {
             Ok(status) => status,
             Err(_) => {
@@ -715,20 +757,7 @@ impl AccountInstallation {
         }
         let status = self.load(&ctx).await?;
         let status = self.refresh_status(&ctx, status).await?;
-        Ok(Json(match status.observation {
-            Observation::Unavailable => Eligibility::Unavailable {
-                reason: Rejection::InstallationUnavailable,
-            },
-            Observation::Unknown => Eligibility::Unknown,
-            Observation::Available { repo_ids }
-                if scope.repo_ids.iter().any(|id| !repo_ids.contains(id)) =>
-            {
-                Eligibility::Unavailable {
-                    reason: Rejection::RepositoryUnavailable,
-                }
-            }
-            Observation::Available { .. } => Eligibility::Available,
-        }))
+        Ok(Json(eligibility(&status.observation, &scope)))
     }
 }
 
@@ -1044,5 +1073,115 @@ mod tests {
         for attempt in [6, 7, 64, u32::MAX] {
             assert_eq!(refresh_backoff(attempt), RECHECK_INTERVAL);
         }
+    }
+
+    fn account_selecting(selected_repos: SelectedRepos) -> Account {
+        Account {
+            installation_id: 1,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos,
+        }
+    }
+
+    fn available(repo_ids: &[u64]) -> Observation {
+        Observation::Available {
+            repo_ids: repo_ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn an_unchanged_available_scope_projects_nothing_and_needs_no_recheck() {
+        let account = account_selecting(SelectedRepos::Subset(vec![10, 11]));
+
+        let refresh = Refresh::of(&account, &available(&[10, 11]));
+
+        assert_eq!(refresh.selected_repos, None);
+        assert!(!refresh.recheck);
+    }
+
+    #[test]
+    fn a_changed_available_scope_projects_what_github_reports() {
+        for before in [SelectedRepos::All, SelectedRepos::Subset(vec![10])] {
+            let refresh = Refresh::of(&account_selecting(before.clone()), &available(&[10, 11]));
+
+            assert_eq!(
+                refresh.selected_repos,
+                Some(SelectedRepos::Subset(vec![10, 11])),
+                "before={before:?}"
+            );
+            assert!(!refresh.recheck);
+        }
+    }
+
+    #[test]
+    fn an_installation_not_known_available_selects_nothing_and_rechecks() {
+        // Delivery's local prerequisite check reads the projected selection,
+        // so anything short of a confirmed scope must fail closed.
+        for observation in [Observation::Unavailable, Observation::Unknown] {
+            let account = account_selecting(SelectedRepos::Subset(vec![10]));
+
+            let refresh = Refresh::of(&account, &observation);
+
+            assert_eq!(
+                refresh.selected_repos,
+                Some(SelectedRepos::Subset(vec![])),
+                "observation={observation:?}"
+            );
+            assert!(refresh.recheck, "observation={observation:?}");
+        }
+    }
+
+    #[test]
+    fn an_already_closed_scope_still_rechecks_without_projecting_again() {
+        let account = account_selecting(SelectedRepos::Subset(vec![]));
+
+        let refresh = Refresh::of(&account, &Observation::Unavailable);
+
+        assert_eq!(refresh.selected_repos, None);
+        assert!(refresh.recheck);
+    }
+
+    fn scope(repo_ids: &[u64]) -> Scope {
+        Scope {
+            account_id: 100,
+            repo_ids: repo_ids.to_vec(),
+        }
+    }
+
+    #[test]
+    fn eligibility_follows_the_observation_and_the_whole_scope() {
+        let cases = [
+            (
+                Observation::Unavailable,
+                Eligibility::Unavailable {
+                    reason: Rejection::InstallationUnavailable,
+                },
+            ),
+            (Observation::Unknown, Eligibility::Unknown),
+            (available(&[10, 11]), Eligibility::Available),
+            (
+                available(&[10]),
+                Eligibility::Unavailable {
+                    reason: Rejection::RepositoryUnavailable,
+                },
+            ),
+        ];
+        for (observation, expected) in cases {
+            assert_eq!(
+                eligibility(&observation, &scope(&[10, 11])),
+                expected,
+                "observation={observation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn retired_identities_have_one_key_each() {
+        assert_eq!(retired_key(1), "retired/1");
+        assert_ne!(retired_key(1), retired_key(2));
     }
 }
