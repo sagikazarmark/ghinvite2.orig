@@ -15,6 +15,11 @@ fn attempt_url(code: &str, id: &str) -> String {
     format!("/i/{code}?operation_id={id}")
 }
 
+const RETRY_UNKNOWN: &str =
+    "Outcome unknown. Retry this same attempt to confirm whether your request was accepted.";
+const FRESH_ATTEMPT: &str =
+    "This is a fresh attempt. The original attempt remains recoverable below.";
+
 /// Submitted attempt input that cannot become an [`Admit`] command.
 enum InvalidInput {
     OperationId,
@@ -98,36 +103,25 @@ pub async fn page(
                     && let Ok(summary) = authority.requester_page(code, session.user_id, None).await
                 {
                     let original = attempt_url(code, &String::from(local.operation_id.clone()));
-                    let fresh = fresh && summary.can_start_fresh;
-                    let id = if fresh {
-                        ghinvite_core::RequestId::new().to_string()
+                    let (id, justification, message, mode) = if fresh && summary.can_start_fresh {
+                        let id = ghinvite_core::RequestId::new().to_string();
+                        (id, None, FRESH_ATTEMPT, FormMode::Fresh)
                     } else {
-                        String::from(local.operation_id.clone())
+                        let id = String::from(local.operation_id.clone());
+                        let justification = local.justification.as_deref();
+                        (id, justification, RETRY_UNKNOWN, FormMode::Retry)
                     };
-                    return render(
-                        session,
-                        code,
-                        &id,
-                        if fresh {
-                            None
-                        } else {
-                            local.justification.as_deref()
-                        },
-                        Some(&summary),
-                        if fresh {
-                            "This is a fresh attempt. The original attempt remains recoverable below."
-                        } else {
-                            "Outcome unknown. Retry this same attempt to confirm whether your request was accepted."
-                        },
-                        Some(&original),
-                        if fresh {
-                            FormMode::Fresh
-                        } else {
-                            FormMode::Retry
-                        },
-                        StatusCode::OK,
-                        vec![],
-                    );
+                    return View {
+                        id: &id,
+                        justification,
+                        page: Some(&summary),
+                        message,
+                        original: Some(&original),
+                        mode,
+                        status: StatusCode::OK,
+                        delivery: vec![],
+                    }
+                    .render(session, code);
                 }
                 if matches!(error, AuthorityError::Missing | AuthorityError::Unknown(_)) {
                     return unknown(session, code, &local);
@@ -163,10 +157,9 @@ pub async fn page(
     };
     let message = receipt.as_ref().map(receipt_copy).unwrap_or_else(|| {
         if page.attempt.is_some() && !fresh {
-            "Outcome unknown. Retry this same attempt to confirm whether your request was accepted."
-                .into()
+            RETRY_UNKNOWN.into()
         } else if fresh {
-            "This is a fresh attempt. The original attempt remains recoverable below.".into()
+            FRESH_ATTEMPT.into()
         } else if page.request.is_some() {
             "Your existing request is shown below.".into()
         } else {
@@ -214,18 +207,17 @@ pub async fn page(
     } else {
         FormMode::Fresh
     };
-    render(
-        session,
-        code,
-        &id,
-        justification.as_deref(),
-        Some(&page),
-        &message,
-        original.as_deref(),
+    View {
+        id: &id,
+        justification: justification.as_deref(),
+        page: Some(&page),
+        message: &message,
+        original: original.as_deref(),
         mode,
-        StatusCode::OK,
+        status: StatusCode::OK,
         delivery,
-    )
+    }
+    .render(session, code)
 }
 
 pub async fn submit(
@@ -255,18 +247,17 @@ pub async fn submit(
             if !page.can_start_fresh {
                 return self::page(state, tower, session, code, None, false).await;
             }
-            return render(
-                session,
-                code,
-                operation,
-                justification.as_deref(),
-                Some(&page),
-                "Your request has not been submitted. Correct the justification below.",
-                None,
-                FormMode::Validation,
-                StatusCode::BAD_REQUEST,
-                vec![],
-            );
+            return View {
+                id: operation,
+                justification: justification.as_deref(),
+                page: Some(&page),
+                message: "Your request has not been submitted. Correct the justification below.",
+                original: None,
+                mode: FormMode::Validation,
+                status: StatusCode::BAD_REQUEST,
+                delivery: vec![],
+            }
+            .render(session, code);
         }
         Err(invalid) => return safe_error(code, invalid.into()),
     };
@@ -298,26 +289,20 @@ pub async fn submit(
         Err(error) => Err(error),
     };
     match outcome {
-        Ok(receipt) => {
-            let id = String::from(command.operation_id.clone());
-            match receipt.result {
-                AdmissionResult::Accepted { .. } => {
-                    Redirect::to(&attempt_url(code, &id)).into_response()
-                }
-                AdmissionResult::Rejected { .. } => render(
-                    session,
-                    code,
-                    &id,
-                    command.justification.as_deref(),
-                    None,
-                    &receipt_copy(&receipt),
-                    Some(&attempt_url(code, &id)),
-                    FormMode::Closed,
-                    StatusCode::CONFLICT,
-                    vec![],
-                ),
+        Ok(receipt) => match receipt.result {
+            AdmissionResult::Accepted { .. } => {
+                let id = String::from(command.operation_id.clone());
+                Redirect::to(&attempt_url(code, &id)).into_response()
             }
-        }
+            AdmissionResult::Rejected { .. } => render_attempt(
+                session,
+                code,
+                &(&command).into(),
+                &receipt_copy(&receipt),
+                FormMode::Closed,
+                StatusCode::CONFLICT,
+            ),
+        },
         Err(error) => failed(session, code, &command, error),
     }
 }
@@ -333,36 +318,50 @@ fn failed(session: &Session, code: &str, command: &Admit, error: AuthorityError)
 
 /// The attempt's operation ID is bound to different input.
 fn conflict(session: &Session, code: &str, input: &AttemptInput) -> Response {
-    let id = String::from(input.operation_id.clone());
-    render(
+    render_attempt(
         session,
         code,
-        &id,
-        input.justification.as_deref(),
-        None,
+        input,
         "Operation conflict. This ID is bound to different input. Recover the original attempt to check its result and whether a fresh attempt is available.",
-        Some(&attempt_url(code, &id)),
         FormMode::Closed,
         StatusCode::CONFLICT,
-        vec![],
     )
 }
 
 /// Whether the attempt was admitted is unknown; offer only the same attempt.
 fn unknown(session: &Session, code: &str, input: &AttemptInput) -> Response {
-    let id = String::from(input.operation_id.clone());
-    render(
+    render_attempt(
         session,
         code,
-        &id,
-        input.justification.as_deref(),
-        None,
+        input,
         "Outcome unknown. Your request may have been accepted. Retry this same attempt or check its status.",
-        Some(&attempt_url(code, &id)),
         FormMode::Retry,
         StatusCode::BAD_GATEWAY,
-        vec![],
     )
+}
+
+/// Render one attempt's own input, without the link's page, linking back to
+/// its attempt URL.
+fn render_attempt(
+    session: &Session,
+    code: &str,
+    input: &AttemptInput,
+    message: &str,
+    mode: FormMode,
+    status: StatusCode,
+) -> Response {
+    let id = String::from(input.operation_id.clone());
+    View {
+        id: &id,
+        justification: input.justification.as_deref(),
+        page: None,
+        message,
+        original: Some(&attempt_url(code, &id)),
+        mode,
+        status,
+        delivery: vec![],
+    }
+    .render(session, code)
 }
 
 fn scope(tower: &tower_sessions::Session, session: &Session, code: &str) -> crate::Result<Scope> {
@@ -439,103 +438,106 @@ fn receipt_copy(receipt: &AdmissionReceipt) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render(
-    session: &Session,
-    code: &str,
-    id: &str,
-    justification: Option<&str>,
-    page: Option<&RequesterPage>,
-    message: &str,
-    original: Option<&str>,
+/// What the attempt page shows for one attempt.
+struct View<'a> {
+    id: &'a str,
+    justification: Option<&'a str>,
+    page: Option<&'a RequesterPage>,
+    message: &'a str,
+    original: Option<&'a str>,
     mode: FormMode,
     status: StatusCode,
     delivery: Vec<ghinvite_ui::invitation::DeliveryPresentation>,
-) -> Response {
-    let code = code.to_owned();
-    let id = id.to_owned();
-    let justification = justification.unwrap_or_default().to_owned();
-    let page = page.cloned();
-    let message = message.to_owned();
-    let original = original.map(str::to_owned);
-    let login = session.login.clone();
-    let refresh_seconds = page
-        .as_ref()
-        .and_then(|p| p.request.as_ref())
-        .filter(|r| r.state == ghinvite_core::RequestState::Pending)
-        .map(|_| ghinvite_ui::invitation::PENDING_REFRESH_SECONDS);
-    let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
-        rsx! {
-            ghinvite_ui::layouts::InvitationLayout {
-                signed_in_login: Some(login.clone()), title: "Request repository access · ghinvite".to_owned(),
-                account_login: None, active_nav: None, flash: None,
-                refresh_seconds,
-                div { class: "space-y-5",
-                h1 { class: "text-2xl font-semibold tracking-tight", "Request repository access" }
-                ghinvite_ui::invitation::IdentityConfirmation {
-                    login: login.clone(),
-                    return_to: format!("/i/{code}"),
-                }
-                if let Some(page) = &page {
-                    ghinvite_ui::invitation::AccessSummary {
-                        permission: page.permission, repos: page.repos.clone(), approval_required: page.approval_required,
+}
+
+impl View<'_> {
+    fn render(self, session: &Session, code: &str) -> Response {
+        let code = code.to_owned();
+        let id = self.id.to_owned();
+        let justification = self.justification.unwrap_or_default().to_owned();
+        let page = self.page.cloned();
+        let message = self.message.to_owned();
+        let original = self.original.map(str::to_owned);
+        let (mode, status, delivery) = (self.mode, self.status, self.delivery);
+        let login = session.login.clone();
+        let refresh_seconds = page
+            .as_ref()
+            .and_then(|p| p.request.as_ref())
+            .filter(|r| r.state == ghinvite_core::RequestState::Pending)
+            .map(|_| ghinvite_ui::invitation::PENDING_REFRESH_SECONDS);
+        let html = crate::views::render::render_with_csrf(session.csrf_token.clone(), move || {
+            rsx! {
+                ghinvite_ui::layouts::InvitationLayout {
+                    signed_in_login: Some(login.clone()), title: "Request repository access · ghinvite".to_owned(),
+                    account_login: None, active_nav: None, flash: None,
+                    refresh_seconds,
+                    div { class: "space-y-5",
+                    h1 { class: "text-2xl font-semibold tracking-tight", "Request repository access" }
+                    ghinvite_ui::invitation::IdentityConfirmation {
+                        login: login.clone(),
+                        return_to: format!("/i/{code}"),
                     }
-                }
-                p { class: "alert alert-info", role: "status", "{message}" }
-                if let Some(page) = &page {
-                    if let Some(request) = &page.request {
-                        p { "Current request status: {request.state}" }
-                        if request.state == ghinvite_core::RequestState::Pending {
-                            h2 { class: "text-xl font-semibold", "Awaiting review" }
-                            p { class: "text-sm leading-6 text-base-content/70", "The account admins have your request. This page checks for updates every 20 seconds." }
+                    if let Some(page) = &page {
+                        ghinvite_ui::invitation::AccessSummary {
+                            permission: page.permission, repos: page.repos.clone(), approval_required: page.approval_required,
                         }
-                        if request.state == ghinvite_core::RequestState::Approved {
-                            div { class: "alert alert-success",
-                                div {
-                                    h2 { class: "text-xl font-semibold", "Approved" }
-                                    p { "Your request is approved. Repository delivery is tracked separately below. Check again for updates; accepting access happens on GitHub." }
+                    }
+                    p { class: "alert alert-info", role: "status", "{message}" }
+                    if let Some(page) = &page {
+                        if let Some(request) = &page.request {
+                            p { "Current request status: {request.state}" }
+                            if request.state == ghinvite_core::RequestState::Pending {
+                                h2 { class: "text-xl font-semibold", "Awaiting review" }
+                                p { class: "text-sm leading-6 text-base-content/70", "The account admins have your request. This page checks for updates every 20 seconds." }
+                            }
+                            if request.state == ghinvite_core::RequestState::Approved {
+                                div { class: "alert alert-success",
+                                    div {
+                                        h2 { class: "text-xl font-semibold", "Approved" }
+                                        p { "Your request is approved. Repository delivery is tracked separately below. Check again for updates; accepting access happens on GitHub." }
+                                    }
                                 }
                             }
-                        }
-                        p { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." }
-                        if original.is_none() {
-                            a { class: "btn btn-outline", href: "/i/{code}", "Check again" }
-                        }
-                    }
-                }
-                if !delivery.is_empty() {
-                    ul { class: "space-y-4", aria_label: "Repository delivery",
-                        for row in &delivery {
-                            ghinvite_ui::invitation::DeliveryRow { row: row.clone(), login: login.clone() }
+                            p { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." }
+                            if original.is_none() {
+                                a { class: "btn btn-outline", href: "/i/{code}", "Check again" }
+                            }
                         }
                     }
-                }
-                if mode != FormMode::Closed {
-                    form { method: "post", action: "/i/{code}?operation_id={id}", class: "space-y-4",
-                        ghinvite_ui::csrf::CsrfField {}
-                        input { r#type: "hidden", name: "operation_id", value: "{id}" }
-                        ghinvite_ui::invitation::JustificationField {
-                            value: justification.clone(), readonly: mode == FormMode::Retry,
-                            max_bytes: Some(ghinvite_core::admission::MAX_JUSTIFICATION_BYTES),
-                            error: if mode == FormMode::Validation { ghinvite_ui::request_form::justification_error(&justification) } else { None },
-                        }
-                        div { class: "card-actions justify-end",
-                            button { r#type: "submit", class: "btn btn-primary", if mode == FormMode::Retry { "Retry same attempt" } else { "Submit request" } }
+                    if !delivery.is_empty() {
+                        ul { class: "space-y-4", aria_label: "Repository delivery",
+                            for row in &delivery {
+                                ghinvite_ui::invitation::DeliveryRow { row: row.clone(), login: login.clone() }
+                            }
                         }
                     }
-                }
-                if let Some(original) = &original {
-                    div { class: "flex flex-wrap gap-3",
-                        a { class: "btn btn-outline", href: "{original}", "Recover original attempt / Check again" }
-                        if page.as_ref().is_some_and(|page| page.can_start_fresh) {
-                            a { class: "link", href: "{original}&fresh=true", "Start a fresh attempt with edited input" }
+                    if mode != FormMode::Closed {
+                        form { method: "post", action: "/i/{code}?operation_id={id}", class: "space-y-4",
+                            ghinvite_ui::csrf::CsrfField {}
+                            input { r#type: "hidden", name: "operation_id", value: "{id}" }
+                            ghinvite_ui::invitation::JustificationField {
+                                value: justification.clone(), readonly: mode == FormMode::Retry,
+                                max_bytes: Some(ghinvite_core::admission::MAX_JUSTIFICATION_BYTES),
+                                error: if mode == FormMode::Validation { ghinvite_ui::request_form::justification_error(&justification) } else { None },
+                            }
+                            div { class: "card-actions justify-end",
+                                button { r#type: "submit", class: "btn btn-primary", if mode == FormMode::Retry { "Retry same attempt" } else { "Submit request" } }
+                            }
                         }
                     }
-                }
-                p { class: "text-sm leading-6 text-base-content/70", "Keep the attempt URL to recover it after signing in again. Opening this invitation link also recovers your latest attempt." }
+                    if let Some(original) = &original {
+                        div { class: "flex flex-wrap gap-3",
+                            a { class: "btn btn-outline", href: "{original}", "Recover original attempt / Check again" }
+                            if page.as_ref().is_some_and(|page| page.can_start_fresh) {
+                                a { class: "link", href: "{original}&fresh=true", "Start a fresh attempt with edited input" }
+                            }
+                        }
+                    }
+                    p { class: "text-sm leading-6 text-base-content/70", "Keep the attempt URL to recover it after signing in again. Opening this invitation link also recovers your latest attempt." }
+                    }
                 }
             }
-        }
-    });
-    (status, Html(html)).into_response()
+        });
+        (status, Html(html)).into_response()
+    }
 }

@@ -1,7 +1,7 @@
 //! The same fixed batch runs in SQLx and D1. One JSON parameter avoids lossy
 //! JavaScript number bindings. All validation and writes share one transaction.
 use super::*;
-use crate::invitation_link::{DESCRIPTION_MAX_CHARS, INTERNAL_NOTE_MAX_BYTES};
+use crate::invitation_link::INTERNAL_NOTE_MAX_BYTES;
 use crate::storage::{Error, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -26,7 +26,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         || link.revoked_by.is_some_and(|id| !valid_id(id))
         || link.revoked_at.is_some() != link.revoked_by.is_some()
         || crate::Slug::from_string(link.invitation_code.clone()).is_err()
-        || creation.description.chars().count() > DESCRIPTION_MAX_CHARS
+        || crate::Description::parse(&creation.description).is_err()
         || crate::Description::parse(link.description()).is_err()
         || link
             .internal_note()

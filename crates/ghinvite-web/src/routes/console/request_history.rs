@@ -245,10 +245,10 @@ mod tests {
         }
     }
 
-    fn link(account_id: u64, installation_id: u64, slug: &str) -> InvitationLink {
+    fn link(account_id: u64, installation_id: u64, code: &str) -> InvitationLink {
         InvitationLink {
             id: InvitationLinkId::new(),
-            slug: Slug::from_string(slug.to_string()).unwrap(),
+            slug: Slug::from_string(code.to_string()).unwrap(),
             installation_id,
             account_id,
             created_by: 701,

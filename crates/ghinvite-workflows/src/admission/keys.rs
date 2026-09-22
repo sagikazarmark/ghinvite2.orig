@@ -13,6 +13,7 @@ pub(super) const LINK: &str = "link";
 /// The original creation receipt, returned on creation replay.
 pub(super) const CREATION: &str = "creation";
 
+/// A request's current snapshot.
 pub(super) fn request(id: RequestId) -> String {
     format!("request/{id}")
 }
@@ -32,18 +33,23 @@ pub(super) fn attempt(id: &AdmissionOperationId) -> String {
     format!("attempt/{}", String::from(id.clone()))
 }
 
+/// The requester's most recent attempt, read when a page names none.
 pub(super) fn latest_attempt(requester_id: u64) -> String {
     format!("latest-attempt/{requester_id}")
 }
 
+/// The approved request's dispatch plan, prepared once and then reused.
 pub(super) fn dispatch(request_id: RequestId) -> String {
     format!("dispatch/{request_id}")
 }
 
+/// The first recorded submission of one planned GitHub invitation.
 pub(super) fn submitted(invitation_id: GithubInvitationId) -> String {
     format!("submitted/{invitation_id}")
 }
 
+/// The terminal signal the lifecycle consumed; its presence means the
+/// requester needs no separate notification.
 pub(super) fn consumed(request_id: RequestId) -> String {
     format!("consumed/{request_id}")
 }

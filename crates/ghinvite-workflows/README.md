@@ -61,7 +61,7 @@ A handler that owns a storage effect delegates it to a pure-async function
 (e.g. `create_logic`, `project_installation`). The
 `#[restate_sdk::object|service|workflow]` impl wraps that function inside
 `ctx.run(|| async {...}).name("step_name").await` so Restate captures it as a
-durable step. Pure functions take `&AppState` (`Arc<dyn Storage>` +
+durable step. Pure functions take `&AppState` (`Arc<dyn WorkflowStorage>` +
 `Arc<InstallationClient>`) and return a failure their caller can classify —
 usually `Result<T, HandlerError>`. Unit tests call them directly, without a
 Restate runtime.
@@ -77,11 +77,11 @@ object) and is covered by the integration tests rather than by unit tests.
 
 Audit events go through `audit::emit(state, account_id, event_type, actor,
 target, metadata, request_id)`, which constructs an `AuditEvent` and calls
-`Storage::audit`. Every state-change handler emits exactly one audit event.
+`AuditStorage::audit`. Every state-change handler emits exactly one audit event.
 
 Metadata updates prepare and journal their changed field names, audit ID, and
 timestamp before applying the write. They construct the event from that snapshot
-and call `Storage::audit` directly so retries reuse the same identity. Storage
+and call `AuditStorage::audit` directly so retries reuse the same identity. Storage
 deduplicates this event type by ID; unchanged metadata produces no event. Audit
 metadata includes field names only, never description or internal-note values.
 

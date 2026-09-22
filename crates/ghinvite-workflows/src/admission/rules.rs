@@ -7,8 +7,8 @@
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::{RequestId, RequestState};
-use restate_sdk::errors::TerminalError;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use super::{
     AdmissionReceipt, AdmissionResult, Admit, AuditIntent, DecideRequest, DecisionAction,
@@ -52,6 +52,15 @@ pub(super) struct AdmissionDecision {
     pub(super) projection: Option<ProjectionEnvelope>,
     pub(super) workflow: Option<WorkflowEnvelope>,
     pub(super) outcome: AdmissionOutcome,
+}
+
+/// A stored record the rules cannot evaluate. Neither is retryable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(super) enum RuleError {
+    #[error("use counter overflow")]
+    UseCounterOverflow,
+    #[error("pending deadline missing")]
+    PendingDeadlineMissing,
 }
 
 /// After-images of one lifecycle evaluation.
@@ -124,7 +133,7 @@ pub(super) fn decide_admission(
     eligibility: &Eligibility,
     now: DateTime<Utc>,
     request_id: RequestId,
-) -> Result<AdmissionDecision, TerminalError> {
+) -> Result<AdmissionDecision, RuleError> {
     let (availability, availability_unknown) = match eligibility {
         Eligibility::Available => (None, false),
         Eligibility::Unavailable { reason } => (Some(reason.clone()), false),
@@ -144,43 +153,12 @@ pub(super) fn decide_admission(
     } else if availability_unknown {
         (None, None)
     } else {
-        let state = if link.creation.approval_required {
-            RequestState::Pending
-        } else {
-            RequestState::Approved
-        };
-        let decision_deadline = link
-            .creation
-            .approval_required
-            .then_some(now + PENDING_LIFETIME);
-        link.uses = link
-            .uses
-            .checked_add(1)
-            .ok_or_else(|| TerminalError::new_with_code(500, "use counter overflow"))?;
-        link.revision += 1;
-        let request = RequestSnapshot {
-            request_id,
-            link_id: link.link_id,
-            account_id: link.creation.account_id,
-            requester_id: input.requester_id,
-            justification: input.justification.clone(),
-            state,
-            admitted_at: now,
-            decision_deadline,
-            revision: 1,
-            decision: (state == RequestState::Approved).then(|| TerminalDecision {
-                decision_id: format!("request.approved/{request_id}"),
-                decided_by: None,
-                effective_at: now,
-                evaluated_at: now,
-                decline_reason: None,
-            }),
-        };
+        let request = accept(&mut link, input, now, request_id)?;
         (
             Some(AdmissionResult::Accepted {
                 request_id,
-                state,
-                decision_deadline,
+                state: request.state,
+                decision_deadline: request.decision_deadline,
             }),
             Some(request),
         )
@@ -189,32 +167,7 @@ pub(super) fn decide_admission(
     let mut touched: Vec<_> = expired.iter().cloned().collect();
     if let Some(request) = &request {
         touched.push(request.clone());
-        events.push(audit(
-            EventType::RequestCreated,
-            request.request_id,
-            Some(input.requester_id),
-            now,
-        ));
-        if request.state == RequestState::Approved {
-            events.push(audit(
-                EventType::RequestApproved,
-                request.request_id,
-                None,
-                now,
-            ));
-        }
-        if link
-            .creation
-            .max_uses
-            .is_some_and(|max| link.uses == u64::from(max))
-        {
-            events.push(audit(
-                EventType::InvitationLinkExhausted,
-                link.link_id,
-                None,
-                now,
-            ));
-        }
+        events.extend(acceptance_events(&link, request, now));
     }
     let projection = if touched.is_empty() {
         None
@@ -247,6 +200,85 @@ pub(super) fn decide_admission(
     })
 }
 
+/// Consume one use of `link` and create the admitted request: pending until
+/// its snapshotted deadline, or approved at once when the link needs no
+/// approval.
+fn accept(
+    link: &mut LinkSnapshot,
+    input: &Admit,
+    now: DateTime<Utc>,
+    request_id: RequestId,
+) -> Result<RequestSnapshot, RuleError> {
+    let state = if link.creation.approval_required {
+        RequestState::Pending
+    } else {
+        RequestState::Approved
+    };
+    let decision_deadline = link
+        .creation
+        .approval_required
+        .then_some(now + PENDING_LIFETIME);
+    link.uses = link
+        .uses
+        .checked_add(1)
+        .ok_or(RuleError::UseCounterOverflow)?;
+    link.revision += 1;
+    Ok(RequestSnapshot {
+        request_id,
+        link_id: link.link_id,
+        account_id: link.creation.account_id,
+        requester_id: input.requester_id,
+        justification: input.justification.clone(),
+        state,
+        admitted_at: now,
+        decision_deadline,
+        revision: 1,
+        decision: (state == RequestState::Approved).then(|| TerminalDecision {
+            decision_id: format!("request.approved/{request_id}"),
+            decided_by: None,
+            effective_at: now,
+            evaluated_at: now,
+            decline_reason: None,
+        }),
+    })
+}
+
+/// Audit events for an accepted request: its creation, an automatic
+/// approval, and the link's exhaustion when this was its last use.
+fn acceptance_events(
+    link: &LinkSnapshot,
+    request: &RequestSnapshot,
+    now: DateTime<Utc>,
+) -> Vec<AuditIntent> {
+    let mut events = vec![audit(
+        EventType::RequestCreated,
+        request.request_id,
+        Some(request.requester_id),
+        now,
+    )];
+    if request.state == RequestState::Approved {
+        events.push(audit(
+            EventType::RequestApproved,
+            request.request_id,
+            None,
+            now,
+        ));
+    }
+    if link
+        .creation
+        .max_uses
+        .is_some_and(|max| link.uses == u64::from(max))
+    {
+        events.push(audit(
+            EventType::InvitationLinkExhausted,
+            link.link_id,
+            None,
+            now,
+        ));
+    }
+    events
+}
+
 /// Evaluate a request's lifecycle at `now`, with an optional account-admin
 /// command. `blocker` is the request ID the requester's blocker names.
 pub(super) fn decide_lifecycle(
@@ -255,7 +287,7 @@ pub(super) fn decide_lifecycle(
     blocker: Option<RequestId>,
     command: Option<&DecideRequest>,
     now: DateTime<Utc>,
-) -> Result<LifecycleDecision, TerminalError> {
+) -> Result<LifecycleDecision, RuleError> {
     let mut request = request.clone();
     let event = transition_request(&mut request, command, now)?;
     let projection = event.map(|event| {
@@ -279,13 +311,13 @@ pub(super) fn transition_request(
     request: &mut RequestSnapshot,
     command: Option<&DecideRequest>,
     now: DateTime<Utc>,
-) -> Result<Option<AuditIntent>, TerminalError> {
+) -> Result<Option<AuditIntent>, RuleError> {
     if request.state != RequestState::Pending {
         return Ok(None);
     }
     let deadline = request
         .decision_deadline
-        .ok_or_else(|| TerminalError::new_with_code(500, "pending deadline missing"))?;
+        .ok_or(RuleError::PendingDeadlineMissing)?;
     let (state, kind, actor, effective_at, reason) = if now >= deadline {
         (
             RequestState::Expired,
@@ -861,15 +893,15 @@ mod tests {
             blocking: None,
         };
         let input = admit(&link);
-        assert!(
+        assert_eq!(
             decide_admission(
                 &view,
                 &input,
                 &Eligibility::Available,
                 now(),
                 RequestId::new()
-            )
-            .is_err()
+            ),
+            Err(RuleError::UseCounterOverflow)
         );
     }
 
@@ -987,7 +1019,10 @@ mod tests {
         let link = link(true);
         let mut request = pending(&link, now());
         request.decision_deadline = None;
-        assert!(transition_request(&mut request, None, now()).is_err());
+        assert_eq!(
+            transition_request(&mut request, None, now()),
+            Err(RuleError::PendingDeadlineMissing)
+        );
     }
 
     #[test]

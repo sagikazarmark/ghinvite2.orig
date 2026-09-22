@@ -175,7 +175,8 @@ impl InvitationLink {
         let Json(decision) = ctx
             .run(|| async {
                 let decision =
-                    rules::decide_lifecycle(&link, &request, blocker, command, self.now())?;
+                    rules::decide_lifecycle(&link, &request, blocker, command, self.now())
+                        .map_err(TerminalError::from)?;
                 Ok::<_, HandlerError>(Json(decision))
             })
             .name("decide_lifecycle")
@@ -377,6 +378,12 @@ fn missing() -> TerminalError {
 }
 fn conflict() -> TerminalError {
     TerminalError::new_with_code(409, "operation conflict")
+}
+
+impl From<rules::RuleError> for TerminalError {
+    fn from(error: rules::RuleError) -> Self {
+        TerminalError::new_with_code(500, error.to_string())
+    }
 }
 
 async fn validate_key(ctx: &ObjectContext<'_>, id: InvitationLinkId) -> Result<(), TerminalError> {
@@ -911,7 +918,8 @@ impl InvitationLink {
                     &eligibility,
                     self.now(),
                     RequestId::new(),
-                )?;
+                )
+                .map_err(TerminalError::from)?;
                 Ok::<_, HandlerError>(Json(decision))
             })
             .name("decide_admission")
