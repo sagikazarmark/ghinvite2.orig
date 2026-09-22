@@ -605,11 +605,8 @@ impl InvitationLink {
             if request.requester_id != query.requester_id {
                 return Err(missing());
             }
-            let mut request = self.transition(&ctx, request, None).await?;
-            if let Some(decision) = &mut request.decision {
-                decision.decline_reason = None;
-            }
-            Some(request)
+            let request = self.transition(&ctx, request, None).await?;
+            Some(rules::requester_view(request))
         } else {
             None
         };
@@ -805,30 +802,13 @@ impl InvitationLink {
             .ok_or_else(missing)?;
         let Json(dispatch) = ctx
             .run(|| async {
-                let decision = request.decision.as_ref().ok_or_else(conflict)?;
-                let commands = link
-                    .creation
-                    .repos
-                    .iter()
-                    .map(|repo| ghinvite_core::delivery::CreateCommand {
-                        invitation_id: ghinvite_core::GithubInvitationId::new(),
-                        link_id: input.link_id,
-                        request_id: input.request_id,
-                        approval_id: decision.decision_id.clone(),
-                        account_id: link.creation.account_id,
-                        installation_id: link.creation.installation_id,
-                        requester_id: request.requester_id,
-                        repo_id: repo.repo_id,
-                        repo_full_name: repo.repo_full_name.clone(),
-                        permission: link.creation.permission,
-                        approved_at: decision.effective_at,
-                    })
-                    .collect();
-                Ok::<_, HandlerError>(Json(crate::request_lifecycle::ApprovedDispatch {
-                    dispatch_id: key.clone(),
-                    input: WorkflowEnvelope::from_authority(&link, request.clone()),
-                    commands,
-                }))
+                // Identities are minted inside the journaled step, so a replay
+                // retains the same plan.
+                let plan = rules::dispatch_plan(key.clone(), &link, &request, || {
+                    ghinvite_core::GithubInvitationId::new()
+                })
+                .ok_or_else(conflict)?;
+                Ok::<_, HandlerError>(Json(plan))
             })
             .name("retain_dispatch_plan")
             .await?;
@@ -957,11 +937,8 @@ impl InvitationLink {
         if input.requester_id == 0 || request.requester_id != input.requester_id {
             return Err(missing());
         }
-        let mut request = self.transition(&ctx, request, None).await?;
-        if let Some(decision) = &mut request.decision {
-            decision.decline_reason = None;
-        }
-        Ok(Json(request))
+        let request = self.transition(&ctx, request, None).await?;
+        Ok(Json(rules::requester_view(request)))
     }
 
     #[handler]
@@ -1009,25 +986,9 @@ impl InvitationLink {
             .ok_or_else(missing)?;
         let was_pending = request.state == RequestState::Pending;
         let request = self.transition(&ctx, request, Some(&input)).await?;
-        let matching = match &input.action {
-            DecisionAction::Approve => request.state == RequestState::Approved,
-            DecisionAction::Decline { reason } => {
-                request.state == RequestState::Declined
-                    && request
-                        .decision
-                        .as_ref()
-                        .is_some_and(|d| &d.decline_reason == reason)
-            }
-        };
         let receipt = DecisionReceipt {
+            outcome: rules::decision_outcome(was_pending, &input.action, &request),
             request,
-            outcome: if !matching {
-                DecisionOutcome::Incompatible
-            } else if was_pending {
-                DecisionOutcome::Applied
-            } else {
-                DecisionOutcome::AlreadyCompleted
-            },
         };
         ctx.set(
             &key,
