@@ -212,8 +212,8 @@ impl InvitationLink {
         decision: AdmissionDecision,
     ) -> Result<AdmissionReceipt, TerminalError> {
         let blocker_key = keys::blocker(input.requester_id);
-        if decision.projection.is_some() {
-            ctx.set(keys::LINK, Json(decision.link.clone()));
+        if let Some(link) = &decision.link {
+            ctx.set(keys::LINK, Json(link.clone()));
             self.checkpoint(ctx, "after-link").await?;
         }
         if let Some(expired) = &decision.expired {
