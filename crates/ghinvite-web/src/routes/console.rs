@@ -658,22 +658,6 @@ async fn save_link_details(
         Ok(id) => id,
         Err(not_found) => return not_found,
     };
-    if let Err(error) = authoritative_link(&state, &admin, id).await {
-        return match error {
-            AuthorityError::Missing => console_not_found_response(&admin),
-            _ => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                edit_link_response(
-                    &admin,
-                    id,
-                    values,
-                    Default::default(),
-                    Some("Failed to load invitation link details. Please try again.".into()),
-                ),
-            )
-                .into_response(),
-        };
-    }
     let (description, internal_note) = match link_edit::validate(&values) {
         Ok(metadata) => metadata,
         Err(errors) => return edit_link_response(&admin, id, values, errors, None),
@@ -713,6 +697,9 @@ async fn save_link_details(
             (axum::http::StatusCode::BAD_GATEWAY,
             edit_link_response(&admin, id, values, Default::default(), Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
         }
+        // The authority answers an unknown link and another account's link
+        // alike, so neither says which it was.
+        Err(AuthorityError::Missing) => console_not_found_response(&admin),
         Err(error) => crate::WebError::from(error).into_response_with_recovery(
             format!(
                 "/console/accounts/{}/links/{id}",

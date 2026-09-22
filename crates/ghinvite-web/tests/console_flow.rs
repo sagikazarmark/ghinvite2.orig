@@ -1049,8 +1049,11 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     assert!(html.contains("href=\"/console/accounts/acme/links/new\""));
 }
 
+/// Saving details is one authority command. `update_metadata` answers an
+/// unknown or foreign link itself, so no read goes first, and a missing link
+/// still lands on the Console's own not-found page.
 #[tokio::test]
-async fn edit_link_lookup_failure_preserves_submitted_input() {
+async fn saving_link_details_is_one_authority_call() {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -1060,22 +1063,32 @@ async fn edit_link_lookup_failure_preserves_submitted_input() {
     let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
     authority.seed_link(&link);
-    authority.fail("link_status", 503);
-    let response = post_edit(
+
+    let saved = post_edit(
         &app,
         &cookie,
         &link.id.to_string(),
-        "description=%20Keep+my+description%20&internal_note=Keep%0Amy+note",
+        "description=Updated&internal_note=",
     )
     .await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("value=\" Keep my description \""));
-    assert!(html.contains(">Keep\nmy note</textarea>"));
-    assert!(html.contains("Failed to load invitation link details. Please try again."));
-    assert_links_navigation_current(&html);
-    assert!(authority.metadata_updates().is_empty());
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    assert_eq!(authority.calls(), ["update_metadata"]);
+
+    let missing = ghinvite_core::InvitationLinkId::new().to_string();
+    let response = post_edit(
+        &app,
+        &cookie,
+        &missing,
+        "description=Updated&internal_note=",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let html = response_html(response).await;
+    assert!(
+        html.contains("This console page is not available."),
+        "{html}"
+    );
+    assert_eq!(authority.calls(), ["update_metadata", "update_metadata"]);
 }
 
 #[tokio::test]
