@@ -6,6 +6,7 @@ use axum::{
 };
 use chrono::Utc;
 use common::link_authority::{self, CODE_SERVICE, LINK_SERVICE};
+use common::sign_in::{OCTOCAT, oauth_expectations, sign_in};
 use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
@@ -104,18 +105,7 @@ impl Browser {
             })
             .await
             .unwrap();
-        let mut expectations = vec![
-            Expectation::ok_json(
-                Method::Post,
-                "https://github.com/login/oauth/access_token",
-                serde_json::json!({"access_token":"user-token", "token_type":"bearer", "scope":"read:user"}),
-            ),
-            Expectation::ok_json(
-                Method::Get,
-                "https://api.github.com/user",
-                serde_json::json!({"id":42, "login":"octocat"}),
-            ),
-        ];
+        let mut expectations = oauth_expectations(OCTOCAT.with_access_token("user-token"));
         for _ in 0..8 {
             expectations.push(Expectation::ok_json(Method::Get,
                 "https://api.github.com/user/installations/77/repositories?per_page=100",
@@ -131,28 +121,14 @@ impl Browser {
             ),
             tower_sessions::MemoryStore::default(),
         );
-        let mut browser = Self {
+        let cookie = sign_in(&app).await;
+        Self {
             app,
-            cookie: String::new(),
+            cookie,
             link,
             request_id,
             ingress,
-        };
-        let login = browser.get("/login").await;
-        browser.cookie = cookie(&login);
-        let location = url::Url::parse(login.headers()["location"].to_str().unwrap()).unwrap();
-        let state = location
-            .query_pairs()
-            .find(|(key, _)| key == "state")
-            .unwrap()
-            .1
-            .into_owned();
-        let response = browser
-            .get(&format!("/oauth/callback?code=test&state={state}"))
-            .await;
-        assert_eq!(response.status(), StatusCode::SEE_OTHER);
-        browser.cookie = cookie(&response);
-        browser
+        }
     }
 
     async fn get(&self, path: &str) -> Response {
@@ -184,16 +160,6 @@ impl Browser {
             .await
             .unwrap()
     }
-}
-
-fn cookie(response: &Response) -> String {
-    response.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_owned()
 }
 
 async fn html(response: Response) -> String {

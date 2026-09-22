@@ -1,15 +1,15 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
+use ghinvite_github::transport::Method;
 use ghinvite_web::{AppState, WebConfig, build_app};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
 
 mod common;
 
 use common::restate_recorder::RestateRecorder;
+use common::sign_in::{OCTOCAT, oauth_expectations, sign_in};
 
 async fn build_app_with(mock: MockTransport) -> (axum::Router, RestateRecorder) {
     let storage = Arc::new(
@@ -27,77 +27,6 @@ async fn build_app_with(mock: MockTransport) -> (axum::Router, RestateRecorder) 
     );
     let session_store = tower_sessions::MemoryStore::default();
     (build_app(state, session_store), restate)
-}
-
-fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
-
-fn state_from_location(location: &str) -> &str {
-    location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-}
-
-async fn sign_in(app: axum::Router) -> (axum::Router, String) {
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-    (app, cookie2)
-}
-
-fn oauth_expectations(login: &str, user_id: u64) -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user read:org"}"#.to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": user_id, "login": login}),
-        ),
-    ]
 }
 
 #[tokio::test]
@@ -122,7 +51,7 @@ async fn setup_unauthenticated_redirects_to_login_with_return_to() {
 
 #[tokio::test]
 async fn setup_rejects_spoofed_installation_id() {
-    let mut expectations = oauth_expectations("octocat", 42);
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",
@@ -138,7 +67,7 @@ async fn setup_rejects_spoofed_installation_id() {
         }),
     ));
     let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
-    let (app, cookie) = sign_in(app).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -155,7 +84,7 @@ async fn setup_rejects_spoofed_installation_id() {
 
 #[tokio::test]
 async fn setup_verified_org_install_calls_onboard_and_redirects() {
-    let mut expectations = oauth_expectations("octocat", 42);
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",
@@ -182,7 +111,7 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
         }),
     ));
     let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
-    let (app, cookie) = sign_in(app).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -216,7 +145,7 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
 
 #[tokio::test]
 async fn setup_verified_user_install_calls_onboard_and_redirects() {
-    let mut expectations = oauth_expectations("octocat", 42);
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",
@@ -232,7 +161,7 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
         }),
     ));
     let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
-    let (app, cookie) = sign_in(app).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -266,7 +195,7 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
 
 #[tokio::test]
 async fn setup_update_calls_repos_changed_and_redirects() {
-    let mut expectations = oauth_expectations("octocat", 42);
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",
@@ -292,7 +221,7 @@ async fn setup_update_calls_repos_changed_and_redirects() {
         }),
     ));
     let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
-    let (app, cookie) = sign_in(app).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()

@@ -18,7 +18,9 @@ async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
+    (app, cookie)
 }
 
 async fn post(
@@ -119,7 +121,8 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, protected_store().await)).await;
+    let app = build_app(state, protected_store().await);
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
     post(
@@ -318,7 +321,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         .insert_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     let mut repositories = installation_repos_expectation();
     let mut body: serde_json::Value = serde_json::from_slice(&repositories.response.body).unwrap();
     body["repositories"].as_array_mut().unwrap().reverse();
@@ -330,7 +333,8 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let action = format!(
         "/console/accounts/octocat/links?link_id={id}&anchor={}",
@@ -642,7 +646,8 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, protected_store().await)).await;
+    let app = build_app(state, protected_store().await);
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
     assert_eq!(
@@ -660,7 +665,7 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
         identity_request(&app, "", "GET", &url).await.status(),
         StatusCode::SEE_OTHER
     );
-    let (_, other_cookie) = sign_in(app.clone()).await;
+    let other_cookie = sign_in(&app).await;
     assert_eq!(
         identity_request(&app, &other_cookie, "GET", &url)
             .await
@@ -790,7 +795,7 @@ impl ghinvite_github::HttpTransport for BrowserGithub {
         if request.url.contains("/repositories?") {
             return Ok(installation_repos_expectation().response);
         }
-        Ok(oauth_sign_in_expectations()
+        Ok(oauth_expectations(OCTOCAT)
             .into_iter()
             .find(|e| e.url == request.url)
             .expect("known GitHub fixture request")
@@ -862,7 +867,7 @@ async fn mutation_recovery_browser_server() {
             axum::routing::get(move || {
                 let app = login_app.clone();
                 async move {
-                    let (_, cookie) = sign_in(app).await;
+                    let cookie = sign_in(&app).await;
                     (
                         [(
                             axum::http::header::SET_COOKIE,

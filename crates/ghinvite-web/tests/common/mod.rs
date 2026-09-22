@@ -1,5 +1,6 @@
 pub mod link_authority;
 pub mod restate_recorder;
+pub mod sign_in;
 
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;

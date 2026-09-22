@@ -14,6 +14,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use common::link_authority::FakeLinkAuthority;
+use common::sign_in::sign_in;
 use ghinvite_core::admission::RequesterPage;
 use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
@@ -386,63 +387,6 @@ fn pending_page(link: &InvitationLink, request: RequestId) -> RequesterPage {
             decision: None,
         }),
     }
-}
-
-/// Sign in through the real OAuth routes; session internals stay private.
-async fn sign_in(app: &axum::Router) -> String {
-    let start = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(start.status(), StatusCode::SEE_OTHER);
-    let cookie = session_cookie(&start, None);
-    let location = start.headers().get("location").unwrap().to_str().unwrap();
-    let oauth_state = location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap();
-
-    let callback = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/oauth/callback?code=test-code&state={oauth_state}"
-                ))
-                .header("cookie", &cookie)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
-    session_cookie(&callback, Some(cookie))
-}
-
-fn session_cookie(response: &axum::response::Response, fallback: Option<String>) -> String {
-    response
-        .headers()
-        .get("set-cookie")
-        .map(|value| {
-            value
-                .to_str()
-                .unwrap()
-                .split(';')
-                .next()
-                .unwrap()
-                .to_string()
-        })
-        .or(fallback)
-        .expect("session cookie available")
 }
 
 async fn body_text(response: axum::response::Response) -> String {

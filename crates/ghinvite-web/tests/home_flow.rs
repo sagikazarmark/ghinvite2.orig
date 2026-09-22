@@ -1,122 +1,21 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
-use ghinvite_core::storage::InstallationStorage;
-use ghinvite_core::{Account, AccountType, SelectedRepos};
-use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
-use std::collections::BTreeMap;
-use std::sync::Arc;
 use tower::ServiceExt;
 
-fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
+mod common;
 
-fn state_from_location(location: &str) -> &str {
-    location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-}
-
-fn oauth_expectations() -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user read:org"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user/memberships/orgs/acme",
-            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
-        ),
-    ]
-}
+use common::sign_in::{
+    ACME_ADMIN, acme_installation, oauth_expectations, signed_in_app, unreachable_restate,
+};
 
 async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage
-        .insert_installation(&Account {
-            installation_id: 77,
-            account_id: 9001,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            installed_at: Utc::now(),
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        })
-        .await
-        .unwrap();
-
-    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(oauth_expectations()));
-    let state = AppState::new(
-        storage,
-        transport,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-
-    (app, cookie2)
+    signed_in_app(
+        &[acme_installation()],
+        oauth_expectations(ACME_ADMIN),
+        unreachable_restate(),
+    )
+    .await
 }
 
 #[tokio::test]

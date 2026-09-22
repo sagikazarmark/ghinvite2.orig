@@ -7,8 +7,7 @@ use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
 };
-use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
+use ghinvite_github::mocks::MockTransport;
 use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
@@ -19,6 +18,7 @@ mod common;
 mod requester_delivery;
 
 use common::link_authority::{CODE_SERVICE, LINK_SERVICE};
+use common::sign_in::{GithubUser, oauth_expectations, sign_in};
 
 #[tokio::test]
 async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
@@ -52,14 +52,13 @@ async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
                 .unwrap(),
         ),
         Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
+            GithubUser::new("octocat", REQUESTER_ID),
         ))),
         restate,
         config,
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     for (uri, status) in [
         ("/".into(), StatusCode::OK),
         (format!("/i/{ACTIVE_SLUG}"), StatusCode::BAD_GATEWAY),
@@ -194,9 +193,12 @@ async fn lost_response_app_with_control(
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(
-            oauth_expectations("octocat", REQUESTER_ID)
+            oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))
                 .into_iter()
-                .chain(oauth_expectations("othercat", REQUESTER_ID + 1))
+                .chain(oauth_expectations(GithubUser::new(
+                    "othercat",
+                    REQUESTER_ID + 1,
+                )))
                 .collect(),
         )),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
@@ -211,7 +213,7 @@ async fn lost_response_app_with_control(
 #[tokio::test]
 async fn authoritative_form_confirms_identity_and_wrong_account_return_destination() {
     let (app, _ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let response = app
         .clone()
         .oneshot(
@@ -281,7 +283,7 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
 async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
     use wiremock::{Mock, ResponseTemplate, matchers::path_regex};
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
     Mock::given(path_regex("/prepare_attempt$"))
@@ -345,7 +347,7 @@ async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
 #[tokio::test]
 async fn pending_authoritative_status_refreshes_until_terminal_without_projection() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     for status in ["pending", "approved", "declined", "expired", "cancelled"] {
         wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -381,7 +383,7 @@ async fn pending_authoritative_status_refreshes_until_terminal_without_projectio
 #[tokio::test]
 async fn oversized_justification_is_editable_without_replacing_the_operation() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
     let text = "é".repeat(8193);
@@ -438,7 +440,7 @@ async fn oversized_justification_is_editable_without_replacing_the_operation() {
 #[tokio::test]
 async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppressed() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     for (attempt, can_start, expected) in [
         (false, false, StatusCode::NOT_FOUND),
         (false, true, StatusCode::OK),
@@ -484,7 +486,7 @@ async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppres
 #[tokio::test]
 async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_is_explicit() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
     let response = app
@@ -591,7 +593,7 @@ async fn admission_browser_server() {
                 async move {
                     *control.lock().unwrap() = (false, "pending".into());
                     let (app, ingress) = lost_response_app_with_control(control).await;
-                    let cookie = sign_in(app.clone()).await;
+                    let cookie = sign_in(&app).await;
                     *current.lock().unwrap() = Some((app, ingress));
                     (
                         [(
@@ -666,8 +668,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
+            GithubUser::new("octocat", REQUESTER_ID),
         ))),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
@@ -680,7 +681,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
         state,
         ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
     );
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let response = app
         .clone()
         .oneshot(
@@ -815,7 +816,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
 #[tokio::test]
 async fn request_submission_requires_the_rendered_session_token() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let token = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new();
     for body in [
@@ -895,7 +896,7 @@ async fn request_submission_requires_the_rendered_session_token() {
 #[tokio::test]
 async fn submission_rejected_for_an_existing_request_is_final() {
     let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let token = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new();
     wiremock::Mock::given(wiremock::matchers::path_regex("/prepare_attempt$"))
@@ -1062,7 +1063,7 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
         .with_priority(1)
         .mount(&ingress)
         .await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -1088,76 +1089,6 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
         .collect();
     assert_eq!(queries.len(), 1);
     assert_eq!(queries[0]["requester_id"], REQUESTER_ID);
-}
-
-fn oauth_expectations(login: &str, user_id: u64) -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": user_id, "login": login}),
-        ),
-    ]
-}
-
-fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
-
-fn state_from_location(location: &str) -> &str {
-    location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-}
-
-async fn sign_in(app: axum::Router) -> String {
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    session_cookie(&resp2, Some(cookie1))
 }
 
 #[tokio::test]
@@ -1276,7 +1207,7 @@ async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
 async fn unsupported_nested_invitation_routes_authenticate_before_404() {
     let app = build_test_app(
         active_link(ACTIVE_SLUG),
-        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+        MockTransport::scripted(oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))),
     )
     .await;
 
@@ -1320,7 +1251,7 @@ async fn unsupported_nested_invitation_routes_authenticate_before_404() {
         )
     );
 
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -1344,7 +1275,7 @@ async fn unsupported_nested_invitation_routes_authenticate_before_404() {
 #[tokio::test]
 async fn requester_form_carries_csp_and_only_external_script() {
     let (app, _ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
 
     let resp = app
         .oneshot(

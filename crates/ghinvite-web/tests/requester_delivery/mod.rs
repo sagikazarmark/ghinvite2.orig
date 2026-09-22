@@ -137,8 +137,7 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
+            GithubUser::new("octocat", REQUESTER_ID),
         ))),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
@@ -160,7 +159,7 @@ async fn failed_observations_preserve_known_outcomes_and_mark_updates_unavailabl
             .await
             .unwrap();
     let observed = fixture_with_storage(storage).await;
-    let cookie = sign_in(observed.app.clone()).await;
+    let cookie = sign_in(&observed.app).await;
     // A database read failure is distinct from an empty/missing projection.
     sqlx::query("DROP TABLE github_invitations")
         .execute(&pool)
@@ -180,7 +179,7 @@ async fn failed_observations_preserve_known_outcomes_and_mark_updates_unavailabl
         .with_priority(1)
         .mount(&fixture.ingress)
         .await;
-    let cookie = sign_in(fixture.app.clone()).await;
+    let cookie = sign_in(&fixture.app).await;
     let html = status_html(&fixture, &cookie).await;
     assert!(html.contains("GitHub invitation created"));
     assert!(html.contains("Latest status updates are unavailable"));
@@ -201,7 +200,7 @@ async fn receipt_free_already_collaborator_is_not_reported_as_invitation_accepta
         .insert_github_invitation(&invitation)
         .await
         .unwrap();
-    let cookie = sign_in(fixture.app.clone()).await;
+    let cookie = sign_in(&fixture.app).await;
     let html = status_html(&fixture, &cookie).await;
     assert!(!html.contains("Your GitHub invitation was accepted"));
     assert_eq!(html.matches("Already a collaborator").count(), 2);
@@ -242,7 +241,7 @@ async fn status_html(fixture: &DeliveryFixture, cookie: &str) -> String {
 #[tokio::test]
 async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes() {
     let fixture = fixture().await;
-    let cookie = sign_in(fixture.app.clone()).await;
+    let cookie = sign_in(&fixture.app).await;
     assert!(
         status_html(&fixture, &cookie)
             .await
@@ -277,7 +276,7 @@ async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes
 async fn mixed_delivery_gives_outcome_specific_next_steps_without_claiming_missing_delivery_failed()
 {
     let fixture = fixture().await;
-    let cookie = sign_in(fixture.app.clone()).await;
+    let cookie = sign_in(&fixture.app).await;
     let html = status_html(&fixture, &cookie).await;
     for copy in [
         "GitHub invitation created — awaiting acceptance",
@@ -320,7 +319,7 @@ async fn delivery_browser_server() {
                 let current = login_current.clone();
                 async move {
                     let fixture = fixture().await;
-                    let cookie = sign_in(fixture.app.clone()).await;
+                    let cookie = sign_in(&fixture.app).await;
                     *current.lock().await = Some(fixture);
                     (
                         [(
