@@ -16,9 +16,11 @@ back only that link's later ones.
 Built on the upstream `restate-sdk = "0.12"` Rust SDK (patched; see the
 workspace `Cargo.toml`).
 
-The library contains handler logic shared by the native binary and the
-`ghinvite-workflows-worker` entry point. Native tests use `SqlxStorage`; the
-Worker uses `D1Storage`.
+The library contains handler logic shared by the two entry points —
+`ghinvite-workflows-server` (native: tokio + `SqlxStorage` + restate-sdk's
+hyper server) and `ghinvite-workflows-worker` (Workers: `D1Storage`). Neither
+runtime is named here, so this crate has no `cfg(target_arch)` wiring; tests
+use `SqlxStorage` as a dev-dependency.
 
 ## Local dev (current)
 

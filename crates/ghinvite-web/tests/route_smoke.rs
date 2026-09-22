@@ -659,7 +659,10 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
         config,
     );
     let session_store = tower_sessions::MemoryStore::default();
-    build_app(state, session_store)
+    // Mount `/assets` exactly as the native binary does, so this still covers
+    // the real wiring now that `ServeDir` lives in `ghinvite-web-server`.
+    let assets = ghinvite_web_server::island_assets(&state.config);
+    ghinvite_web::build_app_with(state, session_store, assets)
 }
 
 /// A throwaway assets directory shaped like `dist/public/assets` after the

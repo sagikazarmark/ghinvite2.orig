@@ -1,4 +1,20 @@
-use super::*;
+//! SQLite `Backend` for the protected session store — the native counterpart
+//! to `ghinvite-web-worker`'s KV backend. Both implement
+//! `ghinvite_web::session_store::Backend`, which owns the envelope format; a
+//! backend only ever sees opaque ciphertext.
+
+use ghinvite_web::session_store::Backend;
+use tower_sessions::cookie::time::{Duration, OffsetDateTime};
+use tower_sessions::session::Id;
+use tower_sessions::session_store::{Error, Result};
+
+fn now() -> OffsetDateTime {
+    OffsetDateTime::now_utc()
+}
+
+fn backend_error(message: &str) -> Error {
+    Error::Backend(message.into())
+}
 
 /// Native development/test storage. All payloads crossing this boundary are opaque.
 #[derive(Clone, Debug)]

@@ -5,12 +5,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "ghinvite-web"
-path = "src/main.rs"
+# Router, handlers and views only — no runtime, no storage backend. The two
+# deployment shapes that supply those are `ghinvite-web-server` (native) and
+# `ghinvite-web-worker` (Cloudflare Workers).
+#
+# `axum` appears once here, without the `tokio` feature: the native binary
+# enables it in its own manifest, so this crate no longer has to list axum
+# twice to work around Cargo unioning feature sets.
 
 [dependencies]
 async-trait.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 base64.workspace = true
 chrono.workspace = true
 chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
@@ -39,37 +44,28 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 
-# axum's `tokio` feature pulls in the full mio-backed tokio runtime, which does
-# not compile on wasm32. The native binary needs it for `axum::serve`; the
-# Workers build (`ghinvite-web-worker`) drives the router via
-# `worker::axum::run` and does not need it. Cargo unions feature sets and can't
-# subtract, so we list axum twice — workspace dep is target-specific instead of
-# unconditional. The native binary also wires up SqlxStorage; the Workers build
-# wires up D1Storage instead.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
-ghinvite-storage-sqlx.workspace = true
-sqlx.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
-# `ServeDir` for the island bundle under `/assets/*` in local dev. The `fs`
-# feature pulls tokio's filesystem support, which the Workers build must not
-# see; on Workers, Static Assets serve `/assets/*` instead.
-tower-http = { workspace = true, features = ["fs"] }
-
-# Wasm32 / Workers build: same axum, minus the `tokio` feature.
+# Platform shims, not deployment wiring: these patch over what
+# wasm32-unknown-unknown lacks for code that runs identically on both targets,
+# so they stay with the library rather than moving to `ghinvite-web-worker`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Covers both our deadlines and Tower's clock calls; std::SystemTime panics
 # on wasm32-unknown-unknown without time's JS-backed implementation.
 time = { version = "0.3", features = ["wasm-bindgen"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 send_wrapper = { version = "0.6", features = ["futures"] }
 
+# The native deployment's pieces are dev-dependencies now: the tests exercise
+# this crate the way `ghinvite-web-server` deploys it. A dev-dependency cycle
+# back onto a dependent crate is legal and does not affect the library build.
 [dev-dependencies]
+axum = { workspace = true, features = ["tokio"] }
 ghinvite-github = { workspace = true, features = ["test-mock"] }
 ghinvite-core = { workspace = true, features = ["test-suite"] }
 ghinvite-storage-sqlx = { workspace = true, features = ["test-util"] }
+ghinvite-web-server.workspace = true
 http-body-util = "0.1"
 sqlx.workspace = true
+tokio.workspace = true
+tower-http = { workspace = true, features = ["fs"] }
 tower-sessions = { workspace = true, features = ["axum-core", "memory-store"] }
 hmac.workspace = true
 sha2.workspace = true

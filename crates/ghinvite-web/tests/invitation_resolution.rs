@@ -671,7 +671,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let backend = ghinvite_web::session_store::SqliteBackend::new(
+    let backend = ghinvite_web_server::SqliteBackend::new(
         sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
     );
     backend.migrate().await.unwrap();

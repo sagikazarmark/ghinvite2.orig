@@ -1,0 +1,29 @@
+[package]
+name = "ghinvite-workflows-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Native deployment shape for the Restate handler services: wires SqlxStorage
+# and the reqwest GitHub transport into `ghinvite_workflows::build_endpoint`
+# and serves it over restate-sdk's hyper server. The Cloudflare Workers shape
+# is `ghinvite-workflows-worker`, which wires D1Storage into the same call.
+#
+# The runtime choice lives here rather than behind a `cfg(target_arch)` in
+# `ghinvite-workflows` so the handler crate stays free of tokio, sqlx, and the
+# `http_server` feature.
+
+[[bin]]
+name = "ghinvite-workflows"
+path = "src/main.rs"
+
+[dependencies]
+ghinvite-core.workspace = true
+ghinvite-github.workspace = true
+ghinvite-storage-sqlx.workspace = true
+ghinvite-workflows.workspace = true
+restate-sdk = { workspace = true, features = ["http_server"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

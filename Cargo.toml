@@ -6,10 +6,12 @@ members = [
     "crates/ghinvite-storage-d1",
     "crates/ghinvite-github",
     "crates/ghinvite-workflows",
+    "crates/ghinvite-workflows-server",
     "crates/ghinvite-workflows-worker",
     "crates/ghinvite-ui",
     "crates/ghinvite-island",
     "crates/ghinvite-web",
+    "crates/ghinvite-web-server",
     "crates/ghinvite-web-worker",
 ]
 
@@ -67,6 +69,7 @@ ghinvite-github = { path = "crates/ghinvite-github" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }
 ghinvite-ui = { path = "crates/ghinvite-ui" }
 ghinvite-web = { path = "crates/ghinvite-web" }
+ghinvite-web-server = { path = "crates/ghinvite-web-server" }
 
 # Browser island bundle (`scripts/build-island.sh` → `dx bundle --profile
 # island`). A dedicated profile, not `[profile.release]`, so the Workers build

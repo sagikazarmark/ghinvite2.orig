@@ -2093,6 +2093,7 @@ dependencies = [
  "ghinvite-github",
  "ghinvite-storage-sqlx",
  "ghinvite-ui",
+ "ghinvite-web-server",
  "hex",
  "hmac 0.12.1",
  "http-body-util",
@@ -2116,6 +2117,24 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "ghinvite-web-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "ghinvite-core",
+ "ghinvite-github",
+ "ghinvite-storage-sqlx",
+ "ghinvite-web",
+ "sqlx",
+ "tokio",
+ "tower-http",
+ "tower-sessions",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2159,6 +2178,20 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ghinvite-workflows-server"
+version = "0.1.0"
+dependencies = [
+ "ghinvite-core",
+ "ghinvite-github",
+ "ghinvite-storage-sqlx",
+ "ghinvite-workflows",
+ "restate-sdk",
  "tokio",
  "tracing",
  "tracing-subscriber",

@@ -1,0 +1,33 @@
+[package]
+name = "ghinvite-web-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Native deployment shape for `ghinvite-web`. This is the only crate on the
+# native path that names a runtime: `axum` with the `tokio` feature for
+# `axum::serve`, `sqlx` for storage and sessions, and `tower-http/fs` for the
+# island bundle. The Workers shape is `ghinvite-web-worker`.
+#
+# Because each shape enables its own features, `ghinvite-web` can depend on
+# axum *without* `tokio` — the subtraction Cargo's feature unification cannot
+# express is done by the crate boundary instead.
+
+[[bin]]
+name = "ghinvite-web"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+axum = { workspace = true, features = ["tokio"] }
+ghinvite-core.workspace = true
+ghinvite-github.workspace = true
+ghinvite-storage-sqlx.workspace = true
+ghinvite-web.workspace = true
+sqlx.workspace = true
+tokio.workspace = true
+tower-http = { workspace = true, features = ["fs"] }
+tower-sessions.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -147,7 +147,7 @@ GHINVITE_GITHUB_APP_ID=<your-app-id> \
 GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE=path/to/private-key.pem \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
 GHINVITE_LISTEN_ADDR=0.0.0.0:9080 \
-cargo run -p ghinvite-workflows
+cargo run -p ghinvite-workflows-server
 ```
 
 On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. GitHub App keys work as downloaded, whether they start with `BEGIN RSA PRIVATE KEY` or `BEGIN PRIVATE KEY`. Without either, the binary starts but GitHub API calls will fail at runtime.
@@ -181,7 +181,7 @@ GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
 GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
 GHINVITE_RESTATE_AUTH=local-unauthenticated \
-cargo run -p ghinvite-web
+cargo run -p ghinvite-web-server
 ```
 
 App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
@@ -237,11 +237,13 @@ crates/
   ghinvite-storage-d1/   — D1Storage: Storage impl for wasm32/production
   ghinvite-github/       — GitHub API clients (OAuth + installation tokens);
                            examples/stub.rs is the API stub for integration tests
-  ghinvite-workflows/    — Restate handler logic (native, tested without Workers)
+  ghinvite-workflows/    — Restate handler logic (runtime-agnostic, tested without Workers)
+  ghinvite-workflows-server/ — native entry point wiring workflows + SqlxStorage
   ghinvite-workflows-worker/ — wasm32 entry point wiring workflows + D1
   ghinvite-ui/           — Dioxus view components + shared form model (Dioxus + core only; browser-buildable)
   ghinvite-island/       — browser island (dioxus-web + dioform) for the new-link form; built by scripts/build-island.sh
-  ghinvite-web/          — axum app + Dioxus SSR of ghinvite-ui (native, tested without Workers)
+  ghinvite-web/          — axum app + Dioxus SSR of ghinvite-ui (runtime-agnostic, tested without Workers)
+  ghinvite-web-server/   — native entry point wiring web + SqlxStorage + SQLite sessions
   ghinvite-web-worker/   — wasm32 entry point wiring web + D1
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 scripts/           — build-island.sh: dx bundle → dist/public (Static Assets)

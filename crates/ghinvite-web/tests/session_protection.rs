@@ -1,6 +1,7 @@
 //! Contract tests at the session-store and raw persistence boundaries (#42).
 
-use ghinvite_web::session_store::{Backend, ProtectedStore, SqliteBackend};
+use ghinvite_web::session_store::{Backend, ProtectedStore};
+use ghinvite_web_server::SqliteBackend;
 use tower_sessions::cookie::time::{Duration, OffsetDateTime};
 use tower_sessions::{
     SessionStore,
