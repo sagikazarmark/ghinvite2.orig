@@ -30,6 +30,29 @@ pub struct CreateLink {
     pub repos: Vec<InvitationLinkRepo>,
 }
 
+/// Link values the authority refuses: a command carrying them is invalid,
+/// and a projection envelope carrying them never came from the authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid invitation link values")]
+pub struct InvalidLinkValues;
+
+impl CreateLink {
+    /// The authority's rule for a new link's values: a positive max use,
+    /// parsed metadata and a parsed repository scope, in the normalised form
+    /// the creation identity binds. Admin authority is checked separately.
+    pub fn normalized(mut self) -> Result<Self, InvalidLinkValues> {
+        if self.installation_id == 0 || self.max_uses == Some(0) {
+            return Err(InvalidLinkValues);
+        }
+        let metadata = LinkMetadata::parse(&self.description, self.internal_note.as_deref())?;
+        (self.description, self.internal_note) = (metadata.description, metadata.internal_note);
+        self.repos = crate::RepositoryScope::parse(self.repos)
+            .map_err(|_| InvalidLinkValues)?
+            .into();
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LinkSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +71,25 @@ pub struct LinkSnapshot {
 pub struct LinkMetadata {
     pub description: String,
     pub internal_note: Option<String>,
+}
+
+impl LinkMetadata {
+    /// The authority's rule for mutable metadata: a parsed description and
+    /// internal note, where a blank note means none.
+    pub fn parse(
+        description: &str,
+        internal_note: Option<&str>,
+    ) -> Result<Self, InvalidLinkValues> {
+        let description = crate::Description::parse(description).map_err(|_| InvalidLinkValues)?;
+        let internal_note = match internal_note {
+            Some(note) => crate::InternalNote::parse(note).map_err(|_| InvalidLinkValues)?,
+            None => None,
+        };
+        Ok(Self {
+            description: description.into(),
+            internal_note: internal_note.map(String::from),
+        })
+    }
 }
 
 impl LinkSnapshot {

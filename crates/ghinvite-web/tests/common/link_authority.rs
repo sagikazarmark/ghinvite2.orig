@@ -396,17 +396,10 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             if !admits(&command.admin, link) {
                 return status(404);
             }
-            let Ok(description) = ghinvite_core::Description::parse(&command.description) else {
-                return status(400);
-            };
-            let Ok(internal_note) =
-                ghinvite_core::InternalNote::parse(command.internal_note.as_deref().unwrap_or(""))
+            let Ok(metadata) =
+                LinkMetadata::parse(&command.description, command.internal_note.as_deref())
             else {
                 return status(400);
-            };
-            let metadata = LinkMetadata {
-                description: description.into(),
-                internal_note: internal_note.map(String::from),
             };
             // Saving the current details again changes nothing.
             let changed = link.description() != metadata.description
@@ -497,29 +490,14 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
 }
 
 /// The real `normalize_creation`: the input the creation identity binds.
-fn normalize_creation(mut command: CreateLink) -> Result<CreateLink, u16> {
+fn normalize_creation(command: CreateLink) -> Result<CreateLink, u16> {
     if command.admin.account_id != command.account_id
         || command.account_id == 0
         || command.admin.user_id == 0
     {
         return Err(404);
     }
-    if command.installation_id == 0 || command.max_uses == Some(0) {
-        return Err(400);
-    }
-    command.description = ghinvite_core::Description::parse(&command.description)
-        .map_err(|_| 400u16)?
-        .into();
-    command.internal_note = match command.internal_note {
-        Some(note) => ghinvite_core::InternalNote::parse(&note)
-            .map_err(|_| 400u16)?
-            .map(String::from),
-        None => None,
-    };
-    command.repos = ghinvite_core::RepositoryScope::parse(command.repos)
-        .map_err(|_| 400u16)?
-        .into();
-    Ok(command)
+    command.normalized().map_err(|_| 400)
 }
 
 /// The real `transition_request` for an admin decision: a pending request

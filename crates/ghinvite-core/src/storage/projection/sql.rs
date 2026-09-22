@@ -1,7 +1,6 @@
 //! The same fixed batch runs in SQLx and D1. One JSON parameter avoids lossy
 //! JavaScript number bindings. All validation and writes share one transaction.
 use super::*;
-use crate::invitation_link::INTERNAL_NOTE_MAX_BYTES;
 use crate::storage::{Error, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -26,16 +25,12 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         || link.revoked_by.is_some_and(|id| !valid_id(id))
         || link.revoked_at.is_some() != link.revoked_by.is_some()
         || crate::Slug::from_string(link.invitation_code.clone()).is_err()
-        || crate::Description::parse(&creation.description).is_err()
-        || crate::Description::parse(link.description()).is_err()
-        || link
-            .internal_note()
-            .is_some_and(|s| s.len() > INTERNAL_NOTE_MAX_BYTES)
-        || creation
-            .internal_note
-            .as_ref()
-            .is_some_and(|s| s.len() > INTERNAL_NOTE_MAX_BYTES)
-        || crate::RepositoryScope::parse(creation.repos.clone()).is_err()
+        // The authority only writes values its own rules leave unchanged.
+        || creation.clone().normalized().as_ref() != Ok(creation)
+        || link.metadata.as_ref().is_some_and(|metadata| {
+            LinkMetadata::parse(&metadata.description, metadata.internal_note.as_deref()).as_ref()
+                != Ok(metadata)
+        })
         || creation.repos.iter().any(|repo| !valid_id(repo.repo_id))
         || envelope.requests.len() > 2
         || envelope.events.len() > 8
@@ -223,3 +218,85 @@ pub const STATEMENTS: &[&str] = &[
     FROM json_each(?1,'$.events') WHERE true ON CONFLICT(id) DO NOTHING"#,
     "DELETE FROM projection_assertions WHERE ?1 IS NOT NULL",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope() -> ProjectionEnvelope {
+        serde_json::from_value(json!({
+            "transition_id": "link/01ARZ3NDEKTSV4RRFFQ69G5FAV/1",
+            "link": {
+                "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 1, "uses": 0,
+                "invitation_code": "abcdefghijklmnop", "created_at": "2026-09-14T00:00:00Z",
+                "revoked_at": null, "revoked_by": null,
+                "creation": {
+                    "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                    "admin": {"account_id": 100, "user_id": 7}, "account_id": 100,
+                    "installation_id": 1, "description": "Workshop", "internal_note": "Cohort",
+                    "expires_at": null, "max_uses": 1, "permission": "pull",
+                    "approval_required": true,
+                    "repos": [
+                        {"repo_id": 10, "repo_full_name": "acme/api"},
+                        {"repo_id": 11, "repo_full_name": "acme/web"}
+                    ]
+                }
+            },
+            "requests": [],
+            "events": []
+        }))
+        .unwrap()
+    }
+
+    fn with_metadata(description: &str, internal_note: Option<&str>) -> ProjectionEnvelope {
+        let mut input = envelope();
+        input.link.metadata = Some(LinkMetadata {
+            description: description.into(),
+            internal_note: internal_note.map(Into::into),
+        });
+        input
+    }
+
+    #[test]
+    fn values_the_authority_writes_are_encoded() {
+        assert!(encode(&envelope()).is_ok());
+        assert!(encode(&with_metadata("Renamed", None)).is_ok());
+    }
+
+    /// The gate applies the authority's own rule: a value it would normalise
+    /// differently, or refuse, never came from it.
+    #[test]
+    fn values_the_authority_would_never_write_are_refused() {
+        let mut refused = Vec::new();
+        for note in [" ", " Cohort", "Cohort\n"] {
+            let mut input = envelope();
+            input.link.creation.internal_note = Some(note.into());
+            refused.push((format!("creation note {note:?}"), input));
+            refused.push((
+                format!("current note {note:?}"),
+                with_metadata("Workshop", Some(note)),
+            ));
+        }
+        for description in [" Workshop", "Workshop "] {
+            let mut input = envelope();
+            input.link.creation.description = description.into();
+            refused.push((format!("creation description {description:?}"), input));
+            refused.push((
+                format!("current description {description:?}"),
+                with_metadata(description, None),
+            ));
+        }
+        let mut input = envelope();
+        input.link.creation.max_uses = Some(0);
+        refused.push(("max uses 0".into(), input));
+        let mut input = envelope();
+        input.link.creation.repos.reverse();
+        refused.push(("unordered repository scope".into(), input));
+        for (case, input) in refused {
+            assert!(
+                matches!(encode(&input), Err(Error::ProjectionInvariant(_))),
+                "{case}"
+            );
+        }
+    }
+}
