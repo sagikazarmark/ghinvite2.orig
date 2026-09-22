@@ -47,6 +47,7 @@
 //! Everything here is pure and compiles natively, so it is unit-tested beside
 //! the shared form model; `main.rs` owns the `web-sys` reading and writing.
 
+use dioform::advanced::FieldIdentity;
 use dioform::prelude::Form;
 use ghinvite_ui::link_form::{CreateLinkForm, LinkFormValues};
 
@@ -71,35 +72,16 @@ impl ControlText {
         }
     }
 
-    /// The admin changed this `<select>` before the island mounted. Its
-    /// options carry their values verbatim, so nothing rewrites them.
-    fn edited(&self) -> bool {
-        self.value != self.default
-    }
-
-    /// The admin changed this `<input type="text">` before the island mounted.
-    ///
-    /// Compared against the *shown* default, because such an input strips CR
-    /// and LF out of its value before anyone touches it. The server preserves a
-    /// multiline description and rejects it
-    /// ([`ghinvite_ui::link_form::DESCRIPTION_SINGLE_LINE`]), so reading that
-    /// shortening as an edit would submit a description the admin never wrote
-    /// and retire the message explaining what was wrong with theirs.
-    fn edited_line(&self) -> bool {
-        self.value != self.default.replace(['\n', '\r'], "")
-    }
-
-    /// The admin changed this `<textarea>` before the island mounted. A
-    /// textarea keeps its newlines but normalises them to LF, which is again
-    /// the browser rewriting the server's value rather than an edit.
-    fn edited_text(&self) -> bool {
-        self.value != self.default.replace("\r\n", "\n").replace('\r', "\n")
-    }
-
-    /// The admin changed this `<input type="number">` before the island
-    /// mounted.
-    fn edited_number(&self) -> bool {
-        self.value != self.default && !self.browser_emptied()
+    /// The admin changed this control before the island mounted: its value
+    /// differs from what the browser shows for the server's, once `sanitiser`
+    /// has had its say.
+    fn edited(&self, sanitiser: Sanitiser) -> bool {
+        match sanitiser {
+            Sanitiser::Plain => self.value != self.default,
+            Sanitiser::Line => self.value != self.default.replace(['\n', '\r'], ""),
+            Sanitiser::Text => self.value != self.default.replace("\r\n", "\n").replace('\r', "\n"),
+            Sanitiser::Number => self.value != self.default && !self.browser_emptied(),
+        }
     }
 
     /// The browser, not the admin, emptied this numeric control: it shows
@@ -110,6 +92,46 @@ impl ControlText {
     /// expiration" without anyone asking.
     fn browser_emptied(&self) -> bool {
         self.value.is_empty() && !displayable_number(&self.default)
+    }
+}
+
+/// The value sanitisation a control applies to the server's value before
+/// anyone touches it — decided by the element the server renders, so
+/// [`sanitiser_for`] must agree with the markup (a test renders the form and
+/// checks every control).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sanitiser {
+    /// A `<select>` or a checkbox: options and checkbox values are carried
+    /// verbatim, so nothing rewrites them.
+    Plain,
+    /// An `<input type="text">`, which strips CR and LF out of its value.
+    ///
+    /// The server preserves a multiline description and rejects it
+    /// ([`ghinvite_ui::link_form::DESCRIPTION_SINGLE_LINE`]), so reading that
+    /// shortening as an edit would submit a description the admin never wrote
+    /// and retire the message explaining what was wrong with theirs.
+    Line,
+    /// A `<textarea>`, which keeps its newlines but normalises them to LF —
+    /// again the browser rewriting the server's value rather than an edit.
+    Text,
+    /// An `<input type="number">`, which shows nothing for text that is not a
+    /// number it can display ([`ControlText::browser_emptied`]).
+    Number,
+}
+
+/// The sanitiser of the control the server renders for `field`.
+fn sanitiser_for(field: &FieldIdentity) -> Sanitiser {
+    let fields = CreateLinkForm::fields();
+    if *field == fields.description().identity() {
+        Sanitiser::Line
+    } else if *field == fields.internal_note().identity() {
+        Sanitiser::Text
+    } else if *field == fields.max_uses().identity()
+        || *field == fields.expires_in_days().identity()
+    {
+        Sanitiser::Number
+    } else {
+        Sanitiser::Plain
     }
 }
 
@@ -187,24 +209,39 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     let fields = CreateLinkForm::fields();
     let mut adopted = values.clone();
 
-    if dom.description.edited_line() {
+    if dom
+        .description
+        .edited(sanitiser_for(&fields.description().identity()))
+    {
         adopted.description = dom.description.value.clone();
         adopted.errors.retire(&fields.description().identity());
     }
-    if dom.internal_note.edited_text() {
+    if dom
+        .internal_note
+        .edited(sanitiser_for(&fields.internal_note().identity()))
+    {
         adopted.internal_note = dom.internal_note.value.clone();
         adopted.errors.retire(&fields.internal_note().identity());
     }
-    if dom.permission.edited() {
+    if dom
+        .permission
+        .edited(sanitiser_for(&fields.permission().identity()))
+    {
         adopted.permission = dom.permission.value.clone();
         adopted.errors.retire(&fields.permission().identity());
     }
     adopted.approval_required = dom.approval_required;
-    if dom.max_uses.edited_number() {
+    if dom
+        .max_uses
+        .edited(sanitiser_for(&fields.max_uses().identity()))
+    {
         adopted.max_uses = dom.max_uses.value.clone();
         adopted.errors.retire(&fields.max_uses().identity());
     }
-    if dom.expires_in_days.edited_number() {
+    if dom
+        .expires_in_days
+        .edited(sanitiser_for(&fields.expires_in_days().identity()))
+    {
         adopted.expires_in_days = dom.expires_in_days.value.clone();
         adopted.errors.retire(&fields.expires_in_days().identity());
     }
@@ -752,6 +789,99 @@ mod tests {
             },
         );
         assert!(adopted.selected_repo_ids.is_empty());
+    }
+
+    /// Every control of the create form the server renders, as its element
+    /// (`input`, `textarea`, `select`), its `type` attribute and its `name`.
+    fn rendered_controls() -> Vec<(&'static str, Option<String>, String)> {
+        use dioxus::prelude::*;
+        use ghinvite_ui::link_form::RepositoryChoice;
+        use ghinvite_ui::links::LinkCreateForm;
+
+        let mut vdom = VirtualDom::new(|| {
+            rsx! {
+                LinkCreateForm {
+                    action: "/console/accounts/acme/links".to_string(),
+                    form: LinkFormValues::default(),
+                    repos: vec![RepositoryChoice { id: 10, full_name: "acme/api".into() }],
+                }
+            }
+        });
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        fn attribute(tag: &str, name: &str) -> Option<String> {
+            let (_, rest) = tag.split_once(&format!(" {name}=\""))?;
+            Some(rest.split_once('"')?.0.to_string())
+        }
+        let mut controls = Vec::new();
+        for element in ["input", "textarea", "select"] {
+            for tag in html.split(&format!("<{element} ")).skip(1) {
+                let tag = format!(" {}", tag.split_once('>').unwrap().0);
+                let name = attribute(&tag, "name").expect("every control submits a name");
+                controls.push((element, attribute(&tag, "type"), name));
+            }
+        }
+        controls
+    }
+
+    /// `adopt` compares each control against what the browser shows for the
+    /// server's value, and what it shows depends on the element the server
+    /// rendered. The two are chosen in different crates, so this reads the
+    /// sanitiser each control needs off the real markup: turning the
+    /// description into a `<textarea>` must fail here, not only in Playwright.
+    #[test]
+    fn every_rendered_control_is_adopted_with_its_elements_sanitiser() {
+        let fields = CreateLinkForm::fields();
+        // Each field's rendered name next to the identity `adopt` looks up.
+        let by_name = [
+            fields.description().field_name().to_string(),
+            fields.internal_note().field_name().to_string(),
+            fields.permission().field_name().to_string(),
+            fields.approval_required().field_name().to_string(),
+            fields.max_uses().field_name().to_string(),
+            fields.expires_in_days().field_name().to_string(),
+            fields.repo_ids().field_name().to_string(),
+        ]
+        .into_iter()
+        .zip([
+            fields.description().identity(),
+            fields.internal_note().identity(),
+            fields.permission().identity(),
+            fields.approval_required().identity(),
+            fields.max_uses().identity(),
+            fields.expires_in_days().identity(),
+            fields.repo_ids().identity(),
+        ])
+        .collect::<Vec<_>>();
+
+        let mut seen = Vec::new();
+        for (element, kind, name) in rendered_controls() {
+            let needed = match (element, kind.as_deref()) {
+                ("input", Some("hidden")) => continue,
+                ("input", None | Some("text")) => Sanitiser::Line,
+                ("input", Some("number")) => Sanitiser::Number,
+                ("input", Some("checkbox")) | ("select", None) => Sanitiser::Plain,
+                ("textarea", None) => Sanitiser::Text,
+                // ADR 0001: a new control kind is new sanitisation to establish
+                // in a browser before the takeover can adopt it.
+                other => panic!("{name} renders as {other:?}, which has no sanitiser"),
+            };
+            let (_, field) = by_name
+                .iter()
+                .find(|(field_name, _)| *field_name == name)
+                .unwrap_or_else(|| panic!("{name} is not a field of the model"));
+            assert_eq!(
+                sanitiser_for(field),
+                needed,
+                "{name} renders as <{element}>"
+            );
+            seen.push(name);
+        }
+
+        for (name, _) in &by_name {
+            assert!(seen.iter().any(|seen| seen == name), "{name} is rendered");
+        }
     }
 
     #[test]

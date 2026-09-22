@@ -500,6 +500,82 @@ mod tests {
         );
     }
 
+    /// Every field of the model, as the island addresses it when it attaches a
+    /// message.
+    fn every_field() -> [dioform::advanced::FieldIdentity; 7] {
+        let fields = CreateLinkForm::fields();
+        [
+            fields.description().identity(),
+            fields.internal_note().identity(),
+            fields.permission().identity(),
+            fields.approval_required().identity(),
+            fields.max_uses().identity(),
+            fields.expires_in_days().identity(),
+            fields.repo_ids().identity(),
+        ]
+    }
+
+    /// The island's round trip: the server's errors become dioform submit
+    /// errors on mount, and dioform's errors are folded back through
+    /// `LinkFormErrors::attach` on every render.
+    fn round_trip(errors: &LinkFormErrors) -> LinkFormErrors {
+        let mut folded = LinkFormErrors::default();
+        for error in submit_errors_from(errors) {
+            let field = error.target().as_field().cloned();
+            folded.attach(field.as_ref(), error.into_error());
+        }
+        folded
+    }
+
+    /// `submit_errors_from` and `LinkFormErrors::attach` are inverses written
+    /// out by hand on either side of the crate boundary. A message attached to
+    /// any field must come back in the slot it left, and no two fields may
+    /// share a slot — or a server error would render beside the wrong control
+    /// on the island's first frame.
+    #[test]
+    fn every_field_message_round_trips_into_its_own_slot() {
+        let mut slotted: Vec<LinkFormErrors> = Vec::new();
+        for field in every_field() {
+            // The same message for every field, so two fields landing in one
+            // slot produce equal errors.
+            let mut errors = LinkFormErrors::default();
+            errors.attach(Some(&field), "message".into());
+
+            assert_eq!(round_trip(&errors), errors, "{field:?}");
+            // The approval checkbox has no slot, so its message is form-level;
+            // every other field fills exactly one slot.
+            if errors.summary == [SUMMARY_MESSAGE] {
+                assert!(
+                    !slotted.contains(&errors),
+                    "{field:?} shares a slot: {errors:?}"
+                );
+                slotted.push(errors);
+            } else {
+                assert_eq!(
+                    field,
+                    CreateLinkForm::fields().approval_required().identity()
+                );
+            }
+        }
+        assert_eq!(slotted.len(), 6, "six fields carry a message slot");
+    }
+
+    /// Every slot at once, spelled out without `..` so a seventh slot fails to
+    /// compile here until it is given a round trip.
+    #[test]
+    fn every_slot_filled_at_once_round_trips() {
+        let errors = LinkFormErrors {
+            summary: vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()],
+            description: Some("d".to_string()),
+            internal_note: Some("n".to_string()),
+            permission: Some("p".to_string()),
+            max_uses: Some("m".to_string()),
+            expires_in_days: Some("e".to_string()),
+            repo_scope: Some("r".to_string()),
+        };
+        assert_eq!(round_trip(&errors), errors);
+    }
+
     #[test]
     fn generic_summary_line_alone_maps_to_nothing() {
         let errors = LinkFormErrors {

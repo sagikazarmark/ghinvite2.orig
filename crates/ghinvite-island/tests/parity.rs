@@ -91,10 +91,18 @@ fn assert_parity(values: LinkFormValues, repos: Vec<RepositoryChoice>) {
 
 /// What the server hands back after a POST in which every rule failed:
 /// values preserved verbatim, including a tampered permission, raw numeric
-/// text that does not parse, and a repository id the installation does not
-/// expose. The messages are the ones the shared parsers and validators emit
+/// text that does not parse, an internal note over its byte limit, and a
+/// repository id the installation does not expose. The messages are the ones the shared parsers and validators emit
 /// for exactly these values — so the island, which re-runs them, must arrive
 /// at the same errors.
+/// An internal note one byte over the limit once trimmed.
+fn over_long_note() -> String {
+    format!(
+        "Keep this note{}",
+        "x".repeat(16_384 - "Keep this note".len() + 1)
+    )
+}
+
 fn failed_submission() -> LinkFormValues {
     LinkFormValues {
         description: "   ".to_string(),
@@ -102,10 +110,10 @@ fn failed_submission() -> LinkFormValues {
         approval_required: true,
         max_uses: "abc".to_string(),
         expires_in_days: "0".to_string(),
-        internal_note: "Keep this note".to_string(),
+        internal_note: over_long_note(),
         selected_repo_ids: vec![999],
         errors: LinkFormErrors {
-            internal_note: None,
+            internal_note: Some(link_form::INTERNAL_NOTE_TOO_LONG.to_string()),
             summary: vec![link_form::SUMMARY_MESSAGE.to_string()],
             description: Some(link_form::DESCRIPTION_REQUIRED.to_string()),
             permission: Some(link_form::PERMISSION_UNSUPPORTED.to_string()),
@@ -524,7 +532,12 @@ fn island_renders_the_expected_error_state_not_just_the_same_string() {
         assert_eq!(island.matches(&format!(" id=\"{id}\"")).count(), 1);
     }
     assert!(island.contains("name=\"approval_required\" value=\"true\" checked"));
-    assert!(island.contains(">Keep this note</textarea>"));
+    assert!(island.contains(&format!(">{}</textarea>", over_long_note())));
+    assert!(island.contains(&format!(
+        "<p id=\"internal_note-error\" class=\"text-sm font-medium text-error\">{}</p>",
+        link_form::INTERNAL_NOTE_TOO_LONG
+    )));
+    assert!(island.contains("aria-describedby=\"internal_note-help internal_note-error\""));
     // Tampered values never reach the markup.
     assert!(!island.contains("owner"));
     assert!(!island.contains("999"));
