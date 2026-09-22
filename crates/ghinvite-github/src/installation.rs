@@ -8,7 +8,7 @@ use crate::payloads::{
 };
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
-use crate::util::path_segment;
+use crate::util::{github_request, path_segment};
 use chrono::Utc;
 use std::sync::Arc;
 
@@ -31,14 +31,11 @@ impl InstallationClient {
         installation_id: u64,
     ) -> Result<crate::payloads::GhAppInstallation> {
         let jwt = self.signer.sign(Utc::now())?;
-        let request = Request::new(
+        let request = github_request(
             Method::Get,
             format!("{}/app/installations/{installation_id}", self.base_url),
-        )
-        .header("accept", "application/vnd.github+json")
-        .header("authorization", format!("Bearer {jwt}"))
-        .header("user-agent", "ghinvite")
-        .header("x-github-api-version", "2022-11-28");
+            &jwt,
+        );
         self.transport.send(request).await?.ensure_success()?.json()
     }
 
@@ -175,11 +172,7 @@ impl InstallationClient {
             "{}/app/installations/{}/access_tokens",
             self.base_url, installation_id
         );
-        let req = Request::new(Method::Post, &url)
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {jwt}"))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28");
+        let req = github_request(Method::Post, url, &jwt);
         match self.transport.send(req).await?.ensure_success() {
             Ok(resp) => resp.json(),
             Err(err) => {
@@ -221,11 +214,11 @@ impl InstallationClient {
         path: &str,
     ) -> Result<Request> {
         let token = self.installation_token(installation_id).await?;
-        Ok(Request::new(method, format!("{}{}", self.base_url, path))
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {token}"))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28"))
+        Ok(github_request(
+            method,
+            format!("{}{}", self.base_url, path),
+            &token,
+        ))
     }
 
     /// `GET /repos/{owner}/{repo}` — small surface for display + access

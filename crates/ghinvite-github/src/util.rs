@@ -1,5 +1,17 @@
 //! Small helpers shared across modules in this crate.
 
+use crate::transport::{Method, Request};
+
+/// A GitHub REST API request carrying `bearer` — an App JWT, an installation
+/// token, or a user access token — and the headers every such call sends.
+pub(crate) fn github_request(method: Method, url: impl Into<String>, bearer: &str) -> Request {
+    Request::new(method, url)
+        .header("accept", "application/vnd.github+json")
+        .header("authorization", format!("Bearer {bearer}"))
+        .header("user-agent", "ghinvite")
+        .header("x-github-api-version", "2022-11-28")
+}
+
 /// Percent-encode a single URL path segment. Allows only RFC 3986 unreserved
 /// characters; everything else is hex-encoded uppercase. Used to build
 /// `/repos/{owner}/{repo}/...` paths defensively against logins or repo

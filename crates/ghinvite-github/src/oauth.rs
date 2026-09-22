@@ -159,11 +159,11 @@ impl UserApiClient {
     }
 
     fn auth_request(&self, method: Method, path: &str) -> Request {
-        Request::new(method, format!("{}{}", self.base_url, path))
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {}", self.user_token))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28")
+        crate::util::github_request(
+            method,
+            format!("{}{}", self.base_url, path),
+            &self.user_token,
+        )
     }
 
     /// `GET /user` — returns the signed-in user's basic profile. Used at sign-in
