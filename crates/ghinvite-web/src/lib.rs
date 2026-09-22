@@ -17,7 +17,7 @@ pub mod views;
 pub mod wasm_compat;
 
 // Re-exports filled in as types appear:
-pub use commands::{GhinviteCommands, RestateCommands};
+pub use commands::RestateCommands;
 pub use config::WebConfig;
 pub use error::{IngressFailure, OAuthFailure, Result, WebError};
 pub use link_authority::{AuthorityError, LinkAuthority};

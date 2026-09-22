@@ -1,104 +1,32 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ghinvite_core::{AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::commands::{
-    GhinviteCommands, OnboardInstallation, RecordInstallationUninstalled,
-    RecordRepositorySelectionChange, RepositorySelectionChangeSource, RouteGithubInvitationWebhook,
-};
 use ghinvite_web::{AppState, WebConfig, build_app};
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
-#[derive(Clone, Debug, PartialEq)]
-enum RecordedCommand {
-    OnboardInstallation {
-        installation_id: u64,
-        actor_user_id: u64,
-        account_id: u64,
-        account_login: String,
-        account_type: AccountType,
-        selected_repos: SelectedRepos,
-    },
-    RecordRepositorySelectionChange {
-        installation_id: u64,
-        selected_repos: SelectedRepos,
-        source: RepositorySelectionChangeSource,
-    },
-}
+mod common;
 
-#[derive(Default)]
-struct RecordingCommands {
-    calls: Arc<Mutex<Vec<RecordedCommand>>>,
-}
+use common::restate_recorder::RestateRecorder;
 
-#[async_trait::async_trait]
-impl GhinviteCommands for RecordingCommands {
-    async fn onboard_installation(&self, command: OnboardInstallation) -> ghinvite_web::Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(RecordedCommand::OnboardInstallation {
-                installation_id: command.installation_id,
-                actor_user_id: command.actor_user_id,
-                account_id: command.account_id,
-                account_login: command.account_login,
-                account_type: command.account_type,
-                selected_repos: command.selected_repos,
-            });
-        Ok(())
-    }
-
-    async fn record_repository_selection_change(
-        &self,
-        command: RecordRepositorySelectionChange,
-    ) -> ghinvite_web::Result<()> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: command.installation_id,
-                selected_repos: command.selected_repos,
-                source: command.source,
-            });
-        Ok(())
-    }
-
-    async fn record_installation_uninstalled(
-        &self,
-        _command: RecordInstallationUninstalled,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected record_installation_uninstalled command")
-    }
-
-    async fn route_github_invitation_webhook(
-        &self,
-        _command: RouteGithubInvitationWebhook,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected route_github_invitation_webhook command")
-    }
-}
-
-async fn build_app_with(mock: MockTransport) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
+async fn build_app_with(mock: MockTransport) -> (axum::Router, RestateRecorder) {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
     let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
-    let commands = Arc::new(RecordingCommands::default());
-    let calls = commands.calls.clone();
+    let restate = RestateRecorder::start().await;
     let state = AppState::new(
         storage,
         transport,
-        commands,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
+        restate.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
-    (build_app(state, session_store), calls)
+    (build_app(state, session_store), restate)
 }
 
 fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
@@ -174,7 +102,7 @@ fn oauth_expectations(login: &str, user_id: u64) -> Vec<Expectation> {
 
 #[tokio::test]
 async fn setup_unauthenticated_redirects_to_login_with_return_to() {
-    let (app, _calls) = build_app_with(MockTransport::scripted(vec![])).await;
+    let (app, _restate) = build_app_with(MockTransport::scripted(vec![])).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -209,7 +137,7 @@ async fn setup_rejects_spoofed_installation_id() {
             }]
         }),
     ));
-    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
+    let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -222,7 +150,7 @@ async fn setup_rejects_spoofed_installation_id() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    assert!(calls.lock().unwrap().is_empty());
+    assert!(restate.calls().is_empty());
 }
 
 #[tokio::test]
@@ -253,7 +181,7 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
             ]
         }),
     ));
-    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
+    let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -271,19 +199,19 @@ async fn setup_verified_org_install_calls_onboard_and_redirects() {
         "/console/accounts/acme"
     );
 
-    let calls = calls.lock().unwrap();
+    let calls = restate.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0],
-        RecordedCommand::OnboardInstallation {
-            installation_id: 77,
-            actor_user_id: 42,
-            account_id: 9001,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            selected_repos: SelectedRepos::Subset(vec![10, 11]),
-        }
-    );
+    let call = &calls[0];
+    assert_eq!(call.service, "Installation");
+    assert_eq!(call.key, "77");
+    assert_eq!(call.method, "onboard");
+    assert!(!call.send);
+    assert_eq!(call.body["installation_id"], 77);
+    assert_eq!(call.body["actor_user_id"], 42);
+    assert_eq!(call.body["account_id"], 9001);
+    assert_eq!(call.body["account_login"], "acme");
+    assert_eq!(call.body["account_type"], "Organization");
+    assert_eq!(call.body["selected_repos"], serde_json::json!([10, 11]));
 }
 
 #[tokio::test]
@@ -303,7 +231,7 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
             }]
         }),
     ));
-    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
+    let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -321,19 +249,19 @@ async fn setup_verified_user_install_calls_onboard_and_redirects() {
         "/console/accounts/octocat"
     );
 
-    let calls = calls.lock().unwrap();
+    let calls = restate.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0],
-        RecordedCommand::OnboardInstallation {
-            installation_id: 88,
-            actor_user_id: 42,
-            account_id: 42,
-            account_login: "octocat".into(),
-            account_type: AccountType::User,
-            selected_repos: SelectedRepos::All,
-        }
-    );
+    let call = &calls[0];
+    assert_eq!(call.service, "Installation");
+    assert_eq!(call.key, "88");
+    assert_eq!(call.method, "onboard");
+    assert!(!call.send);
+    assert_eq!(call.body["installation_id"], 88);
+    assert_eq!(call.body["actor_user_id"], 42);
+    assert_eq!(call.body["account_id"], 42);
+    assert_eq!(call.body["account_login"], "octocat");
+    assert_eq!(call.body["account_type"], "User");
+    assert_eq!(call.body["selected_repos"], "all");
 }
 
 #[tokio::test]
@@ -363,7 +291,7 @@ async fn setup_update_calls_repos_changed_and_redirects() {
             ]
         }),
     ));
-    let (app, calls) = build_app_with(MockTransport::scripted(expectations)).await;
+    let (app, restate) = build_app_with(MockTransport::scripted(expectations)).await;
     let (app, cookie) = sign_in(app).await;
     let resp = app
         .oneshot(
@@ -381,14 +309,14 @@ async fn setup_update_calls_repos_changed_and_redirects() {
         "/console/accounts/acme"
     );
 
-    let calls = calls.lock().unwrap();
+    let calls = restate.calls();
     assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0],
-        RecordedCommand::RecordRepositorySelectionChange {
-            installation_id: 77,
-            selected_repos: SelectedRepos::Subset(vec![12]),
-            source: RepositorySelectionChangeSource::SetupReturn,
-        }
-    );
+    let call = &calls[0];
+    assert_eq!(call.service, "Installation");
+    assert_eq!(call.key, "77");
+    assert_eq!(call.method, "repos_changed");
+    // A setup return waits for the change, where a webhook would only send it.
+    assert!(!call.send);
+    assert_eq!(call.body["installation_id"], 77);
+    assert_eq!(call.body["selected_repos"], serde_json::json!([12]));
 }

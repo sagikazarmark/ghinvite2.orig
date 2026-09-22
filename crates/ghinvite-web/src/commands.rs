@@ -1,28 +1,10 @@
 use crate::error::Result;
 use crate::restate_client::RestateClient;
 use crate::state::WebStorage;
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use octoevents::{Action, Dispatcher, EventKind, Payload};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-#[async_trait]
-pub trait GhinviteCommands: Send + Sync + 'static {
-    async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()>;
-    async fn record_repository_selection_change(
-        &self,
-        command: RecordRepositorySelectionChange,
-    ) -> Result<()>;
-    async fn record_installation_uninstalled(
-        &self,
-        command: RecordInstallationUninstalled,
-    ) -> Result<()>;
-    async fn route_github_invitation_webhook(
-        &self,
-        command: RouteGithubInvitationWebhook,
-    ) -> Result<()>;
-}
 
 #[derive(Clone, Debug)]
 pub struct RestateCommands {
@@ -35,7 +17,7 @@ impl RestateCommands {
     }
 }
 
-/// Every handler behind [`GhinviteCommands`] changes state, and none of these
+/// Every handler behind [`RestateCommands`] changes state, and none of these
 /// call sites can cheaply re-read the result. A refused or unreachable ingress
 /// therefore leaves the command's effect in doubt — the invocation may have
 /// been persisted before the response went wrong — so each failure is reported
@@ -49,9 +31,8 @@ fn mutation_outcome(error: crate::WebError) -> crate::WebError {
     }
 }
 
-#[async_trait]
-impl GhinviteCommands for RestateCommands {
-    async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
+impl RestateCommands {
+    pub async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
         self.restate
             .call(
                 "Installation",
@@ -63,7 +44,7 @@ impl GhinviteCommands for RestateCommands {
             .map_err(mutation_outcome)
     }
 
-    async fn record_repository_selection_change(
+    pub async fn record_repository_selection_change(
         &self,
         command: RecordRepositorySelectionChange,
     ) -> Result<()> {
@@ -91,7 +72,7 @@ impl GhinviteCommands for RestateCommands {
         }
     }
 
-    async fn record_installation_uninstalled(
+    pub async fn record_installation_uninstalled(
         &self,
         command: RecordInstallationUninstalled,
     ) -> Result<()> {
@@ -106,7 +87,7 @@ impl GhinviteCommands for RestateCommands {
             .map_err(mutation_outcome)
     }
 
-    async fn route_github_invitation_webhook(
+    pub async fn route_github_invitation_webhook(
         &self,
         command: RouteGithubInvitationWebhook,
     ) -> Result<()> {
@@ -186,7 +167,7 @@ pub struct SetupReturn {
 }
 
 pub async fn handle_setup_return(
-    commands: &dyn GhinviteCommands,
+    commands: &RestateCommands,
     setup_return: SetupReturn,
 ) -> Result<()> {
     match setup_return.action {
@@ -269,7 +250,7 @@ enum RepositorySelection {
 /// Builds routes for one delivery, using its receipt time for emitted commands.
 pub fn github_webhook_dispatcher(
     storage: Arc<dyn WebStorage>,
-    commands: Arc<dyn GhinviteCommands>,
+    commands: RestateCommands,
     received_at: DateTime<Utc>,
 ) -> Dispatcher {
     let invitation_storage = storage.clone();
@@ -504,99 +485,39 @@ mod tests {
             .with_timezone(&Utc)
     }
 
-    #[derive(Default)]
-    struct RecordingCommands {
-        calls: Arc<Mutex<Vec<RecordedCommand>>>,
+    /// The real commands over an ingress that records what reached it.
+    async fn recording_commands() -> (RestateCommands, Arc<Mutex<Vec<RecordedCall>>>) {
+        let (base, calls) = spawn_restate_recorder(Value::Null).await;
+        (
+            RestateCommands::new(Arc::new(RestateClient::new(base).unwrap())),
+            calls,
+        )
     }
 
-    #[derive(Debug, PartialEq)]
-    enum RecordedCommand {
-        OnboardInstallation {
-            installation_id: u64,
-            actor_user_id: u64,
-            account_id: u64,
-            account_login: String,
-            account_type: ghinvite_core::AccountType,
-            selected_repos: ghinvite_core::SelectedRepos,
-            installed_at: chrono::DateTime<Utc>,
-        },
-        RecordRepositorySelectionChange {
-            installation_id: u64,
-            selected_repos: ghinvite_core::SelectedRepos,
-            source: RepositorySelectionChangeSource,
-        },
-        RecordInstallationUninstalled {
-            installation_id: u64,
-            uninstalled_at: chrono::DateTime<Utc>,
-        },
-        RouteGithubInvitationWebhook {
-            invitation_id: ghinvite_core::GithubInvitationId,
-            action: GithubInvitationWebhookAction,
-            at: chrono::DateTime<Utc>,
-        },
+    /// A webhook-sourced selection change is a one-way send that carries no
+    /// delivery-time repositories: processing refreshes them from GitHub.
+    fn assert_repos_changed_sent(calls: &[RecordedCall], installation_id: u64) {
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let call = &calls[0];
+        assert_eq!(call.service, "Installation");
+        assert_eq!(call.key, installation_id.to_string());
+        assert_eq!(call.method, "repos_changed");
+        assert!(call.send);
+        assert_eq!(call.body["installation_id"], installation_id);
+        assert_eq!(call.body["selected_repos"], serde_json::json!([]));
     }
 
-    #[async_trait]
-    impl GhinviteCommands for RecordingCommands {
-        async fn onboard_installation(&self, command: OnboardInstallation) -> Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(RecordedCommand::OnboardInstallation {
-                    installation_id: command.installation_id,
-                    actor_user_id: command.actor_user_id,
-                    account_id: command.account_id,
-                    account_login: command.account_login,
-                    account_type: command.account_type,
-                    selected_repos: command.selected_repos,
-                    installed_at: command.installed_at,
-                });
-            Ok(())
-        }
-
-        async fn record_repository_selection_change(
-            &self,
-            command: RecordRepositorySelectionChange,
-        ) -> Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(RecordedCommand::RecordRepositorySelectionChange {
-                    installation_id: command.installation_id,
-                    selected_repos: command.selected_repos,
-                    source: command.source,
-                });
-            Ok(())
-        }
-
-        async fn record_installation_uninstalled(
-            &self,
-            command: RecordInstallationUninstalled,
-        ) -> Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(RecordedCommand::RecordInstallationUninstalled {
-                    installation_id: command.installation_id,
-                    uninstalled_at: command.uninstalled_at,
-                });
-            Ok(())
-        }
-
-        async fn route_github_invitation_webhook(
-            &self,
-            command: RouteGithubInvitationWebhook,
-        ) -> Result<()> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push(RecordedCommand::RouteGithubInvitationWebhook {
-                    invitation_id: command.invitation_id,
-                    action: command.action,
-                    at: command.at,
-                });
-            Ok(())
-        }
+    fn assert_invitation_webhook_sent(
+        call: &RecordedCall,
+        invitation_id: ghinvite_core::GithubInvitationId,
+        action: &str,
+    ) {
+        assert_eq!(call.service, "GithubInvitation");
+        assert_eq!(call.key, invitation_id.to_string());
+        assert_eq!(call.method, "on_webhook");
+        assert!(call.send);
+        assert_eq!(call.body["invitation_id"], invitation_id.to_string());
+        assert_eq!(call.body["action"], action);
     }
 
     async fn seed_github_invitation(
@@ -721,8 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn setup_return_install_delegates_to_onboard_command() {
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
         handle_setup_return(
             &commands,
@@ -740,24 +660,25 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::OnboardInstallation {
-                installation_id: 77,
-                actor_user_id: 42,
-                account_id: 9001,
-                account_login: "acme".into(),
-                account_type: ghinvite_core::AccountType::Organization,
-                selected_repos: ghinvite_core::SelectedRepos::All,
-                installed_at: at("2026-05-20T13:00:00Z"),
-            }]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.service, "Installation");
+        assert_eq!(call.key, "77");
+        assert_eq!(call.method, "onboard");
+        assert!(!call.send);
+        assert_eq!(call.body["installation_id"], 77);
+        assert_eq!(call.body["actor_user_id"], 42);
+        assert_eq!(call.body["account_id"], 9001);
+        assert_eq!(call.body["account_login"], "acme");
+        assert_eq!(call.body["account_type"], "Organization");
+        assert_eq!(call.body["selected_repos"], "all");
+        assert_eq!(call.body["installed_at"], "2026-05-20T13:00:00Z");
     }
 
     #[tokio::test]
     async fn setup_return_update_delegates_to_repository_selection_command() {
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
         handle_setup_return(
             &commands,
@@ -775,14 +696,16 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![10, 11]),
-                source: RepositorySelectionChangeSource::SetupReturn,
-            }]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.service, "Installation");
+        assert_eq!(call.key, "77");
+        assert_eq!(call.method, "repos_changed");
+        // A setup return waits for the change, where a webhook only sends it.
+        assert!(!call.send);
+        assert_eq!(call.body["installation_id"], 77);
+        assert_eq!(call.body["selected_repos"], serde_json::json!([10, 11]));
     }
 
     #[tokio::test]
@@ -790,20 +713,16 @@ mod tests {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:00:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::Installation,
-            br#"{"action":"future_action"}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:00:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::Installation,
+                    br#"{"action":"future_action"}"#,
+                ))
+                .await;
 
         outcome.result.unwrap();
         assert_eq!(outcome.matched, Match::UnmatchedAction);
@@ -815,29 +734,27 @@ mod tests {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:00:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::Installation,
-            br#"{"action":"deleted","installation":{"id":77}}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:00:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::Installation,
+                    br#"{"action":"deleted","installation":{"id":77}}"#,
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordInstallationUninstalled {
-                installation_id: 77,
-                uninstalled_at: at("2026-05-20T14:00:00Z"),
-            }]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        assert_eq!(call.service, "Installation");
+        assert_eq!(call.key, "77");
+        assert_eq!(call.method, "uninstall");
+        assert!(call.send);
+        assert_eq!(call.body["installation_id"], 77);
+        assert_eq!(call.body["uninstalled_at"], "2026-05-20T14:00:00Z");
     }
 
     #[tokio::test]
@@ -859,10 +776,7 @@ mod tests {
         let state = crate::AppState::new(
             Arc::new(storage),
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-            Arc::new(RestateCommands::new(Arc::new(
-                RestateClient::new(base).unwrap(),
-            ))),
-            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
+            Arc::new(RestateClient::new(base).unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -922,10 +836,7 @@ mod tests {
         let state = crate::AppState::new(
             storage.clone(),
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-            Arc::new(RestateCommands::new(Arc::new(
-                RestateClient::new(base).unwrap(),
-            ))),
-            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
+            Arc::new(RestateClient::new(base).unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1039,10 +950,7 @@ mod tests {
             .with_state(crate::AppState::new(
                 storage.clone(),
                 Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-                Arc::new(RestateCommands::new(Arc::new(
-                    RestateClient::new("http://127.0.0.1:1").unwrap(),
-                ))),
-                std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
+                Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()),
                 crate::WebConfig {
                     webhook_secret: secret.to_vec(),
                     ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1118,10 +1026,7 @@ mod tests {
         let state = crate::AppState::new(
             storage.clone(),
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-            Arc::new(RestateCommands::new(Arc::new(
-                RestateClient::new(base).unwrap(),
-            ))),
-            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
+            Arc::new(RestateClient::new(base).unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1177,14 +1082,12 @@ mod tests {
             .await
             .unwrap();
         let invitation_id = seed_github_invitation(&storage, 99001).await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (base, calls) = spawn_restate_recorder(Value::Null).await;
         let secret = b"test-webhook-secret";
         let state = crate::AppState::new(
             Arc::new(storage),
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-            Arc::new(commands),
-            std::sync::Arc::new(crate::RestateClient::new("http://127.0.0.1:9").unwrap()),
+            Arc::new(RestateClient::new(base).unwrap()),
             crate::WebConfig {
                 webhook_secret: secret.to_vec(),
                 ..crate::WebConfig::for_local_dev_with_secret([7; 32])
@@ -1217,19 +1120,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         {
             let calls = calls.lock().unwrap();
-            let [
-                RecordedCommand::RouteGithubInvitationWebhook {
-                    invitation_id: recorded_id,
-                    action,
-                    at,
-                },
-            ] = calls.as_slice()
-            else {
+            let [call] = calls.as_slice() else {
                 panic!("expected one invitation webhook command, got {calls:?}");
             };
-            assert_eq!(*recorded_id, invitation_id);
-            assert_eq!(*action, GithubInvitationWebhookAction::Accepted);
-            assert!((before..=after).contains(at));
+            assert_invitation_webhook_sent(call, invitation_id, "accepted");
+            let at: chrono::DateTime<Utc> =
+                serde_json::from_value(call.body["at"].clone()).unwrap();
+            assert!((before..=after).contains(&at));
         }
 
         let response = app
@@ -1259,30 +1156,22 @@ mod tests {
             .await
             .unwrap();
         let invitation_id = seed_github_invitation(&storage, 99001).await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:05:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::from_static("repository_invitation"),
-            br#"{"action":"accepted","invitation":{"id":99001}}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:05:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::from_static("repository_invitation"),
+                    br#"{"action":"accepted","invitation":{"id":99001}}"#,
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RouteGithubInvitationWebhook {
-                invitation_id,
-                action: GithubInvitationWebhookAction::Accepted,
-                at: at("2026-05-20T14:05:00Z"),
-            }]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_invitation_webhook_sent(&calls[0], invitation_id, "accepted");
+        assert_eq!(calls[0].body["at"], "2026-05-20T14:05:00Z");
     }
 
     #[tokio::test]
@@ -1291,30 +1180,22 @@ mod tests {
             .await
             .unwrap();
         let invitation_id = seed_github_invitation(&storage, 99002).await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:06:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::from_static("repository_invitation"),
-            br#"{"action":"declined","invitation":{"id":99002}}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:06:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::from_static("repository_invitation"),
+                    br#"{"action":"declined","invitation":{"id":99002}}"#,
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RouteGithubInvitationWebhook {
-                invitation_id,
-                action: GithubInvitationWebhookAction::Declined,
-                at: at("2026-05-20T14:06:00Z"),
-            }]
-        );
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_invitation_webhook_sent(&calls[0], invitation_id, "declined");
+        assert_eq!(calls[0].body["at"], "2026-05-20T14:06:00Z");
     }
 
     #[tokio::test]
@@ -1324,36 +1205,25 @@ mod tests {
             .unwrap();
         seed_installation_with_repos(&storage, ghinvite_core::SelectedRepos::Subset(vec![10, 11]))
             .await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:10:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::InstallationRepositories,
-            br#"{
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:10:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::InstallationRepositories,
+                    br#"{
                 "action": "added",
                 "repository_selection": "selected",
                 "installation": {"id": 77},
                 "repositories_removed": [{"id": 10}],
                 "repositories_added": [{"id": 12}]
             }"#,
-        ))
-        .await;
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
-                source: RepositorySelectionChangeSource::Webhook,
-            }]
-        );
+        assert_repos_changed_sent(&calls.lock().unwrap(), 77);
     }
 
     #[tokio::test]
@@ -1363,36 +1233,25 @@ mod tests {
             .unwrap();
         seed_installation_with_repos(&storage, ghinvite_core::SelectedRepos::Subset(vec![10, 11]))
             .await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:15:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::InstallationRepositories,
-            br#"{
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:15:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::InstallationRepositories,
+                    br#"{
                 "action": "added",
                 "repository_selection": "all",
                 "installation": {"id": 77},
                 "repositories_removed": [],
                 "repositories_added": []
             }"#,
-        ))
-        .await;
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
-                source: RepositorySelectionChangeSource::Webhook,
-            }]
-        );
+        assert_repos_changed_sent(&calls.lock().unwrap(), 77);
     }
 
     #[tokio::test]
@@ -1401,36 +1260,25 @@ mod tests {
             .await
             .unwrap();
         seed_installation_with_repos(&storage, ghinvite_core::SelectedRepos::All).await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::InstallationRepositories,
-            br#"{
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::InstallationRepositories,
+                    br#"{
                 "action": "removed",
                 "repository_selection": "selected",
                 "installation": {"id": 77},
                 "repositories_removed": [{"id": 10}],
                 "repositories_added": []
             }"#,
-        ))
-        .await;
+                ))
+                .await;
 
         outcome.result.unwrap();
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
-                source: RepositorySelectionChangeSource::Webhook,
-            }]
-        );
+        assert_repos_changed_sent(&calls.lock().unwrap(), 77);
     }
 
     #[tokio::test]
@@ -1443,18 +1291,13 @@ mod tests {
             ghinvite_core::SelectedRepos::Subset(vec![20, 11, 10, 11]),
         )
         .await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::InstallationRepositories,
-            br#"{
+        github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"))
+            .dispatch(Envelope::new(
+                "delivery-1",
+                EventKind::InstallationRepositories,
+                br#"{
                 "action": "removed",
                 "repository_selection": "selected",
                 "installation": {"id": 77},
@@ -1462,19 +1305,12 @@ mod tests {
                 "repositories_added": [{"id": 12, "full_name": "acme/api"}, {"id": 5}, {"id": 12}],
                 "future_field": true
             }"#,
-        ))
-        .await
-        .result
-        .unwrap();
+            ))
+            .await
+            .result
+            .unwrap();
 
-        assert_eq!(
-            calls.lock().unwrap().as_slice(),
-            [RecordedCommand::RecordRepositorySelectionChange {
-                installation_id: 77,
-                selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
-                source: RepositorySelectionChangeSource::Webhook,
-            }]
-        );
+        assert_repos_changed_sent(&calls.lock().unwrap(), 77);
     }
 
     #[tokio::test]
@@ -1484,13 +1320,9 @@ mod tests {
             .unwrap();
         seed_installation_with_repos(&storage, ghinvite_core::SelectedRepos::Subset(vec![10]))
             .await;
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
-        let dispatcher = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        );
+        let (commands, calls) = recording_commands().await;
+        let dispatcher =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"));
         let valid = serde_json::json!({
             "action": "added", "installation": {"id": 77},
             "repository_selection": "selected",
@@ -1549,13 +1381,9 @@ mod tests {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
-        let dispatcher = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        );
+        let (commands, calls) = recording_commands().await;
+        let dispatcher =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"));
 
         for (kind, payload, matched) in [
             (
@@ -1594,20 +1422,16 @@ mod tests {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::from_static("repository_invitation"),
-            br#"{"action":"accepted","invitation":{"id":99001}}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::from_static("repository_invitation"),
+                    br#"{"action":"accepted","invitation":{"id":99001}}"#,
+                ))
+                .await;
 
         outcome.result.unwrap();
         assert_eq!(outcome.matched, Match::Matched);
@@ -1619,20 +1443,16 @@ mod tests {
         let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap();
-        let commands = RecordingCommands::default();
-        let calls = commands.calls.clone();
+        let (commands, calls) = recording_commands().await;
 
-        let outcome = github_webhook_dispatcher(
-            Arc::new(storage),
-            Arc::new(commands),
-            at("2026-05-20T14:20:00Z"),
-        )
-        .dispatch(Envelope::new(
-            "delivery-1",
-            EventKind::Installation,
-            br#"{"action":"deleted"}"#,
-        ))
-        .await;
+        let outcome =
+            github_webhook_dispatcher(Arc::new(storage), commands, at("2026-05-20T14:20:00Z"))
+                .dispatch(Envelope::new(
+                    "delivery-1",
+                    EventKind::Installation,
+                    br#"{"action":"deleted"}"#,
+                ))
+                .await;
 
         assert_eq!(outcome.matched, Match::Matched);
         assert!(outcome.result.is_err());

@@ -229,9 +229,8 @@ async fn fetch(
         )
         .map_err(worker_err)?,
     );
-    let commands = Arc::new(ghinvite_web::RestateCommands::new(restate.clone()));
     let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
-    let state = ghinvite_web::AppState::new(storage, transport, commands, restate, config);
+    let state = ghinvite_web::AppState::new(storage, transport, restate, config);
     let app = ghinvite_web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`
