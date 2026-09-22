@@ -310,6 +310,9 @@ pub const EXPIRES_IN_DAYS_TOO_FAR: &str =
 pub const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
 pub const REPO_SCOPE_TOO_MANY: &str = "Repository scope is limited to 100 repositories. Select fewer repositories, or create another invitation link for the rest.";
 pub const REPO_SCOPE_UNUSABLE: &str = "GitHub returned repository details that cannot be used in a repository scope. Reload the repositories, then try again.";
+/// Form-level: every rule passed, yet the checked values could not be
+/// derived. Nothing the admin typed is at fault, so no field is highlighted.
+pub const CREATION_VALUES_UNCHECKED: &str = "The invitation link could not be created from these values. Try again, and report the problem if it keeps happening.";
 
 // --- parsers ----------------------------------------------------------------
 //
