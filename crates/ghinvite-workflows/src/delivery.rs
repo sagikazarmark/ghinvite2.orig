@@ -446,6 +446,16 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         Ok(user) => user,
         Err(error) => return Ok(unread(&error, "requester identity unverified")),
     };
+    // Mint the PUT's credential before the fence: a mint failure inside the PUT
+    // would read as GitHub's answer to a write that was never sent. A token
+    // this fresh outlives the PUT, which then reuses it from the cache.
+    if let Err(error) = state
+        .github
+        .installation_token(account.installation_id)
+        .await
+    {
+        return Ok(unread(&error, "installation token unavailable"));
+    }
     // A database write fence protects retries of this run closure even when
     // GitHub succeeded but Restate never journaled its response. It never expires.
     let generation = state.storage.claim_delivery_attempt(command).await?;
@@ -935,6 +945,45 @@ mod tests {
 
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
         assert_eq!(attempted.throttled_for_secs, Some(20));
+        mock.assert_exhausted();
+    }
+
+    /// A token mint whose token is already past its refresh window, so the
+    /// next call mints again.
+    fn stale_token_mint() -> Expectation {
+        let mut mint = token_mint(9);
+        mint.response.body = br#"{"token":"ghs_old","expires_at":"2000-01-01T00:00:00Z"}"#.to_vec();
+        mint
+    }
+
+    #[tokio::test]
+    async fn a_failed_token_mint_blocks_before_the_fence_is_claimed() {
+        // Every read mints afresh; the mint that would authorize the PUT fails.
+        let mut script = identity_expectations();
+        script[0] = stale_token_mint();
+        script.insert(2, stale_token_mint());
+        script.insert(4, stale_token_mint());
+        script.push(Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: Default::default(),
+            expected_body: None,
+            response: refusal(502, &[], "Bad Gateway"),
+        });
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_pending_create(mock.clone()).await;
+
+        let attempted = attempt(&state, &command).await.unwrap();
+
+        // Nothing was sent, so this is a prerequisite that blocked, not a PUT
+        // whose outcome is unknown.
+        assert_eq!(
+            attempted.receipt.outcome,
+            CreateOutcome::Blocked {
+                reason: "installation token unavailable".into()
+            }
+        );
+        assert!(fence_is_open(&state, &command).await);
         mock.assert_exhausted();
     }
 

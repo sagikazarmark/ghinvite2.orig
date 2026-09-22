@@ -279,6 +279,10 @@ async fn cancel_or_expire(
             return Ok(());
         }
     } else {
+        // Minted first so a 404 below can only be the invitation's own: a
+        // mint's 404 means the installation is gone, while GitHub may still
+        // hold the invitation.
+        state.github.installation_token(installation).await?;
         match state
             .github
             .delete_invitation(
@@ -432,6 +436,52 @@ mod tests {
             .unwrap_err();
 
         assert!(!err.is_terminal(), "got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    const DELETE_URL: &str = "https://api.github.test/repos/acme/api/invitations/9988";
+
+    async fn stored_state(state: &AppState, row: &GithubInvitation) -> InvitationState {
+        state
+            .storage
+            .get_github_invitation(row.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+    }
+
+    async fn cancel_row(state: &AppState, row: &GithubInvitation) -> crate::Result<()> {
+        cancel_or_expire(state, row.id, 9, dt("2026-05-05T13:00:00Z"), Some(7), false).await
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_invitation_github_already_removed_settles_it() {
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(Method::Delete, DELETE_URL, 404),
+        ]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        cancel_row(&state, &row).await.unwrap();
+
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Cancelled);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_token_mint_404_is_not_evidence_the_invitation_is_gone() {
+        // The installation is gone, not the invitation: GitHub still holds it.
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Post,
+            "https://api.github.test/app/installations/9/access_tokens",
+            404,
+        )]);
+        let (state, row) = seeded_state(mock.clone()).await;
+
+        cancel_row(&state, &row).await.unwrap_err();
+
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Sent);
         mock.assert_exhausted();
     }
 }
