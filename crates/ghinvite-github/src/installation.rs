@@ -1,7 +1,7 @@
 //! App-installation client: holds the App-JWT signer + a token cache, and
 //! exposes the installation-side endpoints.
 
-use crate::error::Result;
+use crate::error::{RateLimit, Result};
 use crate::jwt::AppJwtSigner;
 use crate::payloads::{
     GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhInvitationListItem, GhRepo,
@@ -65,6 +65,33 @@ impl CollaboratorRole {
     pub fn has_access(&self) -> bool {
         *self != Self::None
     }
+}
+
+/// What GitHub's response to adding a repository collaborator said, in HTTP
+/// terms. Each variant is a fact about the response, not a verdict about the
+/// delivery that sent it.
+#[derive(Debug)]
+pub enum CollaboratorAddition {
+    /// 201: GitHub created a pending invitation with this id.
+    Created { invitation_id: u64 },
+    /// 204: the user already collaborates on the repository, so GitHub
+    /// created no invitation.
+    AlreadyCollaborator,
+    /// A 403 or 429 carrying documented rate-limit evidence: GitHub refused the
+    /// PUT outright without deciding it, so nothing was created.
+    Throttled(RateLimit),
+    /// 401, 403 or 404 without rate-limit evidence: GitHub refused the
+    /// credential or would not let it reach the repository or user. Nothing
+    /// was created.
+    AccessRefused { status: u16 },
+    /// 400, 409 or 422: GitHub refused the request itself — an invalid
+    /// permission, an invitee it will not invite, and the like. Nothing was
+    /// created.
+    ValidationRefused { status: u16 },
+    /// No answer to the PUT could be read: it may never have been sent, may
+    /// have failed in transit, or drew a status or body GitHub gives no single
+    /// meaning to. Whether an invitation exists is not known.
+    Unanswered(crate::Error),
 }
 
 /// GitHub's answer to deleting a pending repository invitation.
@@ -329,21 +356,9 @@ impl InstallationClient {
         }
     }
 
-    /// `PUT /repos/{owner}/{repo}/collaborators/{username}`. Returns:
-    /// - `Ok(Some(invitation_id))` on 201 — recipient now has a pending invitation.
-    /// - `Ok(None)` on 204 — recipient was already a collaborator (no invitation
-    ///   created). Caller should treat as immediate-accept.
-    /// - `Err(Error::RateLimited)` when GitHub throttled the write rather than
-    ///   deciding it, so nothing was created and the PUT may be retried.
-    /// - `Err(Error::Status)` on any other status. A 403 arriving this way is a
-    ///   permission refusal, never a rate limit.
-    ///
-    /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
-    /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
-    /// already-declined invitations, etc. `Error::Status::body` carries those
-    /// sub-codes through as a sanitized summary (see [`crate::redact`]), so
-    /// callers can still tell them apart; the response body itself does not
-    /// survive. See spec §16 for the agreed error-handling discipline.
+    /// `PUT /repos/{owner}/{repo}/collaborators/{username}`, answered as the
+    /// [`CollaboratorAddition`] GitHub's response amounts to. What that means
+    /// for a delivery is the caller's decision.
     #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn add_collaborator(
         &self,
@@ -352,28 +367,49 @@ impl InstallationClient {
         repo: &str,
         username: &str,
         permission: ghinvite_core::Permission,
-    ) -> Result<Option<u64>> {
+    ) -> CollaboratorAddition {
         let path = format!(
             "/repos/{}/{}/collaborators/{}",
             path_segment(owner),
             path_segment(repo),
             path_segment(username)
         );
-        let req = self
-            .auth_request(installation_id, Method::Put, &path)
-            .await?
-            .json_body(&serde_json::json!({"permission": permission.to_string()}))?;
-        let resp = self.transport.send(req).await?;
+        let sent = async {
+            let req = self
+                .auth_request(installation_id, Method::Put, &path)
+                .await?
+                .json_body(&serde_json::json!({"permission": permission.to_string()}))?;
+            self.transport.send(req).await
+        };
+        let resp = match sent.await {
+            Ok(resp) => resp,
+            Err(err) => return CollaboratorAddition::Unanswered(err),
+        };
         match resp.status {
-            201 => {
-                let inv: GhCollaboratorInvite = resp.json()?;
-                Ok(Some(inv.id))
-            }
-            204 => Ok(None),
+            201 => match resp.json::<GhCollaboratorInvite>() {
+                Ok(invite) => CollaboratorAddition::Created {
+                    invitation_id: invite.id,
+                },
+                Err(err) => CollaboratorAddition::Unanswered(err),
+            },
+            204 => CollaboratorAddition::AlreadyCollaborator,
             _ => {
                 let err = resp.status_error();
                 tracing::warn!(status = ?err.status(), "github request failed");
-                Err(err)
+                match err {
+                    crate::Error::RateLimited { rate_limit, .. } => {
+                        CollaboratorAddition::Throttled(rate_limit)
+                    }
+                    crate::Error::Status {
+                        status: status @ (401 | 403 | 404),
+                        ..
+                    } => CollaboratorAddition::AccessRefused { status },
+                    crate::Error::Status {
+                        status: status @ (400 | 409 | 422),
+                        ..
+                    } => CollaboratorAddition::ValidationRefused { status },
+                    err => CollaboratorAddition::Unanswered(err),
+                }
             }
         }
     }
@@ -734,16 +770,23 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let id = client
+        let answer = client
             .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-            .await
-            .unwrap();
-        assert_eq!(id, Some(9988));
+            .await;
+        assert!(
+            matches!(
+                answer,
+                CollaboratorAddition::Created {
+                    invitation_id: 9988
+                }
+            ),
+            "{answer:?}"
+        );
         mock.assert_exhausted();
     }
 
     #[tokio::test]
-    async fn add_collaborator_returns_none_on_204() {
+    async fn add_collaborator_reports_an_existing_collaborator_on_204() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation {
@@ -760,42 +803,109 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let id = client
+        let answer = client
             .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-            .await
-            .unwrap();
-        assert_eq!(id, None);
+            .await;
+        assert!(
+            matches!(answer, CollaboratorAddition::AlreadyCollaborator),
+            "{answer:?}"
+        );
     }
 
-    #[tokio::test]
-    async fn add_collaborator_propagates_422() {
+    /// The PUT's answer for each refusing or unanswered status.
+    async fn add_collaborator_answer(status: u16) -> CollaboratorAddition {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation::status(
                 Method::Put,
-                "https://api.github.test/repos/acme/api/collaborators/baduser",
-                422,
+                "https://api.github.test/repos/acme/api/collaborators/octocat",
+                status,
             ),
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let err = client
-            .add_collaborator(9, "acme", "api", "baduser", Permission::Push)
-            .await
-            .unwrap_err();
-        assert_eq!(err.status(), Some(422));
+        let answer = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await;
+        mock.assert_exhausted();
+        answer
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_names_an_access_refusal() {
+        for status in [401, 403, 404] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(answer, CollaboratorAddition::AccessRefused { status: s } if s == status),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_names_a_validation_refusal() {
+        for status in [400, 409, 422] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(answer, CollaboratorAddition::ValidationRefused { status: s } if s == status),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_leaves_any_other_status_unanswered() {
+        for status in [410, 500, 502] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(&answer, CollaboratorAddition::Unanswered(error) if error.status() == Some(status)),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_leaves_an_undecodable_201_unanswered() {
+        // GitHub may well have created the invitation; its id is what is missing.
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Put,
+                url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 201,
+                    headers: BTreeMap::new(),
+                    body: b"not json".to_vec(),
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let answer = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await;
+        assert!(
+            matches!(
+                answer,
+                CollaboratorAddition::Unanswered(crate::Error::Decode(_))
+            ),
+            "{answer:?}"
+        );
     }
 
     #[tokio::test]
     async fn add_collaborator_separates_a_throttled_403_from_a_denied_one() {
+        let throttled = crate::RateLimit {
+            scope: crate::RateLimitScope::Secondary,
+            retry_after: Some(std::time::Duration::from_secs(42)),
+        };
         for (headers, message, expected_limit) in [
             (
                 vec![("retry-after", "42")],
                 "You have exceeded a secondary rate limit",
-                Some(crate::RateLimit {
-                    scope: crate::RateLimitScope::Secondary,
-                    retry_after: Some(std::time::Duration::from_secs(42)),
-                }),
+                Some(throttled),
             ),
             (vec![], "Resource not accessible by integration", None),
         ] {
@@ -818,17 +928,20 @@ mod write_tests {
             ]);
             let client = InstallationClient::new(Arc::new(mock.clone()), signer())
                 .with_base("https://api.github.test");
-            let err = client
+            let answer = client
                 .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-                .await
-                .unwrap_err();
+                .await;
             // Same status either way; the classification is what separates them.
-            assert_eq!(err.status(), Some(403));
-            assert_eq!(
-                err.rate_limit(),
-                expected_limit,
-                "unexpected classification of {message:?}: {err:?}"
-            );
+            match expected_limit {
+                Some(limit) => assert!(
+                    matches!(answer, CollaboratorAddition::Throttled(l) if l == limit),
+                    "unexpected classification of {message:?}: {answer:?}"
+                ),
+                None => assert!(
+                    matches!(answer, CollaboratorAddition::AccessRefused { status: 403 }),
+                    "unexpected classification of {message:?}: {answer:?}"
+                ),
+            }
         }
     }
 

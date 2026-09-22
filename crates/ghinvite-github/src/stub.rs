@@ -334,7 +334,9 @@ async fn reset(State(state): State<SharedState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InstallationClient, jwt::AppJwtSigner, transport::ReqwestTransport};
+    use crate::{
+        CollaboratorAddition, InstallationClient, jwt::AppJwtSigner, transport::ReqwestTransport,
+    };
     use ghinvite_core::Permission;
 
     #[tokio::test]
@@ -366,12 +368,18 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
         }
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "member", "alice", Permission::Pull)
-                .await
-                .unwrap(),
-            None
+        let add = |repo: &'static str| {
+            let github = github.clone();
+            async move {
+                github
+                    .add_collaborator(1, "acme", repo, "alice", Permission::Pull)
+                    .await
+            }
+        };
+        let answer = add("member").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::AlreadyCollaborator),
+            "{answer:?}"
         );
         assert!(
             github
@@ -379,46 +387,39 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "denied", "alice", Permission::Pull)
-                .await
-                .unwrap_err()
-                .status(),
-            Some(422)
-        );
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "retry", "alice", Permission::Pull)
-                .await
-                .unwrap_err()
-                .status(),
-            Some(502)
-        );
+        let answer = add("denied").await;
         assert!(
-            github
-                .add_collaborator(1, "acme", "retry", "alice", Permission::Pull)
-                .await
-                .unwrap()
-                .is_some()
+            matches!(
+                answer,
+                CollaboratorAddition::ValidationRefused { status: 422 }
+            ),
+            "{answer:?}"
+        );
+        let answer = add("retry").await;
+        assert!(
+            matches!(&answer, CollaboratorAddition::Unanswered(error) if error.status() == Some(502)),
+            "{answer:?}"
+        );
+        let answer = add("retry").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::Created { .. }),
+            "{answer:?}"
         );
         // The throttled refusal is a 403 like `denied`, but its documented
         // evidence separates it from a permission decision.
-        let throttled = github
-            .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
-            .await
-            .unwrap_err();
-        assert_eq!(throttled.status(), Some(403));
-        assert_eq!(
-            throttled.rate_limit().and_then(|limit| limit.retry_after),
-            Some(std::time::Duration::from_secs(1))
-        );
+        let answer = add("throttled").await;
         assert!(
-            github
-                .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
-                .await
-                .unwrap()
-                .is_some()
+            matches!(
+                answer,
+                CollaboratorAddition::Throttled(limit)
+                    if limit.retry_after == Some(std::time::Duration::from_secs(1))
+            ),
+            "{answer:?}"
+        );
+        let answer = add("throttled").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::Created { .. }),
+            "{answer:?}"
         );
         let calls: serde_json::Value = http
             .get(format!("{base}/calls"))
@@ -461,11 +462,12 @@ mod tests {
             AppJwtSigner::from_pem(123, include_str!("jwt_test_key.pem")).unwrap(),
         )
         .with_base(base);
-        let id = github
+        let CollaboratorAddition::Created { invitation_id: id } = github
             .add_collaborator(1, "acme", "api", "alice", Permission::Push)
             .await
-            .expect("stub must return a decodable 201 invitation")
-            .unwrap();
+        else {
+            panic!("stub must return a decodable 201 invitation");
+        };
         assert!(id > 0);
         assert!(
             !github
