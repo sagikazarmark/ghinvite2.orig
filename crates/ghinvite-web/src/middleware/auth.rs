@@ -36,13 +36,11 @@ pub async fn check_admin(
         return Ok(cached.is_admin);
     }
     let user_api = UserApiClient::new(state.github_transport.clone(), session.access_token.clone());
-    let is_admin = match user_api.get_org_membership(&account.account_login).await {
-        Ok(m) => {
-            m.organization.id == account.account_id && m.role == "admin" && m.state == "active"
-        }
-        Err(ghinvite_github::Error::Status { status: 404, .. }) => false,
-        Err(e) => return Err(WebError::Github(e)),
-    };
+    let is_admin = user_api
+        .get_org_membership(&account.account_login)
+        .await
+        .map_err(WebError::Github)?
+        .is_active_admin_of(account.account_id);
     session.admin_checks.insert(
         cache_key,
         AdminCheck {

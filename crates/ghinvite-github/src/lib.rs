@@ -31,7 +31,7 @@ pub mod wasm_smoke;
 // Re-exports filled in as each module gains its public types:
 pub use error::{Error, RateLimit, RateLimitScope, Result};
 pub use installation::InstallationClient;
-pub use oauth::{AuthorizeUrl, OAuthConfig, UserApiClient};
+pub use oauth::{AuthorizeUrl, OAuthConfig, OrgMembership, UserApiClient};
 // `redact` itself stays private — bodies are summarised inside this crate —
 // but the rule for bounding an upstream-supplied code is needed by the web
 // crate too, which reads the same kind of value off GitHub's callback query
