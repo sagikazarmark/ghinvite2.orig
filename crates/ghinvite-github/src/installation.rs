@@ -158,8 +158,15 @@ impl InstallationClient {
 
     /// Read collaborator permission and the identity returned with it. Unlike
     /// a login-only 204 membership probe this provides numeric identity evidence.
-    /// The role is GitHub's `role_name` when it sends one (custom roles only
-    /// appear there), otherwise its coarser `permission`.
+    /// The role is GitHub's `role_name` when it sends a non-empty one (custom
+    /// roles only appear there), otherwise its coarser `permission`. A read
+    /// naming no role at all is a decode error, never a custom role: that
+    /// would count as access.
+    ///
+    /// A user without access is a 200 naming `none`. A 404 stays an error:
+    /// GitHub documents it only as "Resource not found", which covers a login
+    /// that no longer resolves and a repository this installation cannot see
+    /// alike, so the caller decides what it means from what it verified first.
     pub async fn collaborator_permission(
         &self,
         installation_id: u64,
@@ -184,10 +191,14 @@ impl InstallationClient {
             .auth_request(installation_id, Method::Get, &path)
             .await?;
         let result: Permission = self.transport.send(req).await?.ensure_success()?.json()?;
-        Ok((
-            result.user.id,
-            CollaboratorRole::parse(&result.role_name.unwrap_or(result.permission)),
-        ))
+        let role = result
+            .role_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or(result.permission);
+        if role.is_empty() {
+            return Err(crate::Error::decode_shape("collaborator permission"));
+        }
+        Ok((result.user.id, CollaboratorRole::parse(&role)))
     }
 
     /// Resolve immutable user identity to addressing data and revalidate that
@@ -1313,5 +1324,53 @@ mod collaborator_role_tests {
             .await
             .unwrap();
         assert_eq!(role, CollaboratorRole::None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_role_name_reads_the_permission_not_a_custom_role() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "none",
+                    "role_name": ""
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        // An empty name is no role at all, so it must not read as a custom
+        // role — which would count as access.
+        assert_eq!(role, CollaboratorRole::None);
+    }
+
+    #[tokio::test]
+    async fn a_permission_read_naming_no_role_is_a_decode_error() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "",
+                    "role_name": ""
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Decode(_)), "got {err:?}");
     }
 }

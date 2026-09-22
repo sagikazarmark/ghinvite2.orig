@@ -72,6 +72,8 @@ pub async fn observe(
     {
         Ok((id, role)) if id == context.request.requester_id => role.has_access(),
         Ok(_) => return Ok(None), // rename/reassignment raced identity lookup
+        // GitHub's 404 here does not say which resource is missing. The
+        // repository was verified reachable above, so it is read as the login.
         Err(ghinvite_github::Error::Status { status: 404, .. }) => {
             // Recheck identity after negative login-addressed evidence.
             if state
