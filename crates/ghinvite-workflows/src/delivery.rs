@@ -6,6 +6,7 @@ use ghinvite_core::{
     delivery::{CreateCommand, CreateOutcome, CreateReceipt},
     storage::Error,
 };
+use ghinvite_github::{CollaboratorAddition, RateLimit};
 use restate_sdk::{
     context::{
         Context, ContextClient, ContextReadState, ContextSideEffects, ContextWriteState,
@@ -294,8 +295,8 @@ impl Attempt {
     /// Pair a receipt with the bounded wait GitHub's throttling guidance
     /// allows. Only a receipt reporting no confirmed outcome carries one, so a
     /// wait can never shorten the life of a settled delivery.
-    fn throttled_by(receipt: CreateReceipt, error: &ghinvite_github::Error) -> Self {
-        let retry_after = error.rate_limit().and_then(|limit| limit.retry_after);
+    fn throttled_by(receipt: CreateReceipt, limit: RateLimit) -> Self {
+        let retry_after = limit.retry_after;
         Self {
             throttled_for_secs: (!receipt.outcome.confirmed())
                 .then(|| crate::throttle::backoff(retry_after).as_secs()),
@@ -416,8 +417,8 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
     // A prerequisite GitHub would not answer for is not a prerequisite that went
     // away: it blocks on GitHub's wait rather than on the unavailability cadence.
     let unread = |error: &ghinvite_github::Error, unavailable: &str| match error.rate_limit() {
-        Some(_) => {
-            Attempt::throttled_by(blocked("GitHub throttled a delivery prerequisite"), error)
+        Some(limit) => {
+            Attempt::throttled_by(blocked("GitHub throttled a delivery prerequisite"), limit)
         }
         None => blocked(unavailable).into(),
     };
@@ -447,8 +448,9 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         Err(error) => return Ok(unread(&error, "requester identity unverified")),
     };
     // Mint the PUT's credential before the fence: a mint failure inside the PUT
-    // would read as GitHub's answer to a write that was never sent. A token
-    // this fresh outlives the PUT, which then reuses it from the cache.
+    // leaves the PUT unanswered, fencing a write that was never sent as outcome
+    // unknown. A token this fresh outlives the PUT, which then reuses it from
+    // the cache.
     if let Err(error) = state
         .github
         .installation_token(account.installation_id)
@@ -472,30 +474,28 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
             )
             .await
         {
-            Ok(Some(upstream_id)) => CreateOutcome::Created { upstream_id },
-            Ok(None) => CreateOutcome::AlreadyCollaborator,
+            CollaboratorAddition::Created { invitation_id } => CreateOutcome::Created {
+                upstream_id: invitation_id,
+            },
+            CollaboratorAddition::AlreadyCollaborator => CreateOutcome::AlreadyCollaborator,
             // A throttled response is GitHub refusing the PUT outright, so it is
             // as explicit a rejection as a 403: the write did not happen and
             // this exact generation may be claimed again. Only a *response*
-            // reaches this arm — a transport failure falls through to
-            // `OutcomeUnknown` below and keeps the fence, so throttling can
-            // never release an ambiguous PUT.
-            Err(error @ ghinvite_github::Error::RateLimited { .. }) => {
+            // is throttled — a transport failure is unanswered and keeps the
+            // fence, so throttling can never release an ambiguous PUT.
+            CollaboratorAddition::Throttled(limit) => {
                 state
                     .storage
                     .reject_delivery_attempt(command.invitation_id, generation)
                     .await?;
-                throttled_by = Some(error);
+                throttled_by = Some(limit);
                 CreateOutcome::Blocked {
                     reason: "GitHub throttled delivery".into(),
                 }
             }
-            // The remaining authorization rejections. A 429 never lands here:
-            // the status is throttling evidence, so it arrives above.
-            Err(ghinvite_github::Error::Status {
-                status: 401 | 403 | 404,
-                ..
-            }) => {
+            // An access refusal is a prerequisite gone missing, not a verdict on
+            // the invitation, so it blocks and releases the fence for a retry.
+            CollaboratorAddition::AccessRefused { .. } => {
                 state
                     .storage
                     .reject_delivery_attempt(command.invitation_id, generation)
@@ -504,11 +504,8 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
                     reason: "GitHub rejected access".into(),
                 }
             }
-            Err(ghinvite_github::Error::Status {
-                status: status @ (400 | 409 | 422),
-                ..
-            }) => CreateOutcome::Failed { status },
-            Err(_) => CreateOutcome::OutcomeUnknown,
+            CollaboratorAddition::ValidationRefused { status } => CreateOutcome::Failed { status },
+            CollaboratorAddition::Unanswered(_) => CreateOutcome::OutcomeUnknown,
         }
     } else {
         // Reconciliation is read-only. Absence, API failure, or a subsequently
@@ -522,15 +519,16 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         // The outcome stays unknown either way: a limit is not evidence about
         // the original PUT.
         let mut unread = |error: ghinvite_github::Error| {
-            if error.rate_limit().is_some() {
-                throttled_by = Some(error);
+            if let Some(limit) = error.rate_limit() {
+                throttled_by = Some(limit);
             }
             CreateOutcome::OutcomeUnknown
         };
         match pending {
             Ok(items) => match items.iter().find(|i| {
                 i.invitee.id == command.requester_id
-                    && permission_matches(&i.permissions, command.permission)
+                    && ghinvite_github::CollaboratorRole::parse(&i.permissions)
+                        .matches(command.permission)
             }) {
                 Some(item) => CreateOutcome::Created {
                     upstream_id: item.id,
@@ -545,9 +543,8 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
                     )
                     .await
                 {
-                    Ok((id, permission))
-                        if id == command.requester_id
-                            && permission_matches(&permission, command.permission) =>
+                    Ok((id, role))
+                        if id == command.requester_id && role.matches(command.permission) =>
                     {
                         CreateOutcome::AlreadyCollaborator
                     }
@@ -566,22 +563,10 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         outcome,
         revision: 1,
     };
-    Ok(match &throttled_by {
-        Some(error) => Attempt::throttled_by(receipt, error),
+    Ok(match throttled_by {
+        Some(limit) => Attempt::throttled_by(receipt, limit),
         None => receipt.into(),
     })
-}
-
-fn permission_matches(value: &str, permission: ghinvite_core::Permission) -> bool {
-    value == permission.to_string()
-        || value
-            == match permission {
-                ghinvite_core::Permission::Pull => "read",
-                ghinvite_core::Permission::Push => "write",
-                ghinvite_core::Permission::Triage => "triage",
-                ghinvite_core::Permission::Maintain => "maintain",
-                ghinvite_core::Permission::Admin => "admin",
-            }
 }
 
 async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), HandlerError> {

@@ -16,6 +16,10 @@ use serde_json::json;
 #[derive(Default)]
 struct StubState {
     installation_account: Option<serde_json::Value>,
+    /// The repository IDs the installation makes available, when a fixture
+    /// needs the scope to change under it. Defaults to `acme/api` and
+    /// `acme/web`.
+    installation_repos: Option<Vec<u64>>,
     user_login: Option<String>,
     addressed_id: Option<u64>,
     access_role: Option<String>,
@@ -79,7 +83,15 @@ fn routes(state: SharedState) -> Router {
         .route("/app/installations/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move {
             Json(json!({"id":id,"account":state.lock().unwrap().installation_account.clone().unwrap_or(json!({"id":100,"login":"acme","type":"Organization"})),"suspended_at":null}))
         }))
-        .route("/installation/repositories", get(|| async { Json(json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]})) }))
+        .route("/installation-repositories", post(|State(state): State<SharedState>, Json(input): Json<Vec<u64>>| async move {
+            state.lock().unwrap().installation_repos = Some(input);
+            StatusCode::NO_CONTENT
+        }))
+        .route("/installation/repositories", get(|State(state): State<SharedState>| async move {
+            let repos = state.lock().unwrap().installation_repos.clone().unwrap_or_else(|| vec![10, 11]);
+            let repositories: Vec<_> = repos.iter().map(|id| json!({"id":id,"full_name":repo_full_name(*id),"private":true})).collect();
+            Json(json!({"total_count":repositories.len(),"repositories":repositories}))
+        }))
         .route("/user/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move { Json(json!({"id":id,"login":state.lock().unwrap().user_login.as_deref().unwrap_or("alice")})) }))
         .route("/users/{login}", get(|Path(login): Path<String>, State(state): State<SharedState>| async move { Json(json!({"id":state.lock().unwrap().addressed_id.unwrap_or(8),"login":login})) }))
         .route("/identity", post(|State(state): State<SharedState>, Json(input): Json<serde_json::Value>| async move {
@@ -325,6 +337,16 @@ async fn get_calls(State(state): State<SharedState>) -> impl IntoResponse {
     })
 }
 
+/// The two repositories every other fixture already names, and a stable name
+/// for any further ID a fixture makes available.
+fn repo_full_name(id: u64) -> String {
+    match id {
+        10 => "acme/api".to_owned(),
+        11 => "acme/web".to_owned(),
+        other => format!("acme/repo-{other}"),
+    }
+}
+
 async fn reset(State(state): State<SharedState>) -> impl IntoResponse {
     let mut s = state.lock().unwrap();
     *s = StubState::default();
@@ -334,7 +356,9 @@ async fn reset(State(state): State<SharedState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InstallationClient, jwt::AppJwtSigner, transport::ReqwestTransport};
+    use crate::{
+        CollaboratorAddition, InstallationClient, jwt::AppJwtSigner, transport::ReqwestTransport,
+    };
     use ghinvite_core::Permission;
 
     #[tokio::test]
@@ -366,12 +390,18 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
         }
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "member", "alice", Permission::Pull)
-                .await
-                .unwrap(),
-            None
+        let add = |repo: &'static str| {
+            let github = github.clone();
+            async move {
+                github
+                    .add_collaborator(1, "acme", repo, "alice", Permission::Pull)
+                    .await
+            }
+        };
+        let answer = add("member").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::AlreadyCollaborator),
+            "{answer:?}"
         );
         assert!(
             github
@@ -379,46 +409,39 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "denied", "alice", Permission::Pull)
-                .await
-                .unwrap_err()
-                .status(),
-            Some(422)
-        );
-        assert_eq!(
-            github
-                .add_collaborator(1, "acme", "retry", "alice", Permission::Pull)
-                .await
-                .unwrap_err()
-                .status(),
-            Some(502)
-        );
+        let answer = add("denied").await;
         assert!(
-            github
-                .add_collaborator(1, "acme", "retry", "alice", Permission::Pull)
-                .await
-                .unwrap()
-                .is_some()
+            matches!(
+                answer,
+                CollaboratorAddition::ValidationRefused { status: 422 }
+            ),
+            "{answer:?}"
+        );
+        let answer = add("retry").await;
+        assert!(
+            matches!(&answer, CollaboratorAddition::Unanswered(error) if error.status() == Some(502)),
+            "{answer:?}"
+        );
+        let answer = add("retry").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::Created { .. }),
+            "{answer:?}"
         );
         // The throttled refusal is a 403 like `denied`, but its documented
         // evidence separates it from a permission decision.
-        let throttled = github
-            .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
-            .await
-            .unwrap_err();
-        assert_eq!(throttled.status(), Some(403));
-        assert_eq!(
-            throttled.rate_limit().and_then(|limit| limit.retry_after),
-            Some(std::time::Duration::from_secs(1))
-        );
+        let answer = add("throttled").await;
         assert!(
-            github
-                .add_collaborator(1, "acme", "throttled", "alice", Permission::Pull)
-                .await
-                .unwrap()
-                .is_some()
+            matches!(
+                answer,
+                CollaboratorAddition::Throttled(limit)
+                    if limit.retry_after == Some(std::time::Duration::from_secs(1))
+            ),
+            "{answer:?}"
+        );
+        let answer = add("throttled").await;
+        assert!(
+            matches!(answer, CollaboratorAddition::Created { .. }),
+            "{answer:?}"
         );
         let calls: serde_json::Value = http
             .get(format!("{base}/calls"))
@@ -461,11 +484,12 @@ mod tests {
             AppJwtSigner::from_pem(123, include_str!("jwt_test_key.pem")).unwrap(),
         )
         .with_base(base);
-        let id = github
+        let CollaboratorAddition::Created { invitation_id: id } = github
             .add_collaborator(1, "acme", "api", "alice", Permission::Push)
             .await
-            .expect("stub must return a decodable 201 invitation")
-            .unwrap();
+        else {
+            panic!("stub must return a decodable 201 invitation");
+        };
         assert!(id > 0);
         assert!(
             !github
@@ -478,10 +502,13 @@ mod tests {
         assert_eq!(pending[0].id, id);
         assert_eq!(pending[0].invitee.login, "alice");
         assert_eq!(pending[0].permissions, "write");
-        github
-            .delete_invitation(1, "acme", "api", id)
-            .await
-            .unwrap();
+        assert_eq!(
+            github
+                .delete_invitation(1, "acme", "api", id)
+                .await
+                .unwrap(),
+            crate::InvitationDeletion::Deleted
+        );
         assert!(
             github
                 .list_invitations(1, "acme", "api")
@@ -493,9 +520,8 @@ mod tests {
             github
                 .delete_invitation(1, "acme", "api", id)
                 .await
-                .unwrap_err()
-                .status(),
-            Some(404)
+                .unwrap(),
+            crate::InvitationDeletion::NotFound
         );
     }
 }

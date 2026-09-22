@@ -36,8 +36,6 @@ pub enum FieldKind {
     RegistryNumber { min: Option<i64>, max: Option<i64> },
     /// Multi-line `<textarea>`; the value is rendered as its text content.
     Textarea { rows: Option<u32> },
-    /// `<input type="number" inputmode="numeric">`.
-    Number { min: Option<i64>, max: Option<i64> },
 }
 
 #[derive(Clone, PartialEq, Props)]
@@ -140,30 +138,7 @@ pub fn Field(props: FieldProps) -> Element {
                 }
             }
         }
-        FieldKind::Text { maxlength } => input_control(
-            &props,
-            described_by,
-            listeners,
-            InputAttrs {
-                input_type: "text",
-                inputmode: None,
-                maxlength: maxlength.map(|n| n.to_string()),
-                min: None,
-                max: None,
-            },
-        ),
-        FieldKind::Number { min, max } => input_control(
-            &props,
-            described_by,
-            listeners,
-            InputAttrs {
-                input_type: "number",
-                inputmode: Some("numeric"),
-                maxlength: None,
-                min: min.map(|n| n.to_string()),
-                max: max.map(|n| n.to_string()),
-            },
-        ),
+        FieldKind::Text { maxlength } => input_control(&props, described_by, listeners, *maxlength),
     };
 
     rsx! {
@@ -238,23 +213,12 @@ fn RegistryInputField(field: FieldProps) -> Element {
     }
 }
 
-/// The attributes that differ between the `<input>`-based kinds. Numeric
-/// values are pre-formatted so SSR emits them quoted (`min="1"`), matching the
-/// hand-written markup they replace.
-struct InputAttrs {
-    input_type: &'static str,
-    inputmode: Option<&'static str>,
-    maxlength: Option<String>,
-    min: Option<String>,
-    max: Option<String>,
-}
-
-/// The single `<input>` element used by every non-textarea kind.
+/// The native single-line `<input type="text">`.
 fn input_control(
     props: &FieldProps,
     described_by: Option<String>,
     listeners: Vec<Attribute>,
-    attrs: InputAttrs,
+    maxlength: Option<u32>,
 ) -> Element {
     let class = if props.error.is_some() {
         "input input-bordered input-error w-full"
@@ -264,15 +228,12 @@ fn input_control(
     rsx! {
         input {
             id: "{props.id}",
-            r#type: attrs.input_type,
+            r#type: "text",
             name: "{props.name}",
             value: "{props.value}",
             class: "{class}",
             required: props.required,
-            inputmode: attrs.inputmode,
-            maxlength: attrs.maxlength,
-            min: attrs.min,
-            max: attrs.max,
+            maxlength: maxlength.map(|n| n.to_string()),
             placeholder: props.placeholder.clone(),
             aria_invalid: if props.error.is_some() { "true" },
             aria_describedby: described_by,
@@ -611,7 +572,7 @@ mod tests {
                     id: "expires_in_days",
                     name: "expires_in_days",
                     label: "Expires in days",
-                    kind: FieldKind::Number { min: Some(1), max: None },
+                    kind: FieldKind::Text { maxlength: None },
                     value: "30",
                 }
             }
@@ -634,7 +595,7 @@ mod tests {
                     id: "max_uses",
                     name: "max_uses",
                     label: "Max use",
-                    kind: FieldKind::Number { min: Some(1), max: None },
+                    kind: FieldKind::Text { maxlength: None },
                     value: "0",
                     error: "Max use must be a positive whole number.",
                 }
@@ -645,33 +606,6 @@ mod tests {
         assert!(html.contains("aria-describedby=\"max_uses-error\""));
         assert!(html.contains("id=\"max_uses-error\""));
         assert!(!html.contains("max_uses-help"));
-    }
-
-    #[test]
-    fn number_field_renders_type_min_max_and_inputmode() {
-        let html = render(|| {
-            rsx! {
-                Field {
-                    id: "max_uses",
-                    name: "max_uses",
-                    label: "Max use",
-                    kind: FieldKind::Number { min: Some(1), max: Some(365) },
-                    value: "7",
-                    placeholder: "Unlimited",
-                    help: "Blank means unlimited invitation requests.",
-                }
-            }
-        });
-
-        assert!(html.contains("type=\"number\""));
-        assert!(html.contains("inputmode=\"numeric\""));
-        assert!(html.contains("min=\"1\""));
-        assert!(html.contains("max=\"365\""));
-        assert!(html.contains("name=\"max_uses\" value=\"7\""));
-        assert!(html.contains("class=\"input input-bordered w-full\""));
-        assert!(html.contains("placeholder=\"Unlimited\""));
-        assert!(!html.contains("maxlength"));
-        assert!(!html.contains("rows"));
     }
 
     #[test]

@@ -14,9 +14,9 @@ use crate::projection::InvitationProjectionClient;
 use crate::request_lifecycle::InvitationRequestClient;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
+use ghinvite_core::storage::projection::LinkMetadata;
 use ghinvite_core::{
-    Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
-    RequestId, RequestState, Slug,
+    InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState, Slug,
 };
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
@@ -212,8 +212,8 @@ impl InvitationLink {
         decision: AdmissionDecision,
     ) -> Result<AdmissionReceipt, TerminalError> {
         let blocker_key = keys::blocker(input.requester_id);
-        if decision.projection.is_some() {
-            ctx.set(keys::LINK, Json(decision.link.clone()));
+        if let Some(link) = &decision.link {
+            ctx.set(keys::LINK, Json(link.clone()));
             self.checkpoint(ctx, "after-link").await?;
         }
         if let Some(expired) = &decision.expired {
@@ -431,29 +431,9 @@ fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError
     Ok(keys::lifecycle_op(&input.operation_id))
 }
 
-fn normalize_creation(mut input: CreateLink) -> Result<CreateLink, TerminalError> {
+fn normalize_creation(input: CreateLink) -> Result<CreateLink, TerminalError> {
     validate_admin(&input.admin, input.account_id)?;
-    if input.installation_id == 0 || input.max_uses == Some(0) {
-        return Err(invalid());
-    }
-    (input.description, input.internal_note) =
-        normalize_metadata(&input.description, input.internal_note)?;
-    input.repos = RepositoryScope::parse(input.repos)
-        .map_err(|_| invalid())?
-        .into();
-    Ok(input)
-}
-
-fn normalize_metadata(
-    description: &str,
-    internal_note: Option<String>,
-) -> Result<(String, Option<String>), TerminalError> {
-    let description = Description::parse(description).map_err(|_| invalid())?;
-    let internal_note = match internal_note {
-        Some(note) => InternalNote::parse(&note).map_err(|_| invalid())?,
-        None => None,
-    };
-    Ok((description.into(), internal_note.map(String::from)))
+    input.normalized().map_err(|_| invalid())
 }
 
 #[restate_sdk::object]
@@ -462,7 +442,7 @@ impl InvitationLink {
     async fn update_metadata(
         &self,
         ctx: ObjectContext<'_>,
-        Json(mut input): Json<UpdateMetadata>,
+        Json(input): Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         validate_key(&ctx, input.link_id).await?;
         let Json(mut link) = ctx
@@ -470,17 +450,14 @@ impl InvitationLink {
             .await?
             .ok_or_else(missing)?;
         validate_admin(&input.admin, link.creation.account_id)?;
-        (input.description, input.internal_note) =
-            normalize_metadata(&input.description, input.internal_note)?;
-        if link.description() == input.description
-            && link.internal_note() == input.internal_note.as_deref()
+        let metadata = LinkMetadata::parse(&input.description, input.internal_note.as_deref())
+            .map_err(|_| invalid())?;
+        if link.description() == metadata.description
+            && link.internal_note() == metadata.internal_note.as_deref()
         {
             return Ok(Json(link));
         }
-        link.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
-            description: input.description,
-            internal_note: input.internal_note,
-        });
+        link.metadata = Some(metadata);
         link.revision += 1;
         let Json(event) = ctx
             .run(|| async {
@@ -883,10 +860,7 @@ impl InvitationLink {
                 }))
                 .call()
                 .await;
-            match observation {
-                Ok(Json(observation)) => observation,
-                Err(_) => Eligibility::Unknown,
-            }
+            crate::availability::called_eligibility(observation.map(|Json(o)| o))?
         } else {
             Eligibility::Available
         };

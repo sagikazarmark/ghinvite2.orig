@@ -8,12 +8,12 @@ pub mod error;
 pub(crate) mod forms;
 pub mod link_authority;
 pub mod middleware;
+pub mod render;
 pub mod restate_client;
 pub mod routes;
 pub mod session;
 pub mod session_store;
 pub mod state;
-pub mod views;
 pub mod wasm_compat;
 
 // Re-exports filled in as types appear:

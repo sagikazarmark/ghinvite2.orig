@@ -15,9 +15,6 @@ use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
 
-/// Upper bound on repository pages walked for one listing (100 per page).
-const MAX_REPOSITORY_PAGES: usize = 1000;
-
 /// Configuration for the GitHub App's OAuth surface. The web binary owns the
 /// `client_secret`; the Restate worker never sees it.
 #[derive(Clone, Debug)]
@@ -129,6 +126,43 @@ pub async fn exchange_code<T: HttpTransport + ?Sized>(
     Ok(token)
 }
 
+/// A GitHub user's standing in an organization, as
+/// `GET /user/memberships/orgs/{login}` answers it for the signed-in user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrgMembership {
+    /// GitHub answered 404: the user is not a member of that organization.
+    NotMember,
+    /// The user belongs to the organization with this immutable id. `admin`
+    /// is an owner's role; `active` is false while the membership is pending.
+    Member {
+        organization_id: u64,
+        admin: bool,
+        active: bool,
+    },
+}
+
+impl OrgMembership {
+    /// Whether this is an active admin membership of exactly the organization
+    /// with `organization_id`. Authority binds to the id GitHub returned, never
+    /// to the login that was asked about — logins can be renamed and reused.
+    pub fn is_active_admin_of(&self, organization_id: u64) -> bool {
+        matches!(
+            *self,
+            Self::Member { organization_id: id, admin: true, active: true } if id == organization_id
+        )
+    }
+}
+
+impl From<GhMembership> for OrgMembership {
+    fn from(m: GhMembership) -> Self {
+        Self::Member {
+            organization_id: m.organization.id,
+            admin: m.role == "admin",
+            active: m.state == "active",
+        }
+    }
+}
+
 /// User-token API client. Constructed per signed-in session (the access token
 /// is encrypted at rest in the server-side session record; the web binary decrypts it
 /// before instantiating this client per request).
@@ -162,11 +196,11 @@ impl UserApiClient {
     }
 
     fn auth_request(&self, method: Method, path: &str) -> Request {
-        Request::new(method, format!("{}{}", self.base_url, path))
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {}", self.user_token))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28")
+        crate::util::github_request(
+            method,
+            format!("{}{}", self.base_url, path),
+            &self.user_token,
+        )
     }
 
     /// `GET /user` — returns the signed-in user's basic profile. Used at sign-in
@@ -188,14 +222,14 @@ impl UserApiClient {
     }
 
     /// `GET /user/memberships/orgs/{login}` — used by the admin recheck path
-    /// (spec §10.3). Returns `Error::Status { status: 404, .. }` if the user is
-    /// not a member of the org; the caller should map that to "not admin".
+    /// (spec §10.3). A 404 is GitHub's answer that the user is not a member of
+    /// the org, so it reads as [`OrgMembership::NotMember`], not as an error.
     ///
-    /// **Errors:** `Error::Status` for non-2xx, `Error::RateLimited` for a
-    /// throttled 403/429 — which is not evidence of non-membership — and
+    /// **Errors:** `Error::Status` for any other non-2xx, `Error::RateLimited`
+    /// for a throttled 403/429 — which is not evidence of non-membership — and
     /// `Error::Decode` for malformed JSON.
     #[tracing::instrument(skip(self), fields(method = "get_org_membership", org_login))]
-    pub async fn get_org_membership(&self, org_login: &str) -> Result<GhMembership> {
+    pub async fn get_org_membership(&self, org_login: &str) -> Result<OrgMembership> {
         // Path-encode the login to defend against odd characters (org renames,
         // etc.).
         let path = format!(
@@ -205,29 +239,44 @@ impl UserApiClient {
         tracing::debug!("calling GET /user/memberships/orgs/{{org_login}}");
         let req = self.auth_request(Method::Get, &path);
         let resp = self.transport.send(req).await?;
+        if resp.status == 404 {
+            return Ok(OrgMembership::NotMember);
+        }
         if !(200..300).contains(&resp.status) {
             tracing::warn!(
                 status = resp.status,
                 "github GET /user/memberships/orgs returned non-2xx"
             );
         }
-        resp.ensure_success()?.json()
+        Ok(resp.ensure_success()?.json::<GhMembership>()?.into())
     }
 
     /// `GET /user/installations` — installations of this GitHub App that the
     /// signed-in user can access. Used by setup-return handling to verify the
-    /// untrusted `installation_id` query parameter from GitHub.
+    /// untrusted `installation_id` query parameter from GitHub, and by the
+    /// console to list the accounts the user can administer.
+    ///
+    /// Follows GitHub's `Link: rel="next"` pages to the end; `total_count` is
+    /// GitHub's own. A listing that cycles or exceeds its page bound is an
+    /// error rather than a partial list: a missing installation would read as
+    /// one the user cannot see.
     #[tracing::instrument(skip(self), fields(method = "list_user_installations"))]
     pub async fn list_user_installations(&self) -> Result<GhUserInstallationList> {
-        let req = self.auth_request(Method::Get, "/user/installations?per_page=100");
-        let resp = self.transport.send(req).await?;
-        if !(200..300).contains(&resp.status) {
-            tracing::warn!(
-                status = resp.status,
-                "github GET /user/installations returned non-2xx"
-            );
-        }
-        resp.ensure_success()?.json()
+        let mut listed: Option<GhUserInstallationList> = None;
+        self.walk_listing(
+            "/user/installations?per_page=100".into(),
+            "github GET /user/installations returned non-2xx",
+            |resp| {
+                let page: GhUserInstallationList = resp.json()?;
+                match &mut listed {
+                    Some(listed) => listed.installations.extend(page.installations),
+                    None => listed = Some(page),
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(listed.expect("a complete walk reads at least one page"))
     }
 
     /// `GET /user/installations/{installation_id}/repositories` — repos the
@@ -236,8 +285,8 @@ impl UserApiClient {
     /// record a selected installation's repositories.
     ///
     /// Follows GitHub's `Link: rel="next"` pages to the end; `total_count` is
-    /// GitHub's own. A listing that cycles or exceeds
-    /// `MAX_REPOSITORY_PAGES` is an error rather than a partial list.
+    /// GitHub's own. A listing that cycles or exceeds its page bound is an
+    /// error rather than a partial list.
     #[tracing::instrument(
         skip(self),
         fields(method = "list_user_installation_repos", installation_id)
@@ -246,40 +295,47 @@ impl UserApiClient {
         &self,
         installation_id: u64,
     ) -> Result<GhInstallationRepos> {
-        let mut path = format!("/user/installations/{installation_id}/repositories?per_page=100");
         let mut listed: Option<GhInstallationRepos> = None;
-        // Every page already walked: a cycle of any length is a paging fault.
-        let mut walked = std::collections::HashSet::new();
-        for _ in 0..MAX_REPOSITORY_PAGES {
-            if !walked.insert(path.clone()) {
-                return Err(Error::InvalidInput(
-                    "pagination returned to a page already walked".into(),
-                ));
-            }
-            let req = self.auth_request(Method::Get, &path);
-            let resp = self.transport.send(req).await?;
-            if !(200..300).contains(&resp.status) {
-                tracing::warn!(
-                    status = resp.status,
-                    "github GET /user/installations/{installation_id}/repositories returned non-2xx"
-                );
-            }
-            let resp = resp.ensure_success()?;
-            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
-            let page: GhInstallationRepos = resp.json()?;
-            match &mut listed {
-                Some(listed) => listed.repositories.extend(page.repositories),
-                None => listed = Some(page),
-            }
-            match next {
-                Some(next) => path = next,
-                None => return Ok(listed.expect("at least one page was read")),
-            }
-        }
-        // A listing cut short is an incomplete observation, not a shorter one.
-        Err(Error::InvalidInput(
-            "repository listing exceeded its page bound".into(),
-        ))
+        self.walk_listing(
+            format!("/user/installations/{installation_id}/repositories?per_page=100"),
+            "github GET /user/installations/{installation_id}/repositories returned non-2xx",
+            |resp| {
+                let page: GhInstallationRepos = resp.json()?;
+                match &mut listed {
+                    Some(listed) => listed.repositories.extend(page.repositories),
+                    None => listed = Some(page),
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(listed.expect("a complete walk reads at least one page"))
+    }
+
+    /// Walk a `Link`-paged user-token listing from `first` to its last page,
+    /// handing each page to `absorb`. `non_2xx` is the warning logged for a
+    /// failed page: a fixed text, since later paths come from GitHub.
+    async fn walk_listing(
+        &self,
+        first: String,
+        non_2xx: &'static str,
+        absorb: impl FnMut(crate::transport::Response) -> Result<()>,
+    ) -> Result<()> {
+        crate::pagination::walk_link_pages(
+            first,
+            &self.base_url,
+            crate::pagination::MAX_PAGES,
+            |path| async move {
+                let req = self.auth_request(Method::Get, &path);
+                let resp = self.transport.send(req).await?;
+                if !(200..300).contains(&resp.status) {
+                    tracing::warn!(status = resp.status, "{non_2xx}");
+                }
+                resp.ensure_success()
+            },
+            absorb,
+        )
+        .await
     }
 }
 
@@ -538,22 +594,65 @@ mod user_api_tests {
             .get_org_membership("acme corp")
             .await
             .unwrap();
-        assert_eq!(m.role, "admin");
-        assert_eq!(m.state, "active");
+        assert_eq!(
+            m,
+            OrgMembership::Member {
+                organization_id: 9001,
+                admin: true,
+                active: true,
+            }
+        );
+        assert!(m.is_active_admin_of(9001));
+        // Authority binds to the immutable organization id, not the login asked.
+        assert!(!m.is_active_admin_of(9002));
     }
 
     #[tokio::test]
-    async fn get_org_membership_404_surfaces_status() {
+    async fn get_org_membership_pending_member_is_not_an_active_admin() {
+        let mock = MockTransport::scripted(vec![Expectation::ok_json(
+            Method::Get,
+            "https://api.github.test/user/memberships/orgs/acme",
+            serde_json::json!({"role": "member", "state": "pending", "organization": {"id": 9001}}),
+        )]);
+        let m = client_with(mock).get_org_membership("acme").await.unwrap();
+        assert_eq!(
+            m,
+            OrgMembership::Member {
+                organization_id: 9001,
+                admin: false,
+                active: false,
+            }
+        );
+        assert!(!m.is_active_admin_of(9001));
+    }
+
+    #[tokio::test]
+    async fn get_org_membership_404_is_not_a_member() {
         let mock = MockTransport::scripted(vec![Expectation::status(
             Method::Get,
             "https://api.github.test/user/memberships/orgs/private",
             404,
         )]);
-        let err = client_with(mock)
+        let m = client_with(mock)
             .get_org_membership("private")
             .await
+            .unwrap();
+        assert_eq!(m, OrgMembership::NotMember);
+        assert!(!m.is_active_admin_of(9001));
+    }
+
+    #[tokio::test]
+    async fn get_org_membership_5xx_is_an_error_not_an_answer() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/user/memberships/orgs/acme",
+            502,
+        )]);
+        let err = client_with(mock)
+            .get_org_membership("acme")
+            .await
             .unwrap_err();
-        assert_eq!(err.status(), Some(404));
+        assert_eq!(err.status(), Some(502));
     }
 
     #[tokio::test]
@@ -674,6 +773,75 @@ mod user_api_tests {
 
         let err = client_with(mock.clone())
             .list_user_installation_repos(77)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        mock.assert_exhausted();
+    }
+
+    fn installations_page(url: &str, ids: &[u64], next: Option<&str>) -> Expectation {
+        let installations: Vec<_> = ids
+            .iter()
+            .map(|id| {
+                serde_json::json!({
+                    "id": id,
+                    "account": {"id": id + 9000, "login": format!("acct{id}"), "type": "Organization"},
+                    "repository_selection": "all",
+                    "target_type": "Organization",
+                    "target_id": id + 9000
+                })
+            })
+            .collect();
+        let mut headers = BTreeMap::new();
+        if let Some(next) = next {
+            headers.insert("link".into(), format!("<{next}>; rel=\"next\""));
+        }
+        Expectation {
+            method: Method::Get,
+            url: url.into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers,
+                body: serde_json::json!({"total_count": 3, "installations": installations})
+                    .to_string()
+                    .into(),
+            },
+        }
+    }
+
+    const INSTALLATIONS_URL: &str = "https://api.github.test/user/installations?per_page=100";
+    const INSTALLATIONS_PAGE_2: &str =
+        "https://api.github.test/user/installations?per_page=100&page=2";
+
+    #[tokio::test]
+    async fn list_user_installations_walks_every_page() {
+        let mock = MockTransport::scripted(vec![
+            installations_page(INSTALLATIONS_URL, &[1, 2], Some(INSTALLATIONS_PAGE_2)),
+            installations_page(INSTALLATIONS_PAGE_2, &[3], None),
+        ]);
+        let resp = client_with(mock.clone())
+            .list_user_installations()
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = resp.installations.iter().map(|i| i.id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(resp.total_count, 3);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_user_installations_refuses_a_paging_cycle() {
+        let mock = MockTransport::scripted(vec![
+            installations_page(INSTALLATIONS_URL, &[1], Some(INSTALLATIONS_PAGE_2)),
+            installations_page(INSTALLATIONS_PAGE_2, &[2], Some(INSTALLATIONS_URL)),
+        ]);
+
+        let err = client_with(mock.clone())
+            .list_user_installations()
             .await
             .unwrap_err();
 

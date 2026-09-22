@@ -32,6 +32,9 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
     for (const phase of ['headers', 'body']) {
       await http(`${githubUrl}/reset`, undefined, 'DELETE');
       await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+      // Start each phase from the scope the reset stub reports, so the previous
+      // phase's restored observation cannot answer this one's admission.
+      await http(`${ingress}/AccountInstallation/100/refresh`, installationId);
       const input = { ...creation(), approval_required: false };
       const link = `InvitationLink/${input.link_id}`;
       await http(`${ingress}/${link}/create`, input);
@@ -42,7 +45,11 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       await eventually(() => storage('request', receipt.result.request_id), Boolean);
       // A separate pending admission must report infrastructure uncertainty,
       // retain its identity, and leave the account available to queued status.
-      const pending = creation();
+      // Its scope reaches beyond what the account has recently observed, which
+      // is what makes admission read GitHub rather than answer from that
+      // observation — and is what the recovery below restores.
+      const base = creation();
+      const pending = { ...base, repos: [...base.repos, { repo_id: 12, repo_full_name: 'acme/repo-12' }] };
       await http(`${ingress}/InvitationLink/${pending.link_id}/create`, pending);
       const attempt = { link_id: pending.link_id, operation_id: id(), requester_id: 91 };
       const seen = fault(phase, installationId);
@@ -60,6 +67,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       fault(null);
       // Restore observation/projection, then replay with no pending invitation
       // or collaborator evidence. Absence must never authorize another PUT.
+      await http(`${githubUrl}/installation-repositories`, [10, 11, 12]);
       await http(`${ingress}/AccountInstallation/100/refresh`, installationId);
       const recovered = await http(`${ingress}/InvitationLink/${pending.link_id}/admit`, attempt);
       assert.equal(recovered.result.kind, 'accepted');
@@ -72,5 +80,8 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       assert.equal(seen.puts(), 1, 'timeout fence prohibits automatic repeat PUT');
       console.log(`PASS Worker ${phase} timeout: retained unknown delivery/fence, admission 503, released account exclusivity, same-attempt recovery`);
     }
+    // Leave the installation making exactly what every other fixture expects.
+    await http(`${githubUrl}/installation-repositories`, [10, 11]);
+    await http(`${ingress}/AccountInstallation/100/refresh`, installationId);
   } finally { fault(null); pause(false); }
 }

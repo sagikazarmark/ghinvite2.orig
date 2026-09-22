@@ -382,6 +382,14 @@ async fn authoritative_workflow_contract() {
         for task in runtime.transport.tasks.lock().unwrap().drain(..) { if !task.is_finished() { task.abort(); } }
         let notified = runtime.client.post(format!("{}/InvitationRequest/{request_id}/notify", runtime.ingress)).json(&signal).send().await.unwrap();
         assert!(notified.status().is_success());
+        // A different terminal fact for a resolved request is a conflict and
+        // must not replace the fact the workflow was already given.
+        let mut conflicting = signal.clone();
+        conflicting["decision_id"] = json!(ghinvite_core::RequestId::new());
+        let conflict = runtime.client.post(format!("{}/InvitationRequest/{request_id}/notify", runtime.ingress)).json(&conflicting).send().await.unwrap();
+        assert_eq!(conflict.status(), 409);
+        let terminal: Value = runtime.client.post(format!("{}/InvitationRequest/{request_id}/notification_status", runtime.ingress)).send().await.unwrap().json().await.unwrap();
+        assert_eq!(terminal, signal, "conflicting signal replaced the terminal fact");
         runtime
             .transport
             .pause_workflows

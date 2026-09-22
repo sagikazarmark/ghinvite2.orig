@@ -1,9 +1,6 @@
 //! Audit browsing: URL normalization, bounded local enrichment, and safe summaries.
 use crate::{
-    middleware::auth::RequireConsoleAdminOf,
-    state::AppState,
-    views::audit::{AuditLogPage, AuditRow},
-    views::render::render_with_csrf as render,
+    middleware::auth::RequireConsoleAdminOf, render::render_with_csrf as render, state::AppState,
 };
 use axum::{
     extract::State,
@@ -15,6 +12,7 @@ use ghinvite_core::{
     audit::{ActorKind, AuditEvent, EventType, TargetKind},
     storage::{AuditBoundary, AuditPosition},
 };
+use ghinvite_ui::audit::{AuditLogPage, AuditRow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

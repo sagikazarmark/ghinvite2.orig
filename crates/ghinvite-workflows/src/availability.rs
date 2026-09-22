@@ -7,7 +7,7 @@ use ghinvite_core::{Account, SelectedRepos, admission::Rejection};
 use restate_sdk::{
     context::{
         ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
-        RunFuture,
+        RunFuture, SharedObjectContext,
     },
     errors::{HandlerError, TerminalError},
     serde::Json,
@@ -41,6 +41,17 @@ pub enum Observation {
 pub struct InstallationStatus {
     pub account: Option<Account>,
     pub observation: Observation,
+    /// When GitHub was read for `observation`. Absent when nothing read it:
+    /// adoption of an existing installation, and retirement by uninstall.
+    #[serde(default)]
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// One reading of an installation's availability, and when it was taken.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Observed {
+    observation: Observation,
+    at: chrono::DateTime<chrono::Utc>,
 }
 
 /// What a refresh follows: the identity an event named, or the periodic
@@ -305,6 +316,7 @@ impl AccountInstallation {
         let status = InstallationStatus {
             account,
             observation: Observation::Unknown,
+            observed_at: None,
         };
         ctx.set("installation", Json(status.clone()));
         Ok(status)
@@ -317,12 +329,11 @@ impl AccountInstallation {
             .get_installation(account.installation_id)
             .await
         {
-            Ok(installation)
+            Ok(Some(installation))
                 if installation.id == account.installation_id
                     && installation.account.id == account.account_id
                     && installation.suspended_at.is_none() => {}
             Ok(_) => return Observation::Unavailable,
-            Err(error) if error.status() == Some(404) => return Observation::Unavailable,
             Err(_) => return Observation::Unknown,
         }
         match self
@@ -343,19 +354,27 @@ impl AccountInstallation {
         mut status: InstallationStatus,
     ) -> Result<InstallationStatus, TerminalError> {
         if let Some(account) = &mut status.account {
-            let observation = if ctx
+            let retired = ctx
                 .get::<bool>(&retired_key(account.installation_id))
                 .await?
-                .is_some()
-            {
-                Observation::Unavailable
-            } else {
-                let Json(observation) = ctx
-                    .run(|| async { Ok::<_, HandlerError>(Json(self.observe(account).await)) })
-                    .name("refresh_github_scope")
-                    .await?;
-                observation
-            };
+                .is_some();
+            // The reading and the time it was taken are one journal entry, so
+            // a replay never dates an observation by when it was replayed.
+            let Json(observed) = ctx
+                .run(|| async {
+                    let observation = if retired {
+                        Observation::Unavailable
+                    } else {
+                        self.observe(account).await
+                    };
+                    Ok::<_, HandlerError>(Json(Observed {
+                        observation,
+                        at: chrono::Utc::now(),
+                    }))
+                })
+                .name("refresh_github_scope")
+                .await?;
+            let Observed { observation, at } = observed;
             let refresh = Refresh::of(account, &observation);
             if let Some(selected) = refresh.selected_repos {
                 project(
@@ -378,8 +397,10 @@ impl AccountInstallation {
                     .await?;
             }
             status.observation = observation;
+            status.observed_at = Some(at);
         } else {
             status.observation = Observation::Unavailable;
+            status.observed_at = None;
         }
         ctx.set("installation", Json(status.clone()));
         Ok(status)
@@ -450,6 +471,53 @@ impl AccountInstallation {
             .await?;
         Ok(())
     }
+
+    /// Shared body of `uninstall` and its retained continuation. The identity
+    /// is retired at once; an adoption outage keeps one continuation per
+    /// identity, which a redelivered event joins rather than competing with.
+    async fn continue_uninstall(
+        &self,
+        ctx: &ObjectContext<'_>,
+        input: UninstallInput,
+        continuation: bool,
+    ) -> Result<(), TerminalError> {
+        ctx.set(&retired_key(input.installation_id), true);
+        let slot = uninstall_slot(input.installation_id);
+        let mut status = match self.load(ctx).await {
+            Ok(status) => status,
+            // An unusable key is not an outage; only unreadable storage is
+            // worth waiting for.
+            Err(error) if error.code() != ADOPTION_UNAVAILABLE => return Err(error),
+            Err(_) => {
+                if !continuation && ctx.get::<bool>(&slot).await?.is_some() {
+                    return Ok(());
+                }
+                ctx.set(&slot, true);
+                ctx.object_client::<AccountInstallationClient>(ctx.key())
+                    .retry_uninstall(Json(input))
+                    .send_after(UNINSTALL_RETRY)
+                    .await?;
+                return Ok(());
+            }
+        };
+        // Only the continuation retires its slot; a fresh event that found
+        // storage readable leaves the pending one to finish as a no-op.
+        if continuation {
+            ctx.clear(&slot);
+        }
+        if status
+            .account
+            .as_ref()
+            .is_some_and(|a| a.installation_id == input.installation_id)
+        {
+            project(ctx, InstallationChange::Uninstall { input }).await?;
+            status.account = None;
+            status.observation = Observation::Unavailable;
+            status.observed_at = None;
+            ctx.set("installation", Json(status));
+        }
+        Ok(())
+    }
 }
 
 /// The state key marking an installation identity retired. A retired
@@ -457,6 +525,14 @@ impl AccountInstallation {
 fn retired_key(installation_id: u64) -> String {
     format!("retired/{installation_id}")
 }
+
+/// The state key holding an uninstall's single scheduled continuation.
+fn uninstall_slot(installation_id: u64) -> String {
+    format!("uninstall_retry/{installation_id}")
+}
+
+/// Delay before a retained uninstall continuation tries adoption again.
+const UNINSTALL_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What a refresh does with an observation of the current installation.
 #[derive(Debug)]
@@ -500,6 +576,48 @@ fn eligibility(observation: &Observation, scope: &Scope) -> Eligibility {
     }
 }
 
+/// The answer a retained observation may give on its own, if it may give one.
+///
+/// Only an acceptance rests on a retained observation, and only while that
+/// observation is recent and covers the whole scope. A rejection is a
+/// permanently retained receipt that restoration never revisits, so every
+/// answer that would reject — and every account with nothing recent to answer
+/// from — reads GitHub again instead (ADR 0004).
+fn retained_eligibility(
+    status: &InstallationStatus,
+    scope: &Scope,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<Eligibility> {
+    let observed_at = status.observed_at?;
+    let recent = (now - observed_at)
+        .to_std()
+        .is_ok_and(|age| age < RECENT_OBSERVATION);
+    (recent
+        && matches!(
+            eligibility(&status.observation, scope),
+            Eligibility::Available
+        ))
+    .then_some(Eligibility::Available)
+}
+
+/// What admission makes of its `eligibility` call. A call fails only with the
+/// callee's terminal error: an adoption outage is transient by design, so
+/// eligibility is unknown and the same attempt can retry. Anything else (an
+/// unusable key or an undecodable scope) means caller and callee disagree,
+/// an invariant failure admission must not present as an outage.
+pub(crate) fn called_eligibility(
+    called: Result<Eligibility, TerminalError>,
+) -> Result<Eligibility, TerminalError> {
+    match called {
+        Ok(eligibility) => Ok(eligibility),
+        Err(error) if error.code() == ADOPTION_UNAVAILABLE => Ok(Eligibility::Unknown),
+        Err(error) => Err(TerminalError::new_with_code(
+            500,
+            format!("installation eligibility refused: {}", error.message()),
+        )),
+    }
+}
+
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
 }
@@ -518,6 +636,11 @@ fn adoption_unavailable() -> TerminalError {
 const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const RECHECK_SLOT: &str = "refresh_scheduled";
 
+/// How long an observation stays recent enough to admit on its own. Access lost
+/// inside this window is not an admission error: it surfaces as blocked
+/// delivery, exactly as a change made after any observation does (ADR 0004).
+const RECENT_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
 /// Bounded backoff for a retained refresh continuation: short first retries so a
 /// brief storage outage converges quickly, settling on the recheck cadence so a
 /// long one costs no more than the recheck it already runs.
@@ -533,7 +656,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        self.uninstall(ctx, Json(input)).await
+        self.continue_uninstall(&ctx, input, true).await
     }
     #[handler]
     async fn retry_refresh(
@@ -612,8 +735,7 @@ impl AccountInstallation {
                     .get_installation(input.installation_id)
                     .await
                 {
-                    Ok(value) => Ok::<_, HandlerError>(Json(Some(value))),
-                    Err(error) if error.status() == Some(404) => Ok(Json(None)),
+                    Ok(value) => Ok::<_, HandlerError>(Json(value)),
                     Err(_) => Err(TerminalError::new_with_code(
                         503,
                         "installation identity could not be confirmed",
@@ -640,7 +762,7 @@ impl AccountInstallation {
                     .get_installation(old.installation_id)
                     .await
                 {
-                    Err(error) if error.status() == Some(404) => Ok(()),
+                    Ok(None) => Ok(()),
                     _ => Err(HandlerError::from(TerminalError::new_with_code(
                         503,
                         "previous installation is not confirmed obsolete",
@@ -716,28 +838,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        ctx.set(&retired_key(input.installation_id), true);
-        let mut status = match self.load(&ctx).await {
-            Ok(status) => status,
-            Err(_) => {
-                ctx.object_client::<AccountInstallationClient>(ctx.key())
-                    .retry_uninstall(Json(input))
-                    .send_after(std::time::Duration::from_secs(60))
-                    .await?;
-                return Ok(());
-            }
-        };
-        if status
-            .account
-            .as_ref()
-            .is_some_and(|a| a.installation_id == input.installation_id)
-        {
-            project(&ctx, InstallationChange::Uninstall { input }).await?;
-            status.account = None;
-            status.observation = Observation::Unavailable;
-            ctx.set("installation", Json(status));
-        }
-        Ok(())
+        self.continue_uninstall(&ctx, input, false).await
     }
     #[handler]
     async fn status(
@@ -746,8 +847,37 @@ impl AccountInstallation {
     ) -> Result<Json<InstallationStatus>, TerminalError> {
         self.load(&ctx).await.map(Json)
     }
+    /// Answers an admission without taking this account's exclusivity whenever
+    /// the retained observation may accept the scope on its own. A shared
+    /// handler holds no object lock, so the reading path below is an ordinary
+    /// call: it queues behind the account's other writers, not behind this.
     #[handler]
     async fn eligibility(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<Eligibility>, TerminalError> {
+        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
+            return Err(invalid());
+        }
+        if let Some(Json(status)) = ctx.get::<Json<InstallationStatus>>("installation").await? {
+            let Json(now) = ctx
+                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
+                .name("eligibility_time")
+                .await?;
+            if let Some(answer) = retained_eligibility(&status, &scope, now) {
+                return Ok(Json(answer));
+            }
+        }
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
+            .observed_eligibility(Json(scope))
+            .call()
+            .await
+    }
+    /// Reads GitHub for this account and answers from what it observed. Every
+    /// answer that can reject an admission comes from here.
+    #[handler]
+    async fn observed_eligibility(
         &self,
         ctx: ObjectContext<'_>,
         Json(scope): Json<Scope>,
@@ -785,6 +915,56 @@ mod tests {
             selected_repos: SelectedRepos::All,
             installed_at: dt("2026-05-04T12:00:00Z"),
         }
+    }
+
+    async fn observed_installation(response: ghinvite_github::mocks::Expectation) -> Observation {
+        let mock = ghinvite_github::mocks::MockTransport::scripted(vec![response]);
+        let installation = AccountInstallation {
+            state: crate::test_support::fixture_state_with_transport(std::sync::Arc::new(
+                mock.clone(),
+            ))
+            .await,
+        };
+        let account = Account {
+            installation_id: 9,
+            account_id: 100,
+            account_login: "acme".into(),
+            account_type: AccountType::Organization,
+            installed_at: dt("2026-05-04T12:00:00Z"),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        };
+        let observation = installation.observe(&account).await;
+        mock.assert_exhausted();
+        observation
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_no_longer_holds_is_unavailable() {
+        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
+            ghinvite_github::Method::Get,
+            "https://api.github.test/app/installations/9",
+            404,
+        ))
+        .await;
+        assert!(
+            matches!(observation, Observation::Unavailable),
+            "{observation:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_would_not_answer_for_is_unknown() {
+        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
+            ghinvite_github::Method::Get,
+            "https://api.github.test/app/installations/9",
+            502,
+        ))
+        .await;
+        assert!(
+            matches!(observation, Observation::Unknown),
+            "{observation:?}"
+        );
     }
 
     #[tokio::test]
@@ -1179,9 +1359,119 @@ mod tests {
         }
     }
 
+    /// An account whose retained observation was taken at `observed_at`.
+    fn observed(observation: Observation, observed_at: Option<&str>) -> InstallationStatus {
+        InstallationStatus {
+            account: Some(account_selecting(SelectedRepos::Subset(vec![10, 11]))),
+            observation,
+            observed_at: observed_at.map(dt),
+        }
+    }
+
+    const NOW: &str = "2026-05-04T12:00:00Z";
+
+    #[test]
+    fn a_recent_available_observation_admits_its_whole_scope_on_its_own() {
+        let status = observed(available(&[10, 11]), Some("2026-05-04T11:56:00Z"));
+
+        assert_eq!(
+            retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+            Some(Eligibility::Available)
+        );
+    }
+
+    #[test]
+    fn an_observation_that_no_longer_speaks_for_now_is_read_again() {
+        // The window's own edge, anything past it, and — for a clock that went
+        // backwards between observation and admission — anything that claims to
+        // postdate the admission reading it.
+        for at in [
+            "2026-05-04T11:55:00Z",
+            "2026-05-04T11:54:00Z",
+            "2026-05-04T12:00:01Z",
+        ] {
+            let status = observed(available(&[10, 11]), Some(at));
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
+                "observed_at={at}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_that_would_reject_is_answered_from_a_retained_observation() {
+        // Every rejection is a permanently retained receipt, so it has to rest
+        // on a live read however recent the retained observation is.
+        for observation in [
+            Observation::Unavailable,
+            Observation::Unknown,
+            available(&[10]),
+        ] {
+            let status = observed(observation.clone(), Some(NOW));
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
+                "observation={observation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_account_never_observed_is_read_live() {
+        // Adoption retains an installation without reading GitHub for it.
+        for observation in [Observation::Unknown, available(&[10, 11])] {
+            let status = observed(observation.clone(), None);
+
+            assert_eq!(
+                retained_eligibility(&status, &scope(&[10, 11]), dt(NOW)),
+                None,
+                "observation={observation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answered_eligibility_call_is_the_eligibility() {
+        assert_eq!(
+            called_eligibility(Ok(Eligibility::Available)).unwrap(),
+            Eligibility::Available
+        );
+    }
+
+    #[test]
+    fn an_adoption_outage_leaves_eligibility_unknown() {
+        assert_eq!(
+            called_eligibility(Err(adoption_unavailable())).unwrap(),
+            Eligibility::Unknown
+        );
+    }
+
+    #[test]
+    fn a_refused_eligibility_call_is_an_invariant_failure_not_unknown() {
+        for refusal in [
+            invalid(),
+            TerminalError::new_with_code(400, "Cannot decode input payload"),
+        ] {
+            let error = called_eligibility(Err(refusal.clone())).unwrap_err();
+            assert_eq!(error.code(), 500, "refusal={refusal}");
+            assert!(error.message().contains(refusal.message()));
+        }
+    }
+
     #[test]
     fn retired_identities_have_one_key_each() {
         assert_eq!(retired_key(1), "retired/1");
         assert_ne!(retired_key(1), retired_key(2));
+    }
+
+    #[test]
+    fn each_uninstalled_identity_has_its_own_continuation_slot() {
+        assert_eq!(uninstall_slot(1), "uninstall_retry/1");
+        assert_ne!(uninstall_slot(1), uninstall_slot(2));
+        let refresh = RefreshTarget::Identity { installation_id: 1 };
+        assert_ne!(uninstall_slot(1), refresh.slot());
     }
 }

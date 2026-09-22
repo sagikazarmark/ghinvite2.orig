@@ -37,6 +37,10 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     await event(current, 'onboard', onboard(current));
     await call('create', input);
     mode = 'unavailable';
+    // Onboarding left a recent available observation, which admits on its own.
+    // The account observes the loss the way a webhook would; the rejection
+    // below still rests on admission's own live read.
+    await http(`${ingress}/AccountInstallation/${account}/refresh`, current);
     const unavailableAttempt = attempt(91);
     const rejected = await call('admit', unavailableAttempt);
     assert.deepEqual(rejected.result, { kind: 'rejected', reason: 'installation_unavailable' });
@@ -47,8 +51,11 @@ export async function installationRecovery({ ingress, http, storage, id, creatio
     await http(`${ingress}/AccountInstallation/${account}/refresh`, current);
     await eventually(() => storage('installation', current), row => row?.selected_repos?.length === 101);
     assert.deepEqual((await storage('installation', current)).selected_repos, scope);
-    pages.length = 0;
     mode = 'incomplete';
+    // Same again: the account has to observe the incomplete pagination before
+    // admission has any reason to read GitHub for it.
+    await http(`${ingress}/AccountInstallation/${account}/refresh`, current);
+    pages.length = 0;
     const retry = attempt(91);
     const response = await fetch(`${ingress}/InvitationLink/${input.link_id}/admit`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(retry), signal: AbortSignal.timeout(25_000),

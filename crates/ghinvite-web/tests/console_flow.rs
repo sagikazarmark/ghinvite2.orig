@@ -11,12 +11,16 @@ use ghinvite_github::transport::{Method, Response};
 use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tower::ServiceExt;
 
 mod common;
 
-use common::link_authority::{FakeLinkAuthority, LINK_SERVICE};
+use common::link_authority::FakeLinkAuthority;
+use common::sign_in::{
+    ACME_ADMIN, GithubUser, OCTOCAT, acme_installation, oauth_expectations, session_cookie,
+    sign_in, sign_in_with_cookie, signed_in_app, unreachable_restate,
+};
 
 #[path = "console_flow/read_recovery.rs"]
 mod read_recovery;
@@ -78,11 +82,12 @@ async fn deadline_queue_app(
     authority.seed(envelope.link.clone());
     let state = AppState::new(
         storage.clone(),
-        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
     (app, cookie, storage, envelope)
 }
 
@@ -222,41 +227,73 @@ async fn overdue_queue_row_warns_about_projection_lag_without_claiming_a_decisio
     assert!(html.contains("Decline request"));
 }
 
-#[tokio::test]
-async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let ingress = MockServer::start().await;
-    let id = ghinvite_core::InvitationLinkId::new();
-    let snapshot = serde_json::json!({"link_id": id, "creation": {
-        "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
-        "installation_id": 1, "description": "Original", "internal_note": null, "expires_at": null,
-        "max_uses": null, "permission": "pull", "approval_required": true,
-        "repos": [{"repo_id": 1, "repo_full_name": "octocat/api"}]},
-        "metadata": {"description": "Authoritative details", "internal_note": null},
-        "invitation_code": "abcdEFGH01234567", "created_at": "2026-09-14T12:00:00Z",
-        "uses": 0, "revision": 2, "revoked_at": null, "revoked_by": null});
-    for method in ["link_status", "update_metadata", "revoke"] {
-        Mock::given(path(format!("/{LINK_SERVICE}/{id}/{method}")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(snapshot.clone()))
-            .mount(&ingress)
-            .await;
+/// A link of the `octocat` user account, which `sign_in` administers.
+fn octocat_link() -> ghinvite_core::InvitationLink {
+    ghinvite_core::InvitationLink {
+        account_id: 42,
+        created_by: 42,
+        ..list_link(1)
     }
+}
+
+/// A request the authority admitted for `link`, pending until `deadline`.
+fn pending_request(
+    link: ghinvite_core::InvitationLinkId,
+    deadline: DateTime<Utc>,
+) -> ghinvite_core::storage::projection::RequestSnapshot {
+    ghinvite_core::storage::projection::RequestSnapshot {
+        request_id: ghinvite_core::RequestId::new(),
+        link_id: link,
+        account_id: 42,
+        requester_id: 99,
+        justification: None,
+        state: ghinvite_core::RequestState::Pending,
+        admitted_at: deadline - Duration::days(7),
+        decision_deadline: Some(deadline),
+        revision: 1,
+        decision: None,
+    }
+}
+
+/// An app signed in as `octocat`, with the account installed unless
+/// `uninstalled`, and no projected links.
+async fn octocat_app(authority: &FakeLinkAuthority, uninstalled: bool) -> (axum::Router, String) {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
-    storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
-        .await
-        .unwrap();
+    let account = identity_account(42, "octocat", AccountType::User);
+    storage.insert_installation(&account).await.unwrap();
+    if uninstalled {
+        storage
+            .mark_installation_uninstalled(account.installation_id, Utc::now())
+            .await
+            .unwrap();
+    }
     let state = AppState::new(
         storage,
-        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
+        Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
+    (app, cookie)
+}
+
+#[tokio::test]
+async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    let id = link.id;
+    let mut authoritative = common::link_authority::snapshot(&link);
+    authoritative.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
+        description: "Authoritative details".into(),
+        internal_note: None,
+    });
+    authority.seed(authoritative);
+    let (app, cookie) = octocat_app(&authority, false).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
         .clone()
@@ -293,45 +330,29 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
-    for request in ingress.received_requests().await.unwrap() {
-        assert!(!request.url.path().ends_with("/send"));
-        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(
-            body["admin"],
-            serde_json::json!({"account_id": 42, "user_id": 42})
-        );
+    // Each is a call awaiting the authority's answer, never a one-way send.
+    assert_eq!(
+        authority.calls(),
+        ["link_status", "update_metadata", "revoke"]
+    );
+    for method in ["link_status", "update_metadata", "revoke"] {
+        for body in authority.received::<serde_json::Value>(method) {
+            assert_eq!(
+                body["admin"],
+                serde_json::json!({"account_id": 42, "user_id": 42})
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn pending_decision_remains_accessible_after_uninstall() {
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let ingress = MockServer::start().await;
-    let link = ghinvite_core::InvitationLinkId::new();
-    let request = ghinvite_core::RequestId::new();
-    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":"applied","request":{
-            "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":"approved",
-            "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
-        .expect(1).mount(&ingress).await;
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let account = identity_account(42, "octocat", AccountType::User);
-    storage.insert_installation(&account).await.unwrap();
-    storage
-        .mark_installation_uninstalled(account.installation_id, Utc::now())
-        .await
-        .unwrap();
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    authority.seed_link(&link);
+    let request = pending_request(link.id, Utc::now() + Duration::days(7));
+    authority.seed_request(request.clone());
+    let (app, cookie) = octocat_app(&authority, true).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
         .clone()
@@ -339,12 +360,14 @@ async fn pending_decision_remains_accessible_after_uninstall() {
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/console/accounts/octocat/requests/{request}/approve"
+                    "/console/accounts/octocat/requests/{}/approve",
+                    request.request_id
                 ))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf_token={csrf}&link_id={link}&operation_id={}",
+                    "csrf_token={csrf}&link_id={}&operation_id={}",
+                    link.id,
                     ghinvite_core::RequestId::new()
                 )))
                 .unwrap(),
@@ -352,6 +375,7 @@ async fn pending_decision_remains_accessible_after_uninstall() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(authority.calls(), ["decide"]);
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -365,35 +389,14 @@ async fn pending_decision_remains_accessible_after_uninstall() {
 #[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
-    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-    let request = ghinvite_core::RequestId::new();
-    let link = ghinvite_core::InvitationLinkId::new();
+    let authority = FakeLinkAuthority::start().await;
+    let link = octocat_link();
+    authority.seed_link(&link);
+    // Past its deadline, so the authority expires it rather than deciding.
+    let request = pending_request(link.id, "2026-01-08T00:00:00Z".parse().unwrap());
+    authority.seed_request(request.clone());
     let operation = ghinvite_core::RequestId::new();
-    let ingress = MockServer::start().await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "outcome": "incompatible", "request": {"request_id": request,
-            "link_id": link, "account_id": 42, "requester_id": 99,
-            "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
-            "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2}})))
-        .mount(&ingress)
-        .await;
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
-        .await
-        .unwrap();
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let (app, cookie) = octocat_app(&authority, false).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     // Missing projection is not evidence that the acknowledged request is absent.
     let response = app
@@ -402,12 +405,14 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
             Request::builder()
                 .method("POST")
                 .uri(format!(
-                    "/console/accounts/octocat/requests/{request}/approve"
+                    "/console/accounts/octocat/requests/{}/approve",
+                    request.request_id
                 ))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf_token={csrf}&link_id={link}&operation_id={operation}&user_id=666"
+                    "csrf_token={csrf}&link_id={}&operation_id={operation}&user_id=666",
+                    link.id
                 )))
                 .unwrap(),
         )
@@ -417,17 +422,11 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
     let html = response_html(response).await;
     assert!(html.contains("expired"));
     assert!(!html.contains("Request approved"));
-    let calls = ingress
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .map(|request| serde_json::from_slice::<DecideRequest>(&request.body).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(authority.calls(), ["decide"]);
+    let calls = authority.received::<DecideRequest>("decide");
     assert_eq!(calls[0].admin.user_id, 42);
     assert_eq!(calls[0].admin.account_id, 42);
-    assert_eq!(calls[0].link_id, link);
+    assert_eq!(calls[0].link_id, link.id);
     assert_eq!(
         String::from(calls[0].operation_id.clone()),
         operation.to_string()
@@ -437,7 +436,7 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
 #[tokio::test]
 async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
     let (app, cookie, authority) =
-        build_signed_in_admin_app_with_authority(oauth_expectations()).await;
+        build_signed_in_admin_app_with_authority(oauth_expectations(ACME_ADMIN)).await;
     for path in [
         "/console/accounts/acme/links",
         "/console/accounts/acme/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/edit",
@@ -471,95 +470,6 @@ async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
     assert!(authority.calls().is_empty());
 }
 
-fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
-
-fn state_from_location(location: &str) -> &str {
-    location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-}
-
-fn oauth_expectations() -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user read:org"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user/memberships/orgs/acme",
-            serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
-        ),
-    ]
-}
-
-fn oauth_expectations_without_membership() -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user read:org"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]
-}
-
-fn oauth_sign_in_expectations() -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user read:org"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]
-}
-
 fn identity_account(account_id: u64, login: &str, account_type: AccountType) -> Account {
     Account {
         installation_id: 77,
@@ -573,19 +483,12 @@ fn identity_account(account_id: u64, login: &str, account_type: AccountType) -> 
 }
 
 async fn identity_app(account: &Account, expectations: Vec<Expectation>) -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage.insert_installation(account).await.unwrap();
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(expectations)),
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
+    signed_in_app(
+        std::slice::from_ref(account),
+        expectations,
+        unreachable_restate(),
+    )
+    .await
 }
 
 async fn identity_request(
@@ -624,7 +527,7 @@ async fn response_html(response: axum::response::Response) -> String {
 #[tokio::test]
 async fn personal_account_reused_login_cannot_authorize_direct_reads_or_mutations() {
     let account = identity_account(999, "octocat", AccountType::User);
-    let (app, cookie) = identity_app(&account, oauth_sign_in_expectations()).await;
+    let (app, cookie) = identity_app(&account, oauth_expectations(OCTOCAT)).await;
     for (method, path) in [
         ("GET", "/console/accounts/octocat"),
         ("GET", "/console/accounts/octocat/links"),
@@ -667,7 +570,7 @@ async fn personal_console_discovery_requires_identity_even_after_rename_or_name_
         (999, "octocat", false),
     ] {
         let account = identity_account(id, stored_login, AccountType::User);
-        let mut expectations = oauth_sign_in_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT);
         expectations.push(visible_account(&account));
         let (app, cookie) = identity_app(&account, expectations).await;
         let response = identity_request(&app, &cookie, "GET", "/console").await;
@@ -707,7 +610,7 @@ fn org_membership(login: &str, organization_id: u64, organization_login: &str) -
 #[tokio::test]
 async fn organization_name_reuse_cannot_authorize_discovery_reads_or_mutations() {
     let account = identity_account(9001, "acme", AccountType::Organization);
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(org_membership("acme", 9999, "acme"));
     expectations.push(org_membership("acme", 9999, "acme"));
     expectations.push(visible_account(&account));
@@ -730,20 +633,11 @@ async fn organization_name_reuse_cannot_authorize_discovery_reads_or_mutations()
 async fn oauth_signin_discards_organization_authority_for_same_or_different_user() {
     for (user_id, login) in [(42, "octocat"), (43, "another-user")] {
         let account = identity_account(9001, "acme", AccountType::Organization);
-        let mut expectations = oauth_sign_in_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT);
         expectations.push(org_membership("acme", 9001, "acme"));
-        let mut second_login = oauth_sign_in_expectations();
-        second_login[0] = Expectation::ok_json(
-            Method::Post,
-            "https://github.com/login/oauth/access_token",
-            serde_json::json!({"access_token": "u_second", "token_type": "bearer", "scope": "read:user read:org"}),
-        );
-        second_login[1] = Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": user_id, "login": login}),
-        );
-        expectations.extend(second_login);
+        expectations.extend(oauth_expectations(
+            GithubUser::new(login, user_id).with_access_token("u_second"),
+        ));
         expectations.push(
             Expectation::status(
                 Method::Get,
@@ -757,7 +651,7 @@ async fn oauth_signin_discards_organization_authority_for_same_or_different_user
         assert_eq!(response.status(), StatusCode::OK);
         let cookie = session_cookie(&response, Some(cookie));
         let old_cookie = cookie.clone();
-        let (app, cookie) = sign_in_with_cookie(app, Some(cookie)).await;
+        let cookie = sign_in_with_cookie(&app, Some(cookie)).await;
         assert_ne!(old_cookie, cookie);
         let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -779,7 +673,7 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
     );
     let mut account = identity_account(9001, "acme", AccountType::Organization);
     storage.insert_installation(&account).await.unwrap();
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(org_membership("acme", 9001, "acme"));
     expectations.push(org_membership("acme", 9001, "renamed-acme"));
     let state = AppState::new(
@@ -788,7 +682,8 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
     let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
     assert_eq!(response.status(), StatusCode::OK);
     let cookie = session_cookie(&response, Some(cookie));
@@ -807,7 +702,7 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
 #[tokio::test]
 async fn organization_rename_keeps_identity_authority_and_cache_across_console_routes() {
     let account = identity_account(9001, "acme", AccountType::Organization);
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(visible_account(&account));
     expectations.push(org_membership("acme", 9001, "renamed-acme"));
     let (app, cookie) = identity_app(&account, expectations).await;
@@ -845,7 +740,7 @@ async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
         ),
     ] {
         let account = identity_account(9001, "acme", AccountType::Organization);
-        let mut expectations = oauth_sign_in_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT);
         expectations.push(Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
@@ -936,11 +831,12 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
         authority.seed_link(&link);
         let state = AppState::new(
             storage.clone(),
-            Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+            Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
             authority.client(),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
-        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let app = build_app(state, tower_sessions::MemoryStore::default());
+        let cookie = sign_in(&app).await;
         let path = format!("/console/accounts/{stored_login}/links/{}/edit", link.id);
         let token = common::csrf_token(&app, &cookie).await;
         let response = app
@@ -985,133 +881,26 @@ async fn build_test_app() -> axum::Router {
     build_app(state, session_store)
 }
 
+/// Signed in as an admin of the installed `acme` organization.
 async fn build_signed_in_admin_app() -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage
-        .insert_installation(&Account {
-            installation_id: 77,
-            account_id: 9001,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            installed_at: Utc::now(),
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        })
-        .await
-        .unwrap();
-
-    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(oauth_expectations()));
-    let state = AppState::new(
-        storage,
-        transport,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-
-    (app, cookie2)
+    signed_in_app(
+        &[acme_installation()],
+        oauth_expectations(ACME_ADMIN),
+        unreachable_restate(),
+    )
+    .await
 }
 
+/// Signed in over the installed `acme` organization with GitHub scripted by
+/// `expectations`, and invitation link commands answered by the returned
+/// authority.
 async fn build_signed_in_admin_app_with_authority(
     expectations: Vec<Expectation>,
 ) -> (axum::Router, String, FakeLinkAuthority) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    storage
-        .insert_installation(&Account {
-            installation_id: 77,
-            account_id: 9001,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            installed_at: Utc::now(),
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        })
-        .await
-        .unwrap();
-
-    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(expectations));
     let authority = FakeLinkAuthority::start().await;
-    let state = AppState::new(
-        storage,
-        transport,
-        authority.client(),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-
-    (app, cookie2, authority)
+    let (app, cookie) =
+        signed_in_app(&[acme_installation()], expectations, authority.client()).await;
+    (app, cookie, authority)
 }
 
 fn installation_repos_expectation() -> Expectation {
@@ -1128,50 +917,9 @@ fn installation_repos_expectation() -> Expectation {
     )
 }
 
-async fn sign_in(app: axum::Router) -> (axum::Router, String) {
-    sign_in_with_cookie(app, None).await
-}
-
-async fn sign_in_with_cookie(app: axum::Router, cookie: Option<String>) -> (axum::Router, String) {
-    let mut request = Request::builder().uri("/login");
-    if let Some(cookie) = &cookie {
-        request = request.header("cookie", cookie);
-    }
-    let resp1 = app
-        .clone()
-        .oneshot(request.body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, cookie);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-
-    (app, cookie2)
-}
-
 async fn build_signed_in_admin_app_with_console_installations(
     logins: Vec<&str>,
 ) -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
     let accounts: Vec<_> = logins
         .iter()
         .enumerate()
@@ -1193,11 +941,8 @@ async fn build_signed_in_admin_app_with_console_installations(
             selected_repos: SelectedRepos::All,
         })
         .collect();
-    for account in &accounts {
-        storage.insert_installation(account).await.unwrap();
-    }
 
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     let installations: Vec<_> = accounts
         .iter()
         .map(|account| {
@@ -1234,28 +979,11 @@ async fn build_signed_in_admin_app_with_console_installations(
         ));
     }
 
-    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(expectations));
-    let state = AppState::new(
-        storage,
-        transport,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    sign_in(app).await
+    signed_in_app(&accounts, expectations, unreachable_restate()).await
 }
 
 async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation {
         method: Method::Get,
         url: "https://api.github.com/user/installations?per_page=100".into(),
@@ -1267,73 +995,17 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
             body: b"server error".to_vec(),
         },
     });
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(expectations));
-    let state = AppState::new(
-        storage,
-        transport,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    sign_in(app).await
+    signed_in_app(&[], expectations, unreachable_restate()).await
 }
 
 async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let mut expectations = oauth_expectations_without_membership();
+    let mut expectations = oauth_expectations(OCTOCAT);
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",
         serde_json::json!({"total_count": 0, "installations": []}),
     ));
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(MockTransport::scripted(expectations));
-    let state = AppState::new(
-        storage,
-        transport,
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let session_store = tower_sessions::MemoryStore::default();
-    let app = build_app(state, session_store);
-
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    let cookie2 = session_cookie(&resp2, Some(cookie1));
-
-    (app, cookie2)
+    signed_in_app(&[], expectations, unreachable_restate()).await
 }
 
 #[tokio::test]
@@ -1368,8 +1040,11 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     assert!(html.contains("href=\"/console/accounts/acme/links/new\""));
 }
 
+/// Saving details is one authority command. `update_metadata` answers an
+/// unknown or foreign link itself, so no read goes first, and a missing link
+/// still lands on the Console's own not-found page.
 #[tokio::test]
-async fn edit_link_lookup_failure_preserves_submitted_input() {
+async fn saving_link_details_is_one_authority_call() {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -1379,22 +1054,32 @@ async fn edit_link_lookup_failure_preserves_submitted_input() {
     let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
     authority.seed_link(&link);
-    authority.fail("link_status", 503);
-    let response = post_edit(
+
+    let saved = post_edit(
         &app,
         &cookie,
         &link.id.to_string(),
-        "description=%20Keep+my+description%20&internal_note=Keep%0Amy+note",
+        "description=Updated&internal_note=",
     )
     .await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    let html = String::from_utf8(body.to_vec()).unwrap();
-    assert!(html.contains("value=\" Keep my description \""));
-    assert!(html.contains(">Keep\nmy note</textarea>"));
-    assert!(html.contains("Failed to load invitation link details. Please try again."));
-    assert_links_navigation_current(&html);
-    assert!(authority.metadata_updates().is_empty());
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    assert_eq!(authority.calls(), ["update_metadata"]);
+
+    let missing = ghinvite_core::InvitationLinkId::new().to_string();
+    let response = post_edit(
+        &app,
+        &cookie,
+        &missing,
+        "description=Updated&internal_note=",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let html = response_html(response).await;
+    assert!(
+        html.contains("This console page is not available."),
+        "{html}"
+    );
+    assert_eq!(authority.calls(), ["update_metadata", "update_metadata"]);
 }
 
 #[tokio::test]
@@ -1920,7 +1605,7 @@ async fn links_app_with_authority(
             .await
             .unwrap();
     }
-    let mut expectations = oauth_sign_in_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT);
     // Rejected membership checks, and checks made while answering with a 502,
     // are not saved in the authorization cache.
     for _ in 0..if role == "admin" { 3 } else { 8 } {
@@ -1936,7 +1621,9 @@ async fn links_app_with_authority(
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
+    (app, cookie)
 }
 
 async fn get_links(app: &axum::Router, cookie: &str, query: &str) -> (StatusCode, String) {
@@ -2279,6 +1966,84 @@ async fn console_audit_page_for_admin_renders_empty_history() {
     assert!(!text.contains("Audit log is not yet implemented."));
     assert!(!text.contains("<table"));
     assert!(text.contains("Event type"));
+}
+
+/// Every Console response is private to the signed-in admin, whatever its
+/// shape: a page, the redirect after a form, or a refusal.
+#[tokio::test]
+async fn console_responses_are_never_stored() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+
+    let saved = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=Updated&internal_note=",
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let mut responses = vec![("POST edit", saved)];
+    for (label, method, path) in [
+        (
+            "links page",
+            "GET",
+            "/console/accounts/acme/links".to_owned(),
+        ),
+        (
+            "link page",
+            "GET",
+            format!("/console/accounts/acme/links/{}", link.id),
+        ),
+        (
+            "attempts page",
+            "GET",
+            "/console/accounts/acme/attempts".into(),
+        ),
+        (
+            "not-found page",
+            "GET",
+            "/console/accounts/acme/missing".into(),
+        ),
+        (
+            "plain refusal",
+            "POST",
+            "/console/accounts/acme/missing".into(),
+        ),
+    ] {
+        responses.push((label, identity_request(&app, &cookie, method, &path).await));
+    }
+    let signed_out = build_test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme/links")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::SEE_OTHER);
+    responses.push(("sign-in redirect", signed_out));
+
+    for (label, response) in responses {
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .map(|value| value.to_str().unwrap()),
+            Some("private, no-store"),
+            "{label} ({})",
+            response.status()
+        );
+    }
 }
 
 #[tokio::test]
@@ -2743,11 +2508,12 @@ async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accou
         .unwrap();
     let state = AppState::new(
         storage,
-        Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
+        Arc::new(MockTransport::scripted(oauth_expectations(OCTOCAT))),
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    let app = build_app(state, tower_sessions::MemoryStore::default());
+    let cookie = sign_in(&app).await;
     assert_eq!(
         audit_get(&app, &cookie, "/console/accounts/octocat/audit")
             .await
@@ -2971,7 +2737,7 @@ async fn console_overview_carries_csp_and_only_external_script() {
 
 #[tokio::test]
 async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_script() {
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(ACME_ADMIN);
     expectations.push(installation_repos_expectation());
     let (app, cookie, _authority) = build_signed_in_admin_app_with_authority(expectations).await;
 
@@ -3019,21 +2785,17 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
     let blob_at = text.find(props_open).expect("props blob present");
     let blob = &text[blob_at + props_open.len()..];
     let blob = &blob[..blob.find("</script>").unwrap()];
-    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
-        serde_json::from_str(blob).unwrap();
+    let props: ghinvite_ui::link_form::LinkFormIslandProps = serde_json::from_str(blob).unwrap();
     assert_eq!(props.action, action);
-    assert_eq!(
-        props.values,
-        ghinvite_web::views::links::LinkFormValues::default()
-    );
+    assert_eq!(props.values, ghinvite_ui::links::LinkFormValues::default());
     assert_eq!(
         props.repos,
         vec![
-            ghinvite_web::views::link_form::RepositoryChoice {
+            ghinvite_ui::link_form::RepositoryChoice {
                 id: 10,
                 full_name: "acme/api".to_string(),
             },
-            ghinvite_web::views::link_form::RepositoryChoice {
+            ghinvite_ui::link_form::RepositoryChoice {
                 id: 11,
                 full_name: "acme/web".to_string(),
             },
@@ -3089,8 +2851,7 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
     let blob_at = text.find(props_open).expect("props blob present");
     let blob = &text[blob_at + props_open.len()..];
     let blob = &blob[..blob.find("</script>").unwrap()];
-    let props: ghinvite_web::views::link_form::LinkFormIslandProps =
-        serde_json::from_str(blob).unwrap();
+    let props: ghinvite_ui::link_form::LinkFormIslandProps = serde_json::from_str(blob).unwrap();
 
     // Values verbatim, errors as the server attached them.
     assert_eq!(
@@ -3326,7 +3087,7 @@ async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration()
 
 #[tokio::test]
 async fn create_link_requires_a_creation_identity() {
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(ACME_ADMIN);
     expectations.push(installation_repos_expectation());
     let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
     let token = common::csrf_token(&app, &cookie).await;
@@ -3394,7 +3155,7 @@ impl CreatePost {
 /// signed-in admin whose installation exposes `acme/api` (10) and `acme/web`
 /// (11).
 async fn post_create_link(body: impl AsRef<str>) -> CreatePost {
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(ACME_ADMIN);
     expectations.push(installation_repos_expectation());
     let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
     let token = common::csrf_token(&app, &cookie).await;
@@ -3750,26 +3511,46 @@ async fn console_unknown_post_route_stays_plain_404() {
     assert_eq!(&body[..], b"Not Found");
 }
 
+/// A malformed id names nothing, so every Console route that takes one
+/// answers the admin exactly as for a missing resource: the Console's own
+/// not-found page, reads and mutations alike.
 #[tokio::test]
-async fn console_post_missing_resource_stays_plain_404() {
+async fn console_malformed_path_ids_render_the_console_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
-    let token = common::csrf_token(&app, &cookie).await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links/not-a-link-id/revoke")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("csrf_token={token}")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let base = "/console/accounts/acme";
+    let mut responses = Vec::new();
+    for path in [
+        "links/not-a-link-id",
+        "links/not-a-link-id/edit",
+        "links/not-a-link-id/requests",
+        "requests/not-a-request-id",
+    ] {
+        responses.push((
+            path,
+            identity_request(&app, &cookie, "GET", &format!("{base}/{path}")).await,
+        ));
+    }
+    for (path, body) in [
+        ("links/not-a-link-id/edit", "description=Kept"),
+        ("links/not-a-link-id/revoke", ""),
+        ("requests/not-a-request-id/approve", ""),
+        ("requests/not-a-request-id/decline", ""),
+    ] {
+        responses.push((
+            path,
+            post_form(&app, &cookie, &format!("{base}/{path}"), body).await,
+        ));
+    }
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"Not Found");
+    for (path, response) in responses {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let html = response_html(response).await;
+        assert!(
+            html.contains("This console page is not available."),
+            "{path}: {html}"
+        );
+        assert!(html.contains("href=\"/console/accounts/acme\""), "{path}");
+    }
 }
 
 const LINK_CREATED: &str = "Invitation link created.";
@@ -3827,7 +3608,7 @@ fn creation_form_action(html: &str) -> String {
 
 #[tokio::test]
 async fn create_link_success_flashes_once_on_the_link_detail_page() {
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(ACME_ADMIN);
     expectations.push(installation_repos_expectation());
     let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
     let link_id = ghinvite_core::InvitationLinkId::new();
@@ -3854,7 +3635,7 @@ async fn create_link_success_flashes_once_on_the_link_detail_page() {
 
 #[tokio::test]
 async fn create_link_authority_rejection_rerenders_form_with_values_and_identity() {
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(ACME_ADMIN);
     // The rejected submission and the corrected resubmission each read the
     // installation's repositories.
     expectations.push(installation_repos_expectation());

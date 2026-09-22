@@ -18,6 +18,10 @@ use tower::ServiceExt;
 use wiremock::matchers::method as wm_method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod common;
+
+use common::sign_in::{OCTOCAT, oauth_expectations, sign_in};
+
 const USER_TOKEN: &str = "user-token-test-only-not-a-credential";
 const INGRESS_KEY: &str = "ingress-key-do-not-expose";
 
@@ -79,14 +83,6 @@ async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
     build_app(state, tower_sessions::MemoryStore::default())
 }
 
-fn cookie_of(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
-
 async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> axum::response::Response {
     let mut builder = Request::builder().uri(uri);
     if let Some(cookie) = cookie {
@@ -101,53 +97,6 @@ async fn get(app: &axum::Router, uri: &str, cookie: Option<&str>) -> axum::respo
 async fn body_text(resp: axum::response::Response) -> String {
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     String::from_utf8_lossy(&bytes).into_owned()
-}
-
-fn oauth_expectations() -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: format!(
-                    r#"{{"access_token":"{USER_TOKEN}","token_type":"bearer","scope":"read:user read:org"}}"#
-                )
-                .into_bytes(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]
-}
-
-/// Drive /login → /oauth/callback and return the signed-in cookie.
-async fn sign_in(app: &axum::Router) -> String {
-    let started = get(app, "/login", None).await;
-    assert_eq!(started.status(), StatusCode::SEE_OTHER);
-    let cookie = cookie_of(&started, None);
-    let location = started.headers()["location"].to_str().unwrap().to_owned();
-    let state = location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap();
-    let finished = get(
-        app,
-        &format!("/oauth/callback?code=test-code&state={state}"),
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(finished.status(), StatusCode::SEE_OTHER);
-    cookie_of(&finished, Some(cookie))
 }
 
 fn assert_absent(haystack: &str, needles: &[&str], what: &str) {
@@ -204,7 +153,7 @@ async fn oauth_callback_distinguishes_a_decline_from_a_provider_error() {
 #[tokio::test]
 async fn github_gateway_body_never_reaches_the_browser() {
     let (logs, _guard) = capture_logs();
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
     expectations.push(Expectation {
         method: Method::Get,
         url: "https://api.github.com/user/installations?per_page=100".into(),
@@ -259,7 +208,7 @@ async fn unsupported_installation_fields_are_not_reflected() {
         ),
     ] {
         let (logs, _guard) = capture_logs();
-        let mut expectations = oauth_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
         expectations.push(Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/installations?per_page=100",
@@ -317,7 +266,7 @@ async fn restate_ingress_body_never_reaches_the_browser() {
         .mount(&ingress)
         .await;
 
-    let mut expectations = oauth_expectations();
+    let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
     expectations.push(Expectation::ok_json(
         Method::Get,
         "https://api.github.com/user/installations?per_page=100",

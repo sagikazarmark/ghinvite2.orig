@@ -74,3 +74,33 @@ invitation-object state. Fence acknowledgement loss can conservatively produce
 outcome unknown without any GitHub effect. Positively rejected access/rate-limit
 attempts release only their exact generation for a safe later retry; uncertain
 attempts remain fenced. See [recovery operations](../delivery-recovery.md).
+
+## Amendment (2026-09-22): an accept may rest on a recent observation, a rejection may not
+
+The matrix row above rejects new requests when the installation or a repository
+in the fixed scope is *known* unavailable. It never said how current that
+knowledge must be, and admission read GitHub on every fresh attempt: a live
+installation read plus a paged repository read, both inside the account's
+exclusive object, so every admission for one account queued behind another's
+GitHub I/O.
+
+The two directions are not symmetric, so they no longer share one rule.
+
+An acceptance may rest on an availability observation up to five minutes old.
+When the retained observation is available and covers the whole fixed scope,
+admission accepts on it without reading GitHub again. Access lost inside that
+window is already this ADR's policy: an observation is never atomic with the
+delivery that follows it, and the loss surfaces as blocked delivery, which
+preserves approval and the original repository scope.
+
+A rejection still rests on a live read. It is a permanent retained receipt that
+restoration never revisits, so nothing weaker than a current reading may produce
+one. Every path that could reject — an observation that is unavailable, unknown,
+older than that window, or that does not cover the scope, and an account never
+observed — reads GitHub under the account's exclusivity exactly as before, with
+the same network deadlines, the same unknown-on-stall result, and the same 503
+asking for the same attempt again.
+
+Unchanged: uncertainty is never a rejection, the periodic recheck still drives
+unavailable and unknown observations back to available, and an acceptance resting
+on a recent observation consumes its use and retains its receipt like any other.

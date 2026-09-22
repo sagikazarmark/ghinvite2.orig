@@ -46,12 +46,14 @@ pub(super) enum AdmissionOutcome {
 /// After-images of one admission decision.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(super) struct AdmissionDecision {
-    pub(super) link: LinkSnapshot,
+    /// The link's after-image under a new revision, present exactly when a
+    /// request changed. The link object rewrites the link iff present.
+    pub(super) link: Option<LinkSnapshot>,
     /// The overdue blocking request, expired by this decision.
     pub(super) expired: Option<RequestSnapshot>,
     /// The admitted request, which becomes the requester's blocker.
     pub(super) request: Option<RequestSnapshot>,
-    /// Present whenever a request changed; the link is then rewritten.
+    /// Present exactly when `link` is.
     pub(super) projection: Option<ProjectionEnvelope>,
     pub(super) workflow: Option<WorkflowEnvelope>,
     pub(super) outcome: AdmissionOutcome,
@@ -172,18 +174,19 @@ pub(super) fn decide_admission(
         touched.push(request.clone());
         events.extend(acceptance_events(&link, request, now));
     }
-    let projection = if touched.is_empty() {
-        None
+    let workflow = request
+        .as_ref()
+        .map(|request| WorkflowEnvelope::from_authority(&link, request.clone()));
+    let (link, projection) = if touched.is_empty() {
+        (None, None)
     } else {
         // Rejection plus expiry also gets a unique link revision.
         if request.is_none() {
             link.revision += 1;
         }
-        Some(projection(&link, touched, events))
+        let envelope = projection(&link, touched, events);
+        (Some(link), Some(envelope))
     };
-    let workflow = request
-        .as_ref()
-        .map(|request| WorkflowEnvelope::from_authority(&link, request.clone()));
     Ok(AdmissionDecision {
         link,
         request,
@@ -537,7 +540,16 @@ mod tests {
             blocking,
         };
         let decision = decide_admission(&view, &input, &eligibility, now(), request_id).unwrap();
+        assert_eq!(
+            decision.link.is_some(),
+            decision.projection.is_some(),
+            "the link is rewritten exactly when the decision projects"
+        );
         (decision, input, request_id)
+    }
+
+    fn changed_link(decision: &AdmissionDecision) -> &LinkSnapshot {
+        decision.link.as_ref().expect("the link was rewritten")
     }
 
     fn receipt(decision: &AdmissionDecision) -> &AdmissionReceipt {
@@ -578,8 +590,8 @@ mod tests {
                 },
             })
         );
-        assert_eq!(decision.link.uses, 1);
-        assert_eq!(decision.link.revision, link.revision + 1);
+        assert_eq!(changed_link(&decision).uses, 1);
+        assert_eq!(changed_link(&decision).revision, link.revision + 1);
         let request = decision.request.clone().unwrap();
         assert_eq!(
             request,
@@ -600,7 +612,7 @@ mod tests {
         assert_eq!(
             decision.workflow,
             Some(WorkflowEnvelope::from_authority(
-                &decision.link,
+                changed_link(&decision),
                 request.clone()
             ))
         );
@@ -616,7 +628,7 @@ mod tests {
             envelope.transition_id,
             format!("link/{}/{}", link.link_id, link.revision + 1)
         );
-        assert_eq!(envelope.link, decision.link);
+        assert_eq!(Some(envelope.link), decision.link);
         assert_eq!(envelope.requests, vec![decision.request.unwrap()]);
         assert_eq!(
             envelope.events,
@@ -673,7 +685,7 @@ mod tests {
         link.uses = 1;
         let (decision, _, _) = decide(&link, None, Eligibility::Available);
 
-        assert_eq!(decision.link.uses, 2);
+        assert_eq!(changed_link(&decision).uses, 2);
         let envelope = decision.projection.unwrap();
         assert_eq!(
             kinds(&envelope),
@@ -697,7 +709,7 @@ mod tests {
         link.creation.max_uses = Some(2);
         let (decision, _, _) = decide(&link, None, Eligibility::Available);
 
-        assert_eq!(decision.link.uses, 1);
+        assert_eq!(changed_link(&decision).uses, 1);
         assert_eq!(
             kinds(&decision.projection.unwrap()),
             vec![EventType::RequestCreated]
@@ -723,7 +735,7 @@ mod tests {
                 },
             })
         );
-        assert_eq!(decision.link, link);
+        assert_eq!(decision.link, None);
         assert_eq!(decision.request, None);
         assert_eq!(decision.projection, None);
         assert_eq!(decision.workflow, None);
@@ -779,7 +791,7 @@ mod tests {
                 },
             );
             assert_eq!(rejection(&decision), Rejection::ExistingRequest);
-            assert_eq!(decision.link, link);
+            assert_eq!(decision.link, None);
             assert_eq!(decision.expired, None);
             assert_eq!(decision.projection, None);
         }
@@ -801,7 +813,7 @@ mod tests {
             );
             assert_eq!(decision.request.unwrap().request_id, request_id);
             assert_eq!(decision.expired, None);
-            assert_eq!(decision.link.uses, 1);
+            assert_eq!(decision.link.unwrap().uses, 1);
         }
     }
 
@@ -837,8 +849,8 @@ mod tests {
             })
         );
         assert_eq!(decision.request.clone().unwrap().request_id, request_id);
-        assert_eq!(decision.link.uses, 1);
-        assert_eq!(decision.link.revision, link.revision + 1);
+        assert_eq!(changed_link(&decision).uses, 1);
+        assert_eq!(changed_link(&decision).revision, link.revision + 1);
         let envelope = decision.projection.unwrap();
         assert_eq!(envelope.requests, vec![expired, decision.request.unwrap()]);
         assert_eq!(
@@ -862,8 +874,8 @@ mod tests {
         assert_eq!(rejection(&decision), Rejection::Exhausted);
         assert_eq!(decision.request, None);
         assert_eq!(decision.workflow, None);
-        assert_eq!(decision.link.uses, 1);
-        assert_eq!(decision.link.revision, link.revision + 1);
+        assert_eq!(changed_link(&decision).uses, 1);
+        assert_eq!(changed_link(&decision).revision, link.revision + 1);
         let expired = decision.expired.unwrap();
         assert_eq!(expired.decision.unwrap().effective_at, deadline);
         let envelope = decision.projection.unwrap();
@@ -885,7 +897,7 @@ mod tests {
             },
         );
         assert_eq!(rejection(&decision), Rejection::RepositoryUnavailable);
-        assert_eq!(decision.link, link);
+        assert_eq!(decision.link, None);
         assert_eq!(decision.request, None);
         assert_eq!(decision.projection, None);
     }
@@ -895,7 +907,7 @@ mod tests {
         let link = link(true);
         let (decision, _, _) = decide(&link, None, Eligibility::Unknown);
         assert_eq!(decision.outcome, AdmissionOutcome::Undetermined);
-        assert_eq!(decision.link, link);
+        assert_eq!(decision.link, None);
         assert_eq!(decision.request, None);
         assert_eq!(decision.projection, None);
         assert_eq!(decision.workflow, None);
@@ -916,7 +928,7 @@ mod tests {
         let (decision, _, _) = decide(&link, Some(blocker), Eligibility::Unknown);
         assert_eq!(decision.outcome, AdmissionOutcome::Undetermined);
         assert_eq!(decision.expired.unwrap().state, RequestState::Expired);
-        assert_eq!(decision.link.revision, link.revision + 1);
+        assert_eq!(decision.link.unwrap().revision, link.revision + 1);
         assert_eq!(
             kinds(&decision.projection.unwrap()),
             vec![EventType::RequestExpired]

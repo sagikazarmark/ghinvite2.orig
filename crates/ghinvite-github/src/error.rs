@@ -25,9 +25,14 @@ pub struct RateLimit {
     pub retry_after: Option<Duration>,
 }
 
-/// All failure modes a GitHub-side call can produce. Callers branch on these
-/// variants; in particular `Error::Status(404)` on a `get_repo` is *not*
-/// fatal — it just means the App lost access.
+/// All failure modes a GitHub-side call can produce.
+///
+/// Where a status has one meaning for an endpoint, the endpoint answers it as
+/// a typed value instead (a missing installation, a missing invitation, the
+/// outcome of adding a collaborator), so no caller has to match on it. The
+/// statuses left here are those an endpoint cannot interpret alone: a 404 on
+/// `get_repo` or a permission read may mean the App lost the repository, and
+/// only the caller knows what it verified first.
 ///
 /// Every string in here is a diagnostic, not a payload. Error values are
 /// formatted into logs and into Restate terminal errors long after the request
@@ -94,10 +99,9 @@ pub enum Error {
 }
 
 impl Error {
-    /// Convenience: extract the status code of any response-carrying variant,
-    /// throttled responses included. Handlers branch on specific codes
-    /// (404 = lost access, 422 = already a member, etc.), so giving them this
-    /// rather than `match`ing keeps call sites tight.
+    /// The status code of any response-carrying variant, throttled responses
+    /// included, for logs and for the few callers that interpret a status an
+    /// endpoint leaves ambiguous.
     pub fn status(&self) -> Option<u16> {
         match self {
             Error::Status { status, .. } | Error::RateLimited { status, .. } => Some(*status),

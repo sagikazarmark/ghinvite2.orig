@@ -75,15 +75,22 @@ object) and is covered by the integration tests rather than by unit tests.
 `crate::error::to_sdk_handler_error` bridge maps the result to Restate's
 `TerminalError` accordingly.
 
-Audit events go through `audit::emit(state, account_id, event_type, actor,
-target, metadata, request_id)`, which constructs an `AuditEvent` and calls
-`AuditStorage::audit`. Every state-change handler emits exactly one audit event.
+Every audit event has an identity fixed before it is written, so a retry
+replays it rather than duplicating it. Which write carries it depends on what
+changed:
 
-Metadata updates prepare and journal their changed field names, audit ID, and
-timestamp before applying the write. They construct the event from that snapshot
-and call `AuditStorage::audit` directly so retries reuse the same identity. Storage
-deduplicates this event type by ID; unchanged metadata produces no event. Audit
-metadata includes field names only, never description or internal-note values.
+- Invitation links and invitation requests (`admission`) attach `AuditIntent`s to the `ProjectionEnvelope` they send to `projection`,
+  and `ProjectionStorage::apply_transition` inserts them in the same
+  transaction as the records. A metadata update journals its event
+  (`link/{id}/metadata/{revision}`) before sending it; unchanged metadata
+  produces no event, and the event carries no description or internal-note
+  values.
+- GitHub invitation settlement (`settlement`) carries its `AuditEvent` in the
+  `Settlement` that `settle_github_invitation` applies; the event ID derives
+  from the invitation ID, so an invitation settles with one event.
+- Installation changes (`availability`) journal their `AuditEvent` first,
+  project the installation, then call `AuditStorage::audit`, which accepts an
+  identical replay.
 
 See [the request lifecycle](../../docs/request-lifecycle-v1.md) and
 [ADR 0003](../../docs/adr/0003-restate-authoritative-admission.md) for the

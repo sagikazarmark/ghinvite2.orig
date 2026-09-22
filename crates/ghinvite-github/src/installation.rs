@@ -1,22 +1,110 @@
 //! App-installation client: holds the App-JWT signer + a token cache, and
 //! exposes the installation-side endpoints.
 
-use crate::error::Result;
+use crate::error::{RateLimit, Result};
 use crate::jwt::AppJwtSigner;
 use crate::payloads::{
     GhCollaboratorInvite, GhInstallationRepos, GhInstallationToken, GhInvitationListItem, GhRepo,
 };
 use crate::token_cache::TokenCache;
 use crate::transport::{HttpTransport, Method, Request};
-use crate::util::path_segment;
+use crate::util::{github_request, path_segment};
 use chrono::Utc;
 use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
-/// Backstop on the pending-invitation walk. At 100 per page this is far past
-/// any real repository; exceeding it is a paging fault, not a complete list.
-const MAX_INVITATION_PAGES: usize = 1000;
+/// A user's role on a repository, in GitHub's collaborator vocabulary — the
+/// `role_name` of a permission read, or the `permissions` of a pending
+/// invitation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CollaboratorRole {
+    Read,
+    Triage,
+    Write,
+    Maintain,
+    Admin,
+    /// GitHub's answer that the user has no access to the repository.
+    None,
+    /// A custom repository role an organization defined. It is access, but
+    /// not the grant of any [`ghinvite_core::Permission`].
+    Other(String),
+}
+
+impl CollaboratorRole {
+    /// Read a role off the wire. Every value is a role: an unrecognized name
+    /// is a custom repository role, never an error. The legacy `pull`/`push`
+    /// names read as the roles they became.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "read" | "pull" => Self::Read,
+            "triage" => Self::Triage,
+            "write" | "push" => Self::Write,
+            "maintain" => Self::Maintain,
+            "admin" => Self::Admin,
+            "none" => Self::None,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+
+    /// Whether this is exactly the role `permission` grants. A higher role is
+    /// not a match: it is evidence of somebody else's grant, not of this one.
+    pub fn matches(&self, permission: ghinvite_core::Permission) -> bool {
+        use ghinvite_core::Permission;
+        matches!(
+            (self, permission),
+            (Self::Read, Permission::Pull)
+                | (Self::Triage, Permission::Triage)
+                | (Self::Write, Permission::Push)
+                | (Self::Maintain, Permission::Maintain)
+                | (Self::Admin, Permission::Admin)
+        )
+    }
+
+    /// Whether the user has any access to the repository at all.
+    pub fn has_access(&self) -> bool {
+        *self != Self::None
+    }
+}
+
+/// What GitHub's response to adding a repository collaborator said, in HTTP
+/// terms. Each variant is a fact about the response, not a verdict about the
+/// delivery that sent it.
+#[derive(Debug)]
+pub enum CollaboratorAddition {
+    /// 201: GitHub created a pending invitation with this id.
+    Created { invitation_id: u64 },
+    /// 204: the user already collaborates on the repository, so GitHub
+    /// created no invitation.
+    AlreadyCollaborator,
+    /// A 403 or 429 carrying documented rate-limit evidence: GitHub refused the
+    /// PUT outright without deciding it, so nothing was created.
+    Throttled(RateLimit),
+    /// 401, 403 or 404 without rate-limit evidence: GitHub refused the
+    /// credential or would not let it reach the repository or user. Nothing
+    /// was created.
+    AccessRefused { status: u16 },
+    /// 400, 409 or 422: GitHub refused the request itself — an invalid
+    /// permission, an invitee it will not invite, and the like. Nothing was
+    /// created.
+    ValidationRefused { status: u16 },
+    /// No answer to the PUT could be read: it may never have been sent, may
+    /// have failed in transit, or drew a status or body GitHub gives no single
+    /// meaning to. Whether an invitation exists is not known.
+    Unanswered(crate::Error),
+}
+
+/// GitHub's answer to deleting a pending repository invitation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvitationDeletion {
+    /// 204: GitHub deleted the pending invitation.
+    Deleted,
+    /// 404: GitHub holds no such invitation this installation can see. It was
+    /// already accepted, declined or deleted — or the installation no longer
+    /// sees the repository, which GitHub answers the same way. Nothing is left
+    /// for this installation to delete either way.
+    NotFound,
+}
 
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
@@ -30,20 +118,25 @@ pub struct InstallationClient {
 
 impl InstallationClient {
     /// App-authenticated identity/status observation, independent of cached tokens.
+    ///
+    /// `Ok(None)` is GitHub's answer that this App has no such installation:
+    /// it was uninstalled or never existed. The request carries the App's own
+    /// JWT and names no repository, so a 404 here has no other meaning.
     pub async fn get_installation(
         &self,
         installation_id: u64,
-    ) -> Result<crate::payloads::GhAppInstallation> {
+    ) -> Result<Option<crate::payloads::GhAppInstallation>> {
         let jwt = self.signer.sign(Utc::now())?;
-        let request = Request::new(
+        let request = github_request(
             Method::Get,
             format!("{}/app/installations/{installation_id}", self.base_url),
-        )
-        .header("accept", "application/vnd.github+json")
-        .header("authorization", format!("Bearer {jwt}"))
-        .header("user-agent", "ghinvite")
-        .header("x-github-api-version", "2022-11-28");
-        self.transport.send(request).await?.ensure_success()?.json()
+            &jwt,
+        );
+        let resp = self.transport.send(request).await?;
+        if resp.status == 404 {
+            return Ok(None);
+        }
+        resp.ensure_success()?.json().map(Some)
     }
 
     /// Complete numeric repository scope. A partial or changing pagination result
@@ -92,13 +185,22 @@ impl InstallationClient {
 
     /// Read collaborator permission and the identity returned with it. Unlike
     /// a login-only 204 membership probe this provides numeric identity evidence.
+    /// The role is GitHub's `role_name` when it sends a non-empty one (custom
+    /// roles only appear there), otherwise its coarser `permission`. A read
+    /// naming no role at all is a decode error, never a custom role: that
+    /// would count as access.
+    ///
+    /// A user without access is a 200 naming `none`. A 404 stays an error:
+    /// GitHub documents it only as "Resource not found", which covers a login
+    /// that no longer resolves and a repository this installation cannot see
+    /// alike, so the caller decides what it means from what it verified first.
     pub async fn collaborator_permission(
         &self,
         installation_id: u64,
         owner: &str,
         repo: &str,
         login: &str,
-    ) -> Result<(u64, String)> {
+    ) -> Result<(u64, CollaboratorRole)> {
         #[derive(serde::Deserialize)]
         struct Permission {
             user: crate::payloads::GhUser,
@@ -116,11 +218,16 @@ impl InstallationClient {
             .auth_request(installation_id, Method::Get, &path)
             .await?;
         let result: Permission = self.transport.send(req).await?.ensure_success()?.json()?;
-        Ok((
-            result.user.id,
-            result.role_name.unwrap_or(result.permission),
-        ))
+        let role = result
+            .role_name
+            .filter(|name| !name.is_empty())
+            .unwrap_or(result.permission);
+        if role.is_empty() {
+            return Err(crate::Error::decode_shape("collaborator permission"));
+        }
+        Ok((result.user.id, CollaboratorRole::parse(&role)))
     }
+
     /// Resolve immutable user identity to addressing data and revalidate that
     /// address. These are read-only calls; a mismatch must never authorize PUT.
     pub async fn verified_user(
@@ -179,11 +286,7 @@ impl InstallationClient {
             "{}/app/installations/{}/access_tokens",
             self.base_url, installation_id
         );
-        let req = Request::new(Method::Post, &url)
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {jwt}"))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28");
+        let req = github_request(Method::Post, url, &jwt);
         match self.transport.send(req).await?.ensure_success() {
             Ok(resp) => resp.json(),
             Err(err) => {
@@ -225,11 +328,11 @@ impl InstallationClient {
         path: &str,
     ) -> Result<Request> {
         let token = self.installation_token(installation_id).await?;
-        Ok(Request::new(method, format!("{}{}", self.base_url, path))
-            .header("accept", "application/vnd.github+json")
-            .header("authorization", format!("Bearer {token}"))
-            .header("user-agent", "ghinvite")
-            .header("x-github-api-version", "2022-11-28"))
+        Ok(github_request(
+            method,
+            format!("{}{}", self.base_url, path),
+            &token,
+        ))
     }
 
     /// `GET /repos/{owner}/{repo}` — small surface for display + access
@@ -253,21 +356,9 @@ impl InstallationClient {
         }
     }
 
-    /// `PUT /repos/{owner}/{repo}/collaborators/{username}`. Returns:
-    /// - `Ok(Some(invitation_id))` on 201 — recipient now has a pending invitation.
-    /// - `Ok(None)` on 204 — recipient was already a collaborator (no invitation
-    ///   created). Caller should treat as immediate-accept.
-    /// - `Err(Error::RateLimited)` when GitHub throttled the write rather than
-    ///   deciding it, so nothing was created and the PUT may be retried.
-    /// - `Err(Error::Status)` on any other status. A 403 arriving this way is a
-    ///   permission refusal, never a rate limit.
-    ///
-    /// **422 sub-codes:** GitHub returns 422 with body `{"message":"Validation Failed",
-    /// "errors":[{"code":"...","field":"..."}]}` for permission validation,
-    /// already-declined invitations, etc. `Error::Status::body` carries those
-    /// sub-codes through as a sanitized summary (see [`crate::redact`]), so
-    /// callers can still tell them apart; the response body itself does not
-    /// survive. See spec §16 for the agreed error-handling discipline.
+    /// `PUT /repos/{owner}/{repo}/collaborators/{username}`, answered as the
+    /// [`CollaboratorAddition`] GitHub's response amounts to. What that means
+    /// for a delivery is the caller's decision.
     #[tracing::instrument(skip(self, username), fields(installation_id, owner, repo))]
     pub async fn add_collaborator(
         &self,
@@ -276,28 +367,49 @@ impl InstallationClient {
         repo: &str,
         username: &str,
         permission: ghinvite_core::Permission,
-    ) -> Result<Option<u64>> {
+    ) -> CollaboratorAddition {
         let path = format!(
             "/repos/{}/{}/collaborators/{}",
             path_segment(owner),
             path_segment(repo),
             path_segment(username)
         );
-        let req = self
-            .auth_request(installation_id, Method::Put, &path)
-            .await?
-            .json_body(&serde_json::json!({"permission": permission.to_string()}))?;
-        let resp = self.transport.send(req).await?;
+        let sent = async {
+            let req = self
+                .auth_request(installation_id, Method::Put, &path)
+                .await?
+                .json_body(&serde_json::json!({"permission": permission.to_string()}))?;
+            self.transport.send(req).await
+        };
+        let resp = match sent.await {
+            Ok(resp) => resp,
+            Err(err) => return CollaboratorAddition::Unanswered(err),
+        };
         match resp.status {
-            201 => {
-                let inv: GhCollaboratorInvite = resp.json()?;
-                Ok(Some(inv.id))
-            }
-            204 => Ok(None),
+            201 => match resp.json::<GhCollaboratorInvite>() {
+                Ok(invite) => CollaboratorAddition::Created {
+                    invitation_id: invite.id,
+                },
+                Err(err) => CollaboratorAddition::Unanswered(err),
+            },
+            204 => CollaboratorAddition::AlreadyCollaborator,
             _ => {
                 let err = resp.status_error();
                 tracing::warn!(status = ?err.status(), "github request failed");
-                Err(err)
+                match err {
+                    crate::Error::RateLimited { rate_limit, .. } => {
+                        CollaboratorAddition::Throttled(rate_limit)
+                    }
+                    crate::Error::Status {
+                        status: status @ (401 | 403 | 404),
+                        ..
+                    } => CollaboratorAddition::AccessRefused { status },
+                    crate::Error::Status {
+                        status: status @ (400 | 409 | 422),
+                        ..
+                    } => CollaboratorAddition::ValidationRefused { status },
+                    err => CollaboratorAddition::Unanswered(err),
+                }
             }
         }
     }
@@ -305,9 +417,10 @@ impl InstallationClient {
     /// `DELETE /repos/{owner}/{repo}/invitations/{invitation_id}` — used to
     /// cancel a pending invitation.
     ///
-    /// **Errors:** `Error::Status { status: 404 }` if the invitation no longer
-    /// exists (already accepted/declined/cancelled), and `Error::RateLimited`
-    /// when GitHub throttled the delete rather than performing it.
+    /// **Errors:** `Error::RateLimited` when GitHub throttled the delete rather
+    /// than performing it, and any failure minting the installation token —
+    /// a mint's 404 means the installation is gone, never the invitation, so
+    /// it is not [`InvitationDeletion::NotFound`].
     #[tracing::instrument(skip(self), fields(installation_id, owner, repo))]
     pub async fn delete_invitation(
         &self,
@@ -315,7 +428,7 @@ impl InstallationClient {
         owner: &str,
         repo: &str,
         invitation_id: u64,
-    ) -> Result<()> {
+    ) -> Result<InvitationDeletion> {
         let path = format!(
             "/repos/{}/{}/invitations/{}",
             path_segment(owner),
@@ -325,8 +438,12 @@ impl InstallationClient {
         let req = self
             .auth_request(installation_id, Method::Delete, &path)
             .await?;
-        match self.transport.send(req).await?.ensure_success() {
-            Ok(_) => Ok(()),
+        let resp = self.transport.send(req).await?;
+        if resp.status == 404 {
+            return Ok(InvitationDeletion::NotFound);
+        }
+        match resp.ensure_success() {
+            Ok(_) => Ok(InvitationDeletion::Deleted),
             Err(err) => {
                 tracing::warn!(status = ?err.status(), "github request failed");
                 Err(err)
@@ -350,44 +467,35 @@ impl InstallationClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<GhInvitationListItem>> {
-        let mut path = format!(
+        let first = format!(
             "/repos/{}/{}/invitations?per_page=100",
             path_segment(owner),
             path_segment(repo)
         );
         let mut listed = Vec::new();
-        // Every page already walked. A cycle of any length — not just a link
-        // back to the page in hand — is a paging fault, and catching it here
-        // spends one request on it instead of the whole page budget.
-        let mut walked = std::collections::HashSet::new();
-        for _ in 0..MAX_INVITATION_PAGES {
-            if !walked.insert(path.clone()) {
-                // `path` came out of an upstream `Link` header; the fault is
-                // the revisit, which needs none of its text to state.
-                return Err(crate::Error::InvalidInput(
-                    "pagination returned to a page already walked".into(),
-                ));
-            }
-            let req = self
-                .auth_request(installation_id, Method::Get, &path)
-                .await?;
-            let resp = match self.transport.send(req).await?.ensure_success() {
-                Ok(resp) => resp,
-                Err(err) => {
-                    tracing::warn!(status = ?err.status(), "github request failed");
-                    return Err(err);
-                }
-            };
-            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
-            listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
-            match next {
-                Some(next) => path = next,
-                None => return Ok(listed),
-            }
-        }
-        Err(crate::Error::InvalidInput(
-            "incomplete pending invitation listing".into(),
-        ))
+        crate::pagination::walk_link_pages(
+            first,
+            &self.base_url,
+            crate::pagination::MAX_PAGES,
+            |path| async move {
+                let req = self
+                    .auth_request(installation_id, Method::Get, &path)
+                    .await?;
+                self.transport
+                    .send(req)
+                    .await?
+                    .ensure_success()
+                    .inspect_err(|err| {
+                        tracing::warn!(status = ?err.status(), "github request failed");
+                    })
+            },
+            |resp| {
+                listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(listed)
     }
 
     /// `GET /repos/{owner}/{repo}/collaborators/{username}` — confirm membership.
@@ -569,6 +677,49 @@ mod read_tests {
         let err = client.get_repo(9, "acme", "gone").await.unwrap_err();
         assert_eq!(err.status(), Some(404));
     }
+
+    #[tokio::test]
+    async fn get_installation_reads_the_installation_github_holds() {
+        let mock = MockTransport::scripted(vec![Expectation::ok_json(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            serde_json::json!({"id": 9, "account": {"id": 100, "login": "acme"}, "suspended_at": null}),
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let installation = client.get_installation(9).await.unwrap().unwrap();
+        assert_eq!((installation.id, installation.account.id), (9, 100));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_missing_installation_is_none_not_an_error() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            404,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert!(client.get_installation(9).await.unwrap().is_none());
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn an_installation_github_would_not_answer_for_is_an_error() {
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            502,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert_eq!(
+            client.get_installation(9).await.unwrap_err().status(),
+            Some(502)
+        );
+        mock.assert_exhausted();
+    }
 }
 
 #[cfg(test)]
@@ -619,16 +770,23 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let id = client
+        let answer = client
             .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-            .await
-            .unwrap();
-        assert_eq!(id, Some(9988));
+            .await;
+        assert!(
+            matches!(
+                answer,
+                CollaboratorAddition::Created {
+                    invitation_id: 9988
+                }
+            ),
+            "{answer:?}"
+        );
         mock.assert_exhausted();
     }
 
     #[tokio::test]
-    async fn add_collaborator_returns_none_on_204() {
+    async fn add_collaborator_reports_an_existing_collaborator_on_204() {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation {
@@ -645,42 +803,109 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let id = client
+        let answer = client
             .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-            .await
-            .unwrap();
-        assert_eq!(id, None);
+            .await;
+        assert!(
+            matches!(answer, CollaboratorAddition::AlreadyCollaborator),
+            "{answer:?}"
+        );
     }
 
-    #[tokio::test]
-    async fn add_collaborator_propagates_422() {
+    /// The PUT's answer for each refusing or unanswered status.
+    async fn add_collaborator_answer(status: u16) -> CollaboratorAddition {
         let mock = MockTransport::scripted(vec![
             token_mint_expectation(),
             Expectation::status(
                 Method::Put,
-                "https://api.github.test/repos/acme/api/collaborators/baduser",
-                422,
+                "https://api.github.test/repos/acme/api/collaborators/octocat",
+                status,
             ),
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        let err = client
-            .add_collaborator(9, "acme", "api", "baduser", Permission::Push)
-            .await
-            .unwrap_err();
-        assert_eq!(err.status(), Some(422));
+        let answer = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await;
+        mock.assert_exhausted();
+        answer
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_names_an_access_refusal() {
+        for status in [401, 403, 404] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(answer, CollaboratorAddition::AccessRefused { status: s } if s == status),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_names_a_validation_refusal() {
+        for status in [400, 409, 422] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(answer, CollaboratorAddition::ValidationRefused { status: s } if s == status),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_leaves_any_other_status_unanswered() {
+        for status in [410, 500, 502] {
+            let answer = add_collaborator_answer(status).await;
+            assert!(
+                matches!(&answer, CollaboratorAddition::Unanswered(error) if error.status() == Some(status)),
+                "{status}: {answer:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn add_collaborator_leaves_an_undecodable_201_unanswered() {
+        // GitHub may well have created the invitation; its id is what is missing.
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation {
+                method: Method::Put,
+                url: "https://api.github.test/repos/acme/api/collaborators/octocat".into(),
+                required_headers: BTreeMap::new(),
+                expected_body: None,
+                response: Response {
+                    status: 201,
+                    headers: BTreeMap::new(),
+                    body: b"not json".to_vec(),
+                },
+            },
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let answer = client
+            .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
+            .await;
+        assert!(
+            matches!(
+                answer,
+                CollaboratorAddition::Unanswered(crate::Error::Decode(_))
+            ),
+            "{answer:?}"
+        );
     }
 
     #[tokio::test]
     async fn add_collaborator_separates_a_throttled_403_from_a_denied_one() {
+        let throttled = crate::RateLimit {
+            scope: crate::RateLimitScope::Secondary,
+            retry_after: Some(std::time::Duration::from_secs(42)),
+        };
         for (headers, message, expected_limit) in [
             (
                 vec![("retry-after", "42")],
                 "You have exceeded a secondary rate limit",
-                Some(crate::RateLimit {
-                    scope: crate::RateLimitScope::Secondary,
-                    retry_after: Some(std::time::Duration::from_secs(42)),
-                }),
+                Some(throttled),
             ),
             (vec![], "Resource not accessible by integration", None),
         ] {
@@ -703,17 +928,20 @@ mod write_tests {
             ]);
             let client = InstallationClient::new(Arc::new(mock.clone()), signer())
                 .with_base("https://api.github.test");
-            let err = client
+            let answer = client
                 .add_collaborator(9, "acme", "api", "octocat", Permission::Push)
-                .await
-                .unwrap_err();
+                .await;
             // Same status either way; the classification is what separates them.
-            assert_eq!(err.status(), Some(403));
-            assert_eq!(
-                err.rate_limit(),
-                expected_limit,
-                "unexpected classification of {message:?}: {err:?}"
-            );
+            match expected_limit {
+                Some(limit) => assert!(
+                    matches!(answer, CollaboratorAddition::Throttled(l) if l == limit),
+                    "unexpected classification of {message:?}: {answer:?}"
+                ),
+                None => assert!(
+                    matches!(answer, CollaboratorAddition::AccessRefused { status: 403 }),
+                    "unexpected classification of {message:?}: {answer:?}"
+                ),
+            }
         }
     }
 
@@ -735,10 +963,54 @@ mod write_tests {
         ]);
         let client = InstallationClient::new(Arc::new(mock.clone()), signer())
             .with_base("https://api.github.test");
-        client
+        assert_eq!(
+            client
+                .delete_invitation(9, "acme", "api", 777)
+                .await
+                .unwrap(),
+            InvitationDeletion::Deleted
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn delete_invitation_reports_an_invitation_github_does_not_hold() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::status(
+                Method::Delete,
+                "https://api.github.test/repos/acme/api/invitations/777",
+                404,
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        assert_eq!(
+            client
+                .delete_invitation(9, "acme", "api", 777)
+                .await
+                .unwrap(),
+            InvitationDeletion::NotFound
+        );
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_token_mint_404_is_not_a_missing_invitation() {
+        // The installation is gone, not the invitation: GitHub may still hold it.
+        let mock = MockTransport::scripted(vec![Expectation::status(
+            Method::Post,
+            "https://api.github.test/app/installations/9/access_tokens",
+            404,
+        )]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client
             .delete_invitation(9, "acme", "api", 777)
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(err.status(), Some(404));
+        mock.assert_exhausted();
     }
 }
 
@@ -1017,5 +1289,201 @@ mod reconcile_tests {
         let err = client.list_invitations(9, "acme", "api").await.unwrap_err();
         assert!(matches!(err, crate::Error::InvalidInput(_)), "got {err:?}");
         mock.assert_exhausted();
+    }
+}
+
+#[cfg(test)]
+mod collaborator_role_tests {
+    use super::*;
+    use crate::mocks::{Expectation, MockTransport};
+    use crate::transport::Response;
+    use ghinvite_core::Permission;
+    use std::collections::BTreeMap;
+
+    const TEST_KEY_PEM: &str = include_str!("jwt_test_key.pem");
+
+    fn signer() -> AppJwtSigner {
+        AppJwtSigner::from_pem(123, TEST_KEY_PEM).unwrap()
+    }
+
+    fn token_mint_expectation() -> Expectation {
+        Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 201,
+                headers: BTreeMap::new(),
+                body: br#"{"token":"ghs_xxx","expires_at":"2099-01-01T00:00:00Z"}"#.to_vec(),
+            },
+        }
+    }
+
+    const PERMISSIONS: [Permission; 5] = [
+        Permission::Pull,
+        Permission::Triage,
+        Permission::Push,
+        Permission::Maintain,
+        Permission::Admin,
+    ];
+
+    #[test]
+    fn each_role_matches_exactly_the_permission_that_grants_it() {
+        for (wire, role, granted) in [
+            ("read", CollaboratorRole::Read, Permission::Pull),
+            ("triage", CollaboratorRole::Triage, Permission::Triage),
+            ("write", CollaboratorRole::Write, Permission::Push),
+            ("maintain", CollaboratorRole::Maintain, Permission::Maintain),
+            ("admin", CollaboratorRole::Admin, Permission::Admin),
+        ] {
+            assert_eq!(CollaboratorRole::parse(wire), role);
+            for permission in PERMISSIONS {
+                assert_eq!(
+                    role.matches(permission),
+                    permission == granted,
+                    "{role:?} against {permission:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_permission_names_read_as_their_roles() {
+        assert_eq!(CollaboratorRole::parse("pull"), CollaboratorRole::Read);
+        assert_eq!(CollaboratorRole::parse("push"), CollaboratorRole::Write);
+    }
+
+    #[test]
+    fn none_is_no_access_and_matches_no_permission() {
+        let role = CollaboratorRole::parse("none");
+        assert_eq!(role, CollaboratorRole::None);
+        assert!(!role.has_access());
+        assert!(PERMISSIONS.iter().all(|p| !role.matches(*p)));
+    }
+
+    #[test]
+    fn a_custom_role_is_access_but_matches_no_permission() {
+        let role = CollaboratorRole::parse("security-auditor");
+        assert_eq!(role, CollaboratorRole::Other("security-auditor".into()));
+        assert!(role.has_access());
+        assert!(PERMISSIONS.iter().all(|p| !role.matches(*p)));
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_prefers_the_role_name() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "read",
+                    "role_name": "triage"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (id, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!((id, role), (42, CollaboratorRole::Triage));
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_reads_a_custom_role_not_an_error() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "write",
+                    "role_name": "security-auditor"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!(role, CollaboratorRole::Other("security-auditor".into()));
+    }
+
+    #[tokio::test]
+    async fn collaborator_permission_without_a_role_name_reads_the_permission() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "none"
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        assert_eq!(role, CollaboratorRole::None);
+    }
+
+    #[tokio::test]
+    async fn an_empty_role_name_reads_the_permission_not_a_custom_role() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "none",
+                    "role_name": ""
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let (_, role) = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap();
+        // An empty name is no role at all, so it must not read as a custom
+        // role — which would count as access.
+        assert_eq!(role, CollaboratorRole::None);
+    }
+
+    #[tokio::test]
+    async fn a_permission_read_naming_no_role_is_a_decode_error() {
+        let mock = MockTransport::scripted(vec![
+            token_mint_expectation(),
+            Expectation::ok_json(
+                Method::Get,
+                "https://api.github.test/repos/acme/api/collaborators/octocat/permission",
+                serde_json::json!({
+                    "user": {"id": 42, "login": "octocat"},
+                    "permission": "",
+                    "role_name": ""
+                }),
+            ),
+        ]);
+        let client = InstallationClient::new(Arc::new(mock.clone()), signer())
+            .with_base("https://api.github.test");
+        let err = client
+            .collaborator_permission(9, "acme", "api", "octocat")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::Error::Decode(_)), "got {err:?}");
     }
 }

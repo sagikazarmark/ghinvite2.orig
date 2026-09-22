@@ -1,6 +1,6 @@
 //! The new invitation link form on the server.
 //!
-//! A thin adapter over the shared model in [`crate::views::link_form`]: the
+//! A thin adapter over the shared model in [`ghinvite_ui::link_form`]: the
 //! raw POST body ([`CreateLinkSubmission`]) is parsed into the typed
 //! `CreateLinkForm`, the shared validators run through `dioform-core`, and the
 //! route gets back either the guardrails the command facade may act on
@@ -11,17 +11,16 @@
 //! No rule lives here. Adding one is a validator in `register_validators`
 //! (and, for a typed text field, a parser) in the shared module.
 
-use crate::views::link_form::{
-    self, CreateLinkForm, LinkFormErrors, RepositoryChoice, register_validators,
-};
-use crate::views::links::LinkFormValues;
 use chrono::{DateTime, Utc};
 use dioform_core::FormCore;
 use ghinvite_core::storage::projection::{AccountAdmin, CreateLink};
-use ghinvite_core::{
-    Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
+use ghinvite_core::{Description, InternalNote, InvitationLinkId, Permission, RepositoryScope};
+use ghinvite_ui::link_form::{
+    self, CreateLinkForm, LinkFormErrors, RepositoryChoice, register_validators,
 };
+use ghinvite_ui::links::LinkFormValues;
 use serde::Deserialize;
+use std::num::NonZeroU32;
 use std::str::FromStr;
 
 /// Raw POST body of the new invitation link form, exactly as submitted.
@@ -85,19 +84,19 @@ impl CreateLinkSubmission {
 /// Invitation-link creation data that passed every rule of the form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatedCreateLink {
-    pub description: String,
-    pub internal_note: Option<String>,
+    pub description: Description,
+    /// `None` when the internal note was left blank.
+    pub internal_note: Option<InternalNote>,
     /// The permission level, one of the supported GitHub collaborator levels.
     pub permission: Permission,
     pub approval_required: bool,
     /// `None` is an intentional "unlimited" (the field was left blank).
-    pub max_uses: Option<u32>,
+    pub max_uses: Option<NonZeroU32>,
     /// `None` is an intentional "no expiration" (the field was left blank).
     /// Otherwise `now` plus the submitted whole number of days.
     pub expires_at: Option<DateTime<Utc>>,
-    /// The repository scope: a non-empty subset of the available
-    /// repositories, ordered by repository ID.
-    pub repos: Vec<InvitationLinkRepo>,
+    /// The repository scope, drawn from the available repositories.
+    pub repos: RepositoryScope,
 }
 
 impl ValidatedCreateLink {
@@ -117,13 +116,13 @@ impl ValidatedCreateLink {
             admin,
             account_id,
             installation_id,
-            description: self.description,
-            internal_note: self.internal_note,
+            description: self.description.into(),
+            internal_note: self.internal_note.map(String::from),
             expires_at: self.expires_at,
-            max_uses: self.max_uses,
+            max_uses: self.max_uses.map(NonZeroU32::get),
             permission: self.permission,
             approval_required: self.approval_required,
-            repos: self.repos,
+            repos: self.repos.into(),
         }
     }
 }
@@ -157,15 +156,29 @@ pub fn validate(
         errors.attach(error.field_identity().as_ref(), error.error().clone());
     }
 
+    finish(&model, errors, available_repos, now)
+}
+
+/// The creation data of a model the validators reported `errors` for.
+///
+/// When every rule passed, the values come from the same derivations the
+/// validators consulted, so they cannot fail. Should the two ever drift, fail
+/// closed — re-render rather than create a link with unvalidated guardrails —
+/// and say so, rather than show the form again with nothing to correct.
+fn finish(
+    model: &CreateLinkForm,
+    errors: LinkFormErrors,
+    available_repos: &[RepositoryChoice],
+    now: DateTime<Utc>,
+) -> Result<ValidatedCreateLink, Box<LinkFormErrors>> {
     if !errors.is_empty() {
         return Err(Box::new(errors));
     }
-
-    // Every rule passed. These are the same derivations the validators
-    // consulted, so they cannot fail now; should the two ever drift, fail
-    // closed (re-render) rather than create a link with unvalidated
-    // guardrails.
     let permission = Permission::from_str(&model.permission).ok();
+    let max_uses = match model.max_uses {
+        None => Some(None),
+        Some(max) => NonZeroU32::new(max).map(Some),
+    };
     let expires_at = match model.expires_in_days {
         None => Some(None),
         Some(days) => link_form::expiration_after(now, days).map(Some),
@@ -178,27 +191,42 @@ pub fn validate(
         Description::parse(&model.description),
         InternalNote::parse(&model.internal_note),
         permission,
+        max_uses,
         expires_at,
         repos,
     ) {
-        (Ok(description), Ok(internal_note), Some(permission), Some(expires_at), Ok(repos)) => {
-            Ok(ValidatedCreateLink {
-                description: description.into(),
-                internal_note: internal_note.map(String::from),
-                permission,
-                approval_required: model.approval_required,
-                max_uses: model.max_uses,
-                expires_at,
-                repos: repos.into(),
-            })
+        (
+            Ok(description),
+            Ok(internal_note),
+            Some(permission),
+            Some(max_uses),
+            Some(expires_at),
+            Ok(repos),
+        ) => Ok(ValidatedCreateLink {
+            description,
+            internal_note,
+            permission,
+            approval_required: model.approval_required,
+            max_uses,
+            expires_at,
+            repos,
+        }),
+        _ => {
+            tracing::error!("create link form: validated values failed their derivation");
+            // Form-level only: with no field highlighted, the "fix the
+            // highlighted fields" line would mislead.
+            Err(Box::new(LinkFormErrors {
+                summary: vec![link_form::CREATION_VALUES_UNCHECKED.to_string()],
+                ..errors
+            }))
         }
-        _ => Err(Box::new(errors)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghinvite_core::InvitationLinkRepo;
 
     fn valid_form() -> CreateLinkSubmission {
         CreateLinkSubmission {
@@ -273,17 +301,17 @@ mod tests {
         assert_eq!(
             validated,
             ValidatedCreateLink {
-                description: "AI coding workshop".into(),
-                internal_note: Some("Keep this note".into()),
+                description: Description::parse("AI coding workshop").unwrap(),
+                internal_note: InternalNote::parse("Keep this note").unwrap(),
                 permission: Permission::Push,
                 approval_required: true,
-                max_uses: Some(7),
+                max_uses: NonZeroU32::new(7),
                 expires_at: Some(
                     DateTime::parse_from_rfc3339("2026-06-18T12:00:00Z")
                         .unwrap()
                         .with_timezone(&Utc)
                 ),
-                repos: vec![scope_repo(10, "acme/api")],
+                repos: RepositoryScope::parse(vec![scope_repo(10, "acme/api")]).unwrap(),
             }
         );
     }
@@ -299,7 +327,7 @@ mod tests {
 
         let validated = validate(&form, &available_repos(), now()).unwrap();
 
-        assert_eq!(validated.description, "AI coding workshop");
+        assert_eq!(validated.description.as_str(), "AI coding workshop");
         assert_eq!(validated.internal_note, None);
         assert!(!validated.approval_required);
     }
@@ -421,6 +449,7 @@ mod tests {
             validate(&with_max_uses(Some(raw)), &available_repos(), now())
                 .unwrap()
                 .max_uses
+                .map(NonZeroU32::get)
         };
 
         assert_eq!(max_uses("1"), Some(1));
@@ -632,7 +661,7 @@ mod tests {
             validate(&with_repo_ids(vec![12, 10, 12, 11, 10]), &available, now()).unwrap();
 
         assert_eq!(
-            validated.repos,
+            validated.repos.as_slice(),
             vec![
                 scope_repo(10, "acme/api"),
                 scope_repo(11, "acme/web"),
@@ -648,7 +677,7 @@ mod tests {
             .collect();
 
         let validated = validate(&with_repo_ids((1..=100).collect()), &available, now()).unwrap();
-        assert_eq!(validated.repos.len(), 100);
+        assert_eq!(validated.repos.as_slice().len(), 100);
 
         let errors = validate(&with_repo_ids((1..=101).collect()), &available, now()).unwrap_err();
         assert_eq!(
@@ -687,13 +716,35 @@ mod tests {
             now(),
         )
         .unwrap();
-        assert_eq!(validated.internal_note, Some("x".repeat(16_384)));
+        assert_eq!(
+            validated.internal_note.as_ref().map(InternalNote::as_str),
+            Some("x".repeat(16_384).as_str())
+        );
 
         let errors =
             validate(&with_note("x".repeat(16_385)), &available_repos(), now()).unwrap_err();
         assert_eq!(
             single_field_errors(&errors).internal_note.as_deref(),
             Some(link_form::INTERNAL_NOTE_TOO_LONG)
+        );
+    }
+
+    #[test]
+    fn values_the_validators_passed_but_the_derivations_refuse_fail_visibly() {
+        // Unreachable through `validate` while the derivations match the
+        // validators; this model skips them to stand in for a drift.
+        let (mut model, _) = valid_form().to_model();
+        model.max_uses = Some(0);
+
+        let errors =
+            finish(&model, LinkFormErrors::default(), &available_repos(), now()).unwrap_err();
+
+        assert_eq!(
+            *errors,
+            LinkFormErrors {
+                summary: vec![link_form::CREATION_VALUES_UNCHECKED.to_string()],
+                ..LinkFormErrors::default()
+            }
         );
     }
 }

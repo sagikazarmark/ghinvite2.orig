@@ -1,15 +1,19 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, TimeZone, Utc};
+use ghinvite_core::admission::{
+    AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, AttemptQuery,
+};
+use ghinvite_core::request_lifecycle::{DecideRequest, DecisionAction, LifecycleOperationId};
 use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::projection::{AccountAdmin, RequestSnapshot};
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
 };
-use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, WebConfig, build_app};
+use ghinvite_github::mocks::MockTransport;
+use ghinvite_web::{AppState, LinkAuthority, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -18,7 +22,8 @@ use tower::ServiceExt;
 mod common;
 mod requester_delivery;
 
-use common::link_authority::{CODE_SERVICE, LINK_SERVICE};
+use common::link_authority::FakeLinkAuthority;
+use common::sign_in::{GithubUser, oauth_expectations, sign_in};
 
 #[tokio::test]
 async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
@@ -52,14 +57,13 @@ async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
                 .unwrap(),
         ),
         Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
+            GithubUser::new("octocat", REQUESTER_ID),
         ))),
         restate,
         config,
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     for (uri, status) in [
         ("/".into(), StatusCode::OK),
         (format!("/i/{ACTIVE_SLUG}"), StatusCode::BAD_GATEWAY),
@@ -94,124 +98,114 @@ async fn body_text(response: axum::response::Response) -> String {
     .unwrap()
 }
 
-/// Transport seam: committed admission with a lost acknowledgement. Domain
-/// replay/revoke races are separately exercised against the real Restate object.
-#[derive(Clone)]
-struct LostAdmissionResponse {
-    link_id: InvitationLinkId,
-    attempts: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
-    latest: Arc<Mutex<Option<String>>>,
-    control: Arc<Mutex<(bool, String)>>,
-}
-impl wiremock::Respond for LostAdmissionResponse {
-    fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
-        use serde_json::{Value, json};
-        use wiremock::ResponseTemplate;
-        let body: Value = serde_json::from_slice(&request.body).unwrap();
-        let method = request.url.path().rsplit('/').next().unwrap();
-        let mut attempts = self.attempts.lock().unwrap();
-        match method {
-            "resolve" => ResponseTemplate::new(200).set_body_json(self.link_id),
-            "prepare_attempt" => {
-                let id = body["operation_id"].as_str().unwrap().to_owned();
-                if let Some(old) = attempts.get(&id) {
-                    if old["input"] != body {
-                        return ResponseTemplate::new(409);
-                    }
-                } else {
-                    attempts.insert(id.clone(), json!({"input": body, "receipt": null}));
-                    *self.latest.lock().unwrap() = Some(id.clone());
-                }
-                ResponseTemplate::new(200).set_body_json(attempts[&id].clone())
-            }
-            "admit" => {
-                let id = body["operation_id"].as_str().unwrap();
-                let attempt = attempts.get_mut(id).unwrap();
-                if attempt["receipt"].is_null() {
-                    attempt["receipt"] = json!({"decided_at": "2026-09-14T12:00:00Z", "result": {
-                        "kind": "accepted", "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "state": "pending",
-                        "decision_deadline": "2026-09-21T12:00:00Z" }});
-                    ResponseTemplate::new(503).set_body_string("private transport detail")
-                } else {
-                    ResponseTemplate::new(200).set_body_json(attempt["receipt"].clone())
-                }
-            }
-            "requester_page" => {
-                let (revoked, status) = self.control.lock().unwrap().clone();
-                let id = body["operation_id"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| self.latest.lock().unwrap().clone());
-                let mut attempt = id.as_ref().and_then(|id| attempts.get(id));
-                if attempt.is_some_and(|a| a["input"]["requester_id"] != body["requester_id"]) {
-                    if !body["operation_id"].is_null() {
-                        return ResponseTemplate::new(404);
-                    }
-                    attempt = None;
-                }
-                let accepted = attempt.is_some_and(|a| !a["receipt"].is_null());
-                let can_start =
-                    !(revoked || accepted && matches!(status.as_str(), "pending" | "approved"));
-                let current = if accepted {
-                    json!({"request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                    "link_id": self.link_id, "account_id": 1, "requester_id": body["requester_id"],
-                    "justification": null, "state": status, "admitted_at": "2026-09-14T12:00:00Z",
-                    "decision_deadline": "2026-09-21T12:00:00Z", "revision": 1})
-                } else {
-                    Value::Null
-                };
-                ResponseTemplate::new(200).set_body_json(
-                    json!({"link_id": self.link_id, "invitation_code": ACTIVE_SLUG,
-                    "repos": [{"repo_id": 1, "repo_full_name": "acme/api"}], "permission": "pull",
-                    "approval_required": true, "can_start_fresh": can_start, "attempt": attempt, "request": current}),
-                )
-            }
-            _ => ResponseTemplate::new(404),
-        }
-    }
+/// A requester router over the fake link authority, which holds the active
+/// link. Every admission applies but its acknowledgement is lost; a retry of
+/// the same attempt recovers the retained receipt.
+struct Requester {
+    app: axum::Router,
+    authority: FakeLinkAuthority,
+    link: InvitationLink,
 }
 
-async fn lost_response_app() -> (axum::Router, wiremock::MockServer) {
-    lost_response_app_with_control(Arc::new(Mutex::new((false, "declined".into())))).await
-}
+const ADMIN: AccountAdmin = AccountAdmin {
+    account_id: 9001,
+    user_id: CREATOR_ID,
+};
 
-async fn lost_response_app_with_control(
-    control: Arc<Mutex<(bool, String)>>,
-) -> (axum::Router, wiremock::MockServer) {
-    let ingress = wiremock::MockServer::start().await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(LostAdmissionResponse {
-            link_id: InvitationLinkId::new(),
-            attempts: Default::default(),
-            latest: Default::default(),
-            control,
-        })
-        .mount(&ingress)
-        .await;
+async fn requester() -> Requester {
+    let authority = FakeLinkAuthority::start().await;
+    let link = active_link(ACTIVE_SLUG);
+    authority.seed_link(&link);
+    authority.lose_acknowledgements("admit");
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(
-            oauth_expectations("octocat", REQUESTER_ID)
+            oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))
                 .into_iter()
-                .chain(oauth_expectations("othercat", REQUESTER_ID + 1))
+                .chain(oauth_expectations(GithubUser::new(
+                    "othercat",
+                    REQUESTER_ID + 1,
+                )))
                 .collect(),
         )),
-        Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    (
-        build_app(state, tower_sessions::MemoryStore::default()),
-        ingress,
-    )
+    Requester {
+        app: build_app(state, tower_sessions::MemoryStore::default()),
+        authority,
+        link,
+    }
+}
+
+/// Make the authority hold the requester's request on `link` in `state`,
+/// admitted earlier by the attempt `operation_id`.
+fn seed_admitted(
+    authority: &FakeLinkAuthority,
+    link: &InvitationLink,
+    operation_id: &str,
+    justification: Option<&str>,
+    state: RequestState,
+) -> RequestSnapshot {
+    let admitted_at = Utc::now();
+    let deadline = admitted_at + chrono::Duration::days(7);
+    let request = RequestSnapshot {
+        request_id: RequestId::new(),
+        link_id: link.id,
+        account_id: link.account_id,
+        requester_id: REQUESTER_ID,
+        justification: justification.map(str::to_owned),
+        state,
+        admitted_at,
+        decision_deadline: Some(deadline),
+        revision: 1,
+        decision: None,
+    };
+    authority.seed_request(request.clone());
+    authority.seed_admission(
+        Admit {
+            link_id: link.id,
+            operation_id: AdmissionOperationId::try_from(operation_id.to_owned()).unwrap(),
+            requester_id: REQUESTER_ID,
+            justification: justification.map(str::to_owned),
+        },
+        AdmissionReceipt {
+            decided_at: admitted_at,
+            result: AdmissionResult::Accepted {
+                request_id: request.request_id,
+                state: RequestState::Pending,
+                decision_deadline: Some(deadline),
+            },
+        },
+    );
+    request
+}
+
+/// Decide `request` as an account admin would.
+async fn decide(authority: &FakeLinkAuthority, request: &RequestSnapshot, action: DecisionAction) {
+    LinkAuthority::new(authority.client())
+        .decide(DecideRequest {
+            link_id: request.link_id,
+            request_id: request.request_id,
+            operation_id: LifecycleOperationId::try_from(RequestId::new().to_string()).unwrap(),
+            admin: ADMIN,
+            action,
+        })
+        .await
+        .unwrap();
+}
+
+fn count(authority: &FakeLinkAuthority, method: &str) -> usize {
+    authority.calls().iter().filter(|m| *m == method).count()
 }
 
 #[tokio::test]
 async fn authoritative_form_confirms_identity_and_wrong_account_return_destination() {
-    let (app, _ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester { app, .. } = requester().await;
+    let cookie = sign_in(&app).await;
     let response = app
         .clone()
         .oneshot(
@@ -279,16 +273,12 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
 
 #[tokio::test]
 async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
-    use wiremock::{Mock, ResponseTemplate, matchers::path_regex};
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester { app, authority, .. } = requester().await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
-    Mock::given(path_regex("/prepare_attempt$"))
-        .respond_with(ResponseTemplate::new(503))
-        .with_priority(1)
-        .mount(&ingress)
-        .await;
+    // The attempt never reaches the authority.
+    authority.fail_once("prepare_attempt", 503);
     let response = app
         .clone()
         .oneshot(
@@ -305,14 +295,6 @@ async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    Mock::given(path_regex("/requester_page$"))
-        .and(wiremock::matchers::body_partial_json(
-            serde_json::json!({"operation_id": id}),
-        ))
-        .respond_with(ResponseTemplate::new(404))
-        .with_priority(1)
-        .mount(&ingress)
-        .await;
     for fresh in [false, true] {
         let response = app
             .clone()
@@ -332,29 +314,26 @@ async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
         assert_eq!(html.contains(&format!("value=\"{id}\"")), !fresh);
         assert_eq!(html.contains("This is a fresh attempt"), fresh);
     }
-    assert!(
-        ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.url.path().ends_with("/admit"))
-    );
+    assert_eq!(count(&authority, "admit"), 0);
 }
 
 #[tokio::test]
 async fn pending_authoritative_status_refreshes_until_terminal_without_projection() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
-    for status in ["pending", "approved", "declined", "expired", "cancelled"] {
-        wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "link_id": RequestId::new(), "invitation_code": ACTIVE_SLUG, "repos": [], "permission": "pull",
-                "approval_required": true, "can_start_fresh": false, "attempt": null,
-                "request": {"link_id": RequestId::new(), "request_id": RequestId::new(), "account_id": 1,
-                    "requester_id": REQUESTER_ID, "justification": null, "state": status,
-                    "admitted_at": "2026-09-14T12:00:00Z", "decision_deadline": "2026-09-21T12:00:00Z", "revision": 1}
-            }))).with_priority(1).up_to_n_times(1).mount(&ingress).await;
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    let cookie = sign_in(&app).await;
+    for status in [
+        RequestState::Pending,
+        RequestState::Approved,
+        RequestState::Declined,
+        RequestState::Expired,
+        RequestState::Cancelled,
+    ] {
+        let operation = RequestId::new().to_string();
+        seed_admitted(&authority, &link, &operation, None, status);
         let response = app
             .clone()
             .oneshot(
@@ -370,7 +349,7 @@ async fn pending_authoritative_status_refreshes_until_terminal_without_projectio
         let html = body_text(response).await;
         assert_eq!(
             html.contains("http-equiv=\"refresh\" content=\"20\""),
-            status == "pending"
+            status == RequestState::Pending
         );
         assert!(html.contains("Check again"));
         assert!(html.contains(&format!("Current request status: {status}")));
@@ -380,8 +359,8 @@ async fn pending_authoritative_status_refreshes_until_terminal_without_projectio
 
 #[tokio::test]
 async fn oversized_justification_is_editable_without_replacing_the_operation() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester { app, authority, .. } = requester().await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
     let text = "é".repeat(8193);
@@ -409,14 +388,7 @@ async fn oversized_justification_is_editable_without_replacing_the_operation() {
     assert!(html.contains("Shorten your justification"));
     assert!(html.contains(&format!("value=\"{id}\"")));
     assert!(!html.contains("readonly=\"true\""));
-    assert!(
-        ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.url.path().ends_with("prepare_attempt"))
-    );
+    assert_eq!(count(&authority, "prepare_attempt"), 0);
     let response = app
         .oneshot(
             Request::builder()
@@ -437,25 +409,35 @@ async fn oversized_justification_is_editable_without_replacing_the_operation() {
 
 #[tokio::test]
 async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppressed() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester {
+        app,
+        authority,
+        mut link,
+    } = requester().await;
+    link.repos = vec![InvitationLinkRepo {
+        repo_id: 1,
+        repo_full_name: "acme/private".into(),
+    }];
+    let mut revoked = link.clone();
+    revoked.revoked_at = Some(Utc::now());
+    revoked.revoked_by = Some(CREATOR_ID);
+    let cookie = sign_in(&app).await;
     for (attempt, can_start, expected) in [
         (false, false, StatusCode::NOT_FOUND),
         (false, true, StatusCode::OK),
         (true, false, StatusCode::OK),
     ] {
-        wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "link_id": RequestId::new(), "invitation_code": ACTIVE_SLUG,
-                "repos": [{"repo_id": 1, "repo_full_name": "acme/private"}], "permission": "pull",
-                "approval_required": true, "can_start_fresh": can_start,
-                "attempt": if attempt { serde_json::json!({"input": {
-                    "link_id": RequestId::new(), "operation_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA",
-                    "requester_id": REQUESTER_ID, "justification": null },
-                    "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
-                    "request_id": RequestId::new(), "state": "pending", "decision_deadline": "2026-09-21T12:00:00Z"}}
-                }) } else { serde_json::Value::Null }, "request": null
-            }))).with_priority(1).up_to_n_times(1).mount(&ingress).await;
+        // A revoked link, the active link, or the active link where the
+        // requester's accepted attempt awaits review.
+        authority.seed_link(if can_start || attempt {
+            &link
+        } else {
+            &revoked
+        });
+        if attempt {
+            let operation = RequestId::new().to_string();
+            seed_admitted(&authority, &link, &operation, None, RequestState::Pending);
+        }
         let response = app
             .clone()
             .oneshot(
@@ -483,8 +465,8 @@ async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppres
 
 #[tokio::test]
 async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_is_explicit() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester { app, authority, .. } = requester().await;
+    let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new().to_string();
     let response = app
@@ -504,7 +486,10 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let html = body_text(response).await;
-    assert!(!html.contains("private transport detail"));
+    assert!(
+        !html.contains("acknowledgement lost"),
+        "no transport detail"
+    );
     assert!(html.contains("Outcome unknown"));
     for uri in [
         format!("/i/{ACTIVE_SLUG}"),
@@ -524,6 +509,14 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
         assert_eq!(response.status(), StatusCode::OK);
         assert!(body_text(response).await.contains("Request accepted at"));
     }
+    // Once the admitted request is declined, a fresh attempt is possible.
+    let [request] = authority.requests().try_into().unwrap();
+    decide(
+        &authority,
+        &request,
+        DecisionAction::Decline { reason: None },
+    )
+    .await;
     let response = app
         .clone()
         .oneshot(
@@ -560,16 +553,50 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
             .await
             .contains("Recover the original attempt")
     );
-    assert_eq!(
-        ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.url.path().ends_with("/admit"))
-            .count(),
-        1
-    );
+    assert_eq!(count(&authority, "admit"), 1);
+}
+
+/// Set the admission fixture's authority: revoke or restore the link, and
+/// decide the requester's open requests.
+async fn fixture_state(
+    requester: (FakeLinkAuthority, InvitationLink),
+    query: BTreeMap<String, String>,
+) -> StatusCode {
+    let (authority, link) = requester;
+    let action = match query.get("status").map(String::as_str) {
+        None => None,
+        Some("approved") => Some(DecisionAction::Approve),
+        Some("declined") => Some(DecisionAction::Decline { reason: None }),
+        Some(_) => return StatusCode::BAD_REQUEST,
+    };
+    if let Some(action) = action {
+        for request in authority.requests() {
+            if request.state == RequestState::Pending {
+                decide(&authority, &request, action.clone()).await;
+            }
+        }
+    }
+    match query.get("revoked").map(String::as_str) {
+        Some("true") => {
+            LinkAuthority::new(authority.client())
+                .revoke(AdminLinkCommand {
+                    link_id: link.id,
+                    admin: ADMIN,
+                })
+                .await
+                .unwrap();
+        }
+        Some(_) => {
+            // The real authority never restores a revoked link; the fixture
+            // does so to reopen fresh attempts.
+            let mut snapshot = authority.link(link.id).unwrap();
+            snapshot.revoked_at = None;
+            snapshot.revoked_by = None;
+            authority.seed(snapshot);
+        }
+        None => {}
+    }
+    StatusCode::NO_CONTENT
 }
 
 /// Playwright drives this real router with JavaScript disabled. Authentication
@@ -578,21 +605,18 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
 #[ignore = "long-running Playwright fixture"]
 async fn admission_browser_server() {
     use axum::response::IntoResponse;
-    let current = Arc::new(Mutex::new(None::<(axum::Router, wiremock::MockServer)>));
-    let control = Arc::new(Mutex::new((false, "pending".into())));
+    let current = Arc::new(Mutex::new(None::<Requester>));
     let login_current = current.clone();
-    let login_control = control.clone();
+    let state_current = current.clone();
     let app = axum::Router::new()
         .route(
             "/fixture-login",
             axum::routing::get(move || {
                 let current = login_current.clone();
-                let control = login_control.clone();
                 async move {
-                    *control.lock().unwrap() = (false, "pending".into());
-                    let (app, ingress) = lost_response_app_with_control(control).await;
-                    let cookie = sign_in(app.clone()).await;
-                    *current.lock().unwrap() = Some((app, ingress));
+                    let requester = requester().await;
+                    let cookie = sign_in(&requester.app).await;
+                    *current.lock().unwrap() = Some(requester);
                     (
                         [(
                             "set-cookie",
@@ -610,23 +634,18 @@ async fn admission_browser_server() {
                 move |axum::extract::Query(query): axum::extract::Query<
                     BTreeMap<String, String>,
                 >| {
-                    let control = control.clone();
-                    async move {
-                        let mut state = control.lock().unwrap();
-                        if let Some(revoked) = query.get("revoked") {
-                            state.0 = revoked == "true";
-                        }
-                        if let Some(status) = query.get("status") {
-                            state.1 = status.clone();
-                        }
-                        StatusCode::NO_CONTENT
-                    }
+                    let requester = {
+                        let current = state_current.lock().unwrap();
+                        let requester = current.as_ref().unwrap();
+                        (requester.authority.clone(), requester.link.clone())
+                    };
+                    fixture_state(requester, query)
                 },
             ),
         )
         .route("/health", axum::routing::get(|| async { StatusCode::OK }))
         .fallback(move |request: Request<Body>| {
-            let app = current.lock().unwrap().as_ref().unwrap().0.clone();
+            let app = current.lock().unwrap().as_ref().unwrap().app.clone();
             async move { app.oneshot(request).await.unwrap() }
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:4174")
@@ -638,38 +657,18 @@ async fn admission_browser_server() {
 #[tokio::test]
 async fn authoritative_native_form_validates_identity_and_preserves_unknown_input_without_sql_link()
 {
-    use wiremock::{
-        Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
-    };
-    let ingress = MockServer::start().await;
-    let link_id = InvitationLinkId::new();
-    Mock::given(method("POST"))
-        .and(path(format!("/{CODE_SERVICE}/{ACTIVE_SLUG}/resolve")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(link_id))
-        .mount(&ingress)
-        .await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{link_id}/requester_page")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "link_id": link_id, "invitation_code": ACTIVE_SLUG, "repos": [], "permission": "pull",
-            "approval_required": true, "can_start_fresh": true, "attempt": null, "request": null
-        })))
-        .mount(&ingress)
-        .await;
-    Mock::given(path(format!("/{LINK_SERVICE}/{link_id}/prepare_attempt")))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
+    let authority = FakeLinkAuthority::start().await;
+    authority.seed_link(&active_link(ACTIVE_SLUG));
+    authority.fail("prepare_attempt", 503);
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(oauth_expectations(
-            "octocat",
-            REQUESTER_ID,
+            GithubUser::new("octocat", REQUESTER_ID),
         ))),
-        Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let backend = ghinvite_web::session_store::SqliteBackend::new(
@@ -680,7 +679,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
         state,
         ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
     );
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let response = app
         .clone()
         .oneshot(
@@ -732,21 +731,13 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
             assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
     }
-    let calls = ingress.received_requests().await.unwrap();
-    assert_eq!(
-        calls
-            .iter()
-            .filter(|r| r.url.path().ends_with("prepare_attempt"))
-            .count(),
-        1
-    );
+    assert_eq!(count(&authority, "prepare_attempt"), 1);
     // Preparation itself was unavailable: recover from the explicitly saved
-    // session continuation after navigating away from the failed POST.
-    ingress.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&ingress)
-        .await;
+    // session continuation after navigating away from the failed POST, while
+    // the whole authority is unavailable.
+    for method in ["resolve", "requester_page", "admit"] {
+        authority.fail(method, 503);
+    }
     let response = app
         .clone()
         .oneshot(
@@ -814,8 +805,12 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
 
 #[tokio::test]
 async fn request_submission_requires_the_rendered_session_token() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    let cookie = sign_in(&app).await;
     let token = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new();
     for body in [
@@ -840,21 +835,16 @@ async fn request_submission_requires_the_rendered_session_token() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
-    assert!(ingress.received_requests().await.unwrap().is_empty());
+    assert!(authority.calls().is_empty());
     // The authority already holds this attempt's receipt, so preparing it
     // settles the admission.
-    wiremock::Mock::given(wiremock::matchers::path_regex("/prepare_attempt$"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "input": {"link_id": RequestId::new(), "operation_id": id,
-                    "requester_id": REQUESTER_ID, "justification": "Native request"},
-                "receipt": {"decided_at": "2026-09-14T12:00:00Z", "result": {"kind": "accepted",
-                    "request_id": RequestId::new(), "state": "pending", "decision_deadline": null}}
-            })),
-        )
-        .with_priority(1)
-        .mount(&ingress)
-        .await;
+    seed_admitted(
+        &authority,
+        &link,
+        &id.to_string(),
+        Some("Native request"),
+        RequestState::Pending,
+    );
     let response = app
         .clone()
         .oneshot(
@@ -875,41 +865,36 @@ async fn request_submission_requires_the_rendered_session_token() {
         response.headers()["location"],
         format!("/i/{ACTIVE_SLUG}?operation_id={id}")
     );
-    let prepared: Vec<_> = ingress
-        .received_requests()
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|r| r.url.path().ends_with("/prepare_attempt"))
-        .collect();
-    assert_eq!(prepared.len(), 1);
-    let command: serde_json::Value = serde_json::from_slice(&prepared[0].body).unwrap();
-    assert_eq!(command["operation_id"], id.to_string());
-    assert_eq!(command["requester_id"], REQUESTER_ID);
-    assert_eq!(command["justification"], "Native request");
-    assert!(!String::from_utf8_lossy(&prepared[0].body).contains(&token));
+    let [command] = authority
+        .received::<Admit>("prepare_attempt")
+        .try_into()
+        .unwrap();
+    assert_eq!(String::from(command.operation_id), id.to_string());
+    assert_eq!(command.requester_id, REQUESTER_ID);
+    assert_eq!(command.justification.as_deref(), Some("Native request"));
+    let [body] = authority
+        .received::<serde_json::Value>("prepare_attempt")
+        .try_into()
+        .unwrap();
+    assert!(!body.to_string().contains(&token));
+    assert_eq!(count(&authority, "admit"), 0);
 }
 
 /// An existing pending or approved request is the authority's call, not the
 /// projection's; its rejection is final and offers no resubmission.
 #[tokio::test]
 async fn submission_rejected_for_an_existing_request_is_final() {
-    let (app, ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    authority.recover("admit");
+    let earlier = RequestId::new().to_string();
+    seed_admitted(&authority, &link, &earlier, None, RequestState::Pending);
+    let cookie = sign_in(&app).await;
     let token = common::csrf_token(&app, &cookie).await;
     let id = RequestId::new();
-    wiremock::Mock::given(wiremock::matchers::path_regex("/prepare_attempt$"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "input": {"link_id": RequestId::new(), "operation_id": id,
-                    "requester_id": REQUESTER_ID, "justification": null},
-                "receipt": {"decided_at": "2026-09-14T12:00:00Z",
-                    "result": {"kind": "rejected", "reason": "existing_request"}}
-            })),
-        )
-        .with_priority(1)
-        .mount(&ingress)
-        .await;
     let response = app
         .oneshot(
             Request::builder()
@@ -928,14 +913,9 @@ async fn submission_rejected_for_an_existing_request_is_final() {
     assert!(html.contains("result is final."));
     assert!(!html.contains("Submit request"));
     assert!(!html.contains("Retry same attempt"));
-    assert!(
-        ingress
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .all(|r| !r.url.path().ends_with("/admit"))
-    );
+    // The rejection admitted nothing and spent no use of the link.
+    assert_eq!(authority.requests().len(), 1);
+    assert_eq!(authority.link(link.id).unwrap().uses, 0);
 }
 
 const ACTIVE_SLUG: &str = "abcdEFGH01234567";
@@ -1042,27 +1022,24 @@ async fn build_test_app(link: InvitationLink, mock: MockTransport) -> axum::Rout
 
 #[tokio::test]
 async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason() {
-    let (app, ingress) = lost_response_app().await;
-    let request = RequestId::new();
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
     // No projected request exists; the authority's requester page is the
     // requester's only source of truth.
-    wiremock::Mock::given(wiremock::matchers::path_regex("/requester_page$"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "link_id": InvitationLinkId::new(), "invitation_code": ACTIVE_SLUG,
-            "repos": [{"repo_id": 1, "repo_full_name": "acme/api"}], "permission": "pull",
-            "approval_required": true, "can_start_fresh": false, "attempt": null,
-            "request": {"request_id": request, "link_id": InvitationLinkId::new(),
-                "account_id": 9001, "requester_id": REQUESTER_ID, "justification": null,
-                "state": "declined", "admitted_at": "2026-01-01T00:00:00Z",
-                "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2,
-                "decision": {"decision_id": "decision", "decided_by": 7,
-                    "effective_at": "2026-01-02T00:00:00Z", "evaluated_at": "2026-01-02T00:00:00Z",
-                    "decline_reason": "Private admin context"}}
-        })))
-        .with_priority(1)
-        .mount(&ingress)
-        .await;
-    let cookie = sign_in(app.clone()).await;
+    let operation = RequestId::new().to_string();
+    let request = seed_admitted(&authority, &link, &operation, None, RequestState::Pending);
+    decide(
+        &authority,
+        &request,
+        DecisionAction::Decline {
+            reason: Some("Private admin context".into()),
+        },
+    )
+    .await;
+    let cookie = sign_in(&app).await;
     let response = app
         .oneshot(
             Request::builder()
@@ -1078,86 +1055,11 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
     assert!(html.contains("Current request status: declined"));
     assert!(!html.contains("Private admin context"));
     assert!(!html.contains("Submit request"));
-    let queries: Vec<serde_json::Value> = ingress
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|r| r.url.path().ends_with("/requester_page"))
-        .map(|r| serde_json::from_slice(&r.body).unwrap())
-        .collect();
-    assert_eq!(queries.len(), 1);
-    assert_eq!(queries[0]["requester_id"], REQUESTER_ID);
-}
-
-fn oauth_expectations(login: &str, user_id: u64) -> Vec<Expectation> {
-    vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": user_id, "login": login}),
-        ),
-    ]
-}
-
-fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
-    resp.headers()
-        .get("set-cookie")
-        .map(|v| v.to_str().unwrap().split(';').next().unwrap().to_string())
-        .or(fallback)
-        .expect("session cookie available")
-}
-
-fn state_from_location(location: &str) -> &str {
-    location
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap()
-}
-
-async fn sign_in(app: axum::Router) -> String {
-    let resp1 = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let [query] = authority
+        .received::<AttemptQuery>("requester_page")
+        .try_into()
         .unwrap();
-    assert_eq!(resp1.status(), StatusCode::SEE_OTHER);
-    let cookie1 = session_cookie(&resp1, None);
-    let location = resp1.headers().get("location").unwrap().to_str().unwrap();
-    let state = state_from_location(location);
-
-    let resp2 = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/oauth/callback?code=test-code&state={state}"))
-                .header("cookie", &cookie1)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
-    session_cookie(&resp2, Some(cookie1))
+    assert_eq!(query.requester_id, REQUESTER_ID);
 }
 
 #[tokio::test]
@@ -1276,7 +1178,7 @@ async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
 async fn unsupported_nested_invitation_routes_authenticate_before_404() {
     let app = build_test_app(
         active_link(ACTIVE_SLUG),
-        MockTransport::scripted(oauth_expectations("octocat", REQUESTER_ID)),
+        MockTransport::scripted(oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))),
     )
     .await;
 
@@ -1320,7 +1222,7 @@ async fn unsupported_nested_invitation_routes_authenticate_before_404() {
         )
     );
 
-    let cookie = sign_in(app.clone()).await;
+    let cookie = sign_in(&app).await;
     let resp = app
         .oneshot(
             Request::builder()
@@ -1343,8 +1245,8 @@ async fn unsupported_nested_invitation_routes_authenticate_before_404() {
 
 #[tokio::test]
 async fn requester_form_carries_csp_and_only_external_script() {
-    let (app, _ingress) = lost_response_app().await;
-    let cookie = sign_in(app.clone()).await;
+    let Requester { app, .. } = requester().await;
+    let cookie = sign_in(&app).await;
 
     let resp = app
         .oneshot(

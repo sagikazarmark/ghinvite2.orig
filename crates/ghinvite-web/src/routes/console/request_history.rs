@@ -1,10 +1,10 @@
 use super::*;
-use crate::views::request_history::{
-    HistoryRow, RepositoryDelivery, RequestDetailPage, RequestHistoryPage,
-};
 use axum::{extract::Path, http::StatusCode};
 use ghinvite_core::storage::{RecordStorage, request_history::Boundary};
 use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, RequestState};
+use ghinvite_ui::request_history::{
+    HistoryRow, RepositoryDelivery, RequestDetailPage, RequestHistoryPage,
+};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -70,8 +70,9 @@ pub(super) async fn history(
     Path((_, id)): Path<(String, String)>,
     uri: Uri,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse::<InvitationLinkId>() else {
-        return console_not_found_response(&admin);
+    let id: InvitationLinkId = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
     let link = match owned_link(state.storage.as_ref(), admin.account.account_id, id).await {
         Ok(link) => link,
@@ -136,8 +137,9 @@ pub(super) async fn detail(
     admin: RequireConsoleAdminOf,
     Path((_, id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse::<RequestId>() else {
-        return console_not_found_response(&admin);
+    let id: RequestId = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
     let (request, link) =
         match owned_request(state.storage.as_ref(), admin.account.account_id, id).await {
@@ -169,7 +171,7 @@ pub(super) async fn detail(
         .iter()
         .map(|repo| RepositoryDelivery {
             repo_id: repo.repo_id,
-            presentation: crate::views::invitation::delivery_presentation(
+            presentation: ghinvite_ui::invitation::delivery_presentation(
                 repo,
                 &receipts,
                 &[],

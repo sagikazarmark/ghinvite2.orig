@@ -51,13 +51,14 @@ async fn github_authorization_failures_use_dependency_statuses_without_disclosin
         let state = AppState::new(
             storage,
             Arc::new(MembershipFailureTransport {
-                oauth: MockTransport::scripted(oauth_sign_in_expectations()),
+                oauth: MockTransport::scripted(oauth_expectations(OCTOCAT)),
                 status: upstream,
             }),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
-        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let app = build_app(state, tower_sessions::MemoryStore::default());
+        let cookie = sign_in(&app).await;
         let response = identity_request(&app, &cookie, "GET", "/console/accounts/acme").await;
         assert_eq!(response.status(), expected, "upstream {upstream}");
         let html = response_html(response).await;
@@ -85,7 +86,7 @@ async fn historical_settings_require_current_authority() {
             .mark_installation_uninstalled(account.installation_id, Utc::now())
             .await
             .unwrap();
-        let mut expectations = oauth_sign_in_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT);
         if kind == AccountType::Organization {
             expectations.push(Expectation::ok_json(Method::Get,
                 "https://api.github.com/user/memberships/orgs/historical",
@@ -97,7 +98,8 @@ async fn historical_settings_require_current_authority() {
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
-        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let app = build_app(state, tower_sessions::MemoryStore::default());
+        let cookie = sign_in(&app).await;
         let response = identity_request(
             &app,
             &cookie,
@@ -128,14 +130,14 @@ async fn authorization_read_failure_preserves_submission_without_account_disclos
         (429, StatusCode::SERVICE_UNAVAILABLE),
         (504, StatusCode::GATEWAY_TIMEOUT),
     ] {
-        let mut expectations = oauth_expectations_without_membership();
+        let mut expectations = oauth_expectations(OCTOCAT);
         expectations.push(Expectation::status(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
             upstream,
         ));
         expectations.extend([
-            oauth_expectations().pop().unwrap(),
+            oauth_expectations(ACME_ADMIN).pop().unwrap(),
             installation_repos_expectation(),
         ]);
         let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
@@ -318,7 +320,7 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
                 .await
                 .unwrap();
         }
-        let mut expectations = oauth_sign_in_expectations();
+        let mut expectations = oauth_expectations(OCTOCAT);
         if !uninstalled {
             let mut repos = installation_repos_expectation();
             repos.response.status = upstream;
@@ -330,7 +332,8 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
             Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
-        let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+        let app = build_app(state, tower_sessions::MemoryStore::default());
+        let cookie = sign_in(&app).await;
         let response =
             identity_request(&app, &cookie, "GET", "/console/accounts/octocat/settings").await;
         assert_eq!(response.status(), status);
@@ -373,11 +376,11 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
             StatusCode::BAD_GATEWAY,
         ),
     ] {
-        let mut expectations = oauth_expectations();
+        let mut expectations = oauth_expectations(ACME_ADMIN);
         let mut failure = installation_repos_expectation();
         failure.response.status = upstream;
         failure.response.body = b"private-upstream-diagnostic".to_vec();
-        let membership = oauth_expectations().pop().unwrap();
+        let membership = oauth_expectations(ACME_ADMIN).pop().unwrap();
         expectations.extend([
             failure.clone(),
             membership.clone(),
@@ -480,7 +483,7 @@ async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
         AppState::new(
             storage,
             Arc::new(RepositoryFailureTransport {
-                oauth: MockTransport::scripted(oauth_sign_in_expectations()),
+                oauth: MockTransport::scripted(oauth_expectations(OCTOCAT)),
                 status,
             }),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
@@ -492,7 +495,8 @@ async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
 
 #[tokio::test]
 async fn repository_transport_failure_is_not_reported_as_timeout_or_empty_installation() {
-    let (app, cookie) = sign_in(repository_recovery_app(Arc::new(AtomicU16::new(0))).await).await;
+    let app = repository_recovery_app(Arc::new(AtomicU16::new(0))).await;
+    let cookie = sign_in(&app).await;
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/links/new").await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -516,7 +520,7 @@ async fn read_recovery_browser_server() {
             axum::routing::get(move || {
                 let app = login_app.clone();
                 async move {
-                    let (_, cookie) = sign_in(app).await;
+                    let cookie = sign_in(&app).await;
                     (
                         [(
                             axum::http::header::SET_COOKIE,

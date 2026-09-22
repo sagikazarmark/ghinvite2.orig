@@ -247,52 +247,38 @@ direct Cargo execution requires `RESTATE_ADMIN_URL`, `RESTATE_INGRESS_URL`, and
 `RESTATE_ENDPOINT_HOST` from an isolated runtime. Prefer the script, which owns
 those values and runtime cleanup.
 
-### Admission protocol proof (#48)
+### Admission protocol proof (#48, retired)
 
-```bash
-bash scripts/test-restate.sh admission_protocol_proof
-```
+The throwaway #48 protocol proof
+([`crates/ghinvite-workflows/tests/admission_protocol_proof.rs` at `f78d8d2`](https://github.com/sagikazarmark/ghinvite2.orig/blob/f78d8d2/crates/ghinvite-workflows/tests/admission_protocol_proof.rs),
+with its `split_state.rs`, `deadlines.rs`, and `notifications.rs` extensions)
+registered test-only handlers and a miniature SQL schema to check the admission
+protocol before production handlers existed. It has since been retired in
+favour of `authoritative_admission`, and the runner no longer accepts an
+`admission_protocol_proof` target. Read the files at that commit for the
+original evidence; [ADR 0003](adr/0003-restate-authoritative-admission.md)
+keeps its recorded results.
 
-This optional throwaway experiment reuses the disposable runtime runner and
-registers test-only handlers from
-`crates/ghinvite-workflows/tests/admission_protocol_proof.rs`. It verifies a
-complete journaled decision followed by a coherent state write and durable
-projection/workflow sends. The endpoint uses request-response mode on native.
-It aborts SDK execution tasks at four recovery checkpoints, rejects real SQLite
-projection writes with a trigger while admission/revocation proceed, then tests
-commit acknowledgement loss and duplicate/out-of-order projection convergence.
-It also checks final-use concurrency, replay/payload conflicts, and expiration
-before versus after a durable decision.
+The production suites now cover each proof scenario:
 
-The split-state extension in `tests/admission_protocol_proof/split_state.rs`
-uses lazy-loaded link, operation, request, and requester-blocker keys. It aborts
-between state writes, verifies exclusive status reads wait for recovery, checks
-terminal release/approved suppression/stale-pointer protection, and observes
-request bodies to ensure unrelated history is not eagerly transferred. It
-does not test production lifecycle timers, cancellation authorization, or
-lifecycle projection/audit.
+- `authoritative_admission`: journaled decision followed by coherent state
+  writes and projection/workflow sends, SDK task aborts at every recovery
+  checkpoint with exclusive status reads waiting for recovery, final-use
+  concurrency, replay/payload conflicts, expiry before versus after a durable
+  decision, projection outage during admission/revocation, terminal release and
+  stale-pointer protection, deadline arbitration and timer races, lazy state
+  without eager history transfer, and workflow notification replay, interrupted
+  resolution, and the 409 for a conflicting terminal signal.
+- `durable_projection`: commit acknowledgement loss and ordered projection
+  convergence.
+- `retained_delivery`: late notification after workflow completion does not
+  recreate promise state.
+- The `ghinvite-core` storage test suite: stale snapshots cannot regress a
+  revoked link.
 
-The deadline extension in `tests/admission_protocol_proof/deadlines.rs` adds
-controlled-clock before/equal/after arbitration, interrupted timely decisions,
-combined expiry/readmission and expiry/rejection recovery, status-triggered
-expiry, auto-approval, and real durable timer races/delayed startup. It remains
-a test-only fixed-requester model; production notifications, cancellation
-permissions, full lifecycle projections, and Worker/D1 are not covered.
-
-`tests/admission_protocol_proof/notifications.rs` tests direct workflow promises
-before startup, while waiting, across interrupted resolution, and after actual
-two-second workflow retention cleanup. The proof runner sets the disposable
-runtime's cleanup scan to one second (`RESTATE_PROOF_CLEANUP_INTERVAL`); ordinary
-smoke/dev runs retain the default hourly scan. Late notifications may recreate
-promise state but must not start the workflow. This is standalone notification
-evidence; authoritative link validation, dispatch checkpoints, and orphan-state
-cleanup are still production integration work.
-
-The miniature SQL schema and handlers are protocol evidence, not production
-admission implementation or D1/Worker conformance. See
-[ADR 0003](adr/0003-restate-authoritative-admission.md) for results and remaining
-verification. The default runner still executes the existing production workflow
-acceptance gate; the proof is explicitly selected by the argument above.
+The runner sets the disposable runtime's cleanup scan to one second
+(`RESTATE_PROOF_CLEANUP_INTERVAL`) so retention cleanup is observable; ordinary
+smoke/dev runs retain the default hourly scan.
 
 ### D1 storage conformance (requires wasm-bindgen CLI)
 

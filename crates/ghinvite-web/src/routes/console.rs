@@ -2,13 +2,11 @@
 
 use crate::forms::create_link::{self as create_link_form, CreateLinkSubmission};
 use crate::link_authority::AuthorityError;
-use crate::middleware::auth::RequireConsoleAdminOf;
+use crate::middleware::auth::{ConsoleAdminRejection, RequireConsoleAdminOf};
 use crate::middleware::csrf::{CsrfForm, EmptyForm};
+use crate::render::render_with_csrf as render;
 use crate::session;
 use crate::state::AppState;
-use crate::views::link_edit::{self, LinkEditValues};
-use crate::views::link_form::{RepositoryChoice, missing_repository_notice};
-use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
 use axum::http::{Method, Uri};
@@ -16,6 +14,8 @@ use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use chrono::Utc;
 use dioxus::prelude::*;
+use ghinvite_ui::link_edit::{self, LinkEditValues};
+use ghinvite_ui::link_form::{RepositoryChoice, missing_repository_notice};
 
 mod attempts;
 mod audit;
@@ -50,21 +50,11 @@ pub fn router() -> Router<AppState> {
         .route("/console/accounts/{login}/requests", get(requests_queue))
         .route(
             "/console/accounts/{login}/links/{link_id}/requests",
-            get(request_history::history).layer(
-                tower_http::set_header::SetResponseHeaderLayer::overriding(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("private, no-store"),
-                ),
-            ),
+            get(request_history::history),
         )
         .route(
             "/console/accounts/{login}/requests/{request_id}",
-            get(request_history::detail).layer(
-                tower_http::set_header::SetResponseHeaderLayer::overriding(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("private, no-store"),
-                ),
-            ),
+            get(request_history::detail),
         )
         .route("/console/accounts/{login}/attempts", get(attempts::index))
         .route(
@@ -80,18 +70,18 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(decline_request),
         )
         .route("/console/accounts/{login}/settings", get(settings_page))
-        .route(
-            "/console/accounts/{login}/audit",
-            get(audit::page).layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, no-store"),
-            )),
-        )
+        .route("/console/accounts/{login}/audit", get(audit::page))
         .route(
             "/console/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
         )
         .route("/console/{*rest}", get(console_unknown))
+        // Every Console answer belongs to one signed-in admin, including the
+        // redirects and plain refusals the HTML-only layer in `build_app` skips.
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-store"),
+        ))
 }
 
 async fn console_index(
@@ -117,9 +107,9 @@ async fn console_index(
             let signed_in_login = Some(session.login.clone());
             let html = render(session.csrf_token.clone(), move || {
                 rsx! {
-                    crate::views::console::ConsoleIndexPage {
+                    ghinvite_ui::console::ConsoleIndexPage {
                         signed_in_login: signed_in_login.clone(),
-                        state: crate::views::console::ConsoleIndexState::LoadError,
+                        state: ghinvite_ui::console::ConsoleIndexState::LoadError,
                     }
                 }
             });
@@ -135,14 +125,14 @@ async fn console_index(
     }
 
     let state_view = if accounts.is_empty() {
-        crate::views::console::ConsoleIndexState::Empty
+        ghinvite_ui::console::ConsoleIndexState::Empty
     } else {
-        crate::views::console::ConsoleIndexState::AccountPicker { accounts }
+        ghinvite_ui::console::ConsoleIndexState::AccountPicker { accounts }
     };
     let signed_in_login = Some(session.login.clone());
     let html = render(session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::console::ConsoleIndexPage {
+            ghinvite_ui::console::ConsoleIndexPage {
                 signed_in_login: signed_in_login.clone(),
                 state: state_view.clone(),
             }
@@ -154,7 +144,7 @@ async fn console_index(
 async fn load_console_accounts(
     state: &AppState,
     session: &mut session::Session,
-) -> Result<Vec<crate::views::console::ConsoleAccountChoice>, crate::error::WebError> {
+) -> Result<Vec<ghinvite_ui::console::ConsoleAccountChoice>, crate::error::WebError> {
     let user_api = ghinvite_github::oauth::UserApiClient::new(
         state.github_transport.clone(),
         session.access_token.clone(),
@@ -174,9 +164,9 @@ async fn load_console_accounts(
         let is_admin = crate::middleware::auth::check_admin(state, session, &account).await?;
 
         if is_admin {
-            accounts.push(crate::views::console::ConsoleAccountChoice {
+            accounts.push(ghinvite_ui::console::ConsoleAccountChoice {
                 login: account.account_login,
-                account_type: crate::views::components::account_type_label(account.account_type)
+                account_type: ghinvite_ui::components::account_type_label(account.account_type)
                     .to_string(),
             });
         }
@@ -212,13 +202,25 @@ fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::
     let account_login = admin.account.account_login.clone();
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::not_found::ConsoleNotFoundPage {
+            ghinvite_ui::not_found::ConsoleNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
                 account_login: account_login.clone(),
             }
         }
     });
     (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
+}
+
+/// The id a Console route names in its path. A malformed id names nothing,
+/// so it answers exactly like a missing resource: the Console's own
+/// not-found page, which only a verified admin may see.
+// The rejection is the rendered response the handler returns as-is.
+#[allow(clippy::result_large_err)]
+fn path_id<T: std::str::FromStr>(
+    admin: &RequireConsoleAdminOf,
+    raw: &str,
+) -> Result<T, axum::response::Response> {
+    raw.parse().map_err(|_| console_not_found_response(admin))
 }
 
 async fn overview(
@@ -260,7 +262,7 @@ async fn overview(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::console::OverviewPage {
+            ghinvite_ui::console::OverviewPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -281,7 +283,7 @@ async fn links_list(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let value = |key: &str| params.get(key).map(String::as_str).unwrap_or_default();
-    let query = crate::views::link_list::LinkListQuery::new(
+    let query = ghinvite_ui::link_list::LinkListQuery::new(
         value("filter"),
         value("sort"),
         value("direction"),
@@ -302,7 +304,7 @@ async fn links_list(
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::link_list::LinkListPage {
+            ghinvite_ui::link_list::LinkListPage {
                 signed_in_login: Some(admin.session.login.clone()),
                 flash: flash.clone(),
                 account_login: admin.account.account_login.clone(),
@@ -321,7 +323,7 @@ async fn new_link_form(
 ) -> impl IntoResponse {
     let repos = load_installation_repos_for_form(&state, &admin).await;
     let flash = session::take_flash(&admin.tower).await.unwrap_or(None);
-    let form = crate::views::links::LinkFormValues::default();
+    let form = ghinvite_ui::links::LinkFormValues::default();
 
     creation_form_response(
         &admin,
@@ -344,7 +346,7 @@ fn creation_form_response(
     admin: &RequireConsoleAdminOf,
     flash: Option<session::Flash>,
     repos: Result<Vec<RepositoryChoice>, RepositoryLoadError>,
-    mut form: crate::views::links::LinkFormValues,
+    mut form: ghinvite_ui::links::LinkFormValues,
     now: chrono::DateTime<Utc>,
     link_id: ghinvite_core::InvitationLinkId,
 ) -> axum::response::Response {
@@ -372,7 +374,7 @@ fn creation_form_response(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::links::LinkCreateFormPage {
+            ghinvite_ui::links::LinkCreateFormPage {
                 action: action.clone(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
@@ -454,7 +456,7 @@ async fn load_installation_repos_for_form(
 
 async fn create_link(
     axum::extract::State(state): axum::extract::State<AppState>,
-    admin: Result<RequireConsoleAdminOf, axum::response::Response>,
+    admin: Result<RequireConsoleAdminOf, ConsoleAdminRejection>,
     tower: tower_sessions::Session,
     uri: Uri,
     axum::extract::Query(identity): axum::extract::Query<CreationIdentity>,
@@ -462,14 +464,10 @@ async fn create_link(
 ) -> impl IntoResponse {
     let admin = match admin {
         Ok(admin) => admin,
-        Err(response)
-            if matches!(
-                response.status(),
-                axum::http::StatusCode::BAD_GATEWAY
-                    | axum::http::StatusCode::SERVICE_UNAVAILABLE
-                    | axum::http::StatusCode::GATEWAY_TIMEOUT
-            ) =>
-        {
+        // GitHub could not say whether this user may create links here. Keep
+        // the submission so verification can be retried without retyping it.
+        Err(rejection @ ConsoleAdminRejection::AdminCheckUnavailable(_)) => {
+            let response = rejection.into_response();
             let Ok(CsrfForm(form)) = form else {
                 return response;
             };
@@ -481,7 +479,7 @@ async fn create_link(
             let values = form.into_view_values(Default::default());
             let html = render(session.csrf_token, move || {
                 rsx! {
-                    crate::views::links::AccessVerificationRetryPage {
+                    ghinvite_ui::links::AccessVerificationRetryPage {
                         signed_in_login: Some(session.login.clone()),
                         action: action.clone(),
                         values: values.clone(),
@@ -490,7 +488,7 @@ async fn create_link(
             });
             return (response.status(), Html(html)).into_response();
         }
-        Err(response) => return response,
+        Err(rejection) => return rejection.into_response(),
     };
     let form = match form {
         Ok(CsrfForm(form)) => form,
@@ -629,8 +627,9 @@ async fn edit_link_form(
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse() else {
-        return console_not_found_response(&admin);
+    let id = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
     let link = match authoritative_link(&state, &admin, id).await {
         Ok(link) => link,
@@ -655,25 +654,10 @@ async fn save_link_details(
     axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
     CsrfForm(values): CsrfForm<LinkEditValues>,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse() else {
-        return console_not_found_response(&admin);
+    let id = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
-    if let Err(error) = authoritative_link(&state, &admin, id).await {
-        return match error {
-            AuthorityError::Missing => console_not_found_response(&admin),
-            _ => (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                edit_link_response(
-                    &admin,
-                    id,
-                    values,
-                    Default::default(),
-                    Some("Failed to load invitation link details. Please try again.".into()),
-                ),
-            )
-                .into_response(),
-        };
-    }
     let (description, internal_note) = match link_edit::validate(&values) {
         Ok(metadata) => metadata,
         Err(errors) => return edit_link_response(&admin, id, values, errors, None),
@@ -713,6 +697,9 @@ async fn save_link_details(
             (axum::http::StatusCode::BAD_GATEWAY,
             edit_link_response(&admin, id, values, Default::default(), Some("Save outcome unknown. Check the link details before retrying these values.".into()))).into_response()
         }
+        // The authority answers an unknown link and another account's link
+        // alike, so neither says which it was.
+        Err(AuthorityError::Missing) => console_not_found_response(&admin),
         Err(error) => crate::WebError::from(error).into_response_with_recovery(
             format!(
                 "/console/accounts/{}/links/{id}",
@@ -751,13 +738,11 @@ fn edit_link_response(
 async fn link_detail(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, link_id)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let link_id = match ghinvite_core::InvitationLinkId::from_str(&link_id_str) {
+    let link_id = match path_id(&admin, &link_id) {
         Ok(id) => id,
-        Err(_) => return console_not_found_response(&admin),
+        Err(not_found) => return not_found,
     };
     let link = match authoritative_link(&state, &admin, link_id).await {
         Ok(link) => link,
@@ -785,7 +770,7 @@ async fn link_detail(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::links::LinkDetailPage {
+            ghinvite_ui::links::LinkDetailPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account_login: account_login.clone(),
@@ -801,14 +786,12 @@ async fn link_detail(
 async fn revoke_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, link_id)): axum::extract::Path<(String, String)>,
     _form: CsrfForm<EmptyForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let link_id = match ghinvite_core::InvitationLinkId::from_str(&link_id_str) {
+    let link_id = match path_id(&admin, &link_id) {
         Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
+        Err(not_found) => return not_found,
     };
     attempts::execute(
         &state,
@@ -859,7 +842,7 @@ async fn requests_queue(
     let rows = page
         .rows
         .into_iter()
-        .map(|row| crate::views::requests::PendingRequestRow {
+        .map(|row| ghinvite_ui::requests::PendingRequestRow {
             request_id: row.request_id.to_string(),
             link_slug: row.link_slug,
             link_description: row.link_description,
@@ -881,7 +864,7 @@ async fn requests_queue(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::requests::RequestsQueuePage {
+            ghinvite_ui::requests::RequestsQueuePage {
                 now: Utc::now(),
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
@@ -903,20 +886,13 @@ struct QueueQuery {
 async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, request_id)): axum::extract::Path<(String, String)>,
     CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let request_id = match ghinvite_core::RequestId::from_str(&request_id_str) {
-        Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
-    };
-
     authoritative_decision(
         &state,
         &admin,
-        request_id,
+        &request_id,
         form,
         ghinvite_core::request_lifecycle::DecisionAction::Approve,
     )
@@ -926,20 +902,13 @@ async fn approve_request(
 async fn decline_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, request_id)): axum::extract::Path<(String, String)>,
     CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let request_id = match ghinvite_core::RequestId::from_str(&request_id_str) {
-        Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
-    };
-
     authoritative_decision(
         &state,
         &admin,
-        request_id,
+        &request_id,
         form,
         ghinvite_core::request_lifecycle::DecisionAction::Decline { reason: None },
     )
@@ -955,11 +924,15 @@ struct LifecycleForm {
 async fn authoritative_decision(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
-    request_id: ghinvite_core::RequestId,
+    request_id: &str,
     form: LifecycleForm,
     action: ghinvite_core::request_lifecycle::DecisionAction,
 ) -> axum::response::Response {
     use ghinvite_core::request_lifecycle::DecideRequest;
+    let request_id = match path_id(admin, request_id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
+    };
     let (Some(link_id), Some(operation_id)) = (form.link_id, form.operation_id) else {
         return crate::WebError::BadRequest(
             "Missing lifecycle command identity. Reload the queue.".into(),
@@ -1022,7 +995,7 @@ async fn settings_page(
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::settings::SettingsPage {
+            ghinvite_ui::settings::SettingsPage {
                 signed_in_login: signed_in_login.clone(),
                 flash: flash.clone(),
                 account: account.clone(),

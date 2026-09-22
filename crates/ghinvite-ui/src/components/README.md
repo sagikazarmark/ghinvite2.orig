@@ -62,8 +62,8 @@ Two upstream limitations keep some wiring application-owned:
   which does not preserve the application's help styling.
 
 Metadata reduces duplication but does not remove all application wiring.
-Only the new-link numeric fields migrated. Legacy `FieldKind::Number` controls
-elsewhere, checkboxes, and textarea retain their native rendering and listeners.
+Only the new-link numeric fields migrated. Native `FieldKind::Text` controls,
+checkboxes, and textarea retain their native rendering and listeners.
 No installed upstream source was edited, no dependencies were added, and the
 source installation and update instructions below are unchanged.
 

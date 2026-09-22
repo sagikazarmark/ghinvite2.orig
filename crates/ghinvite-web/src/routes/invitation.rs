@@ -1,8 +1,8 @@
 //! `/i/{slug}...` routes: the requester's admission flow.
 
+use crate::render::render_with_csrf as render;
 use crate::session;
 use crate::state::AppState;
-use crate::views::render::render_with_csrf as render;
 use axum::Router;
 use axum::extract::State;
 use axum::http::Uri;
@@ -33,7 +33,7 @@ pub(super) fn invitation_not_found_response(
     let signed_in_login = Some(session.login.clone());
     let html = render(session.csrf_token.clone(), move || {
         rsx! {
-            crate::views::not_found::InvitationNotFoundPage {
+            ghinvite_ui::not_found::InvitationNotFoundPage {
                 signed_in_login: signed_in_login.clone(),
             }
         }
