@@ -1,4 +1,6 @@
-use ghinvite_core::storage::{Storage, pending_queue::PendingBoundary};
+use ghinvite_core::storage::pending_queue::PendingBoundary;
+use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
+use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, Permission,
     RequestId, RequestState, SelectedRepos, Slug, User,
@@ -70,27 +72,28 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
             .await
             .unwrap();
     }
-    storage.insert_invitation_link(&link).await.unwrap();
-    let mut ids = Vec::new();
+    let mut requests = Vec::new();
     for n in (1..=53).rev() {
         let id: RequestId = format!("01ARZ3NDEKTSV4RRFFQ69G5{:03}", n).parse().unwrap();
-        ids.push(id);
+        let request = InvitationRequest {
+            id,
+            invitation_link_id: link.id,
+            requester_id: n,
+            justification: None,
+            state: RequestState::Pending,
+            decided_by: None,
+            decided_at: None,
+            decline_reason: None,
+            created_at: now,
+            decision_deadline: Some(now),
+        };
         storage
-            .insert_invitation_request_and_increment_uses(&InvitationRequest {
-                id,
-                invitation_link_id: link.id,
-                requester_id: n,
-                justification: None,
-                state: RequestState::Pending,
-                decided_by: None,
-                decided_at: None,
-                decline_reason: None,
-                created_at: now,
-                decision_deadline: Some(now),
-            })
+            .apply_transition(&fixture::envelope(&link, std::slice::from_ref(&request), 1))
             .await
             .unwrap();
+        requests.push(request);
     }
+    let mut ids: Vec<RequestId> = requests.iter().map(|r| r.id).collect();
     ids.sort_by_key(|id| id.to_string());
     count.0.store(0, std::sync::atomic::Ordering::Relaxed);
     let first = storage.pending_request_page(42, None).await.unwrap();
@@ -134,14 +137,12 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
             .is_empty()
     );
     for id in &ids[..26] {
+        let mut request = requests.iter().find(|r| r.id == *id).unwrap().clone();
+        request.state = RequestState::Declined;
+        request.decided_by = Some(1);
+        request.decided_at = Some(now);
         storage
-            .record_request_decision(&ghinvite_core::storage::RequestDecision {
-                request_id: *id,
-                state: RequestState::Declined,
-                decided_by: Some(1),
-                decided_at: now,
-                decline_reason: None,
-            })
+            .apply_transition(&fixture::envelope(&link, &[request], 2))
             .await
             .unwrap();
     }
@@ -183,12 +184,12 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         .connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
-    // External storage boundary: legacy encodings, corruption, and missing rows
-    // cannot be written through the domain's validated interface.
+    // External storage boundary: alternate time encodings, corruption, and
+    // missing rows cannot be written through the domain's validated interface.
     sqlx::raw_sql("PRAGMA foreign_keys=OFF;
         INSERT INTO installations VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
-        INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop');")
+        INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1);")
         .execute(&db).await.unwrap();
     for (id, time) in [
         ("001", "2026-01-01T00:00:00.000000001Z"),
@@ -257,6 +258,23 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             "{detail}"
         );
     }
+    let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(&format!(
+        "EXPLAIN QUERY PLAN {}",
+        pending_queue::COUNT_QUERY
+    ))
+    .bind(42)
+    .fetch_all(&db)
+    .await
+    .unwrap();
+    let detail = plan
+        .iter()
+        .map(|r| r.3.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        detail.contains("SEARCH r USING INDEX idx_pending_queue_seek (queue_account_id=?)"),
+        "the overview count seeks the pending index: {detail}"
+    );
     sqlx::query("UPDATE invitation_links SET permission='corrupt'")
         .execute(&db)
         .await
@@ -286,6 +304,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .len(),
         3
     );
+    let count = |account| storage.count_pending_requests_for_account(account);
+    assert_eq!((count(42).await.unwrap(), count(43).await.unwrap()), (0, 3));
     sqlx::query("DELETE FROM invitation_links")
         .execute(&db)
         .await
@@ -299,11 +319,12 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .is_empty(),
         "orphan ownership cannot be verified"
     );
+    assert_eq!(count(43).await.unwrap(), 0, "orphans are not counted");
     sqlx::query("UPDATE invitation_requests SET queue_account_id=NULL")
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored')").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1)").execute(&db).await.unwrap();
     assert_eq!(
         storage
             .pending_request_page(43, None)
@@ -312,6 +333,11 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
             .rows
             .len(),
         3
+    );
+    assert_eq!(
+        count(43).await.unwrap(),
+        3,
+        "restored owner is counted again"
     );
     sqlx::query("DROP TABLE users").execute(&db).await.unwrap();
     assert!(matches!(

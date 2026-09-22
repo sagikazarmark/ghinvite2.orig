@@ -43,6 +43,7 @@ pub fn AccessVerificationRetryPage(
     action: String,
     values: LinkFormValues,
 ) -> Element {
+    let fields = CreateLinkForm::fields();
     rsx! {
         crate::layouts::HomeLayout {
             signed_in_login,
@@ -57,16 +58,16 @@ pub fn AccessVerificationRetryPage(
                     form { method: "post", action,
                         crate::csrf::CsrfField {}
                         input { r#type: "hidden", name: "reload_repos", value: "true" }
-                        input { r#type: "hidden", name: "description", value: values.description.clone() }
-                        input { r#type: "hidden", name: "internal_note", value: values.internal_note.clone() }
-                        input { r#type: "hidden", name: "permission", value: values.permission.clone() }
-                        input { r#type: "hidden", name: "max_uses", value: values.max_uses.clone() }
-                        input { r#type: "hidden", name: "expires_in_days", value: values.expires_in_days.clone() }
+                        input { r#type: "hidden", name: fields.description().field_name(), value: values.description.clone() }
+                        input { r#type: "hidden", name: fields.internal_note().field_name(), value: values.internal_note.clone() }
+                        input { r#type: "hidden", name: fields.permission().field_name(), value: values.permission.clone() }
+                        input { r#type: "hidden", name: fields.max_uses().field_name(), value: values.max_uses.clone() }
+                        input { r#type: "hidden", name: fields.expires_in_days().field_name(), value: values.expires_in_days.clone() }
                         if values.approval_required {
-                            input { r#type: "hidden", name: "approval_required", value: "true" }
+                            input { r#type: "hidden", name: fields.approval_required().field_name(), value: "true" }
                         }
                         for id in values.selected_repo_ids.iter() {
-                            input { r#type: "hidden", name: "repo_ids", value: "{id}" }
+                            input { r#type: "hidden", name: fields.repo_ids().field_name(), value: "{id}" }
                         }
                         p { "Description: {values.description}" }
                         button { r#type: "submit", class: "btn btn-primary", "Retry access verification" }
@@ -80,8 +81,9 @@ pub fn AccessVerificationRetryPage(
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkCreateFormPageProps {
-    #[props(default)]
-    pub action: Option<String>,
+    /// `action` of the form: the route that handles the POST, carrying the
+    /// creation identity.
+    pub action: String,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
@@ -101,10 +103,7 @@ pub struct LinkCreateFormPageProps {
 #[component]
 pub fn LinkCreateFormPage(props: LinkCreateFormPageProps) -> Element {
     let login = props.account_login.clone();
-    let action = props
-        .action
-        .clone()
-        .unwrap_or_else(|| format!("/console/accounts/{login}/links"));
+    let action = props.action.clone();
     let island_props = LinkFormIslandProps {
         csrf_token: try_consume_context::<crate::csrf::CsrfToken>()
             .unwrap_or_default()
@@ -263,6 +262,7 @@ pub fn LinkCreateForm(
                         value: form.internal_note.clone(),
                         placeholder: "Why this link exists",
                         help: "Optional admin-only notes. Not visible in the invitation request flow.",
+                        error: form.errors.internal_note.clone(),
                         oninput: handlers.internal_note.oninput,
                         onchange: handlers.internal_note.onchange,
                         onblur: handlers.internal_note.onblur,
@@ -810,6 +810,7 @@ mod tests {
         let page = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1064,6 +1065,7 @@ mod tests {
             internal_note: "Keep this note".to_string(),
             selected_repo_ids: vec![11],
             errors: LinkFormErrors {
+                internal_note: None,
                 summary: vec![
                     "Fix the highlighted fields before creating this invitation link.".to_string(),
                 ],
@@ -1104,6 +1106,7 @@ mod tests {
             internal_note: "Keep this note".to_string(),
             selected_repo_ids: vec![11, 999],
             errors: LinkFormErrors {
+                internal_note: None,
                 summary: vec![
                     "Fix the highlighted fields before creating this invitation link.".to_string(),
                 ],
@@ -1435,6 +1438,7 @@ mod tests {
         let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1507,6 +1511,7 @@ mod tests {
         let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1563,6 +1568,7 @@ mod tests {
         let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1626,6 +1632,7 @@ mod tests {
         let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1679,6 +1686,7 @@ mod tests {
         let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1719,6 +1727,7 @@ mod tests {
         let html = crate::testing::render(|| {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1766,6 +1775,7 @@ mod tests {
         let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),
@@ -1821,6 +1831,7 @@ mod tests {
         let html = crate::testing::render(move || {
             rsx! {
                 LinkCreateFormPage {
+                    action: "/console/accounts/acme/links".to_string(),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),

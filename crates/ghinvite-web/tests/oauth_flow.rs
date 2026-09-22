@@ -1,8 +1,9 @@
 //! End-to-end OAuth sign-in tests. Drives the full /login → /oauth/callback
-//! flow through axum + the in-process MockTransport from Plan 2.
+//! flow through axum + the in-process MockTransport.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use ghinvite_core::storage::InstallationStorage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
@@ -33,7 +34,7 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
     mock: MockTransport,
     session_store: S,
 ) -> axum::Router {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -57,6 +58,7 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     build_app(state, session_store)
@@ -614,150 +616,33 @@ async fn browser_tokens_are_stable_session_separated_and_replaced_on_signin() {
 
 mod common;
 
-#[derive(Clone, Debug)]
-struct ConcurrentLoadStore {
-    inner: tower_sessions::MemoryStore,
-    first_loads: Arc<tokio::sync::Barrier>,
-    loads: Arc<AtomicU8>,
-}
-
-#[async_trait::async_trait]
-impl SessionStore for ConcurrentLoadStore {
-    async fn create(&self, record: &mut Record) -> session_store::Result<()> {
-        self.inner.create(record).await
-    }
-    async fn save(&self, record: &Record) -> session_store::Result<()> {
-        self.inner.save(record).await
-    }
-    async fn load(&self, id: &Id) -> session_store::Result<Option<Record>> {
-        let record = self.inner.load(id).await?;
-        if self.loads.fetch_add(1, Ordering::SeqCst) < 2 {
-            self.first_loads.wait().await;
-        }
-        Ok(record)
-    }
-    async fn delete(&self, id: &Id) -> session_store::Result<()> {
-        self.inner.delete(id).await
-    }
-}
-
 #[tokio::test]
-async fn legacy_session_concurrent_forms_keep_the_same_usable_token() {
-    let inner = tower_sessions::MemoryStore::default();
-    let session = tower_sessions::Session::new(None, Arc::new(inner.clone()), None);
-    session
-        .insert(
-            "ghinvite",
-            serde_json::json!({
-                "user_id":42, "login":"octocat", "access_token":"u_xxx", "admin_checks":{}
-            }),
-        )
-        .await
-        .unwrap();
-    session.save().await.unwrap();
-    let cookie = format!("id={}", session.id().unwrap());
-    let store = ConcurrentLoadStore {
-        inner,
-        first_loads: Arc::new(tokio::sync::Barrier::new(2)),
-        loads: Arc::new(AtomicU8::new(0)),
-    };
-    let app = build_app_with_store(MockTransport::scripted(vec![]), store).await;
-    let (first, second) = tokio::join!(
-        common::csrf_token(&app, &cookie),
-        common::csrf_token(&app, &cookie)
-    );
-    assert_eq!(
-        first, second,
-        "concurrently opened legacy-session forms share authority"
-    );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/logout")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("csrf_token={first}")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-}
-
-#[tokio::test]
-async fn legacy_session_error_page_logout_token_does_not_depend_on_persistence() {
-    // Persisted legacy authority is test input; all observations use HTTP.
+async fn authenticated_session_without_csrf_authority_confers_no_identity() {
+    // A stored authenticated record must carry browser mutation authority;
+    // without it the record is malformed and treated as signed out.
     let store = tower_sessions::MemoryStore::default();
     let session = tower_sessions::Session::new(None, Arc::new(store.clone()), None);
     session
         .insert(
             "ghinvite",
             serde_json::json!({
-                "user_id":42, "login":"octocat", "access_token":"u_xxx", "admin_checks":{}
+                "user_id": 42, "login": "octocat", "access_token": "u_xxx",
+                "oauth_csrf": null, "csrf_token": null, "admin_checks": {}, "return_to": null
             }),
         )
         .await
         .unwrap();
     session.save().await.unwrap();
     let cookie = format!("id={}", session.id().unwrap());
-    // Render a production page, then simulate its upstream read failing. The
-    // layer is inside SessionManagerLayer, which skips persistence on 5xx.
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let state = AppState::new(
-        storage,
-        Arc::new(MockTransport::scripted(vec![])),
-        Arc::new(RestateCommands::new(Arc::new(
-            RestateClient::new("http://127.0.0.1:1").unwrap(),
-        ))),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let page_app = ghinvite_web::routes::home::router()
-        .with_state(state)
-        .layer(axum::middleware::map_response(
-            |mut response: axum::response::Response| async move {
-                *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-                response
-            },
-        ))
-        .layer(tower_sessions::SessionManagerLayer::new(store.clone()).with_secure(false));
-    let response = get(&page_app, "/", &cookie).await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let html = String::from_utf8(
-        response
-            .into_body()
-            .collect()
-            .await
-            .unwrap()
-            .to_bytes()
-            .to_vec(),
-    )
-    .unwrap();
-    let token = html
-        .split("name=\"csrf_token\" value=\"")
-        .nth(1)
-        .unwrap()
-        .split('"')
-        .next()
-        .unwrap();
     let app = build_app_with_store(MockTransport::scripted(vec![]), store).await;
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/logout")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("csrf_token={token}")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let response = get(&app, "/console/accounts/octocat", &cookie).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        response.headers()["location"]
+            .to_str()
+            .unwrap()
+            .starts_with("/login?return_to=")
+    );
 }
 
 #[tokio::test]

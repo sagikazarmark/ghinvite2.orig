@@ -30,7 +30,7 @@
 //!
 //! Raw restoration is not gated on the server having rejected anything: the
 //! takeover adopts what the admin typed before the island mounted, so a `0` on
-//! a form the server never saw has to survive too, and `initial_model` would
+//! a form the server never saw has to survive too, and the typed model would
 //! otherwise blank it into "unlimited". Its parse error is then visible from
 //! the first frame rather than on leaving the field.
 //! Valid noncanonical text such as `"007"` or `" 7 "` still formats as `"7"`
@@ -183,7 +183,7 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
 fn form_config(props: &LinkFormIslandProps) -> FormConfig<CreateLinkForm> {
     let repos = props.repos.clone();
     let now = props.now;
-    let mut config = FormConfig::new(initial_model(&props.values))
+    let mut config = FormConfig::new(props.values.to_model().0)
         .validation_mode(ValidationMode::on_commit())
         .register_core(move |core| register_validators(core, &repos, now));
     if !props.values.errors.is_empty() || has_raw_numeric(&props.values) {
@@ -195,7 +195,7 @@ fn form_config(props: &LinkFormIslandProps) -> FormConfig<CreateLinkForm> {
 
 /// A numeric guardrail whose text the typed model cannot hold.
 ///
-/// `initial_model` maps an unparseable guardrail to `None`, so without
+/// `LinkFormValues::to_model` maps an unparseable guardrail to `None`, so without
 /// restoration the first frame renders it blank — turning "0" into unlimited
 /// and losing the blocker that should stop the POST. That matters even with no
 /// server errors at all, because the takeover adopts what the admin typed
@@ -219,22 +219,6 @@ fn commit_on_focus_exit<T: 'static>(binding: dioxus_field::Binding<T>) -> dioxus
         binding.commit();
         binding.focus_exit();
     }))
-}
-
-/// The typed model the preserved values describe — the same mapping the
-/// server's `CreateLinkSubmission::to_model` applies to the raw POST: text
-/// verbatim, a numeric guardrail that fails to parse left blank (its raw text
-/// is restored separately by [`browser_rejection`]).
-fn initial_model(values: &LinkFormValues) -> CreateLinkForm {
-    CreateLinkForm {
-        description: values.description.clone(),
-        internal_note: values.internal_note.clone(),
-        permission: values.permission.clone(),
-        approval_required: values.approval_required,
-        max_uses: parse_max_uses(&values.max_uses).unwrap_or(None),
-        expires_in_days: parse_expires_in_days(&values.expires_in_days).unwrap_or(None),
-        repo_ids: values.selected_repo_ids.clone(),
-    }
 }
 
 /// How a parsed guardrail is written back into its input: the number, or an
@@ -269,6 +253,9 @@ fn submit_errors_from(errors: &LinkFormErrors) -> Vec<SubmitError<CreateLinkForm
     let mut submit_errors = Vec::new();
     if let Some(message) = &errors.description {
         submit_errors.push(SubmitError::field(fields.description(), message.clone()));
+    }
+    if let Some(message) = &errors.internal_note {
+        submit_errors.push(SubmitError::field(fields.internal_note(), message.clone()));
     }
     if let Some(message) = &errors.permission {
         submit_errors.push(SubmitError::field(fields.permission(), message.clone()));
@@ -475,33 +462,6 @@ mod tests {
     }
 
     #[test]
-    fn initial_model_mirrors_the_servers_to_model() {
-        let model = initial_model(&LinkFormValues {
-            description: "  AI  ".into(),
-            permission: "owner".into(),
-            approval_required: true,
-            max_uses: "abc".into(),
-            expires_in_days: " 45 ".into(),
-            internal_note: "note".into(),
-            selected_repo_ids: vec![999, 10],
-            errors: LinkFormErrors::default(),
-        });
-
-        assert_eq!(
-            model,
-            CreateLinkForm {
-                description: "  AI  ".into(),
-                internal_note: "note".into(),
-                permission: "owner".into(),
-                approval_required: true,
-                max_uses: None,
-                expires_in_days: Some(45),
-                repo_ids: vec![999, 10],
-            }
-        );
-    }
-
-    #[test]
     fn format_count_writes_blank_for_none() {
         assert_eq!(format_count(&None), "");
         assert_eq!(format_count(&Some(7)), "7");
@@ -511,6 +471,7 @@ mod tests {
     fn submit_errors_map_slots_to_fields_and_extra_summary_lines_to_the_form() {
         let fields = CreateLinkForm::fields();
         let errors = LinkFormErrors {
+            internal_note: None,
             summary: vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()],
             description: Some("d".to_string()),
             permission: None,

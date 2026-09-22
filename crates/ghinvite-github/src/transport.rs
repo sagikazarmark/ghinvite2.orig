@@ -124,8 +124,7 @@ impl Response {
     }
 
     /// GitHub returns the remaining quota in `x-ratelimit-remaining`. Returns
-    /// `None` if absent or unparseable. Plan 3's reconciler should back off
-    /// before this hits zero.
+    /// `None` if absent or unparseable.
     pub fn rate_limit_remaining(&self) -> Option<u32> {
         self.headers
             .get("x-ratelimit-remaining")

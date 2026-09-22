@@ -57,18 +57,25 @@ pub fn query(before: Option<Boundary>) -> String {
     )
 }
 
-pub fn page(mut rows: Vec<(InvitationRequest, Option<String>)>) -> Page {
+#[derive(Debug, Deserialize)]
+pub struct Row {
+    #[serde(flatten)]
+    pub request: InvitationRequest,
+    pub requester_login: Option<String>,
+}
+
+pub fn page(mut rows: Vec<Row>) -> Page {
     let more = rows.len() > PAGE_SIZE;
     rows.truncate(PAGE_SIZE);
     let requester_logins = rows
         .iter()
-        .filter_map(|(request, login)| {
-            login
+        .filter_map(|row| {
+            row.requester_login
                 .as_ref()
-                .map(|login| (request.requester_id, login.clone()))
+                .map(|login| (row.request.requester_id, login.clone()))
         })
         .collect();
-    let requests: Vec<_> = rows.into_iter().map(|(request, _)| request).collect();
+    let requests: Vec<_> = rows.into_iter().map(|row| row.request).collect();
     let older = if more {
         requests.last().map(Boundary::from)
     } else {

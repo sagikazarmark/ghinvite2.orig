@@ -1,4 +1,4 @@
-//! Versioned, bounded admission after-images. Parents are verified identities,
+//! Bounded admission after-images. Parents are verified identities,
 //! not profile snapshots: their owners must restore missing installations/users.
 use crate::audit::EventType;
 use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
@@ -17,7 +17,6 @@ pub struct AccountAdmin {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLink {
-    pub version: u32,
     pub link_id: InvitationLinkId,
     pub admin: AccountAdmin,
     pub account_id: u64,
@@ -64,6 +63,15 @@ impl LinkSnapshot {
             None => self.creation.internal_note.as_deref(),
         }
     }
+    pub fn inactive(&self, now: DateTime<Utc>) -> Option<crate::Inactive> {
+        crate::Inactive::check(
+            self.revoked_at.is_some(),
+            self.creation.expires_at,
+            self.uses,
+            self.creation.max_uses,
+            now,
+        )
+    }
     pub fn as_link(&self) -> crate::InvitationLink {
         crate::InvitationLink {
             id: self.link_id,
@@ -104,7 +112,6 @@ pub struct RequestSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectionEnvelope {
-    pub version: u32,
     pub transition_id: String,
     pub link: LinkSnapshot,
     pub requests: Vec<RequestSnapshot>,
@@ -128,10 +135,10 @@ pub struct AuditIntent {
 #[async_trait::async_trait]
 pub trait ProjectionStorage: Send + Sync + 'static {
     async fn apply_transition(&self, envelope: &ProjectionEnvelope) -> super::Result<()>;
-
-    /// Eventually consistent versioned request read, including its immutable
-    /// admission deadline. None means absent or legacy, never admission rejection.
-    async fn get_projected_request(&self, id: RequestId) -> super::Result<Option<RequestSnapshot>>;
 }
 
 pub mod sql;
+
+/// Test seeding through the projector.
+#[cfg(feature = "test-suite")]
+pub mod fixture;

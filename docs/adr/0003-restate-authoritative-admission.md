@@ -18,6 +18,8 @@ For [#48](https://github.com/sagikazarmark/ghinvite2.orig/issues/48), we chose a
 | Separate Restate projection execution | Retry-safe SQLx/D1 writes, including request records, link records, and audit events. It does not decide admission. |
 | SQLx/D1 | Queryable records for Console lists, audit, and other read views. Projected eligibility is advisory, not permission to admit or approve. |
 
+**Update (2026-09-21):** These owners are implemented as the `InvitationLink` Virtual Object, the `InvitationRequest` workflow and the `InvitationProjection` projector. The earlier SQL-driven writers and the cutover path were removed before launch; nothing had been deployed.
+
 This decision covers invitation-link and invitation-request admission/lifecycle state; it does not move all application data, sessions, or GitHub invitation state into the link object.
 
 All eligibility-affecting commands for a link use the same canonical object key, validated against the command's link ID. Account authorization is still required and is not replaced by key validation. Admission does not read projected database state to reconstruct current eligibility during normal operation.
@@ -87,12 +89,12 @@ Keep all authoritative keys in the **same link-ID object**, but separate growing
 
 | Key (logical encoding) | Value and access |
 |---|---|
-| `v1/link` | Link identity/account, fixed guardrails, metadata, revocation, uses, and monotonic revision. No requester list or outcome history. Read for new admission and link changes. |
-| `v1/op/<operation_id>` | Immutable canonical input/fingerprint and original accepted/rejected outcome. Direct lookup before eligibility. |
-| `v1/request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
-| `v1/blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
+| `link` | Link identity/account, fixed guardrails, metadata, revocation, uses, and monotonic revision. No requester list or outcome history. Read for new admission and link changes. |
+| `op/<operation_id>` | Immutable canonical input/fingerprint and original accepted/rejected outcome. Direct lookup before eligibility. |
+| `request/<request_id>` | Requester identity, authoritative lifecycle state, admission time/deadline, current revision, and transition/dispatch identity needed for safe recovery. Direct lookup by request. |
+| `blocker/<requester_id>` | The exact currently pending/approved request ID. At most one pointer per requester/link; absent when retry-eligible. |
 
-Use canonical typed identifiers and versioned encoding, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the approved production contract below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation.
+Use canonical typed identifiers, not arbitrary delimiter-containing strings. The proof reuses operation identity as request identity for simplicity; the approved production contract below separates them. Its link-local operation key binds requester as input, and the same raw operation ID under another link is a different scoped operation.
 
 ### Approved operation identity and retention contract
 
@@ -254,6 +256,8 @@ Restate durably retains unfinished execution, but its journal is not automatical
 
 Use a separate ordinary Restate service with one internal `apply_transition(envelope)` command. The link object sends to it durably and does not await completion. The service may process different envelopes concurrently; correctness comes from conditional database writes and stable identities, not assumed delivery order. A keyed projector is unnecessary initially unless measured database contention warrants serialization. This is the concrete implementation recommendation, not an additional verified production adapter.
 
+**Update (2026-09-21):** `InvitationProjection` is now a Virtual Object keyed by link ID rather than an ordinary service. The link object still sends without awaiting completion, but the per-key queue applies one link's transitions in send order, and a failing transition holds back only that link's later transitions. Revision checks remain as a guard against manual redrives.
+
 Each versioned envelope contains:
 
 - schema version and a stable transition ID generated/recorded with the authoritative decision;
@@ -265,6 +269,8 @@ Each versioned envelope contains:
 Admission normally touches one request; overdue expiry plus readmission touches at most the old and new requests. A rejection without lifecycle effects need not create a projected request. Never include all operation/request history in an envelope. Operation receipts stay authoritative in the link object; projecting copies is optional and must not gate replay.
 
 For each mutable row, insert if absent, replace only when the incoming revision is greater, and treat equal revision with equal content as replay. Equal revision with different authoritative content or an immutable identity/account mismatch is an invariant failure to repair, not an ignorable duplicate. Lower revision snapshots cannot undo newer state. Request state and link state use separate revision comparisons: receiving a newer link snapshot must not suppress a still-needed request snapshot from an older envelope.
+
+**Update (2026-09-21):** With the projector serialized per link and no other writer of these rows, links and requests no longer retain snapshot content or identity columns. An equal-revision snapshot is a no-op rather than a content comparison; immutable identity conflicts are still checked against the stored columns, and audit events still compare content.
 
 Always attempt all immutable audit insertions independently of snapshot freshness. The same event ID with identical content is replay; different content conflicts. Derive exhaustion identity from the logical link exhaustion transition and expiration identity from the exact request expiration transition, not whichever invocation happens to publish them. This prevents old snapshots arriving late from losing historical events.
 
@@ -319,6 +325,8 @@ This adds one small durable delivery module per request. Direct promise evidence
 If request withdrawal is wanted now, decide explicitly whether the requester, an account admin, or both may cancel a pending request. Then define audit actor/reason visibility and command replay. The recommended state rule is pending-only cancellation before its deadline, expiry at/after the deadline, no use refund, and no cascade to an approved request/GitHub invitation. Administrative Restate cancellation/kill remains operational recovery and is not a domain cancellation command.
 
 ## Approved dispatch recovery and migration contract
+
+**Update (2026-09-21):** The legacy writers and cutover path were removed before launch, so the controlled writer cutover, historical data treatment, and pre-cutover rollback steps below no longer apply; nothing had been deployed. The retained dispatch plan, receiving-side receipt, projection prerequisite and post-authority recovery rules still apply.
 
 The maintainer [confirmed this contract](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5668073287), including stable dispatch plans and create outcomes, controlled write maintenance, preservation of established historical deadlines, and existing identity-parent prerequisites. This is not a completed migration or verified external-effect protocol; concrete recovery mechanics and the migration rehearsal remain implementation work.
 
@@ -392,6 +400,8 @@ Required rehearsal: legacy pending/approved/terminal records, `Sent` and ambiguo
 | What can be rebuilt after retention, administrative kill/purge, or independent restore? | Define Restate backup/state retention and projection rebuild/redrive procedures. Workflow restart after completed-workflow retention must not repeat downstream GitHub effects. |
 
 ## Migration and implementation seams
+
+**Update (2026-09-21):** The legacy writers and cutover path were removed before launch. The files and existing-data cutover described below no longer exist or apply; #58's cutover tooling was deleted.
 
 Current code differs from this decision:
 
@@ -503,6 +513,6 @@ Restate state becomes critical business data. Per-link serialization limits a ho
 
 ## Historical reconciliation and references
 
-The [v1 design](../superpowers/specs/2026-05-04-ghinvite-v1-design.md) (§8 request timer, §9 workflow, and Q8) and [Plan 3](../superpowers/plans/2026-05-04-ghinvite-restate-handlers.md) retain the historical link-expiry deadline cap and older workflow/storage assumptions. This ADR supersedes those admission/deadline rules; their original bodies remain historical evidence. The current domain language is in [CONTEXT.md](../../CONTEXT.md).
+The original v1 design spec (§8 request timer, §9 workflow, and Q8) and the Restate handlers implementation plan (Plan 3) (both removed; see git history) retain the historical link-expiry deadline cap and older workflow/storage assumptions. This ADR supersedes those admission/deadline rules; their original bodies remain historical evidence. The current domain language is in [CONTEXT.md](../../CONTEXT.md).
 
 Restate's [database integration guidance](https://docs.restate.dev/guides/databases) describes object-state consistency and retry-safe external writes; its [state documentation](https://docs.restate.dev/develop/ts/state) distinguishes object-state retention from workflow retention. These explain the architectural choice; implementation details must be checked against this repository's pinned Rust SDK/runtime rather than inferred from examples for other SDKs.

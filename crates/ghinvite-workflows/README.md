@@ -1,18 +1,17 @@
 # crates/ghinvite-workflows
 
-Restate handler services for ghinvite. Which services own durable state depends
-on the endpoint mode (`GHINVITE_ADMISSION_MODE`):
+Restate handler services for ghinvite. `build_endpoint` binds every service on
+one endpoint, and these services own every durable state change:
+`InvitationLink` and `InvitationRequest` own admission and the request
+lifecycle, `GithubCreate` owns delivery, and `AccountInstallation` owns
+installations. `GithubInvitation` keeps only its settlement handlers and
+`Reconcile` only `daily_run`.
 
-- **`legacy` (the default)** — `build_endpoint` binds `InvitationLink`,
-  `InvitationRequest`, `GithubInvitation` and `Reconcile` as their real
-  implementations, and they still own their state. Installations are the
-  exception: they cut over ahead of the rest, so `AccountInstallationV1` and
-  `InstallationProjectionV1` own them in both modes.
-- **`authoritative`** — `build_cutover_endpoint` gives the `_v1` services
-  ownership of every durable state change: `InvitationRequestV1` and the request
-  lifecycle, `GithubCreateV1` and settlement, and the projection service they all
-  write through. The four writers above stay bound only for deployments pinned
-  before the cutover.
+SQL is a projection written through `InvitationProjection`, a Virtual Object
+keyed by link ID, and `InstallationProjection`. The link object sends
+projections fire-and-forget, so admission never waits on SQL; the per-key queue
+applies one link's transitions in send order, and a failing transition holds
+back only that link's later ones.
 
 Built on the upstream `restate-sdk = "0.12"` Rust SDK (patched; see the
 workspace `Cargo.toml`).
@@ -34,8 +33,8 @@ bottom; `grep -l 'mod tests' src/*.rs` lists them. They call the module's pure
 functions directly, so none of them needs a Restate runtime.
 
 The durable timer path requires the real Restate runtime. From the repository
-root, run `bash scripts/test-restate.sh` to register the current endpoint and
-verify request expiration and persisted audit outcomes. This feature-gated
+root, run `bash scripts/test-restate.sh [target]` to register the current endpoint and
+run that target (default `authoritative_admission`) against it. This feature-gated
 test is excluded from normal workspace tests; when enabled it fails if the
 runtime is absent. See [local testing](../../docs/local-testing.md) for the
 host/container topology, prerequisites, deadlines, and cleanup.
@@ -62,7 +61,7 @@ A handler that owns a storage effect delegates it to a pure-async function
 (e.g. `create_logic`, `project_installation`). The
 `#[restate_sdk::object|service|workflow]` impl wraps that function inside
 `ctx.run(|| async {...}).name("step_name").await` so Restate captures it as a
-durable step. Pure functions take `&AppState` (`Arc<dyn Storage>` +
+durable step. Pure functions take `&AppState` (`Arc<dyn WorkflowStorage>` +
 `Arc<InstallationClient>`) and return a failure their caller can classify —
 usually `Result<T, HandlerError>`. Unit tests call them directly, without a
 Restate runtime.
@@ -78,19 +77,19 @@ object) and is covered by the integration tests rather than by unit tests.
 
 Audit events go through `audit::emit(state, account_id, event_type, actor,
 target, metadata, request_id)`, which constructs an `AuditEvent` and calls
-`Storage::audit`. Every state-change handler emits exactly one audit event.
+`AuditStorage::audit`. Every state-change handler emits exactly one audit event.
 
 Metadata updates prepare and journal their changed field names, audit ID, and
 timestamp before applying the write. They construct the event from that snapshot
-and call `Storage::audit` directly so retries reuse the same identity. Storage
+and call `AuditStorage::audit` directly so retries reuse the same identity. Storage
 deduplicates this event type by ID; unchanged metadata produces no event. Audit
 metadata includes field names only, never description or internal-note values.
 
-See `docs/superpowers/plans/2026-05-04-ghinvite-restate-handlers.md` for the
-implementation plan, and `docs/superpowers/specs/2026-05-04-ghinvite-v1-design.md`
-§9 for the workflow specifications.
+See [the request lifecycle](../../docs/request-lifecycle-v1.md) and
+[ADR 0003](../../docs/adr/0003-restate-authoritative-admission.md) for the
+workflow contracts.
 
-## Isolated authoritative admission
+## Authoritative admission
 
-The opt-in `admission_v1` module and its native acceptance runner implement #53.
+The `admission` module and its native acceptance runner implement #53.
 See [the command and recovery contract](../../docs/admission-v1.md).

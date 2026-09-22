@@ -1,18 +1,26 @@
 //! Session-bound continuations persisted before ingress, including on a lost
 //! acknowledgement. Current account authorization is required on every access.
 use super::*;
+use crate::attempt_continuations::{AttemptContinuations, Retention, Scope};
 use axum::http::StatusCode;
 use axum::response::{Redirect, Response};
-use base64::Engine;
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
 use ghinvite_core::admission::AdminLinkCommand;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
 use ghinvite_core::storage::projection::CreateLink;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
+
+const CREATED: &str = "Invitation link created.";
+const REVOKED: &str = "Invitation link stopped accepting new invitation requests.";
+/// The authority refused the creation's input; nothing was created.
+pub(super) const CREATE_REJECTED: &str =
+    "The invitation link could not be created with these values. Review them and try again.";
+const REVOKE_REJECTED: &str = "This invitation link could not be stopped. Reload it and try again.";
+
+/// The authority definitively rejected a creation (400): nothing was created
+/// and the retained continuation was released, so the same creation identity
+/// can carry corrected values. The caller that holds the submitted form
+/// re-renders it.
+pub(super) struct CreateRejected;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) enum Command {
@@ -58,65 +66,12 @@ impl Command {
     }
 }
 
-fn scope(admin: &RequireConsoleAdminOf) -> crate::Result<String> {
-    use sha2::{Digest, Sha256};
-    let session_id = admin.tower.id().ok_or_else(|| failure("missing session"))?;
-    let digest = Sha256::digest(format!(
-        "ghinvite/admin-attempt/v2/{session_id}/{}/{}",
-        admin.session.user_id, admin.account.account_id
-    ));
-    Ok(hex::encode(digest))
-}
-
-fn failure(_: impl std::fmt::Display) -> crate::WebError {
-    crate::WebError::Session("Attempt recovery temporarily unavailable.".into())
-}
-
-fn seal(state: &AppState, scope: &str, command: &Command) -> crate::Result<String> {
-    let mut nonce = [0; 24];
-    rand::rngs::OsRng
-        .try_fill_bytes(&mut nonce)
-        .map_err(failure)?;
-    let cipher = XChaCha20Poly1305::new((&state.config.session_secret).into());
-    let aad = format!("admin-attempt/v1/{scope}/{}", command.id());
-    let plaintext = serde_json::to_vec(command).map_err(failure)?;
-    let encrypted = cipher
-        .encrypt(
-            &XNonce::try_from(nonce.as_slice()).map_err(failure)?,
-            Payload {
-                msg: &plaintext,
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(failure)?;
-    let mut bytes = nonce.to_vec();
-    bytes.extend(encrypted);
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
-}
-
-fn open(
-    state: &AppState,
-    scope: &str,
-    stored: ghinvite_core::storage::admin_attempts::StoredAttempt,
-) -> crate::Result<Command> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(stored.payload)
-        .map_err(failure)?;
-    if bytes.len() < 24 {
-        return Err(failure("invalid continuation"));
-    }
-    let cipher = XChaCha20Poly1305::new((&state.config.session_secret).into());
-    let aad = format!("admin-attempt/v1/{scope}/{}", stored.id);
-    let plaintext = cipher
-        .decrypt(
-            &XNonce::try_from(&bytes[..24]).map_err(failure)?,
-            Payload {
-                msg: &bytes[24..],
-                aad: aad.as_bytes(),
-            },
-        )
-        .map_err(failure)?;
-    serde_json::from_slice(&plaintext).map_err(failure)
+fn scope(admin: &RequireConsoleAdminOf) -> crate::Result<Scope> {
+    Scope::console(
+        &admin.tower,
+        admin.session.user_id,
+        admin.account.account_id,
+    )
 }
 
 pub(super) async fn load(
@@ -124,40 +79,27 @@ pub(super) async fn load(
     admin: &RequireConsoleAdminOf,
     id: &str,
 ) -> crate::Result<Option<Command>> {
-    let scope = scope(admin)?;
-    state
-        .storage
-        .get_admin_attempt(&scope, id, Utc::now().timestamp())
-        .await?
-        .map(|r| open(state, &scope, r))
-        .transpose()
+    AttemptContinuations::new(state)
+        .load(&scope(admin)?, id)
+        .await
 }
 
 // An immutable record per attempt prevents request-local session snapshots from
 // overwriting each other's submitted input. A collision never authorizes ingress.
+// A decision is also bound to its request, so only one original decision
+// attempt per request is retained.
 async fn retain(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     command: &Command,
-) -> crate::Result<Command> {
-    let scope = scope(admin)?;
+) -> crate::Result<Retention<Command>> {
     let binding = match command {
-        Command::Decision(c) => format!("request-{}-{}", c.link_id, c.request_id),
-        _ => command.id(),
+        Command::Decision(c) => Some(format!("request-{}-{}", c.link_id, c.request_id)),
+        _ => None,
     };
-    let payload = seal(state, &scope, command)?;
-    let stored = state
-        .storage
-        .retain_admin_attempt(
-            &scope,
-            &command.id(),
-            &binding,
-            &payload,
-            admin.tower.expiry_date().unix_timestamp(),
-            Utc::now().timestamp(),
-        )
-        .await?;
-    open(state, &scope, stored)
+    AttemptContinuations::new(state)
+        .retain(&scope(admin)?, &command.id(), binding.as_deref(), command)
+        .await
 }
 
 fn url(admin: &RequireConsoleAdminOf, command: &Command) -> String {
@@ -170,15 +112,9 @@ fn url(admin: &RequireConsoleAdminOf, command: &Command) -> String {
 
 pub(super) async fn index(State(state): State<AppState>, admin: RequireConsoleAdminOf) -> Response {
     let result = async {
-        let scope = scope(&admin)?;
-        let records = state
-            .storage
-            .list_admin_attempts(&scope, Utc::now().timestamp())
-            .await?;
-        records
-            .into_iter()
-            .map(|r| open(&state, &scope, r))
-            .collect::<crate::Result<Vec<_>>>()
+        AttemptContinuations::new(&state)
+            .list::<Command>(&scope(&admin)?)
+            .await
     }
     .await;
     match result {
@@ -225,43 +161,36 @@ pub(super) async fn page(
     };
     let result = match &command {
         Command::Decision(c) => {
-            let result = match &state.request_lifecycle {
-                Some(l) => l.decision_status(c.clone()).await,
-                None => Err(crate::WebError::NotFound),
-            };
+            let result = state.link_authority.decision_status(c.clone()).await;
             return match result {
                 Ok(Some(receipt)) => decision_response(&admin, &command, &receipt),
-                Ok(None) | Err(crate::WebError::NotFound) => unknown(&admin, &command),
+                Ok(None) | Err(AuthorityError::Missing) => unknown(&admin, &command),
                 Err(e) => failed(&admin, &command, e),
             };
         }
-        Command::Create(c) => match &state.admission {
-            Some(a) => a
-                .link_status(AdminLinkCommand {
-                    link_id: c.link_id,
-                    admin: c.admin.clone(),
-                })
-                .await
-                .and_then(|link| {
-                    if link.creation == *c {
-                        Ok(Some("Invitation link created."))
-                    } else {
-                        Err(crate::WebError::Conflict)
-                    }
-                }),
-            None => Err(crate::WebError::NotFound),
-        },
-        Command::Revoke(c) => match &state.admission {
-            Some(a) => a.link_status(c.clone()).await.map(|link| {
-                link.revoked_at
-                    .map(|_| "Invitation link stopped accepting new invitation requests.")
+        Command::Create(c) => state
+            .link_authority
+            .link_status(AdminLinkCommand {
+                link_id: c.link_id,
+                admin: c.admin.clone(),
+            })
+            .await
+            .and_then(|link| {
+                if link.creation == *c {
+                    Ok(Some(CREATED))
+                } else {
+                    Err(AuthorityError::Conflict)
+                }
             }),
-            None => Err(crate::WebError::NotFound),
-        },
+        Command::Revoke(c) => state
+            .link_authority
+            .link_status(c.clone())
+            .await
+            .map(|link| link.revoked_at.map(|_| REVOKED)),
     };
     match result {
         Ok(Some(message)) => render_attempt(&admin, &command, StatusCode::OK, message, false),
-        Ok(None) | Err(crate::WebError::NotFound) => unknown(&admin, &command),
+        Ok(None) | Err(AuthorityError::Missing) => unknown(&admin, &command),
         Err(e) => failed(&admin, &command, e),
     }
 }
@@ -279,49 +208,92 @@ pub(super) async fn retry(
     }
 }
 
+/// Execute an attempt with no submitted form to return to (a retry from the
+/// recovery page, a revocation or a decision). A rejected creation starts over
+/// from a fresh creation form, since its retained input was released.
 pub(super) async fn execute(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     command: Command,
 ) -> Response {
-    let original = match retain(state, admin, &command).await {
-        Ok(c) => c,
-        Err(e) => return failed(admin, &command, e),
-    };
-    if original.id() != command.id() {
-        if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
-            && old.action != new.action
-        {
-            return render_attempt(
-                admin,
-                &original,
-                StatusCode::CONFLICT,
-                "The requested decision was not applied. A different original decision attempt is retained. Check its status before deciding what to do next.",
-                false,
-            );
+    match submit(state, admin, command).await {
+        Ok(response) => response,
+        Err(CreateRejected) => {
+            flash(admin, session::FlashLevel::Error, CREATE_REJECTED).await;
+            Redirect::to(&format!(
+                "/console/accounts/{}/links/new",
+                admin.account.account_login
+            ))
+            .into_response()
         }
-        return Redirect::to(&url(admin, &original)).into_response();
     }
-    if serde_json::to_value(&original).unwrap() != serde_json::to_value(&command).unwrap() {
-        return failed(admin, &original, crate::WebError::Conflict);
+}
+
+async fn flash(admin: &RequireConsoleAdminOf, level: session::FlashLevel, message: &str) {
+    let _ = session::set_flash(
+        &admin.tower,
+        session::Flash {
+            level,
+            message: message.into(),
+        },
+    )
+    .await;
+}
+
+/// A definitive rejection applied nothing, so its continuation must neither
+/// read as an unknown outcome nor bind the identity to the rejected input.
+async fn release(state: &AppState, admin: &RequireConsoleAdminOf, command: &Command) {
+    let released = async {
+        AttemptContinuations::new(state)
+            .release(&scope(admin)?, &command.id())
+            .await
     }
-    let result = match &command {
+    .await;
+    if released.is_err() {
+        // Retained input then keeps binding the identity; resubmitting changed
+        // values reports a conflict rather than applying anything.
+        tracing::warn!("rejected admin attempt could not be released");
+    }
+}
+
+/// Execute an attempt. Only a creation the authority rejected is returned to
+/// the caller, which may hold the submitted form to re-render.
+pub(super) async fn submit(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    command: Command,
+) -> Result<Response, CreateRejected> {
+    match retain(state, admin, &command).await {
+        Ok(Retention::Retained) => {}
+        Ok(Retention::Bound(original)) => {
+            if let (Command::Decision(old), Command::Decision(new)) = (&original, &command)
+                && old.action != new.action
+            {
+                return Ok(render_attempt(
+                    admin,
+                    &original,
+                    StatusCode::CONFLICT,
+                    "The requested decision was not applied. A different original decision attempt is retained. Check its status before deciding what to do next.",
+                    false,
+                ));
+            }
+            return Ok(Redirect::to(&url(admin, &original)).into_response());
+        }
+        Ok(Retention::Conflict(original)) => return Ok(conflict(admin, &original)),
+        Err(e) => return Ok(back_to_link(admin, &command, e)),
+    }
+    let (result, completed) = match &command {
         Command::Decision(c) => {
-            let result = match &state.request_lifecycle {
-                Some(l) => l.decide(c.clone()).await,
-                None => Err(crate::WebError::NotFound),
-            };
-            return match result {
+            let result = state.link_authority.decide(c.clone()).await;
+            return Ok(match result {
                 Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
                     decision_response(admin, &command, &receipt)
                 }
                 Ok(receipt) => {
-                    let _ = session::set_flash(
-                        &admin.tower,
-                        session::Flash {
-                            level: session::FlashLevel::Success,
-                            message: decision_message(&receipt),
-                        },
+                    flash(
+                        admin,
+                        session::FlashLevel::Success,
+                        &decision_message(&receipt),
                     )
                     .await;
                     Redirect::to(&format!(
@@ -331,25 +303,42 @@ pub(super) async fn execute(
                     .into_response()
                 }
                 Err(e) => failed(admin, &command, e),
-            };
+            });
         }
-        Command::Create(c) => match &state.admission {
-            Some(a) => a.create(c.clone()).await.map(|_| ()),
-            None => Err(crate::WebError::NotFound),
-        },
-        Command::Revoke(c) => match &state.admission {
-            Some(a) => a.revoke(c.clone()).await.map(|_| ()),
-            None => Err(crate::WebError::NotFound),
-        },
+        Command::Create(c) => (
+            state.link_authority.create(c.clone()).await.map(|_| ()),
+            CREATED,
+        ),
+        Command::Revoke(c) => (
+            state.link_authority.revoke(c.clone()).await.map(|_| ()),
+            REVOKED,
+        ),
     };
+    let detail = format!(
+        "/console/accounts/{}/links/{}",
+        admin.account.account_login,
+        command.link_id()
+    );
     match result {
-        Ok(()) => Redirect::to(&format!(
-            "/console/accounts/{}/links/{}",
-            admin.account.account_login,
-            command.link_id()
-        ))
-        .into_response(),
-        Err(e) => failed(admin, &command, e),
+        // Every completing execution flashes once: a first submission, a
+        // retried recovered attempt, and an identical resubmission alike.
+        Ok(()) => {
+            flash(admin, session::FlashLevel::Success, completed).await;
+            Ok(Redirect::to(&detail).into_response())
+        }
+        // Invalid input for the authority (for a creation, typically an
+        // expiry already in the past); the authority applied nothing.
+        Err(AuthorityError::Invalid) => {
+            release(state, admin, &command).await;
+            match command {
+                Command::Create(_) => Err(CreateRejected),
+                _ => {
+                    flash(admin, session::FlashLevel::Error, REVOKE_REJECTED).await;
+                    Ok(Redirect::to(&detail).into_response())
+                }
+            }
+        }
+        Err(e) => Ok(failed(admin, &command, e)),
     }
 }
 
@@ -402,31 +391,42 @@ fn decision_response(
     render_attempt(admin, command, status, &decision_message(receipt), false)
 }
 
-pub(super) fn failed(
+/// Render what the authority's answer means for this attempt.
+fn failed(admin: &RequireConsoleAdminOf, command: &Command, error: AuthorityError) -> Response {
+    match error {
+        AuthorityError::Unknown(_) => unknown(admin, command),
+        AuthorityError::Conflict => conflict(admin, command),
+        // Anything else is not about this attempt's outcome.
+        e => back_to_link(admin, command, e.into()),
+    }
+}
+
+/// The attempt's identity is bound to input other than what was submitted.
+pub(super) fn conflict(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
+    render_attempt(
+        admin,
+        command,
+        StatusCode::CONFLICT,
+        "Operation conflict. This identity is bound to different input. Check the original attempt status; no replacement attempt was submitted.",
+        false,
+    )
+}
+
+/// Render the shared failure page pointing back at the link the attempt was
+/// acting on.
+fn back_to_link(
     admin: &RequireConsoleAdminOf,
     command: &Command,
     error: crate::WebError,
 ) -> Response {
-    match error {
-        crate::WebError::Restate(_) => unknown(admin, command),
-        crate::WebError::Conflict => render_attempt(
-            admin,
-            command,
-            StatusCode::CONFLICT,
-            "Operation conflict. This identity is bound to different input. Check the original attempt status; no replacement attempt was submitted.",
-            false,
+    error.into_response_with_recovery(
+        format!(
+            "/console/accounts/{}/links/{}",
+            admin.account.account_login,
+            command.link_id()
         ),
-        // Anything else is not about this attempt's outcome, so it renders the
-        // shared failure page pointing back at the link it was acting on.
-        e => e.into_response_with_recovery(
-            format!(
-                "/console/accounts/{}/links/{}",
-                admin.account.account_login,
-                command.link_id()
-            ),
-            "Back to link details",
-        ),
-    }
+        "Back to link details",
+    )
 }
 
 fn render_attempt(

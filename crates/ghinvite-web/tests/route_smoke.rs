@@ -1,6 +1,6 @@
 //! Route-existence smoke tests. Each route from spec §11 must be registered
-//! and respond with a non-500. Some return 501 (Plans 5–6 fill them in);
-//! some return 200/302; auth-required ones return 302→/login.
+//! and respond with a non-500. Some return 200/302; auth-required ones return
+//! 302→/login.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -37,7 +37,7 @@ async fn build_test_app() -> axum::Router {
 
 async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -50,7 +50,13 @@ async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Rout
         webhook_secret: webhook_secret.to_vec(),
         ..WebConfig::for_local_dev_with_secret([7; 32])
     };
-    let state = AppState::new(storage, transport, commands, config);
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
+        config,
+    );
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }
@@ -75,55 +81,6 @@ async fn health_returns_ok() {
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
-}
-
-#[tokio::test]
-async fn cutover_maintenance_closes_browser_and_webhook_writes() {
-    let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::in_memory()
-            .await
-            .unwrap(),
-    );
-    let transport = Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![]));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap());
-    let state = AppState::new(
-        storage,
-        transport,
-        Arc::new(RestateCommands::new(restate)),
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_write_maintenance();
-    let app = build_app(state, tower_sessions::MemoryStore::default());
-    for path in [
-        "/i/testcode12345678",
-        "/console/accounts/acme/links",
-        "/webhooks/github",
-    ] {
-        let response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-    assert_eq!(
-        app.oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap()
-        )
-        .await
-        .unwrap()
-        .status(),
-        StatusCode::OK
-    );
 }
 
 #[tokio::test]
@@ -687,7 +644,7 @@ async fn webhook_rejects_body_over_two_mib() {
 
 async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf>) -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -700,7 +657,13 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
         island_assets_dir,
         ..WebConfig::for_local_dev_with_secret([7; 32])
     };
-    let state = AppState::new(storage, transport, commands, config);
+    let state = AppState::new(
+        storage,
+        transport,
+        commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
+        config,
+    );
     let session_store = tower_sessions::MemoryStore::default();
     build_app(state, session_store)
 }

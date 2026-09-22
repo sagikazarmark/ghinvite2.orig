@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
-use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::InstallationStorage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
@@ -75,7 +75,7 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
         .await
         .unwrap();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(oauth_expectations()));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
@@ -84,6 +84,7 @@ async fn build_signed_in_app_with_installation() -> (axum::Router, String) {
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();

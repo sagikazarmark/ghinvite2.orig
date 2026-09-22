@@ -31,4 +31,5 @@ http = "1"
 http-body-util = "0.1"
 tracing-subscriber.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
 bytes = "1"

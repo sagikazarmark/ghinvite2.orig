@@ -1,18 +1,16 @@
 //! Test-only access to the public storage boundary inside workerd.
-use ghinvite_core::storage::{Storage, projection::ProjectionStorage};
+use ghinvite_core::storage::{
+    ConsoleStorage, DeliveryStorage, RecordStorage, WebhookStorage, projection::ProjectionStorage,
+    test_suite,
+};
 use http_body_util::BodyExt;
-use worker::{Body, Env, HttpRequest};
+use worker::{Body, Env, HttpRequest, wasm_bindgen::JsValue};
 
 pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response<Body>> {
     let path = req.uri().path().to_owned();
     let bytes = req.into_body().collect().await?.to_bytes();
     let input: serde_json::Value = serde_json::from_slice(&bytes).map_err(super::worker_err)?;
-    let storage =
-        ghinvite_storage_d1::D1Storage::new(env.d1(if path == "/__fixture/delivery-suite" {
-            "DB_DELIVERY"
-        } else {
-            "DB"
-        })?);
+    let storage = ghinvite_storage_d1::D1Storage::new(env.d1("DB")?);
     let result = match path.as_str() {
         "/__fixture/installation" => storage
             .get_installation(serde_json::from_value(input).map_err(super::worker_err)?)
@@ -46,8 +44,14 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .get_github_invitation(serde_json::from_value(input).map_err(super::worker_err)?)
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
-        "/__fixture/delivery-suite" => {
-            ghinvite_core::storage::test_suite::scenario_delivery_audit(storage).await;
+        "/__fixture/storage-suite" => Ok(serde_json::json!(test_suite::SCENARIOS)),
+        // The caller supplies a freshly migrated DB per scenario. A failed
+        // assertion panics, which aborts this Wasm instance with the message.
+        _ if path.starts_with("/__fixture/storage-suite/") => {
+            let name = &path["/__fixture/storage-suite/".len()..];
+            if !test_suite::run_scenario(name, storage).await {
+                return Err(super::worker_err("unknown storage suite scenario"));
+            }
             Ok(serde_json::Value::Null)
         }
         "/__fixture/delivery" => storage
@@ -67,7 +71,7 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/request" => storage
-            .get_projected_request(serde_json::from_value(input).map_err(super::worker_err)?)
+            .get_invitation_request(serde_json::from_value(input).map_err(super::worker_err)?)
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/audit" => storage
@@ -78,6 +82,42 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             )
             .await
             .map(|value| serde_json::json!({"events": value.events})),
+        "/__fixture/audit-page" => {
+            let (account, filter, position) = audit_seek(input)?;
+            storage
+                .list_audit_events(account, filter, position)
+                .await
+                .map(|page| {
+                    serde_json::json!({"events": page.events,
+                        "has_older": page.has_older, "has_newer": page.has_newer})
+                })
+        }
+        // The query plan of the page read above, with the same bindings.
+        "/__fixture/audit-plan" => {
+            use ghinvite_core::storage::audit_read;
+            let (account, filter, position) = audit_seek(input)?;
+            let boundary = position.boundary();
+            let plan = env
+                .d1("DB")?
+                .prepare(format!(
+                    "EXPLAIN QUERY PLAN {}",
+                    audit_read::query(filter, position, false)
+                ))
+                .bind(&[
+                    (account as f64).into(),
+                    filter.map(|e| e.as_str().into()).unwrap_or(JsValue::NULL),
+                    boundary
+                        .map(|b| audit_read::boundary_time(b).into())
+                        .unwrap_or(JsValue::NULL),
+                    boundary
+                        .map(|b| b.id.to_string().into())
+                        .unwrap_or(JsValue::NULL),
+                ])?
+                .all()
+                .await?
+                .results::<serde_json::Value>()?;
+            Ok(serde_json::json!(plan))
+        }
         _ => return Err(super::worker_err("unknown fixture operation")),
     };
     let (status, value) = match result {
@@ -93,4 +133,36 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
         .header("content-type", "application/json")
         .body(body)
         .unwrap())
+}
+
+/// `[account, event type | null, "latest" | "before" | "after", id, occurred_at]`.
+fn audit_seek(
+    input: serde_json::Value,
+) -> worker::Result<(
+    u64,
+    Option<ghinvite_core::audit::EventType>,
+    ghinvite_core::storage::AuditPosition,
+)> {
+    use ghinvite_core::storage::{AuditBoundary, AuditPosition};
+    type Seek = (
+        u64,
+        Option<ghinvite_core::audit::EventType>,
+        String,
+        Option<ghinvite_core::AuditEventId>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    let (account, filter, kind, id, occurred_at): Seek =
+        serde_json::from_value(input).map_err(super::worker_err)?;
+    let boundary = || {
+        id.zip(occurred_at)
+            .map(|(id, occurred_at)| AuditBoundary { id, occurred_at })
+            .ok_or_else(|| super::worker_err("audit boundary missing"))
+    };
+    let position = match kind.as_str() {
+        "latest" => AuditPosition::Latest,
+        "before" => AuditPosition::Before(boundary()?),
+        "after" => AuditPosition::After(boundary()?),
+        _ => return Err(super::worker_err("unknown audit position")),
+    };
+    Ok((account, filter, position))
 }

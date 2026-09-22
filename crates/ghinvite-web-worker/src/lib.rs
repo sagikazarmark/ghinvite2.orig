@@ -218,7 +218,7 @@ async fn fetch(
 
     let config = config_from_env(&env)?;
     let db = env.d1("DB")?;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> =
+    let storage: Arc<dyn ghinvite_web::WebStorage> =
         Arc::new(ghinvite_storage_d1::D1Storage::new(db));
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);
@@ -231,17 +231,7 @@ async fn fetch(
     );
     let commands = Arc::new(ghinvite_web::RestateCommands::new(restate.clone()));
     let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
-    let state = ghinvite_web::AppState::new(storage, transport, commands, config);
-    let mode = env
-        .var("GHINVITE_ADMISSION_MODE")
-        .map(|v| v.to_string())
-        .unwrap_or_else(|_| "legacy".into());
-    let state = match mode.as_str() {
-        "legacy" => state,
-        "maintenance" => state.with_write_maintenance(),
-        "authoritative" => state.with_admission(restate),
-        _ => return Err(worker_err("invalid GHINVITE_ADMISSION_MODE")),
-    };
+    let state = ghinvite_web::AppState::new(storage, transport, commands, restate, config);
     let app = ghinvite_web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`

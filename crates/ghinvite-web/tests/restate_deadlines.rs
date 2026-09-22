@@ -1,10 +1,11 @@
-use ghinvite_web::{RestateClient, WebError};
+use ghinvite_web::{LinkAuthority, RestateClient, WebError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn native_restate_deadline_preserves_unknown_mutation_outcomes() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = RestateClient::new(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let authority = LinkAuthority::new(std::sync::Arc::new(client.clone()));
     let server = tokio::spawn(async move {
         let mut connections = tokio::task::JoinSet::new();
         loop {
@@ -12,7 +13,7 @@ async fn native_restate_deadline_preserves_unknown_mutation_outcomes() {
             connections.spawn(async move {
                 let mut request = [0; 4096];
                 let n = socket.read(&mut request).await.unwrap();
-                if String::from_utf8_lossy(&request[..n]).contains("/body") {
+                if String::from_utf8_lossy(&request[..n]).contains("/resolve") {
                     socket
                         .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
                         .await
@@ -27,7 +28,12 @@ async fn native_restate_deadline_preserves_unknown_mutation_outcomes() {
     let result = tokio::time::timeout(std::time::Duration::from_secs(20), async {
         tokio::join!(
             client.call::<_, serde_json::Value>("Fixture", "key", "headers", &input),
-            client.authoritative_call::<_, serde_json::Value>("Fixture", "key", "body", &input),
+            async {
+                authority
+                    .resolve("abcdefgh12345678")
+                    .await
+                    .map_err(WebError::from)
+            },
             client.send("Fixture", "key", "headers", &input),
         )
     })

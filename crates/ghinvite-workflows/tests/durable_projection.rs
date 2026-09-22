@@ -2,10 +2,10 @@
 #![cfg(feature = "integration")]
 
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{AuditPosition, Storage};
+use ghinvite_core::storage::{AuditPosition, ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{Account, AccountType, InvitationLinkId, SelectedRepos, User};
 use ghinvite_storage_sqlx::SqlxStorage;
-use ghinvite_workflows::{admission_v1, projection_v1};
+use ghinvite_workflows::{admission, projection};
 use restate_sdk::endpoint::Endpoint;
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -18,21 +18,21 @@ use tokio::time::{sleep, timeout};
 struct LostAcknowledgement {
     storage: Arc<SqlxStorage>,
     committed_attempts: AtomicUsize,
+    // Link revisions in commit order. The per-link projector must never commit
+    // a later transition before an earlier one that is still retrying.
+    committed_revisions: std::sync::Mutex<Vec<u64>>,
 }
 #[async_trait::async_trait]
 impl ProjectionStorage for LostAcknowledgement {
-    async fn get_projected_request(
-        &self,
-        id: ghinvite_core::RequestId,
-    ) -> ghinvite_core::storage::Result<Option<ghinvite_core::storage::projection::RequestSnapshot>>
-    {
-        self.storage.get_projected_request(id).await
-    }
     async fn apply_transition(
         &self,
         envelope: &ProjectionEnvelope,
     ) -> ghinvite_core::storage::Result<()> {
         self.storage.apply_transition(envelope).await?;
+        self.committed_revisions
+            .lock()
+            .unwrap()
+            .push(envelope.link.revision);
         if self.committed_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(ghinvite_core::storage::Error::Database(
                 "fixture: committed but acknowledgement lost".into(),
@@ -44,33 +44,38 @@ impl ProjectionStorage for LostAcknowledgement {
 
 // #55 owns lifecycle execution; only its startup contract is needed here.
 struct RequestSink;
-impl admission_v1::InvitationRequestV1 for RequestSink {
+
+#[restate_sdk::workflow(name = "InvitationRequest")]
+impl RequestSink {
+    #[handler]
     async fn notification_status(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
     ) -> Result<
-        restate_sdk::serde::Json<Option<admission_v1::TerminalSignal>>,
+        restate_sdk::serde::Json<Option<admission::TerminalSignal>>,
         restate_sdk::errors::TerminalError,
     > {
         Ok(restate_sdk::serde::Json(None))
     }
+    #[handler]
     async fn notify(
         &self,
         _: restate_sdk::context::SharedWorkflowContext<'_>,
-        _: restate_sdk::serde::Json<admission_v1::TerminalSignal>,
+        _: restate_sdk::serde::Json<admission::TerminalSignal>,
     ) -> Result<(), restate_sdk::errors::TerminalError> {
         Ok(())
     }
+    #[handler]
     async fn run(
         &self,
         _: restate_sdk::context::WorkflowContext<'_>,
-        _: restate_sdk::serde::Json<admission_v1::WorkflowEnvelope>,
+        _: restate_sdk::serde::Json<admission::WorkflowEnvelope>,
     ) -> Result<
-        restate_sdk::serde::Json<ghinvite_workflows::request_lifecycle_v1::WorkflowResult>,
+        restate_sdk::serde::Json<ghinvite_workflows::request_lifecycle::WorkflowResult>,
         restate_sdk::errors::TerminalError,
     > {
         Ok(restate_sdk::serde::Json(
-            ghinvite_workflows::request_lifecycle_v1::WorkflowResult {
+            ghinvite_workflows::request_lifecycle::WorkflowResult {
                 state: ghinvite_core::RequestState::Pending,
                 dispatch: None,
             },
@@ -90,9 +95,9 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             if client.get(format!("{admin}/health")).send().await.is_ok_and(|r| r.status().is_success()) { break; }
             sleep(Duration::from_millis(100)).await;
         }
-        let acknowledgements = Arc::new(LostAcknowledgement { storage: storage.clone(), committed_attempts: AtomicUsize::new(0) });
-        let endpoint = projection_v1::bind(admission_v1::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())
-            .bind(admission_v1::InvitationRequestV1::serve(RequestSink)).build();
+        let acknowledgements = Arc::new(LostAcknowledgement { storage: storage.clone(), committed_attempts: AtomicUsize::new(0), committed_revisions: Default::default() });
+        let endpoint = projection::bind(admission::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())
+            .bind(RequestSink).build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
@@ -113,7 +118,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         let link_id = InvitationLinkId::new();
         let command = |handler: &'static str, input: Value| {
             let client = client.clone();
-            let url = format!("{ingress}/InvitationLinkV1/{link_id}/{handler}");
+            let url = format!("{ingress}/InvitationLink/{link_id}/{handler}");
             async move {
                 let response = client.post(url).json(&input).send().await.unwrap();
                 assert!(response.status().is_success(), "{}", response.text().await.unwrap());
@@ -121,7 +126,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             }
         };
         // Parents are absent. Creation succeeds and its separate projection waits.
-        command("create", json!({"version": 1, "link_id": link_id,
+        command("create", json!({"link_id": link_id,
             "admin": {"account_id": 100, "user_id": 7}, "account_id": 100, "installation_id": 1,
             "description": "Workshop", "internal_note": null, "expires_at": null, "max_uses": 1,
             "permission": "pull", "approval_required": true,
@@ -129,7 +134,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         // Observe a durable dependency failure before restoring its parents.
         loop {
             let response = client.post(format!("{admin}/query")).header("accept", "application/json")
-                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjectionV1'"}))
+                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjection'"}))
                 .send().await.unwrap();
             let body: Value = response.json().await.unwrap();
             if body["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["last_failure"].as_str().is_some_and(|s| s.contains("dependency")))) { break; }
@@ -146,18 +151,18 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         }
         // Real SQLite write failure late in the transaction, not a fake consumer.
         storage.debug_set_audit_failure(true).await.unwrap();
-        let accepted = command("admit", json!({"version": 1, "link_id": link_id,
+        let accepted = command("admit", json!({"link_id": link_id,
             "operation_id": ghinvite_core::RequestId::new(), "requester_id": 8,
             "justification": "Access please"})).await;
         assert_eq!(accepted["result"]["kind"], "accepted");
         let revoked = command("revoke", json!({"link_id": link_id,
             "admin": {"account_id": 100, "user_id": 7}})).await;
         assert!(revoked["revoked_at"].is_string());
-        let decision = command("decide", json!({"version": 1, "link_id": link_id,
+        let decision = command("decide", json!({"link_id": link_id,
             "request_id": accepted["result"]["request_id"], "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 100, "user_id": 7}, "action": {"kind": "decline", "reason": "Admin-only context"}})).await;
         assert_eq!(decision["outcome"], "applied");
-        let browser = ghinvite_web::admission::RestateAdmission::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
+        let browser = ghinvite_web::LinkAuthority::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
         let metadata = browser.update_metadata(ghinvite_core::admission::UpdateMetadata {
             link_id, admin: ghinvite_core::storage::projection::AccountAdmin { account_id: 100, user_id: 7 },
             description: "Updated workshop".into(), internal_note: Some("Private updated note".into()),
@@ -165,13 +170,13 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         assert_eq!(metadata.creation.description, "Workshop");
         loop {
             let response = client.post(format!("{admin}/query")).header("accept", "application/json")
-                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjectionV1'"}))
+                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjection'"}))
                 .send().await.unwrap();
             let body: Value = response.json().await.unwrap();
             if body["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["last_failure"].as_str().is_some_and(|s| s.contains("injected audit failure")))) { break; }
             sleep(Duration::from_millis(100)).await;
         }
-        assert!(storage.list_requests_for_link(link_id).await.unwrap().is_empty());
+        assert!(storage.request_history(100, link_id, None).await.unwrap().requests.is_empty());
         assert!(storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap().events.is_empty());
         storage.debug_set_projection_invariant_failure(true).await.unwrap();
         storage.debug_set_audit_failure(false).await.unwrap();
@@ -179,17 +184,17 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         // accepted work. Repair the SQL rule and let the same invocation redrive.
         loop {
             let response = client.post(format!("{admin}/query")).header("accept", "application/json")
-                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjectionV1'"}))
+                .json(&json!({"query": "SELECT id, last_failure FROM sys_invocation WHERE target_service_name = 'InvitationProjection'"}))
                 .send().await.unwrap();
             let body: Value = response.json().await.unwrap();
             if body["rows"].as_array().is_some_and(|rows| rows.iter().any(|row| row["last_failure"].as_str().is_some_and(|s| s.contains("projection invariant")))) { break; }
             sleep(Duration::from_millis(100)).await;
         }
-        assert!(storage.list_requests_for_link(link_id).await.unwrap().is_empty());
+        assert!(storage.request_history(100, link_id, None).await.unwrap().requests.is_empty());
         storage.debug_set_projection_invariant_failure(false).await.unwrap();
         loop {
             let link = storage.get_invitation_link_by_id(link_id).await.unwrap();
-            let requests = storage.list_requests_for_link(link_id).await.unwrap();
+            let requests = storage.request_history(100, link_id, None).await.unwrap().requests;
             let events = storage.list_audit_events(100, None, AuditPosition::Latest).await.unwrap();
             if link.as_ref().is_some_and(|l| l.revoked_at.is_some() && l.description == "Updated workshop") && requests.len() == 1 && events.events.len() == 6
                 && acknowledgements.committed_attempts.load(Ordering::SeqCst) >= 5 {
@@ -201,8 +206,9 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
                 assert_eq!(requests[0].decided_by, Some(7));
                 assert_eq!(requests[0].decline_reason.as_deref(), Some("Admin-only context"));
                 assert_eq!(serde_json::to_value(requests[0].decided_at).unwrap(), decision["request"]["decision"]["effective_at"]);
-                let projected = storage.get_projected_request(requests[0].id).await.unwrap().unwrap();
-                assert_eq!(serde_json::to_value(projected.decision_deadline).unwrap(), accepted["result"]["decision_deadline"]);
+                assert_eq!(serde_json::to_value(requests[0].decision_deadline).unwrap(), accepted["result"]["decision_deadline"]);
+                let revisions = acknowledgements.committed_revisions.lock().unwrap().clone();
+                assert!(revisions.is_sorted(), "link transitions committed out of order: {revisions:?}");
                 break;
             }
             sleep(Duration::from_millis(100)).await;

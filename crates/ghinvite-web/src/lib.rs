@@ -1,14 +1,12 @@
 //! Web binary core. axum app builder + tower-sessions + OAuth flow + Dioxus
-//! layouts. Plan 7 wraps `build_app()` in a Workers `#[event(fetch)]`; Plans 5
-//! and 6 fill in the console and recipient routes.
+//! layouts. `ghinvite-web-worker` serves `build_app()` on Cloudflare Workers.
 
-pub(crate) mod account_admin_reads;
+pub(crate) mod attempt_continuations;
 pub mod commands;
 pub mod config;
 pub mod error;
 pub(crate) mod forms;
-pub(crate) mod invitation_link_resolution;
-pub mod lifecycle;
+pub mod link_authority;
 pub mod middleware;
 pub mod restate_client;
 pub mod routes;
@@ -22,8 +20,9 @@ pub mod wasm_compat;
 pub use commands::{GhinviteCommands, RestateCommands};
 pub use config::WebConfig;
 pub use error::{IngressFailure, OAuthFailure, Result, WebError};
+pub use link_authority::{AuthorityError, LinkAuthority};
 pub use restate_client::RestateClient;
-pub use state::AppState;
+pub use state::{AppState, WebStorage};
 
 use axum::Router;
 
@@ -32,12 +31,11 @@ use axum::Router;
 /// over SQLite and KV respectively; tests can inject failure stores.
 ///
 /// `state` carries storage, github transport, command facade, and config.
-pub fn build_app<S>(mut state: AppState, session_store: S) -> Router
+pub fn build_app<S>(state: AppState, session_store: S) -> Router
 where
     S: tower_sessions::SessionStore + Clone + 'static,
 {
     use tower_sessions::{Expiry, SessionManagerLayer};
-    state.attempt_store = Some(std::sync::Arc::new(session_store.clone()));
 
     let session_layer = SessionManagerLayer::new(session_store)
         .with_secure(state.config.cookie_secure)
@@ -59,25 +57,6 @@ where
         .route("/static/app.js", axum::routing::get(serve_app_js));
 
     let router = island_assets(router, &state.config);
-
-    let maintenance = state.write_maintenance;
-    let router = router.layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| async move {
-            if maintenance
-                && request.uri().path() != "/health"
-                && !request.uri().path().starts_with("/static/")
-            {
-                use axum::response::IntoResponse;
-                return (
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    [(axum::http::header::RETRY_AFTER, "60")],
-                    "Write maintenance in progress. Retry your existing attempt later.",
-                )
-                    .into_response();
-            }
-            next.run(request).await
-        },
-    ));
 
     router
         .fallback(routes::not_found::public)
@@ -140,4 +119,3 @@ fn static_asset(content_type: &'static str, body: &'static str) -> axum::respons
     use axum::response::IntoResponse;
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
-pub mod admission;

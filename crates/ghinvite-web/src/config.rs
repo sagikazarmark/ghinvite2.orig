@@ -4,7 +4,7 @@ use ghinvite_github::oauth::OAuthConfig;
 use std::path::PathBuf;
 
 /// Configuration parsed at server boot. Production sources fields from
-/// Workers secrets (Plan 7); local dev uses [`WebConfig::for_local_dev`].
+/// Workers vars and secrets; local dev uses [`WebConfig::for_local_dev`].
 #[derive(Clone)]
 pub struct WebConfig {
     /// Base URL of THIS web binary (e.g. `https://ghinvite.example`). Used to

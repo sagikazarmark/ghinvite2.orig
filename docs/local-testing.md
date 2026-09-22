@@ -6,7 +6,7 @@
 cargo test --workspace
 ```
 
-This excludes the feature-gated real Restate acceptance gate, the opt-in ignored D1 suite,
+This excludes the feature-gated real Restate acceptance gate, the Worker/D1 gates,
 and browser tests. A passing workspace suite does **not** verify Restate runtime
 compatibility or container networking.
 
@@ -113,9 +113,10 @@ replaces the SSR form, and replaced with identity at every successful OAuth
 sign-in. Dynamic responses use `Cache-Control: private, no-store`. Tokens stay
 out of URLs and command payloads; rejected parser bodies are not logged/echoed.
 
-The session helper retains deterministic CSRF fallback coverage for injected
-test stores, but production protected storage rejects legacy unencrypted
-sessions outright. Users must restart sign-in after the protection upgrade.
+Every authenticated session stores its token. A stored authenticated session
+without one is malformed and confers no identity, like any unreadable record:
+protected storage treats it as absent, and the session helper reads it as
+signed out.
 
 Protected POST inventory:
 
@@ -148,10 +149,14 @@ blocked (see `tests/browser/README.md`).
 
 ### Restate approval and delivery acceptance gate
 
-From the repository root, run the same command used by CI:
+From the repository root, run the same targets as CI:
 
 ```bash
-bash scripts/test-restate.sh
+bash scripts/test-restate.sh authoritative_admission   # also the default target
+bash scripts/test-restate.sh retained_delivery
+bash scripts/test-restate.sh installation_availability
+bash scripts/test-restate.sh installation_audit_replay
+bash scripts/test-restate.sh durable_projection
 ```
 
 Prerequisites:
@@ -172,10 +177,10 @@ Prerequisites:
 
 `compose.yaml` pins Restate **1.7.9** by image digest; the dev stack and smoke
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
-script. To upgrade Restate, update the shared image pin and rerun this command.
+script. To upgrade Restate, update the shared image pin and rerun these commands.
 
-The script runs the GitHub stub HTTP contract tests, compiles the single
-integration-test file, creates a uniquely named
+The script runs the GitHub stub HTTP contract tests (for `retained_delivery`),
+compiles the selected integration-test file, creates a uniquely named
 Compose project, and publishes admin/ingress on randomly allocated **loopback**
 ports. The Rust test serves the current workflow endpoint on `0.0.0.0:0`.
 Restate reaches it using `host.docker.internal`, explicitly mapped by Compose
@@ -184,45 +189,23 @@ subnet or fixed IP is assumed. The readiness probe uses cleartext HTTP/2 and the
 SDK discovery media type. Successful deployment registration verifies the
 container-to-host discovery path before any invocation is sent.
 
-The test starts its own GitHub HTTP stub on `127.0.0.1:0`, using the same router
+`retained_delivery` starts its own GitHub HTTP stub on `127.0.0.1:0`, using the same router
 as the standalone example. The production `InstallationClient` and
 `ReqwestTransport` exchange a synthetic App JWT for a fake installation token
 and send real HTTP requests to that stub. Both servers are Tokio tasks owned by
 the test runtime, so success, assertion failure, or process termination closes
 their sockets. No credentials are injected into this gate.
 
-The bounded scenarios verify:
-
-- Request expiration after a two-second decision window, including the stored
-  link description/scope/use count and four audit records, with **zero** GitHub calls.
-- Auto-approval and manual approval through the web application's public
-  `RestateCommands` → `RestateClient` → real ingress/handlers. Manual approval
-  resolves the actual durable decision promise; pending requests dispatch no
-  GitHub work. Each link has **four repositories**, with `201` (sent with an ID),
-  `204` (already collaborator), `422` (failed), and one `502` followed by `201`.
-  The final retry is performed by Restate, not a retry loop in the test/client.
-- Persisted request approval separately from per-repository delivery success,
-  stored upstream invitation IDs matched against GitHub list responses, requester,
-  repository and permission on outbound calls, exact attempt counts, and safe
-  account-scoped audit metadata. Reads use the public `Storage` API.
-- Re-submitting the **same request ID and payload after completed success**
-  leaves one request, one link use, the same invitation IDs/audit count, and no
-  additional outbound GitHub calls. A transparent loopback HTTP observer forwards
-  real command bytes/responses and captures Restate's send receipts: both sends
-  must return the same invocation ID, whose workflow output is completed. It
-  never synthesizes an ingress response. This covers stable-operation replay, not
-  arbitrary browser resubmissions that generate a new request ID.
-
-The gate starts below the web router; focused HTTP authorization/session tests
-remain in `console_flow`, `route_smoke`, and `oauth_flow`. The browser POST echo
-fixture is not used as evidence of the web-to-Restate wire contract.
+Each target documents its scenarios: [authoritative admission](admission-v1.md#native-acceptance)
+and [request lifecycle](request-lifecycle-v1.md), [retained delivery](delivery-recovery.md#verification),
+[installation availability](installation-availability.md), and
+[durable projection](admission-v1.md#projection-tests). Focused HTTP
+authorization/session tests remain in `console_flow`, `route_smoke`, and `oauth_flow`.
 
 **Boundaries:** local stub responses are not evidence of live GitHub webhook
 availability or delivery. Native SQLx runtime tests are **not D1 adapter
-conformance**. Full browser OAuth, automatic lifecycle scheduling, and deep
-partial-commit/crash-recovery fault injection are outside this gate (Batch 3
-covers the latter). The transient scenario fails before upstream success; it
-does not claim exactly-once delivery across a GitHub-success/database-failure gap.
+conformance**. Full browser OAuth is outside this gate. No test claims
+exactly-once delivery across a GitHub-success/database-failure gap.
 
 #### Standalone GitHub stub
 
@@ -243,10 +226,6 @@ all GitHub validation, authorization, pagination, or pending-invitation updates.
 and status only, never headers/JWTs/tokens. `DELETE /reset` clears all fixture
 state. Configuration and ledger requests are excluded from the API call count.
 
-Readiness has a 30-second deadline per service; harness HTTP calls have a 20-second
-deadline (3-second connect), the real web client has its production 15-second
-timeout, request polling is bounded at 15s and fanout/retry polling at 30s, and
-all scenarios share a 120-second overall deadline.
 The shell bounds each compilation/contract-test step (600s), container startup/pull (180s), test execution
 (150s), and cleanup (30s), escalating to a kill after a further 5s if a child
 ignores termination; CI also has a 30-minute job deadline. Registration
@@ -315,25 +294,24 @@ admission implementation or D1/Worker conformance. See
 verification. The default runner still executes the existing production workflow
 acceptance gate; the proof is explicitly selected by the argument above.
 
-### D1 storage smoke tests (requires wrangler)
-
-The [Worker admission gate](worker-admission-gate.md) exercises the **actual Rust
-D1 binding path** via workerd and real Restate. Run
-`npm run test:admission --prefix tests/worker`. The SQL-only suite below is separate.
-
-Install `wrangler` separately (`npm i -g wrangler`).
-
-First, apply migrations to local D1:
+### D1 storage conformance (requires wasm-bindgen CLI)
 
 ```bash
-wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
+npm run test:storage --prefix tests/worker
 ```
 
-Then run the smoke tests:
+This builds the actual workflows Worker with `runtime-tests` and runs every
+shared storage scenario (`ghinvite_core::storage::test_suite`, the same suite
+`sqlx_suite` runs natively) against the real `D1Storage` inside workerd. Each
+scenario gets its own Miniflare instance with a fresh in-memory D1 database
+migrated from `migrations/`. It also executes the shared audit seek query over
+historical UTC encodings, exact page boundaries and nanosecond/ID seeks through
+the adapter, and asserts D1's expression-index query plans. No Docker, Restate or
+Wrangler is needed; setup is as in the [Worker smoke](../tests/worker/README.md).
 
-```bash
-cargo test -p ghinvite-storage-d1 --features d1-suite -- --ignored
-```
+The [Worker admission gate](worker-admission-gate.md) separately exercises the
+D1 binding path end to end via workerd and real Restate
+(`npm run test:admission --prefix tests/worker`).
 
 ### wasm32 build check
 
@@ -395,4 +373,4 @@ or Restate) and visits the public and Console documents at 390 x 844 and
 | Island bundle | ✅ requires dx | ✅ push + PR |
 | Document shell browser suite | ✅ requires Playwright | ✅ push + PR |
 | Restate integration | ✅ `bash scripts/test-restate.sh` | ✅ push + PR |
-| D1 suite | ✅ requires wrangler | ❌ not in CI v1 |
+| D1 storage conformance | ✅ requires wasm-bindgen CLI | ✅ push + PR |

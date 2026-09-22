@@ -32,6 +32,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --workspace -- -D warnings
+      # The Restate integration suites and their fault injection compile only
+      # with the `integration` feature, so lint them explicitly.
+      - run: cargo clippy -p ghinvite-workflows --features integration --tests -- -D warnings
 
   css:
     name: CSS freshness
@@ -91,6 +94,8 @@ jobs:
       - run: npm run test:queue --prefix tests/worker
       - run: npm run test:history --prefix tests/worker
       - run: npm run test:deadlines --prefix tests/worker
+      - name: Shared storage conformance on actual D1
+        run: npm run test:storage --prefix tests/worker
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker
@@ -211,14 +216,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The runner owns the disposable runtime; the test owns loopback GitHub
       # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
-      - name: Verify approval, fanout, retry, and duplicate operations
-        run: bash scripts/test-restate.sh
-      - name: Verify isolated authoritative admission and recovery
+      - name: Verify authoritative admission and recovery
         run: bash scripts/test-restate.sh authoritative_admission
       - name: Verify retained delivery and uncertain HTTP recovery
         run: bash scripts/test-restate.sh retained_delivery
-      - name: Rehearse authoritative writer cutover
-        run: bash scripts/test-restate.sh writer_cutover
       - name: Verify installation convergence and admission availability
         run: bash scripts/test-restate.sh installation_availability
       - name: Verify one audit event survives a retried installation projection

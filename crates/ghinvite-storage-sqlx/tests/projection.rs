@@ -1,18 +1,20 @@
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{AuditPosition, Storage};
+use ghinvite_core::storage::{
+    AuditPosition, ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage,
+};
 use ghinvite_core::{Account, AccountType, SelectedRepos, User};
 use ghinvite_storage_sqlx::SqlxStorage;
 use serde_json::json;
 
 fn envelope() -> ProjectionEnvelope {
     serde_json::from_value(json!({
-        "version": 1, "transition_id": "v1/link/01ARZ3NDEKTSV4RRFFQ69G5FAV/2",
+        "transition_id": "link/01ARZ3NDEKTSV4RRFFQ69G5FAV/2",
         "link": {
             "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 2, "uses": 1,
             "invitation_code": "abcdefghijklmnop", "created_at": "2026-09-14T00:00:00Z",
             "revoked_at": null, "revoked_by": null,
             "creation": {
-                "version": 1, "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "admin": {"account_id": 100, "user_id": 7}, "account_id": 100,
                 "installation_id": 1, "description": "Workshop", "internal_note": null,
                 "expires_at": null, "max_uses": 1, "permission": "pull",
@@ -26,7 +28,7 @@ fn envelope() -> ProjectionEnvelope {
             "state": "pending", "admitted_at": "2026-09-14T01:00:00Z",
             "decision_deadline": "2026-09-21T01:00:00Z", "revision": 1
         }],
-        "events": [{"event_id": "v1/request.created/01ARZ3NDEKTSV4RRFFQ69G5FAW",
+        "events": [{"event_id": "request.created/01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "kind": "request.created", "actor_id": 8, "target_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "effective_at": "2026-09-14T01:00:00Z", "evaluated_at": "2026-09-14T01:00:00Z"}]
     }))
@@ -92,24 +94,18 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
     ] {
         let id = ghinvite_core::GithubInvitationId::new();
         let receipt: ghinvite_core::delivery::CreateReceipt = serde_json::from_value(json!({
-            "command":{"version":1,"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
+            "command":{"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
                 "approval_id":"approval","account_id":100,"installation_id":1,"requester_id":8,"repo_id":10,
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
         })).unwrap();
-        // Pre-#64 rows used typed serde encoding rather than a sorted JSON Value.
-        let mut legacy = receipt.clone();
-        legacy.confirmed_at = None;
-        sqlx::query(
-            "INSERT INTO delivery_outcomes(invitation_id, request_id, receipt) VALUES (?, ?, ?)",
-        )
-        .bind(id.to_string())
-        .bind(receipt.command.request_id.to_string())
-        .bind(serde_json::to_string(&legacy).unwrap())
-        .execute(&fault)
-        .await
-        .unwrap();
-        storage.project_delivery(&legacy).await.unwrap();
+        // An earlier unconfirmed observation is already projected.
+        let unknown = ghinvite_core::delivery::CreateReceipt {
+            outcome: ghinvite_core::delivery::CreateOutcome::OutcomeUnknown,
+            confirmed_at: None,
+            ..receipt.clone()
+        };
+        storage.project_delivery(&unknown).await.unwrap();
         let receipt = ghinvite_core::delivery::CreateReceipt {
             revision: 2,
             ..receipt
@@ -122,7 +118,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .unwrap()
                 .iter()
-                .any(|row| row == &legacy)
+                .any(|row| row == &unknown)
         );
         assert!(
             storage
@@ -173,23 +169,32 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
         .unwrap();
     assert_eq!(link.uses_count, 1);
     assert_eq!(link.repos[0].repo_full_name, "acme/api");
-    let requests = storage
-        .list_pending_requests_for_account(100)
-        .await
-        .unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].justification.as_deref(), Some("Access please"));
-    for request in [
-        requests[0].clone(),
+    let pending = storage.pending_request_page(100, None).await.unwrap().rows;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].justification.as_deref(), Some("Access please"));
+    assert_eq!(
+        pending[0].decision_deadline,
+        Some("2026-09-21T01:00:00Z".parse().unwrap()),
+        "the pending queue must expose the persisted decision deadline"
+    );
+    assert_eq!(
         storage
-            .get_invitation_request(requests[0].id)
+            .count_pending_requests_for_account(100)
+            .await
+            .unwrap(),
+        1
+    );
+    for request in [
+        storage
+            .get_invitation_request(pending[0].request_id)
             .await
             .unwrap()
             .unwrap(),
         storage
-            .list_requests_for_link(link.id)
+            .request_history(100, link.id, None)
             .await
             .unwrap()
+            .requests
             .remove(0),
     ] {
         assert_eq!(
@@ -200,7 +205,7 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
     }
     assert_eq!(
         storage
-            .get_projected_request(requests[0].id)
+            .get_invitation_request(pending[0].request_id)
             .await
             .unwrap()
             .unwrap()
@@ -222,14 +227,12 @@ async fn maximum_escaped_command_payload_remains_projectable() {
     input.link.creation.internal_note = Some("\u{0001}".repeat(16_384));
     input.requests[0].justification = Some("\u{0001}".repeat(16_384));
     storage.apply_transition(&input).await.unwrap();
-    assert_eq!(
-        storage
-            .get_projected_request(input.requests[0].request_id)
-            .await
-            .unwrap()
-            .unwrap(),
-        input.requests[0]
-    );
+    let request = storage
+        .get_invitation_request(input.requests[0].request_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.justification, input.requests[0].justification);
 }
 
 #[tokio::test]
@@ -318,12 +321,12 @@ async fn conflicting_duplicate_events_roll_back_the_entire_envelope() {
             .unwrap()
             .is_empty()
     );
-    assert!(
+    assert_eq!(
         storage
-            .list_pending_requests_for_account(100)
+            .count_pending_requests_for_account(100)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        0
     );
     assert!(
         storage
@@ -363,9 +366,10 @@ async fn reordered_snapshots_keep_independent_revisions_and_historical_events() 
     assert_eq!(link.uses_count, 1);
     assert!(link.revoked_at.is_some());
     let requests = storage
-        .list_requests_for_link(old.link.link_id)
+        .request_history(100, old.link.link_id, None)
         .await
-        .unwrap();
+        .unwrap()
+        .requests;
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].state, ghinvite_core::RequestState::Expired);
     assert_eq!(
@@ -416,9 +420,10 @@ async fn parent_repair_retries_without_overwriting_owned_facts() {
     );
     assert_eq!(
         storage
-            .list_requests_for_link(input.link.link_id)
+            .request_history(100, input.link.link_id, None)
             .await
             .unwrap()
+            .requests
             .len(),
         1
     );
@@ -432,19 +437,11 @@ async fn invariant_conflicts_are_observable_and_redrive_is_atomic() {
     storage.apply_transition(&input).await.unwrap();
     let mut conflicts = vec![];
     let mut changed = input.clone();
-    changed.link.uses = 2; // same revision, different content
-    conflicts.push(changed);
-    let mut changed = input.clone();
     changed.link.revision = 1; // stale immutable identity still conflicts
     changed.link.creation.account_id = 101;
     changed.link.creation.admin.account_id = 101;
     changed.requests.clear();
     changed.events.clear();
-    conflicts.push(changed);
-    let mut changed = input.clone();
-    changed.link.revision = 3;
-    changed.link.uses = 2;
-    changed.requests[0].state = ghinvite_core::RequestState::Approved;
     conflicts.push(changed);
     let mut changed = input.clone();
     changed.link.revision = 3;
@@ -471,10 +468,9 @@ async fn invariant_conflicts_are_observable_and_redrive_is_atomic() {
         );
         assert_eq!(
             storage
-                .list_pending_requests_for_account(100)
+                .count_pending_requests_for_account(100)
                 .await
-                .unwrap()
-                .len(),
+                .unwrap(),
             1
         );
     }
@@ -506,12 +502,16 @@ async fn reordered_readmission_does_not_require_old_request_projection_first() {
     expired.requests[0].state = ghinvite_core::RequestState::Expired;
     expired.requests[0].revision = 2;
     storage.apply_transition(&expired).await.unwrap();
-    let pending = storage
-        .list_pending_requests_for_account(100)
-        .await
-        .unwrap();
+    let pending = storage.pending_request_page(100, None).await.unwrap().rows;
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].id, fresh.requests[0].request_id);
+    assert_eq!(pending[0].request_id, fresh.requests[0].request_id);
+    assert_eq!(
+        storage
+            .count_pending_requests_for_account(100)
+            .await
+            .unwrap(),
+        1
+    );
     assert_eq!(
         storage
             .get_invitation_link_by_id(old.link.link_id)

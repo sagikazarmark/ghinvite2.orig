@@ -3,15 +3,14 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::{DateTime, Duration, Utc};
-use ghinvite_core::storage::Storage;
+use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{AuditStorage, ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
 use ghinvite_web::commands::{
-    CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
-    OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
-    RevokeInvitationLink, RouteGithubInvitationWebhook, SubmitInvitationRequest,
-    UpdateInvitationLinkMetadata,
+    GhinviteCommands, OnboardInstallation, RecordInstallationUninstalled,
+    RecordRepositorySelectionChange, RouteGithubInvitationWebhook,
 };
 use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
 use http_body_util::BodyExt;
@@ -20,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 mod common;
+
+use common::link_authority::{FakeLinkAuthority, LINK_SERVICE};
 
 #[path = "console_flow/read_recovery.rs"]
 mod read_recovery;
@@ -63,10 +64,10 @@ async fn deadline_queue_app(
     let request = ghinvite_core::RequestId::new();
     // A historical/custom deadline, deliberately not today's seven-day policy.
     let envelope = serde_json::from_value(serde_json::json!({
-        "version":1, "transition_id":format!("v1/link/{link}/2"),
+        "transition_id":format!("link/{link}/2"),
         "link":{"link_id":link,"revision":2,"uses":1,"invitation_code":"DeadlineQueue001",
             "created_at":"2026-01-01T00:00:00Z", "revoked_at":null,"revoked_by":null,
-            "creation":{"version":1,"link_id":link,"admin":{"account_id":42,"user_id":42},
+            "creation":{"link_id":link,"admin":{"account_id":42,"user_id":42},
                 "account_id":42,"installation_id":77,"description":"Deadline fixture",
                 "internal_note":null,"expires_at":expires_at,"max_uses":null,"permission":"pull",
                 "approval_required":true,"repos":[{"repo_id":10,"repo_full_name":"octocat/api"}]}},
@@ -76,10 +77,14 @@ async fn deadline_queue_app(
     }))
     .unwrap();
     storage.apply_transition(&envelope).await.unwrap();
+    // The authority holds the link the projection was written from.
+    let authority = FakeLinkAuthority::start().await;
+    authority.seed(envelope.link.clone());
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
@@ -93,7 +98,7 @@ async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
     let template = envelope.requests[0].clone();
     envelope.link.revision += 1;
     envelope.link.uses = 54;
-    envelope.transition_id = format!("v1/link/{}/3", envelope.link.link_id);
+    envelope.transition_id = format!("link/{}/3", envelope.link.link_id);
     envelope.requests = (1..=53)
         .map(|n| {
             let mut request = template.clone();
@@ -122,16 +127,18 @@ async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
         .unwrap()
         .replace("&amp;", "&");
     for request in &envelope.requests[..26] {
-        storage
-            .record_request_decision(&ghinvite_core::storage::RequestDecision {
-                request_id: request.request_id,
-                state: ghinvite_core::RequestState::Declined,
-                decided_by: Some(42),
-                decided_at: Utc::now(),
-                decline_reason: None,
-            })
-            .await
-            .unwrap();
+        {
+            let mut decided = storage
+                .get_invitation_request(request.request_id)
+                .await
+                .unwrap()
+                .unwrap();
+            decided.state = ghinvite_core::RequestState::Declined;
+            decided.decided_by = Some(42);
+            decided.decided_at = Some(Utc::now());
+            decided.decline_reason = None;
+            storage.seed_decision(&decided).await.unwrap();
+        }
     }
     let html = response_html(identity_request(&app, &cookie, "GET", &next).await).await;
     assert!(html.contains("Queue item 027"));
@@ -184,35 +191,6 @@ async fn queue_keeps_historical_deadline_independent_of_earlier_or_later_link_ex
 }
 
 #[tokio::test]
-async fn queue_does_not_invent_a_deadline_for_missing_historical_data() {
-    let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
-    // Legacy/migrated rows may have no recorded deadline. The old insert path
-    // represents those rows without requiring a fabricated projection snapshot.
-    let mut historical = storage
-        .get_invitation_request(envelope.requests[0].request_id)
-        .await
-        .unwrap()
-        .unwrap();
-    historical.id = ghinvite_core::RequestId::new();
-    historical.requester_id = 42;
-    historical.decision_deadline = None;
-    storage
-        .insert_invitation_request_and_increment_uses(&historical)
-        .await
-        .unwrap();
-    let response =
-        identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let html = response_html(response).await;
-    assert!(html.contains("Decision deadline: Unavailable"));
-    assert!(!html.contains("Decision deadline: No expiration"));
-    assert!(
-        !html.contains("2026-01-08"),
-        "must not recompute from current seven-day policy"
-    );
-}
-
-#[tokio::test]
 async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
     use ghinvite_core::storage::projection::ProjectionStorage;
     let (app, cookie, storage, mut envelope) = deadline_queue_app(None).await;
@@ -221,7 +199,7 @@ async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
     envelope.link.creation.link_id = link;
     envelope.link.creation.approval_required = false;
     envelope.link.invitation_code = "AutoDeadline0001".into();
-    envelope.transition_id = format!("v1/link/{link}/2");
+    envelope.transition_id = format!("link/{link}/2");
     envelope.requests[0].link_id = link;
     envelope.requests[0].request_id = ghinvite_core::RequestId::new();
     envelope.requests[0].state = ghinvite_core::RequestState::Approved;
@@ -255,7 +233,7 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let ingress = MockServer::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
     let snapshot = serde_json::json!({"link_id": id, "creation": {
-        "version": 1, "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
+        "link_id": id, "admin": {"account_id": 42, "user_id": 42}, "account_id": 42,
         "installation_id": 1, "description": "Original", "internal_note": null, "expires_at": null,
         "max_uses": null, "permission": "pull", "approval_required": true,
         "repos": [{"repo_id": 1, "repo_full_name": "octocat/api"}]},
@@ -263,7 +241,7 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
         "invitation_code": "abcdEFGH01234567", "created_at": "2026-09-14T12:00:00Z",
         "uses": 0, "revision": 2, "revoked_at": null, "revoked_by": null});
     for method in ["link_status", "update_metadata", "revoke"] {
-        Mock::given(path(format!("/InvitationLinkV1/{id}/{method}")))
+        Mock::given(path(format!("/{LINK_SERVICE}/{id}/{method}")))
             .respond_with(ResponseTemplate::new(200).set_body_json(snapshot.clone()))
             .mount(&ingress)
             .await;
@@ -280,10 +258,10 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
@@ -337,7 +315,7 @@ async fn pending_decision_remains_accessible_after_uninstall() {
     let ingress = MockServer::start().await;
     let link = ghinvite_core::InvitationLinkId::new();
     let request = ghinvite_core::RequestId::new();
-    Mock::given(path(format!("/InvitationLinkV1/{link}/decide")))
+    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"outcome":"applied","request":{
             "request_id":request,"link_id":link,"account_id":42,"requester_id":99,"state":"approved",
             "admitted_at":"2026-09-14T12:00:00Z","decision_deadline":"2026-09-21T12:00:00Z","revision":2}})))
@@ -356,10 +334,10 @@ async fn pending_decision_remains_accessible_after_uninstall() {
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_admission(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
+    );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let response = app
@@ -394,22 +372,19 @@ async fn pending_decision_remains_accessible_after_uninstall() {
 #[tokio::test]
 async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry() {
     use ghinvite_core::request_lifecycle::*;
-    use ghinvite_core::storage::projection::RequestSnapshot;
-    struct Lifecycle(Arc<Mutex<Vec<DecideRequest>>>);
-    #[async_trait::async_trait]
-    impl ghinvite_web::lifecycle::RequestLifecycle for Lifecycle {
-        async fn decide(&self, command: DecideRequest) -> ghinvite_web::Result<DecisionReceipt> {
-            self.0.lock().unwrap().push(command.clone());
-            Ok(DecisionReceipt { outcome: DecisionOutcome::Incompatible,
-                request: serde_json::from_value(serde_json::json!({"request_id": command.request_id,
-                    "link_id": command.link_id, "account_id": 42, "requester_id": 99,
-                    "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
-                    "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2})).unwrap() })
-        }
-        async fn status(&self, _: RequestStatus) -> ghinvite_web::Result<RequestSnapshot> {
-            panic!("unexpected status")
-        }
-    }
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let request = ghinvite_core::RequestId::new();
+    let link = ghinvite_core::InvitationLinkId::new();
+    let operation = ghinvite_core::RequestId::new();
+    let ingress = MockServer::start().await;
+    Mock::given(path(format!("/{LINK_SERVICE}/{link}/decide")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "outcome": "incompatible", "request": {"request_id": request,
+            "link_id": link, "account_id": 42, "requester_id": 99,
+            "justification": null, "state": "expired", "admitted_at": "2026-01-01T00:00:00Z",
+            "decision_deadline": "2026-01-08T00:00:00Z", "revision": 2}})))
+        .mount(&ingress)
+        .await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -419,19 +394,15 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
         .insert_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let calls = Arc::new(Mutex::new(vec![]));
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
-    )
-    .with_request_lifecycle(Arc::new(Lifecycle(calls.clone())));
+    );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
     let csrf = common::csrf_token(&app, &cookie).await;
-    let request = ghinvite_core::RequestId::new();
-    let link = ghinvite_core::InvitationLinkId::new();
-    let operation = ghinvite_core::RequestId::new();
     // Missing projection is not evidence that the acknowledged request is absent.
     let response = app
         .clone()
@@ -454,7 +425,13 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
     let html = response_html(response).await;
     assert!(html.contains("expired"));
     assert!(!html.contains("Request approved"));
-    let calls = calls.lock().unwrap();
+    let calls = ingress
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| serde_json::from_slice::<DecideRequest>(&request.body).unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].admin.user_id, 42);
     assert_eq!(calls[0].admin.account_id, 42);
@@ -467,8 +444,8 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
 
 #[tokio::test]
 async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(oauth_expectations()).await;
+    let (app, cookie, authority) =
+        build_signed_in_admin_app_with_authority(oauth_expectations()).await;
     for path in [
         "/console/accounts/acme/links",
         "/console/accounts/acme/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/edit",
@@ -499,7 +476,7 @@ async fn console_mutations_reject_missing_invalid_and_sibling_origin_tokens() {
             );
         }
     }
-    assert!(calls.lock().unwrap().is_empty());
+    assert!(authority.calls().is_empty());
 }
 
 fn session_cookie(resp: &axum::response::Response, fallback: Option<String>) -> String {
@@ -613,7 +590,8 @@ async fn identity_app(account: &Account, expectations: Vec<Expectation>) -> (axu
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
@@ -816,7 +794,8 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
@@ -893,11 +872,10 @@ async fn unverified_organization_membership_fails_closed_and_can_be_retried() {
 }
 
 #[tokio::test]
-async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never_grant_access() {
-    for (cache_key, checked_at) in [
-        ("acme", Utc::now()),
-        ("42:9001", Utc::now() - Duration::seconds(61)),
-        ("42:9001", Utc::now() + Duration::minutes(5)),
+async fn expired_or_future_organization_authority_is_reverified_and_errors_never_grant_access() {
+    for checked_at in [
+        Utc::now() - Duration::seconds(61),
+        Utc::now() + Duration::minutes(5),
     ] {
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -909,14 +887,15 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
             .await
             .unwrap();
         let store = tower_sessions::MemoryStore::default();
-        // Seed an old persisted session; exercise all verification via HTTP.
+        // Seed a persisted session; exercise all verification via HTTP.
         let session = tower_sessions::Session::new(None, Arc::new(store.clone()), None);
         session
             .insert(
                 "ghinvite",
                 serde_json::json!({
                     "user_id": 42, "login": "octocat", "access_token": "u_xxx", "oauth_csrf": null,
-                    "admin_checks": {cache_key: {"is_admin": true, "checked_at": checked_at}}
+                    "csrf_token": "token", "return_to": null,
+                    "admin_checks": {"42:9001": {"is_admin": true, "checked_at": checked_at}}
                 }),
             )
             .await
@@ -937,7 +916,8 @@ async fn expired_or_legacy_organization_authority_is_reverified_and_errors_never
                     404,
                 ),
             ])),
-            Arc::new(RecordingCommands::default()),
+            Arc::new(UnusedCommands),
+            std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let app = build_app(state, store);
@@ -963,17 +943,16 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
             .unwrap();
         let mut link = list_link(1);
         link.account_id = 42;
+        let authority = FakeLinkAuthority::start().await;
+        authority.seed_link(&link);
         let state = AppState::new(
             storage.clone(),
             Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-            Arc::new(RecordingCommands {
-                edit_storage: Some(storage.clone()),
-                ..Default::default()
-            }),
+            Arc::new(UnusedCommands),
+            authority.client(),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
-        storage.insert_invitation_link(&link).await.unwrap();
         let path = format!("/console/accounts/{stored_login}/links/{}/edit", link.id);
         let token = common::csrf_token(&app, &cookie).await;
         let response = app
@@ -999,93 +978,13 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum RecordedCommand {
-    CreateInvitationLink {
-        description: String,
-        internal_note: Option<String>,
-        permission: ghinvite_core::Permission,
-        approval_required: bool,
-        max_uses: Option<u32>,
-        expires_at: Option<DateTime<Utc>>,
-        repo_ids: Vec<u64>,
-    },
-}
-
+/// Console routes reach Restate through the authority, never through the
+/// installation command facade, so every command here is a test failure.
 #[derive(Default)]
-struct RecordingCommands {
-    calls: Arc<Mutex<Vec<RecordedCommand>>>,
-    edit_storage: Option<Arc<ghinvite_storage_sqlx::SqlxStorage>>,
-    /// How the metadata command fails, when it is meant to.
-    fail_edits: Option<ghinvite_web::IngressFailure>,
-}
+struct UnusedCommands;
 
 #[async_trait::async_trait]
-impl GhinviteCommands for RecordingCommands {
-    async fn update_invitation_link_metadata(
-        &self,
-        command: UpdateInvitationLinkMetadata,
-    ) -> ghinvite_web::Result<()> {
-        if let Some(failure) = self.fail_edits.clone() {
-            return Err(ghinvite_web::WebError::Restate(failure));
-        }
-        assert_eq!(command.by_user, 42);
-        self.edit_storage
-            .as_ref()
-            .expect("unexpected metadata update")
-            .update_invitation_link_metadata(
-                command.account_id,
-                command.link_id,
-                &command.description,
-                command.internal_note.as_deref(),
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn create_invitation_link(
-        &self,
-        command: CreateInvitationLink,
-    ) -> ghinvite_web::Result<CreateInvitationLinkOutput> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(RecordedCommand::CreateInvitationLink {
-                description: command.description,
-                internal_note: command.internal_note,
-                permission: command.permission,
-                approval_required: command.approval_required,
-                max_uses: command.max_uses,
-                expires_at: command.expires_at,
-                repo_ids: command.repos.into_iter().map(|repo| repo.repo_id).collect(),
-            });
-        Ok(CreateInvitationLinkOutput {
-            link_id: ghinvite_core::InvitationLinkId::new(),
-            slug: "abcdEFGH01234567".to_string(),
-        })
-    }
-
-    async fn revoke_invitation_link(
-        &self,
-        _command: RevokeInvitationLink,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected revoke_invitation_link command")
-    }
-
-    async fn submit_invitation_request(
-        &self,
-        _command: SubmitInvitationRequest,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected submit_invitation_request command")
-    }
-
-    async fn decide_invitation_request(
-        &self,
-        _command: DecideInvitationRequest,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected decide_invitation_request command")
-    }
-
+impl GhinviteCommands for UnusedCommands {
     async fn onboard_installation(
         &self,
         _command: OnboardInstallation,
@@ -1117,7 +1016,7 @@ impl GhinviteCommands for RecordingCommands {
 
 async fn build_test_app() -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -1130,6 +1029,7 @@ async fn build_test_app() -> axum::Router {
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1155,7 +1055,7 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
         .await
         .unwrap();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(oauth_expectations()));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
@@ -1164,6 +1064,7 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1201,9 +1102,9 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
     (app, cookie2)
 }
 
-async fn build_signed_in_admin_app_with_recording_commands(
+async fn build_signed_in_admin_app_with_authority(
     expectations: Vec<Expectation>,
-) -> (axum::Router, String, Arc<Mutex<Vec<RecordedCommand>>>) {
+) -> (axum::Router, String, FakeLinkAuthority) {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -1222,15 +1123,15 @@ async fn build_signed_in_admin_app_with_recording_commands(
         .await
         .unwrap();
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
-    let commands = Arc::new(RecordingCommands::default());
-    let calls = commands.calls.clone();
+    let authority = FakeLinkAuthority::start().await;
     let state = AppState::new(
         storage,
         transport,
-        commands,
+        Arc::new(UnusedCommands),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1265,7 +1166,7 @@ async fn build_signed_in_admin_app_with_recording_commands(
     assert_eq!(resp2.status(), StatusCode::SEE_OTHER);
     let cookie2 = session_cookie(&resp2, Some(cookie1));
 
-    (app, cookie2, calls)
+    (app, cookie2, authority)
 }
 
 fn installation_repos_expectation() -> Expectation {
@@ -1388,7 +1289,7 @@ async fn build_signed_in_admin_app_with_console_installations(
         ));
     }
 
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = storage;
+    let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
     let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
@@ -1397,6 +1298,7 @@ async fn build_signed_in_admin_app_with_console_installations(
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1406,7 +1308,7 @@ async fn build_signed_in_admin_app_with_console_installations(
 }
 
 async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Router, String) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -1431,6 +1333,7 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1440,7 +1343,7 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
 }
 
 async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -1459,6 +1362,7 @@ async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();
@@ -1505,13 +1409,13 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let mut link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     link.id = ghinvite_core::InvitationLinkId::new();
     link.slug = ghinvite_core::Slug::from_string("foreigncode00001".into()).unwrap();
     link.account_id = 9002;
     link.installation_id = 78;
     link.description = "Other account secret".into();
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
 
     let (status, html) = get_links(&app, &cookie, "?account_id=9002&login=other").await;
     assert_eq!(status, StatusCode::OK);
@@ -1530,26 +1434,16 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
 
 #[tokio::test]
 async fn edit_link_lookup_failure_preserves_submitted_input() {
-    let path = std::env::temp_dir().join(format!(
-        "ghinvite-edit-{}.sqlite",
-        ghinvite_core::InvitationLinkId::new()
-    ));
     let storage = Arc::new(
-        ghinvite_storage_sqlx::SqlxStorage::at_path(&path)
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
-    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
-    let pool =
-        sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
-            .await
-            .unwrap();
-    sqlx::query("DROP TABLE invitation_link_repos")
-        .execute(&pool)
-        .await
-        .unwrap();
+    authority.seed_link(&link);
+    authority.fail("link_status", 503);
     let response = post_edit(
         &app,
         &cookie,
@@ -1564,10 +1458,7 @@ async fn edit_link_lookup_failure_preserves_submitted_input() {
     assert!(html.contains(">Keep\nmy note</textarea>"));
     assert!(html.contains("Failed to load invitation link details. Please try again."));
     assert_links_navigation_current(&html);
-    pool.close().await;
-    drop(app);
-    drop(storage);
-    std::fs::remove_file(path).unwrap();
+    assert!(authority.metadata_updates().is_empty());
 }
 
 #[tokio::test]
@@ -1577,16 +1468,16 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
             .await
             .unwrap(),
     );
-    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    authority.seed_link(&link);
     for description in [
         "".to_string(),
         "%20%20".into(),
         "Workshop%0Acohort".into(),
         "x".repeat(121),
     ] {
-        // The command fake panics if invalid input reaches the save boundary.
         let response = post_edit(
             &app,
             &cookie,
@@ -1602,24 +1493,10 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
         assert!(html.contains("description-help description-error"));
         assert!(html.contains("> Keep\nthis </textarea>"));
     }
-    let commands = Arc::new(RecordingCommands {
-        fail_edits: Some(ghinvite_web::IngressFailure::Rejected { status: 503 }),
-        ..Default::default()
-    });
-    let mut expectations = oauth_expectations();
-    // The session layer does not persist the authorization cache on a 502.
-    expectations.push(Expectation::ok_json(
-        Method::Get,
-        "https://api.github.com/user/memberships/orgs/acme",
-        serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
-    ));
-    let state = AppState::new(
-        storage.clone(),
-        Arc::new(MockTransport::scripted(expectations)),
-        commands,
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    // Invalid input never reaches the authority.
+    assert!(authority.metadata_updates().is_empty());
+
+    authority.fail("update_metadata", 503);
     let response = post_edit(
         &app,
         &cookie,
@@ -1631,18 +1508,18 @@ async fn edit_link_errors_preserve_input_and_do_not_change_details() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = String::from_utf8(body.to_vec()).unwrap();
     assert_links_navigation_current(&html);
-    assert!(html.contains("Failed to save invitation link details. Please try again."));
+    assert!(html.contains("Save outcome unknown"));
     assert!(html.contains("value=\" New details \""));
     assert!(html.contains("> Keep\nthis </textarea>"));
-    assert!(!html.contains("aria-invalid"));
+    assert!(!html.contains("aria-invalid=\"true\""));
     let (_, detail) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
     assert!(detail.contains("Workshop 001</h1>"));
     assert!(!detail.contains("New details"));
 }
 
 /// A refused ingress call and one whose outcome is unknown must not read the
-/// same. Restate may have persisted the invocation before the response went
-/// wrong, so "please try again" on an unknown outcome invites applying the same
+/// same. Restate may have applied the command before the response went wrong,
+/// so "please try again" on an unknown outcome invites applying the same
 /// mutation twice.
 #[tokio::test]
 async fn an_unknown_save_outcome_does_not_invite_a_blind_retry() {
@@ -1651,30 +1528,11 @@ async fn an_unknown_save_outcome_does_not_invite_a_blind_retry() {
             .await
             .unwrap(),
     );
-    // `links_app` seeds the account the link hangs off.
-    let _ = links_app(storage.clone(), "admin").await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
-    let commands = Arc::new(RecordingCommands {
-        fail_edits: Some(ghinvite_web::IngressFailure::OutcomeUnknown {
-            detail: "ingress send rejected",
-            status: Some(503),
-        }),
-        ..Default::default()
-    });
-    let mut expectations = oauth_expectations();
-    expectations.push(Expectation::ok_json(
-        Method::Get,
-        "https://api.github.com/user/memberships/orgs/acme",
-        serde_json::json!({"role": "admin", "state": "active", "organization": {"id": 9001}}),
-    ));
-    let state = AppState::new(
-        storage.clone(),
-        Arc::new(MockTransport::scripted(expectations)),
-        commands,
-        WebConfig::for_local_dev_with_secret([7; 32]),
-    );
-    let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
+    authority.seed_link(&link);
+    authority.fail("update_metadata", 503);
 
     let response = post_edit(
         &app,
@@ -1690,7 +1548,8 @@ async fn an_unknown_save_outcome_does_not_invite_a_blind_retry() {
     assert!(html.contains("Save outcome unknown"), "{html}");
     assert!(!html.contains("Please try again"), "{html}");
     // The operational detail stays in the log, never in the page.
-    assert!(!html.contains("ingress send rejected"), "{html}");
+    assert!(!html.contains("ingress"), "{html}");
+    assert!(!html.contains("503"), "{html}");
 }
 
 #[tokio::test]
@@ -1723,14 +1582,15 @@ async fn edit_link_get_and_post_require_account_admin_and_hide_foreign_links() {
                 .await
                 .unwrap(),
         );
-        let (app, cookie) = links_app(storage.clone(), role).await;
+        let authority = FakeLinkAuthority::start().await;
+        let (app, cookie) = links_app_with_authority(storage, role, &authority).await;
         let mut foreign = list_link(1);
         foreign.account_id = 9002;
         foreign.installation_id = 78;
         foreign.description = "Foreign private context".into();
-        storage.insert_invitation_link(&foreign).await.unwrap();
+        authority.seed_link(&foreign);
         let own = list_link(2);
-        storage.insert_invitation_link(&own).await.unwrap();
+        authority.seed_link(&own);
         let mut ids = vec![
             foreign.id.to_string(),
             "invalid".into(),
@@ -1748,6 +1608,11 @@ async fn edit_link_get_and_post_require_account_admin_and_hide_foreign_links() {
                 post_edit(&app, &cookie, &id, "description=Changed&account_id=9002").await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
+        assert!(authority.metadata_updates().is_empty());
+        assert_eq!(
+            authority.link(foreign.id).unwrap().description(),
+            "Foreign private context"
+        );
     }
 }
 
@@ -1758,17 +1623,15 @@ async fn edit_link_save_normalizes_metadata_and_keeps_guardrails() {
             .await
             .unwrap(),
     );
-    let commands = Arc::new(RecordingCommands {
-        edit_storage: Some(storage.clone()),
-        ..Default::default()
-    });
-    let (app, cookie) = links_app_with_commands(storage.clone(), "admin", commands).await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let mut link = list_link(1);
     link.max_uses = Some(8);
     link.uses_count = 3;
     link.revoked_at = Some(link.created_at);
+    link.revoked_by = Some(link.created_by);
     link.internal_note = Some("Old private note".into());
-    storage.insert_invitation_link(&link).await.unwrap();
+    authority.seed_link(&link);
     for (note, expected) in [("%20New%0Anote%20", Some("New\nnote")), ("%20%20", None)] {
         let response = post_edit(&app, &cookie, &link.id.to_string(), &format!("description=%20Updated+workshop%20&internal_note={note}&permission=admin&max_uses=999&uses_count=0&revoked_at=&account_id=9002&by_user=999")).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -1776,10 +1639,17 @@ async fn edit_link_save_normalizes_metadata_and_keeps_guardrails() {
             response.headers()["location"],
             format!("/console/accounts/acme/links/{}", link.id)
         );
+        // Only the normalized metadata reaches the authority, as the signed-in
+        // admin of the routed account; tampered guardrails are not commands.
+        let update = authority.metadata_updates().pop().unwrap();
+        assert_eq!(update.link_id, link.id);
+        assert_eq!(update.description, "Updated workshop");
+        assert_eq!(update.internal_note.as_deref(), expected);
+        assert_eq!(update.admin.account_id, 9001);
+        assert_eq!(update.admin.user_id, 42);
         let (status, detail) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
         assert_eq!(status, StatusCode::OK);
         assert!(detail.contains("Updated workshop</h1>"));
-        assert!(detail.contains("Invitation link details updated."));
         assert!(detail.contains("3 / 8"));
         assert!(detail.contains("inactive"));
         assert!(!detail.contains("Old private note"));
@@ -1789,8 +1659,11 @@ async fn edit_link_save_normalizes_metadata_and_keeps_guardrails() {
             assert!(!detail.contains("New\nnote"));
         }
     }
-    let (_, list) = get_links(&app, &cookie, "?filter=all").await;
-    assert!(list.contains("Updated workshop</a>"));
+    let current = authority.link(link.id).unwrap();
+    assert_eq!(current.creation.max_uses, Some(8));
+    assert_eq!(current.creation.permission, ghinvite_core::Permission::Pull);
+    assert_eq!(current.uses, 3);
+    assert!(current.revoked_at.is_some());
 }
 
 async fn post_edit(
@@ -1821,11 +1694,13 @@ async fn edit_link_form_prefills_metadata_for_inactive_links() {
             .await
             .unwrap(),
     );
-    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let mut link = list_link(1);
     link.internal_note = Some("Private note\nSecond line".into());
     link.revoked_at = Some(link.created_at);
-    storage.insert_invitation_link(&link).await.unwrap();
+    link.revoked_by = Some(link.created_by);
+    authority.seed_link(&link);
     let (status, html) = get_links(&app, &cookie, &format!("/{}/edit", link.id)).await;
     assert_eq!(status, StatusCode::OK);
     assert_links_navigation_current(&html);
@@ -1848,9 +1723,10 @@ async fn link_detail_selects_links_but_missing_links_have_no_current_section() {
             .await
             .unwrap(),
     );
-    let (app, cookie) = links_app(storage.clone(), "admin").await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    authority.seed_link(&link);
 
     let (status, html) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
     assert_eq!(status, StatusCode::OK);
@@ -1893,7 +1769,7 @@ async fn links_collection_preserves_auth_and_concealment() {
             .unwrap(),
     );
     let (app, cookie) = links_app(storage.clone(), "member").await;
-    storage.insert_invitation_link(&list_link(1)).await.unwrap();
+    storage.seed_link(&list_link(1)).await.unwrap();
     let (status, html) = get_links(&app, &cookie, "?filter=all&account_id=9001").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(html.contains("Page not found"));
@@ -1913,8 +1789,9 @@ async fn links_collection_url_state_filters_sorts_then_paginates() {
         let mut link = list_link(n);
         if n % 2 == 0 {
             link.revoked_at = Some(Utc::now());
+            link.revoked_by = Some(link.created_by);
         }
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
     }
     let (status, first) = get_links(&app, &cookie, "").await;
     assert_eq!(status, StatusCode::OK);
@@ -1985,7 +1862,8 @@ async fn links_collection_distinguishes_empty_account_from_empty_filter() {
 
     let mut link = list_link(1);
     link.revoked_at = Some(Utc::now());
-    storage.insert_invitation_link(&link).await.unwrap();
+    link.revoked_by = Some(link.created_by);
+    storage.seed_link(&link).await.unwrap();
     let (_, filtered) = get_links(&app, &cookie, "").await;
     assert!(filtered.contains("No invitation links match this filter"));
     assert_links_navigation_current(&filtered);
@@ -2071,7 +1949,10 @@ fn list_link(n: u32) -> ghinvite_core::InvitationLink {
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![],
+        repos: vec![ghinvite_core::InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: "octocat/api".into(),
+        }],
     }
 }
 
@@ -2079,13 +1960,15 @@ async fn links_app(
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     role: &str,
 ) -> (axum::Router, String) {
-    links_app_with_commands(storage, role, Arc::new(RecordingCommands::default())).await
+    links_app_with_authority(storage, role, &FakeLinkAuthority::start().await).await
 }
 
-async fn links_app_with_commands(
+/// Sign in to the `acme` Console as `role`, with invitation link commands and
+/// reads answered by `authority`.
+async fn links_app_with_authority(
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     role: &str,
-    commands: Arc<dyn GhinviteCommands>,
+    authority: &FakeLinkAuthority,
 ) -> (axum::Router, String) {
     for (installation_id, account_id, login) in [(77, 9001, "acme"), (78, 9002, "other")] {
         storage
@@ -2102,8 +1985,9 @@ async fn links_app_with_commands(
             .unwrap();
     }
     let mut expectations = oauth_sign_in_expectations();
-    // Rejected membership checks are not saved in the authorization cache.
-    for _ in 0..if role == "admin" { 1 } else { 8 } {
+    // Rejected membership checks, and checks made while answering with a 502,
+    // are not saved in the authorization cache.
+    for _ in 0..if role == "admin" { 3 } else { 8 } {
         expectations.push(Expectation::ok_json(
             Method::Get,
             "https://api.github.com/user/memberships/orgs/acme",
@@ -2113,7 +1997,8 @@ async fn links_app_with_commands(
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        commands,
+        Arc::new(UnusedCommands),
+        authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     sign_in(build_app(state, tower_sessions::MemoryStore::default())).await
@@ -2473,8 +2358,9 @@ async fn console_overview_keeps_five_recent_links_and_opens_filtered_collections
         let mut link = list_link(n);
         if n % 2 == 0 {
             link.revoked_at = Some(link.created_at);
+            link.revoked_by = Some(link.created_by);
         }
-        storage.insert_invitation_link(&link).await.unwrap();
+        storage.seed_link(&link).await.unwrap();
     }
     let response = app
         .clone()
@@ -2542,11 +2428,11 @@ async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut foreign_link = list_link(2);
     foreign_link.account_id = 9002;
     foreign_link.installation_id = 78;
-    storage.insert_invitation_link(&foreign_link).await.unwrap();
+    storage.seed_link(&foreign_link).await.unwrap();
     let cases = [
         (
             EventType::InvitationLinkMetadataUpdated,
@@ -2636,8 +2522,8 @@ async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
         (EventType::RequestCreated, serde_json::Value::Null, "—"),
         (
             EventType::InvitationSent,
-            serde_json::json!({"recovered":true,"repo_full_name":"private-repo","requester_id":8}),
-            "Confirmed outcome observed during recovery",
+            serde_json::json!({"repo_full_name":"private-repo","requester_id":8}),
+            "—",
         ),
         (
             EventType::RequestCreated,
@@ -2782,7 +2668,7 @@ async fn audit_optional_enrichment_failures_fall_back_but_core_failures_are_500(
     );
     let (app, cookie) = links_app(storage.clone(), "admin").await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut event = audit_event(1, EventType::InvitationLinkCreated);
     event.target_kind = TargetKind::InvitationLink;
     event.target_id = link.id.to_string();
@@ -2875,10 +2761,10 @@ async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accou
                 .mark_installation_uninstalled(77, Utc::now())
                 .await
                 .unwrap();
-            assert_eq!(
-                audit_get(&app, &cookie, base).await.0,
-                StatusCode::NOT_FOUND
-            );
+            // An uninstalled account keeps its history readable to its admins.
+            let (status, html) = audit_get(&app, &cookie, "/console/accounts/acme/audit").await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(html.contains("resource-001"));
             storage
                 .insert_installation(&Account {
                     installation_id: 79,
@@ -2923,7 +2809,8 @@ async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accou
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
@@ -2988,8 +2875,8 @@ async fn audit_history_urls_filter_seek_normalize_and_remain_read_only() {
             .await
             .unwrap(),
     );
-    let commands = Arc::new(RecordingCommands::default());
-    let (app, cookie) = links_app_with_commands(storage.clone(), "admin", commands.clone()).await;
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage.clone(), "admin", &authority).await;
     for n in 0..51 {
         storage
             .audit(&audit_event(n, EventType::RequestCreated))
@@ -3100,7 +2987,7 @@ async fn audit_history_urls_filter_seek_normalize_and_remain_read_only() {
     assert!(empty.contains("No recorded events in this range."));
     assert_eq!(audit_anchor(&empty, "Back to latest").unwrap(), first_uri);
     assert!(!empty.contains("resource-999"));
-    assert!(commands.calls.lock().unwrap().is_empty());
+    assert!(authority.calls().is_empty());
     // Public read boundary also proves browsing did not append history.
     let page = storage
         .list_audit_events(9001, None, ghinvite_core::storage::AuditPosition::Latest)
@@ -3152,8 +3039,7 @@ async fn console_overview_carries_csp_and_only_external_script() {
 async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_script() {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
-    let (app, cookie, _calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let (app, cookie, _authority) = build_signed_in_admin_app_with_authority(expectations).await;
 
     let before = Utc::now();
     let resp = app
@@ -3180,10 +3066,17 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
 
     assert_links_navigation_current(&text);
 
-    // Island root wraps the form.
-    assert!(text.contains(
-        "<div id=\"link-form-island\"><form method=\"post\" action=\"/console/accounts/acme/links\""
-    ));
+    // Island root wraps the form, which posts to the creation identity.
+    let island = "<div id=\"link-form-island\"><form method=\"post\" action=\"";
+    let action = text
+        .split_once(island)
+        .expect("island root wraps the form")
+        .1
+        .split_once('"')
+        .unwrap()
+        .0
+        .replace("&amp;", "&")
+        .replace("&#38;", "&");
     assert!(text.contains("</form></div>"));
 
     // The props blob is a data block carrying action, values, repos and the
@@ -3194,7 +3087,7 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
     let blob = &blob[..blob.find("</script>").unwrap()];
     let props: ghinvite_web::views::link_form::LinkFormIslandProps =
         serde_json::from_str(blob).unwrap();
-    assert_eq!(props.action, "/console/accounts/acme/links");
+    assert_eq!(props.action, action);
     assert_eq!(
         props.values,
         ghinvite_web::views::links::LinkFormValues::default()
@@ -3216,6 +3109,18 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
         before <= props.now && props.now <= after,
         "now is the server's instant"
     );
+    // The creation identity: a fresh link ID and the whole-second instant the
+    // server validates a submission against, the one the island sees.
+    let query = action
+        .strip_prefix("/console/accounts/acme/links?")
+        .expect("the form posts to the links collection");
+    let query: BTreeMap<_, _> = url::form_urlencoded::parse(query.as_bytes()).collect();
+    assert!(
+        query["link_id"]
+            .parse::<ghinvite_core::InvitationLinkId>()
+            .is_ok()
+    );
+    assert_eq!(query["anchor"], props.now.timestamp().to_string());
 
     // The module script follows, with a stable src under /assets.
     let module = "<script type=\"module\" src=\"/assets/ghinvite-island.js\"></script>";
@@ -3237,30 +3142,14 @@ async fn new_link_form_mounts_the_island_under_csp_without_inline_executable_scr
 
 #[tokio::test]
 async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_values() {
-    let mut expectations = oauth_expectations();
-    expectations.push(installation_repos_expectation());
-    let (app, cookie, _calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let created = post_create_link(
+        "description=%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E&permission=owner&max_uses=7&expires_in_days=45&repo_ids=999&repo_ids=10",
+    )
+    .await;
 
-    let body = "description=%3C%2Fscript%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E&permission=owner&max_uses=7&expires_in_days=45&repo_ids=999&repo_ids=10";
-    let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    let uri = created.uri();
+    let text = response_html(created.response).await;
 
     let props_open = "<script type=\"application/json\" id=\"link-form-props\">";
     let blob_at = text.find(props_open).expect("props blob present");
@@ -3293,40 +3182,28 @@ async fn create_link_failed_post_seeds_island_props_with_errors_and_preserved_va
             .contains("no longer available")
     );
     assert!(!props.values.errors.summary.is_empty());
+    // The re-rendered form keeps the creation identity it was submitted with,
+    // and the island validates against the same instant the server did.
+    assert_eq!(props.action, uri);
+    assert_eq!(props.now, created.anchor);
 
     // The description cannot break out of the data block: the raw bytes hold
     // no `<`, and the page has exactly three script elements.
     assert!(!blob.contains('<'));
     assert_eq!(text.matches("</script>").count(), 3);
+    assert!(created.authority.created().is_empty());
 }
 
 #[tokio::test]
 async fn create_link_invalid_description_rerenders_form_with_errors_and_preserved_values() {
-    let mut expectations = oauth_expectations();
-    expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let created = post_create_link(
+        "description=%20%20%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
 
-    let body = "description=%20%20%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
-    let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains("New invitation link"));
     assert_links_navigation_current(&text);
     assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
@@ -3344,67 +3221,35 @@ async fn create_link_invalid_description_rerenders_form_with_errors_and_preserve
 
 #[tokio::test]
 async fn create_link_valid_submission_invokes_command_and_redirects() {
-    let mut expectations = oauth_expectations();
-    expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let created = post_create_link(
+        "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
 
-    let body = "description=%20AI+coding+workshop%20&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10";
-    let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let before = Utc::now();
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let after = Utc::now();
-
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert!(location.starts_with("/console/accounts/acme/links/"));
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let RecordedCommand::CreateInvitationLink {
-        description,
-        internal_note,
-        permission,
-        approval_required,
-        max_uses,
-        expires_at,
-        repo_ids,
-    } = &calls[0];
-    assert_eq!(description, "AI coding workshop");
-    assert_eq!(internal_note.as_deref(), Some("Keep this note"));
-    assert_eq!(*permission, ghinvite_core::Permission::Push);
-    assert!(approval_required);
-    assert_eq!(*max_uses, Some(7));
-    assert_expires_days_from(*expires_at, 45, before, after);
-    assert_eq!(*repo_ids, vec![10]);
-}
-
-/// `expires_at` must be exactly `days` after some instant between `before`
-/// and `after` (the request's `now`), i.e. `now + days` without drift.
-fn assert_expires_days_from(
-    expires_at: Option<DateTime<Utc>>,
-    days: i64,
-    before: DateTime<Utc>,
-    after: DateTime<Utc>,
-) {
-    let expires_at = expires_at.expect("expires_at should be set");
-    let earliest = before + Duration::days(days);
-    let latest = after + Duration::days(days);
-    assert!(
-        expires_at >= earliest && expires_at <= latest,
-        "expires_at {expires_at} should be {days} days after a now in [{before}, {after}]"
+    assert_eq!(created.response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        created.response.headers()["location"],
+        format!("/console/accounts/acme/links/{}", created.link_id)
     );
+    let command = created.command();
+    assert_eq!(command.link_id, created.link_id);
+    assert_eq!(command.account_id, 9001);
+    assert_eq!(command.installation_id, 77);
+    assert_eq!(command.admin.account_id, 9001);
+    assert_eq!(command.admin.user_id, 42);
+    assert_eq!(command.description, "AI coding workshop");
+    assert_eq!(command.internal_note.as_deref(), Some("Keep this note"));
+    assert_eq!(command.permission, ghinvite_core::Permission::Push);
+    assert!(command.approval_required);
+    assert_eq!(command.max_uses, Some(7));
+    // Expiry is exactly `days` after the creation anchor, so a retry of the
+    // same identity yields the same command.
+    assert_eq!(
+        command.expires_at,
+        Some(created.anchor + Duration::days(45))
+    );
+    assert_eq!(created.repo_ids(), vec![10]);
+    assert_eq!(command.repos[0].repo_full_name, "acme/api");
 }
 
 fn assert_preserved_description_input(html: &str) {
@@ -3477,31 +3322,14 @@ fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) 
 
 #[tokio::test]
 async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors() {
-    let mut expectations = oauth_expectations();
-    expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let created = post_create_link(
+        "description=AI+coding+workshop&permission=push&max_uses=abc&expires_in_days=0&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
 
-    let body = "description=AI+coding+workshop&permission=push&max_uses=abc&expires_in_days=0&internal_note=Keep+this+note&repo_ids=10";
-    let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains("New invitation link"));
     assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
     assert!(text.contains("Max use must be a whole number of 1 or more."));
@@ -3534,119 +3362,140 @@ async fn create_link_invalid_numeric_guardrails_rerender_form_with_field_errors(
 
 #[tokio::test]
 async fn create_link_valid_numeric_guardrails_reach_command() {
-    let mut expectations = oauth_expectations();
-    expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let created = post_create_link(
+        "description=AI+coding+workshop&permission=pull&max_uses=+3+&expires_in_days=+10+&repo_ids=11",
+    )
+    .await;
 
-    let body = "description=AI+coding+workshop&permission=pull&max_uses=+3+&expires_in_days=+10+&repo_ids=11";
-    let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let before = Utc::now();
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let after = Utc::now();
-
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let RecordedCommand::CreateInvitationLink {
-        max_uses,
-        expires_at,
-        repo_ids,
-        ..
-    } = &calls[0];
-    assert_eq!(*max_uses, Some(3));
-    assert_expires_days_from(*expires_at, 10, before, after);
-    assert_eq!(*repo_ids, vec![11]);
+    assert_eq!(created.response.status(), StatusCode::SEE_OTHER);
+    let command = created.command();
+    assert_eq!(command.max_uses, Some(3));
+    assert_eq!(
+        command.expires_at,
+        Some(created.anchor + Duration::days(10))
+    );
+    assert_eq!(created.repo_ids(), vec![11]);
 }
 
 #[tokio::test]
 async fn create_link_blank_numeric_guardrails_mean_unlimited_and_no_expiration() {
+    let created = post_create_link(
+        "description=AI+coding+workshop&permission=pull&max_uses=&expires_in_days=&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(created.response.status(), StatusCode::SEE_OTHER);
+    let command = created.command();
+    assert_eq!(command.max_uses, None);
+    assert_eq!(command.expires_at, None);
+}
+
+#[tokio::test]
+async fn create_link_requires_a_creation_identity() {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
-
-    let body =
-        "description=AI+coding+workshop&permission=pull&max_uses=&expires_in_days=&repo_ids=10";
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
     let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{body}");
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let RecordedCommand::CreateInvitationLink {
-        max_uses,
-        expires_at,
-        ..
-    } = &calls[0];
-    assert_eq!(*max_uses, None);
-    assert_eq!(*expires_at, None);
+    let link_id = ghinvite_core::InvitationLinkId::new();
+    for query in [
+        String::new(),
+        format!("?link_id={link_id}"),
+        format!("?anchor={}", Utc::now().timestamp()),
+        format!("?link_id={link_id}&anchor={}", i64::MAX),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/console/accounts/acme/links{query}"))
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "csrf_token={token}&description=AI+coding+workshop&permission=pull&repo_ids=10"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    assert!(authority.calls().is_empty());
 }
 
 const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
 
-/// POST the new invitation link form as a signed-in admin whose installation
-/// exposes `acme/api` (10) and `acme/web` (11), returning the response and the
-/// recorded command calls.
-async fn post_create_link(
-    body: impl AsRef<str>,
-) -> (axum::response::Response, Arc<Mutex<Vec<RecordedCommand>>>) {
+/// A new invitation link form POST and what reached the link authority.
+struct CreatePost {
+    response: axum::response::Response,
+    authority: FakeLinkAuthority,
+    /// The creation identity the form was posted with.
+    link_id: ghinvite_core::InvitationLinkId,
+    anchor: DateTime<Utc>,
+}
+
+impl CreatePost {
+    /// The form action that carries this creation identity.
+    fn uri(&self) -> String {
+        format!(
+            "/console/accounts/acme/links?link_id={}&anchor={}",
+            self.link_id,
+            self.anchor.timestamp()
+        )
+    }
+
+    /// The one creation command the authority received.
+    fn command(&self) -> ghinvite_core::storage::projection::CreateLink {
+        let mut created = self.authority.created();
+        assert_eq!(created.len(), 1, "exactly one creation command");
+        created.pop().unwrap()
+    }
+
+    fn repo_ids(&self) -> Vec<u64> {
+        self.command().repos.iter().map(|r| r.repo_id).collect()
+    }
+}
+
+/// POST the new invitation link form, with a fresh creation identity, as a
+/// signed-in admin whose installation exposes `acme/api` (10) and `acme/web`
+/// (11).
+async fn post_create_link(body: impl AsRef<str>) -> CreatePost {
     let mut expectations = oauth_expectations();
     expectations.push(installation_repos_expectation());
-    let (app, cookie, calls) =
-        build_signed_in_admin_app_with_recording_commands(expectations).await;
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
     let token = common::csrf_token(&app, &cookie).await;
-    let body = format!("csrf_token={token}&{}", body.as_ref());
-    let resp = app
+    let mut created = CreatePost {
+        response: axum::response::Response::default(),
+        authority,
+        link_id: ghinvite_core::InvitationLinkId::new(),
+        // The form renders its anchor in whole seconds.
+        anchor: DateTime::from_timestamp(Utc::now().timestamp(), 0).unwrap(),
+    };
+    created.response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/console/accounts/acme/links")
+                .uri(created.uri())
                 .header("cookie", cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body))
+                .body(Body::from(format!("csrf_token={token}&{}", body.as_ref())))
                 .unwrap(),
         )
         .await
         .unwrap();
-    (resp, calls)
+    created
 }
 
 #[tokio::test]
 async fn create_link_without_repositories_rerenders_form_with_repository_scope_error() {
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains("New invitation link"));
     assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
     assert!(text.contains(REPO_SCOPE_REQUIRED));
@@ -3672,15 +3521,14 @@ async fn create_link_without_repositories_rerenders_form_with_repository_scope_e
 
 #[tokio::test]
 async fn create_link_with_only_unknown_repositories_rerenders_form_with_repository_scope_error() {
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=1000",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains(REPO_SCOPE_REQUIRED));
     assert!(text.contains("id=\"repo_ids-error\""));
     assert!(!text.contains("Bad Request"));
@@ -3693,29 +3541,27 @@ async fn create_link_with_only_unknown_repositories_rerenders_form_with_reposito
 
 #[tokio::test]
 async fn create_link_with_unavailable_selection_requires_review_before_reducing_scope() {
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&permission=push&repo_ids=999&repo_ids=11&repo_ids=10",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    let html = response_html(resp).await;
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let html = response_html(created.response).await;
     assert!(html.contains("Selected repositories are no longer available: 999"));
     assert!(html.contains("Review the remaining scope before creating"));
     assert!(html.contains("value=\"10\" checked"));
     assert!(html.contains("value=\"11\" checked"));
-    assert!(calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn create_link_validation_failure_keeps_available_repositories_checked_and_drops_unknown() {
-    let (resp, calls) =
-        post_create_link("description=&permission=push&repo_ids=10&repo_ids=999").await;
+    let created = post_create_link("description=&permission=push&repo_ids=10&repo_ids=999").await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains("id=\"description-error\""));
     assert!(
         text.contains("repo_ids-error"),
@@ -3735,15 +3581,14 @@ async fn create_link_missing_permission_key_rerenders_form_with_permission_error
     // The select always submits a value, so a POST without the key is tampering.
     // It must get the same inline error path as a wrong value, not a bare 400
     // from form deserialization.
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&approval_required=true&max_uses=7&expires_in_days=45&repo_ids=10",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains(PERMISSION_UNSUPPORTED));
     assert!(text.contains("id=\"permission-error\""));
     assert!(!text.contains("Bad Request"));
@@ -3767,11 +3612,14 @@ async fn create_link_malformed_permissions_keep_raw_props_and_never_reach_comman
         if let Some(raw) = raw {
             body.append_pair("permission", raw);
         }
-        let (response, calls) = post_create_link(body.finish()).await;
-        assert_eq!(response.status(), StatusCode::OK, "permission={raw:?}");
-        assert!(calls.lock().unwrap().is_empty());
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let html = String::from_utf8(body.to_vec()).unwrap();
+        let created = post_create_link(body.finish()).await;
+        assert_eq!(
+            created.response.status(),
+            StatusCode::OK,
+            "permission={raw:?}"
+        );
+        assert!(created.authority.created().is_empty());
+        let html = response_html(created.response).await;
         let props = html
             .split_once("<script type=\"application/json\" id=\"link-form-props\">")
             .unwrap()
@@ -3822,18 +3670,17 @@ async fn create_link_malformed_permissions_keep_raw_props_and_never_reach_comman
 
 #[tokio::test]
 async fn create_link_tampered_permission_rerenders_form_with_permission_error() {
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&permission=owner&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
     )
     .await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(created.response.status(), StatusCode::OK);
     assert!(
-        calls.lock().unwrap().is_empty(),
-        "a tampered permission level must not reach the command facade"
+        created.authority.created().is_empty(),
+        "a tampered permission level must not reach the link authority"
     );
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    let text = response_html(created.response).await;
     assert!(text.contains("New invitation link"));
     assert!(text.contains("Fix the highlighted fields before creating this invitation link."));
     assert!(text.contains(PERMISSION_UNSUPPORTED));
@@ -3890,13 +3737,11 @@ fn assert_description_error_empty(html: &str) {
 
 #[tokio::test]
 async fn create_link_tampered_permission_is_reported_with_other_field_errors() {
-    let (resp, calls) =
-        post_create_link("description=&permission=Push&max_uses=0&repo_ids=10").await;
+    let created = post_create_link("description=&permission=Push&max_uses=0&repo_ids=10").await;
 
-    assert_eq!(resp.status(), StatusCode::OK);
-    assert!(calls.lock().unwrap().is_empty());
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
+    assert_eq!(created.response.status(), StatusCode::OK);
+    assert!(created.authority.created().is_empty());
+    let text = response_html(created.response).await;
     assert!(text.contains("id=\"permission-error\""));
     assert!(text.contains("id=\"description-error\""));
     assert!(text.contains("id=\"max_uses-error\""));
@@ -3914,45 +3759,42 @@ async fn create_link_every_supported_permission_level_reaches_command() {
         ("admin", ghinvite_core::Permission::Admin),
     ] {
         let body = format!("description=AI+coding+workshop&permission={raw}&repo_ids=10");
-        let (resp, calls) = post_create_link(body).await;
+        let created = post_create_link(body).await;
 
-        assert_eq!(resp.status(), StatusCode::SEE_OTHER, "permission={raw:?}");
-        let location = resp.headers().get("location").unwrap().to_str().unwrap();
-        assert!(location.starts_with("/console/accounts/acme/links/"));
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "permission={raw:?}");
-        let RecordedCommand::CreateInvitationLink { permission, .. } = &calls[0];
-        assert_eq!(*permission, expected, "permission={raw:?}");
+        assert_eq!(
+            created.response.status(),
+            StatusCode::SEE_OTHER,
+            "permission={raw:?}"
+        );
+        assert_eq!(
+            created.response.headers()["location"],
+            format!("/console/accounts/acme/links/{}", created.link_id)
+        );
+        assert_eq!(created.command().permission, expected, "permission={raw:?}");
     }
 }
 
 #[tokio::test]
 async fn create_link_approval_policy_checkbox_behaviour_is_unchanged() {
     // Checked means account admin approval is required.
-    let (resp, calls) = post_create_link(
+    let created = post_create_link(
         "description=AI+coding+workshop&permission=pull&approval_required=true&repo_ids=10",
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    {
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        let RecordedCommand::CreateInvitationLink {
-            approval_required, ..
-        } = &calls[0];
-        assert!(*approval_required, "checked box requires admin approval");
-    }
+    assert_eq!(created.response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        created.command().approval_required,
+        "checked box requires admin approval"
+    );
 
     // Unchecked (the key is absent from a native form POST) means auto-approve.
-    let (resp, calls) =
+    let created =
         post_create_link("description=AI+coding+workshop&permission=pull&repo_ids=10").await;
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let calls = calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
-    let RecordedCommand::CreateInvitationLink {
-        approval_required, ..
-    } = &calls[0];
-    assert!(!*approval_required, "unchecked box auto-approves");
+    assert_eq!(created.response.status(), StatusCode::SEE_OTHER);
+    assert!(
+        !created.command().approval_required,
+        "unchecked box auto-approves"
+    );
 }
 
 #[tokio::test]
@@ -3994,4 +3836,230 @@ async fn console_post_missing_resource_stays_plain_404() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Not Found");
+}
+
+const LINK_CREATED: &str = "Invitation link created.";
+const LINK_DETAILS_UPDATED: &str = "Invitation link details updated.";
+const LINK_REVOKED: &str = "Invitation link stopped accepting new invitation requests.";
+const LINK_CREATE_REJECTED: &str =
+    "The invitation link could not be created with these values. Review them and try again.";
+const LINK_REVOKE_REJECTED: &str =
+    "This invitation link could not be stopped. Reload it and try again.";
+
+async fn post_form(
+    app: &axum::Router,
+    cookie: &str,
+    uri: &str,
+    body: &str,
+) -> axum::response::Response {
+    let token = common::csrf_token(app, cookie).await;
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!("csrf_token={token}&{body}")))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Follow a redirect and return the page it lands on.
+async fn follow(
+    app: &axum::Router,
+    cookie: &str,
+    response: axum::response::Response,
+) -> (StatusCode, String) {
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()["location"].to_str().unwrap().to_owned();
+    let response = identity_request(app, cookie, "GET", &location).await;
+    (response.status(), response_html(response).await)
+}
+
+/// The action of the new invitation link form, unescaped.
+fn creation_form_action(html: &str) -> String {
+    html.split("action=\"/console/accounts/acme/links?")
+        .nth(1)
+        .expect("creation form action")
+        .split('"')
+        .next()
+        .unwrap()
+        .replace("&#38;", "&")
+        .replace("&amp;", "&")
+}
+
+#[tokio::test]
+async fn create_link_success_flashes_once_on_the_link_detail_page() {
+    let mut expectations = oauth_expectations();
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
+    let link_id = ghinvite_core::InvitationLinkId::new();
+    let uri = format!(
+        "/console/accounts/acme/links?link_id={link_id}&anchor={}",
+        Utc::now().timestamp()
+    );
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=Flash+workshop&permission=pull&expires_in_days=5&repo_ids=10",
+    )
+    .await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Flash workshop</h1>"));
+    assert_eq!(html.matches(LINK_CREATED).count(), 1);
+    assert!(html.contains("alert-success"));
+    assert_eq!(authority.created().len(), 1);
+    let (_, again) = get_links(&app, &cookie, &format!("/{link_id}")).await;
+    assert!(!again.contains(LINK_CREATED), "a flash is shown once");
+}
+
+#[tokio::test]
+async fn create_link_authority_rejection_rerenders_form_with_values_and_identity() {
+    let mut expectations = oauth_expectations();
+    // The rejected submission and the corrected resubmission each read the
+    // installation's repositories.
+    expectations.push(installation_repos_expectation());
+    expectations.push(installation_repos_expectation());
+    let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
+    let link_id = ghinvite_core::InvitationLinkId::new();
+    let anchor = Utc::now().timestamp();
+    let uri = format!("/console/accounts/acme/links?link_id={link_id}&anchor={anchor}");
+    authority.fail("create", 400);
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=AI+coding+workshop&permission=push&approval_required=true&max_uses=7&expires_in_days=45&internal_note=Keep+this+note&repo_ids=10",
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let html = response_html(response).await;
+    assert!(html.contains("New invitation link"));
+    assert!(html.contains(LINK_CREATE_REJECTED));
+    assert_preserved_description_input(&html);
+    assert!(html.contains("value=\"push\" selected"));
+    assert!(html.contains("name=\"approval_required\" value=\"true\" checked"));
+    assert_numeric_input(&html, "max_uses", "7", None);
+    assert_numeric_input(&html, "expires_in_days", "45", None);
+    assert!(html.contains("Keep this note"));
+    assert!(html.contains("value=\"10\" checked"));
+    assert_eq!(
+        creation_form_action(&html),
+        format!("link_id={link_id}&anchor={anchor}"),
+        "the same creation identity is resubmitted"
+    );
+    // The authority's rejection is not disclosed.
+    assert!(!html.contains("Invalid command"));
+    assert!(!html.contains("Bad Request"));
+    assert_eq!(
+        authority.calls().iter().filter(|m| *m == "create").count(),
+        1
+    );
+    assert!(authority.link(link_id).is_none());
+    // A definitive rejection is not a recoverable attempt.
+    let attempts = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/acme/attempts").await,
+    )
+    .await;
+    assert!(!attempts.contains(&format!("create-{link_id}")));
+
+    // Corrected values under the same identity create the link.
+    authority.recover("create");
+    let response = post_form(
+        &app,
+        &cookie,
+        &uri,
+        "description=Corrected+workshop&permission=push&expires_in_days=45&repo_ids=10",
+    )
+    .await;
+    assert_eq!(
+        response.headers()["location"],
+        format!("/console/accounts/acme/links/{link_id}")
+    );
+    let (_, detail) = follow(&app, &cookie, response).await;
+    assert!(detail.contains(LINK_CREATED));
+    assert_eq!(
+        authority.link(link_id).unwrap().creation.description,
+        "Corrected workshop"
+    );
+}
+
+#[tokio::test]
+async fn link_detail_mutations_flash_once_after_the_redirect() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+
+    let response = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=Updated+workshop&internal_note=",
+    )
+    .await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Updated workshop</h1>"));
+    assert_eq!(html.matches(LINK_DETAILS_UPDATED).count(), 1);
+
+    let revoke = format!("/console/accounts/acme/links/{}/revoke", link.id);
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(html.matches(LINK_REVOKED).count(), 1);
+    assert!(!html.contains(LINK_DETAILS_UPDATED));
+    assert!(authority.link(link.id).unwrap().revoked_at.is_some());
+    let (_, again) = get_links(&app, &cookie, &format!("/{}", link.id)).await;
+    assert!(!again.contains(LINK_REVOKED), "a flash is shown once");
+}
+
+#[tokio::test]
+async fn revoke_authority_rejection_returns_to_link_detail_with_an_error() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+    authority.fail("revoke", 400);
+
+    let revoke = format!("/console/accounts/acme/links/{}/revoke", link.id);
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    assert_eq!(
+        response.headers()["location"],
+        format!("/console/accounts/acme/links/{}", link.id)
+    );
+    let (status, html) = follow(&app, &cookie, response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(html.matches(LINK_REVOKE_REJECTED).count(), 1);
+    assert!(html.contains("alert-error"));
+    assert!(!html.contains(LINK_REVOKED));
+    assert!(!html.contains("Invalid command"));
+    assert!(authority.link(link.id).unwrap().revoked_at.is_none());
+    // Nothing was applied, so no attempt is left reading as an unknown outcome.
+    let attempts = response_html(
+        identity_request(&app, &cookie, "GET", "/console/accounts/acme/attempts").await,
+    )
+    .await;
+    assert!(!attempts.contains(&format!("revoke-{}", link.id)));
+
+    authority.recover("revoke");
+    let response = post_form(&app, &cookie, &revoke, "").await;
+    let (_, html) = follow(&app, &cookie, response).await;
+    assert!(html.contains(LINK_REVOKED));
 }

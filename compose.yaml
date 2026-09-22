@@ -19,7 +19,7 @@ services:
     profiles: [smoke]
     image: *restate-image
     environment:
-      # The admission proof overrides this to exercise actual workflow cleanup.
+      # scripts/test-restate.sh overrides this to exercise actual workflow cleanup.
       RESTATE_WORKER__CLEANUP_INTERVAL: "${RESTATE_PROOF_CLEANUP_INTERVAL:-1h}"
     extra_hosts:
       - host.docker.internal:host-gateway

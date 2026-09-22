@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 import { stalledResponse } from './deadline-recovery.mjs';
@@ -18,7 +19,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
     kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
     bindings: {
-      GHINVITE_ADMISSION_MODE: 'authoritative', GHINVITE_BASE_URL: 'https://browser.test',
+      GHINVITE_BASE_URL: 'https://browser.test',
       GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: ingress,
       GHINVITE_RESTATE_AUTH: 'bearer', GHINVITE_RESTATE_API_KEY: ingressApiKey,
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
@@ -66,9 +67,14 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     assert.ok(authenticatedIngressCalls > 0, 'browser status must call authenticated ingress');
     assert.equal(page.headers.get('cache-control'), 'private, no-store');
     console.log('PASS browser Worker Bearer ingress binding and authoritative status with empty D1');
+    // Submissions retain their pre-ingress continuation in D1.
+    const schema = readFileSync(new URL('../../migrations/0001_initial.sql', import.meta.url), 'utf8');
+    for (const statement of schema.match(/CREATE (TABLE|INDEX) attempt_continuations[^;]*;/g)) {
+      await db.exec(statement.replaceAll('\n', ' '));
+    }
     if (recovery) for (const phase of ['headers', 'body']) {
       const input = recovery.creation();
-      const created = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/create`, input);
+      const created = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/create`, input);
       const path = `https://browser.test/i/${created.invitation_code}`;
       const form = await mf.dispatchFetch(path, { headers: { cookie } });
       assert.equal(form.status, 200);
@@ -98,9 +104,9 @@ export async function browserAdmission(ingress, code, requester, operation, reco
       assert.ok(retried.headers.get('location').includes(operation_id));
       const status = await mf.dispatchFetch(`https://browser.test${retried.headers.get('location')}`, { headers: { cookie } });
       assert.equal(status.status, 200, await status.text());
-      const result = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/admit`, attempted.at(-1));
+      const result = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/admit`, attempted.at(-1));
       assert.deepEqual(result, committed);
-      const link = await recovery.http(`${ingress}/InvitationLinkV1/${input.link_id}/link_status`, { link_id: input.link_id, admin: input.admin });
+      const link = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/link_status`, { link_id: input.link_id, admin: input.admin });
       assert.equal(link.uses, 1);
       console.log(`PASS browser Worker ${phase} mutation timeout after commit: original form identity/input and one-use recovery`);
     }

@@ -1,7 +1,7 @@
 //! #83: one installation transition leaves one audit event behind, even when
 //! the projection is retried after its audit write has already committed.
 //!
-//! `InstallationProjectionV1::apply` retains the audit event in a `ctx.run` step
+//! `InstallationProjection::apply` retains the audit event in a `ctx.run` step
 //! before it projects anything, so a retry replays the identity the first
 //! attempt minted. Nothing but a real invocation retry can show that: if the
 //! identity were minted outside the journal, the retry would mint a second one
@@ -19,14 +19,69 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Wraps the real storage so one installation audit write can commit and still
-/// report failure. Every other call goes straight through.
+/// report failure. Every other workflow storage call goes straight through.
 struct LostAuditAcknowledgement {
     inner: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     swallowed: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl Storage for LostAuditAcknowledgement {
+impl AuditStorage for LostAuditAcknowledgement {
+    /// Commit the event, then lose the acknowledgement once. Restate cannot tell
+    /// this from a crash between the write and its journal entry, so it retries
+    /// the invocation — which is the only way to observe whether the event
+    /// identity was retained or minted afresh.
+    async fn audit(&self, event: &AuditEvent) -> Result<()> {
+        self.inner.audit(event).await?;
+        if event.event_type == EventType::InstallationCreated
+            && self.swallowed.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Err(ghinvite_core::storage::Error::Database(
+                "fixture: committed but acknowledgement lost".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RecordStorage for LostAuditAcknowledgement {
+    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
+        self.inner.get_installation(installation_id).await
+    }
+    async fn get_active_installation_by_account_id(
+        &self,
+        account_id: u64,
+    ) -> Result<Option<Account>> {
+        self.inner
+            .get_active_installation_by_account_id(account_id)
+            .await
+    }
+    async fn upsert_user(&self, user: &User) -> Result<()> {
+        self.inner.upsert_user(user).await
+    }
+    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
+        self.inner.get_user(user_id).await
+    }
+    async fn get_invitation_link_by_id(
+        &self,
+        id: InvitationLinkId,
+    ) -> Result<Option<InvitationLink>> {
+        self.inner.get_invitation_link_by_id(id).await
+    }
+    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
+        self.inner.get_invitation_request(id).await
+    }
+    async fn get_github_invitation(
+        &self,
+        id: GithubInvitationId,
+    ) -> Result<Option<GithubInvitation>> {
+        self.inner.get_github_invitation(id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl InstallationStorage for LostAuditAcknowledgement {
     async fn insert_installation(&self, account: &Account) -> Result<()> {
         self.inner.insert_installation(account).await
     }
@@ -48,159 +103,40 @@ impl Storage for LostAuditAcknowledgement {
             .update_installation_repos(installation_id, selected)
             .await
     }
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        self.inner.get_installation(installation_id).await
-    }
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>> {
-        self.inner
-            .get_active_installation_by_account_id(account_id)
-            .await
-    }
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        self.inner.get_active_installation_by_login(login).await
-    }
     async fn list_active_installations(&self) -> Result<Vec<Account>> {
         self.inner.list_active_installations().await
     }
-    async fn upsert_user(&self, user: &User) -> Result<()> {
-        self.inner.upsert_user(user).await
-    }
-    async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
-        self.inner.get_user(user_id).await
-    }
-    async fn insert_invitation_link(&self, link: &InvitationLink) -> Result<()> {
-        self.inner.insert_invitation_link(link).await
-    }
-    async fn update_invitation_link_metadata(
+}
+
+/// Installation transitions deliver nothing.
+#[async_trait::async_trait]
+impl DeliveryStorage for LostAuditAcknowledgement {
+    async fn claim_delivery_attempt(
         &self,
-        account_id: u64,
-        id: InvitationLinkId,
-        description: &str,
-        internal_note: Option<&str>,
-    ) -> Result<()> {
-        self.inner
-            .update_invitation_link_metadata(account_id, id, description, internal_note)
-            .await
+        _: &ghinvite_core::delivery::CreateCommand,
+    ) -> Result<Option<u64>> {
+        unreachable!()
     }
-    async fn mark_invitation_link_revoked(
+    async fn reject_delivery_attempt(&self, _: GithubInvitationId, _: u64) -> Result<()> {
+        unreachable!()
+    }
+    async fn delivery_attempt_exists(&self, _: GithubInvitationId) -> Result<bool> {
+        unreachable!()
+    }
+    async fn project_delivery(&self, _: &ghinvite_core::delivery::CreateReceipt) -> Result<()> {
+        unreachable!()
+    }
+    async fn insert_github_invitation(&self, _: &GithubInvitation) -> Result<()> {
+        unreachable!()
+    }
+    async fn settle_github_invitation(&self, _: &settlement::Settlement) -> Result<()> {
+        unreachable!()
+    }
+    async fn list_pending_github_invitations_for_account(
         &self,
-        id: InvitationLinkId,
-        by_user: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()> {
-        self.inner
-            .mark_invitation_link_revoked(id, by_user, when)
-            .await
-    }
-    async fn get_invitation_link_by_id(
-        &self,
-        id: InvitationLinkId,
-    ) -> Result<Option<InvitationLink>> {
-        self.inner.get_invitation_link_by_id(id).await
-    }
-    async fn invitation_link_belongs_to_account(
-        &self,
-        account_id: u64,
-        id: InvitationLinkId,
-    ) -> Result<bool> {
-        self.inner
-            .invitation_link_belongs_to_account(account_id, id)
-            .await
-    }
-    async fn get_invitation_link_by_slug(&self, slug: &str) -> Result<Option<InvitationLink>> {
-        self.inner.get_invitation_link_by_slug(slug).await
-    }
-    async fn list_invitation_links_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationLink>> {
-        self.inner
-            .list_invitation_links_for_account(account_id)
-            .await
-    }
-    async fn insert_invitation_request_and_increment_uses(
-        &self,
-        request: &InvitationRequest,
-    ) -> Result<()> {
-        self.inner
-            .insert_invitation_request_and_increment_uses(request)
-            .await
-    }
-    async fn record_request_decision(&self, decision: &RequestDecision) -> Result<()> {
-        self.inner.record_request_decision(decision).await
-    }
-    async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
-        self.inner.get_invitation_request(id).await
-    }
-    async fn list_pending_requests_for_account(
-        &self,
-        account_id: u64,
-    ) -> Result<Vec<InvitationRequest>> {
-        self.inner
-            .list_pending_requests_for_account(account_id)
-            .await
-    }
-    async fn list_requests_for_link(
-        &self,
-        link_id: InvitationLinkId,
-    ) -> Result<Vec<InvitationRequest>> {
-        self.inner.list_requests_for_link(link_id).await
-    }
-    async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
-        self.inner.insert_github_invitation(invitation).await
-    }
-    async fn update_github_invitation(&self, update: &GithubInvitationUpdate) -> Result<()> {
-        self.inner.update_github_invitation(update).await
-    }
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>> {
-        self.inner.get_github_invitation(id).await
-    }
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>> {
-        self.inner
-            .get_github_invitation_by_github_id(github_id)
-            .await
-    }
-    async fn list_pending_github_invitations_for_installation(
-        &self,
-        installation_id: u64,
+        _: u64,
     ) -> Result<Vec<GithubInvitation>> {
-        self.inner
-            .list_pending_github_invitations_for_installation(installation_id)
-            .await
-    }
-    async fn list_audit_events(
-        &self,
-        account_id: u64,
-        event: Option<ghinvite_core::audit::EventType>,
-        position: AuditPosition,
-    ) -> Result<AuditPage> {
-        self.inner
-            .list_audit_events(account_id, event, position)
-            .await
-    }
-    /// Commit the event, then lose the acknowledgement once. Restate cannot tell
-    /// this from a crash between the write and its journal entry, so it retries
-    /// the invocation — which is the only way to observe whether the event
-    /// identity was retained or minted afresh.
-    async fn audit(&self, event: &AuditEvent) -> Result<()> {
-        self.inner.audit(event).await?;
-        if event.event_type == EventType::InstallationCreated
-            && self.swallowed.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            return Err(ghinvite_core::storage::Error::Database(
-                "fixture: committed but acknowledgement lost".into(),
-            ));
-        }
-        Ok(())
+        unreachable!()
     }
 }
 
@@ -284,8 +220,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         ),
     );
     // Projection ownership is not what this test varies; only the audit write is.
-    let endpoint =
-        ghinvite_workflows::build_cutover_endpoint(state, storage.clone(), None).unwrap();
+    let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {

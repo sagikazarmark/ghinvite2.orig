@@ -8,15 +8,13 @@ onboarding prevents that identity from ever being onboarded. Repository-change
 payloads retain their old wire shape for compatibility, but their selection is
 ignored: webhooks and setup returns request a refresh.
 
-`AccountInstallationV1/<numeric account ID>` serializes onboarding, repository
+`AccountInstallation/<numeric account ID>` serializes onboarding, repository
 refresh, uninstall, status, and admission observations across replacement
 installations. It adopts an existing active installation row once, then retains
-current identity and observations in Restate. `InstallationProjectionV1` receives
+current identity and observations in Restate. `InstallationProjection` receives
 ordered durable sends for SQL/audit writes on a separate account-keyed object,
 so persistence retries cannot hold availability, approval, or replay hostage.
-Deploy these services together and
-drain old installation invocations before upgrading: their journal sequence has
-changed. Keep obsolete endpoints isolated as in the admission cutover procedure.
+Deploy these services together.
 
 Onboarding verifies the App-authenticated GitHub installation's numeric account
 ID. A replacement can supersede an existing identity only after GitHub confirms

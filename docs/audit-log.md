@@ -46,8 +46,7 @@ navigation are server-rendered and work without JavaScript.
   arrivals. SQLite fixtures cover historical mixed encodings and corrupt rows.
 - Console HTTP tests cover authorization, reinstall history, URL normalization,
   navigation, safe summaries/resources, privacy, enrichment failures, and errors.
-- The opt-in local D1 suite executes the shared production SQL builder against
-  Wrangler D1, including mixed encodings, both directions, exact page boundaries,
-  filtering/account isolation, and expression-index seek plans. It does not run
-  the Rust Worker decoder end-to-end; Workers/Wasm checks verify that integration
-  compiles. Run instructions are in `migrations/README.md`.
+- The D1 storage gate (`npm run test:storage --prefix tests/worker`) runs the
+  shared conformance suite on the actual Worker adapter in workerd, and reads
+  historical mixed encodings through the adapter in both directions with exact
+  page boundaries, filtering/account isolation, and expression-index seek plans.

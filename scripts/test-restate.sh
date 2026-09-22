@@ -2,14 +2,12 @@
 set -euo pipefail
 
 # Run from the repository root. GNU timeout is `gtimeout` on macOS (coreutils).
-target=${1:-integration_test}
+target=${1:-authoritative_admission}
 case "$target" in
-  integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability|installation_audit_replay) ;;
-  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [integration_test|admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|writer_cutover|installation_availability|installation_audit_replay]' >&2; exit 2 ;;
+  admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|installation_availability|installation_audit_replay) ;;
+  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [admission_protocol_proof|authoritative_admission|durable_projection|retained_delivery|installation_availability|installation_audit_replay]' >&2; exit 2 ;;
 esac
-if [[ "$target" != integration_test ]]; then
-  export RESTATE_PROOF_CLEANUP_INTERVAL=1s
-fi
+export RESTATE_PROOF_CLEANUP_INTERVAL=1s
 deadline=$(command -v timeout || command -v gtimeout) || {
   printf '%s\n' 'Restate acceptance FAILED: GNU timeout (coreutils) is required.' >&2
   exit 1
@@ -25,7 +23,7 @@ bounded 15s docker compose version
 
 # Compile before starting infrastructure; respect rust-toolchain.toml and Cargo.lock.
 rustc --version
-if [[ "$target" == integration_test ]]; then
+if [[ "$target" == retained_delivery ]]; then
   bounded 600s cargo test --locked -p ghinvite-github --features test-stub --lib stub::tests
 fi
 bounded 600s cargo test --locked -p ghinvite-workflows --features integration --test "$target" --no-run

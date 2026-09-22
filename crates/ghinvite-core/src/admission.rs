@@ -1,4 +1,4 @@
-//! Versioned browser admission commands. Identities are trusted caller assertions.
+//! Browser admission commands. Identities are trusted caller assertions.
 use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -24,19 +24,32 @@ impl From<AdmissionOperationId> for String {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Admit {
-    pub version: u32,
     pub link_id: InvitationLinkId,
     pub operation_id: AdmissionOperationId,
     pub requester_id: u64,
     pub justification: Option<String>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("justification is too long")]
+pub struct JustificationTooLong;
+
 impl Admit {
-    pub fn normalize(&mut self) {
+    /// Trim the justification (blank means none) and bound it to
+    /// [`MAX_JUSTIFICATION_BYTES`].
+    pub fn normalize(&mut self) -> Result<(), JustificationTooLong> {
         self.justification = self
             .justification
             .take()
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
+        if self
+            .justification
+            .as_ref()
+            .is_some_and(|s| s.len() > MAX_JUSTIFICATION_BYTES)
+        {
+            return Err(JustificationTooLong);
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -66,6 +79,15 @@ pub enum Rejection {
     InstallationUnavailable,
     RepositoryUnavailable,
 }
+impl From<crate::Inactive> for Rejection {
+    fn from(inactive: crate::Inactive) -> Self {
+        match inactive {
+            crate::Inactive::Revoked => Self::Revoked,
+            crate::Inactive::Expired => Self::Expired,
+            crate::Inactive::Exhausted => Self::Exhausted,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -94,8 +116,7 @@ pub struct RequesterPage {
     pub permission: Permission,
     pub approval_required: bool,
     /// Advisory only: current link guardrails and requester suppression permit
-    /// a fresh attempt. Missing on older responses means do not offer a form.
-    #[serde(default)]
+    /// a fresh attempt.
     pub can_start_fresh: bool,
     pub attempt: Option<Attempt>,
     pub request: Option<crate::storage::projection::RequestSnapshot>,

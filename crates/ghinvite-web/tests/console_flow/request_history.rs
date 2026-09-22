@@ -1,4 +1,6 @@
 use super::*;
+use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 
 #[tokio::test]
 async fn history_and_detail_require_current_account_admin_authority() {
@@ -9,7 +11,7 @@ async fn history_and_detail_require_current_account_admin_authority() {
     );
     let (app, cookie) = links_app(storage.clone(), "member").await;
     let link = list_link(1);
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     for path in [
         format!("/console/accounts/acme/links/{}/requests", link.id),
         format!(
@@ -47,10 +49,7 @@ async fn request_history_browser_server() {
     request.decline_reason = Some("Browser decision".into());
     for _ in 0..27 {
         request.id = ghinvite_core::RequestId::new();
-        storage
-            .insert_invitation_request_and_increment_uses(&request)
-            .await
-            .unwrap();
+        storage.seed_request(&request).await.unwrap();
     }
     let destination = format!("/console/accounts/octocat/links/{}", envelope.link.link_id);
     let fixture = axum::Router::new()
@@ -99,7 +98,7 @@ async fn request_history_handles_empty_missing_profiles_and_unavailable_projecti
         repo_id: 10,
         repo_full_name: "acme/api".into(),
     }];
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let history = format!("/console/accounts/acme/links/{}/requests", link.id);
     let html = response_html(identity_request(&app, &cookie, "GET", &history).await).await;
     assert!(html.contains("No projected requests in this range"));
@@ -115,10 +114,7 @@ async fn request_history_handles_empty_missing_profiles_and_unavailable_projecti
         decision_deadline: Some("2026-01-03T12:34:56Z".parse().unwrap()),
         created_at: "2026-01-01T00:00:00Z".parse().unwrap(),
     };
-    storage
-        .insert_invitation_request_and_increment_uses(&request)
-        .await
-        .unwrap();
+    storage.seed_request(&request).await.unwrap();
     let detail = format!("/console/accounts/acme/requests/{}", request.id);
     let pool =
         sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
@@ -189,10 +185,7 @@ async fn request_history_pages_and_terminal_details_conceal_foreign_resources() 
     template.state = ghinvite_core::RequestState::Cancelled;
     for _ in 0..27 {
         template.id = ghinvite_core::RequestId::new();
-        storage
-            .insert_invitation_request_and_increment_uses(&template)
-            .await
-            .unwrap();
+        storage.seed_request(&template).await.unwrap();
     }
     let base = format!("/console/accounts/octocat/links/{link}/requests");
     let html = response_html(identity_request(&app, &cookie, "GET", &base).await).await;
@@ -217,16 +210,26 @@ async fn request_history_pages_and_terminal_details_conceal_foreign_resources() 
         .unwrap();
     foreign.id = ghinvite_core::InvitationLinkId::new();
     foreign.account_id = 999;
+    foreign.installation_id = 999;
+    storage
+        .insert_installation(&ghinvite_core::Account {
+            installation_id: 999,
+            account_id: 999,
+            account_login: "foreign".into(),
+            account_type: ghinvite_core::AccountType::Organization,
+            installed_at: foreign.created_at,
+            uninstalled_at: None,
+            selected_repos: ghinvite_core::SelectedRepos::All,
+        })
+        .await
+        .unwrap();
     foreign.slug = ghinvite_core::Slug::from_string("ForeignHistory01".into()).unwrap();
     foreign.description = "Foreign private link".into();
-    storage.insert_invitation_link(&foreign).await.unwrap();
+    storage.seed_link(&foreign).await.unwrap();
     template.id = ghinvite_core::RequestId::new();
     template.invitation_link_id = foreign.id;
     template.justification = Some("Foreign private justification".into());
-    storage
-        .insert_invitation_request_and_increment_uses(&template)
-        .await
-        .unwrap();
+    storage.seed_request(&template).await.unwrap();
     for path in [
         format!("/console/accounts/octocat/links/{}/requests", foreign.id),
         format!("/console/accounts/octocat/requests/{}", template.id),
@@ -244,22 +247,23 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
     use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
     let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
     let request = &envelope.requests[0];
-    storage
-        .record_request_decision(&ghinvite_core::storage::RequestDecision {
-            request_id: request.request_id,
-            state: ghinvite_core::RequestState::Approved,
-            decided_by: Some(42),
-            decided_at: "2026-01-02T12:00:00Z".parse().unwrap(),
-            decline_reason: None,
-        })
-        .await
-        .unwrap();
+    {
+        let mut decided = storage
+            .get_invitation_request(request.request_id)
+            .await
+            .unwrap()
+            .unwrap();
+        decided.state = ghinvite_core::RequestState::Approved;
+        decided.decided_by = Some(42);
+        decided.decided_at = Some("2026-01-02T12:00:00Z".parse().unwrap());
+        decided.decline_reason = None;
+        storage.seed_decision(&decided).await.unwrap();
+    }
     let path = format!("/console/accounts/octocat/requests/{}", request.request_id);
     let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
     assert!(html.contains("No projected delivery outcome yet"));
     let mut receipt = CreateReceipt {
         command: CreateCommand {
-            version: 1,
             invitation_id: ghinvite_core::GithubInvitationId::new(),
             link_id: request.link_id,
             request_id: request.request_id,
@@ -277,7 +281,6 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
         },
         revision: 1,
         confirmed_at: None,
-        recovered: false,
     };
     for (outcome, label) in [
         (
@@ -316,16 +319,14 @@ async fn terminal_request_is_reachable_from_link_history_with_immutable_scope_an
     let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
     let id = envelope.requests[0].request_id;
     let link = envelope.link.link_id;
-    storage
-        .record_request_decision(&ghinvite_core::storage::RequestDecision {
-            request_id: id,
-            state: ghinvite_core::RequestState::Declined,
-            decided_by: Some(42),
-            decided_at: "2026-01-02T12:00:00Z".parse().unwrap(),
-            decline_reason: Some("Admin-only decision context".into()),
-        })
-        .await
-        .unwrap();
+    {
+        let mut decided = storage.get_invitation_request(id).await.unwrap().unwrap();
+        decided.state = ghinvite_core::RequestState::Declined;
+        decided.decided_by = Some(42);
+        decided.decided_at = Some("2026-01-02T12:00:00Z".parse().unwrap());
+        decided.decline_reason = Some("Admin-only decision context".into());
+        storage.seed_decision(&decided).await.unwrap();
+    }
     let base = "/console/accounts/octocat";
     let html = response_html(
         identity_request(&app, &cookie, "GET", &format!("{base}/links/{link}")).await,

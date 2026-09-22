@@ -63,7 +63,7 @@ fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
 }
 
 async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -74,6 +74,7 @@ async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
         storage,
         transport,
         Arc::new(RestateCommands::new(restate)),
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     build_app(state, tower_sessions::MemoryStore::default())

@@ -16,8 +16,11 @@ use crate::views::link_form::{
 };
 use crate::views::links::LinkFormValues;
 use chrono::{DateTime, Utc};
-use dioform_core::{FieldIdentity, Form, FormCore};
-use ghinvite_core::{InvitationLinkRepo, Permission};
+use dioform_core::FormCore;
+use ghinvite_core::storage::projection::{AccountAdmin, CreateLink};
+use ghinvite_core::{
+    Description, InternalNote, InvitationLinkId, InvitationLinkRepo, Permission, RepositoryScope,
+};
 use serde::Deserialize;
 use std::str::FromStr;
 
@@ -26,7 +29,7 @@ use std::str::FromStr;
 /// Text fields are `Option<String>` so a missing key and an empty value both
 /// reach [`Self::to_model`] unchanged; nothing is parsed or trimmed during
 /// deserialization.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CreateLinkSubmission {
     #[serde(default)]
     pub reload_repos: bool,
@@ -47,43 +50,13 @@ pub struct CreateLinkSubmission {
 impl CreateLinkSubmission {
     /// Parse the submission into the shared typed model.
     ///
-    /// Text fields are carried verbatim (a missing key becomes the empty
-    /// string, which is also what an empty control submits); the numeric
-    /// guardrails go through the shared parsers. A guardrail that fails to
-    /// parse is left blank in the model and its message attached to the
-    /// returned errors, keyed by field identity, so the validators do not
-    /// report the same field twice.
+    /// A missing key becomes the empty string, which is also what an empty
+    /// control submits; from there the mapping is the shared
+    /// [`LinkFormValues::to_model`], the same one the island mounts with.
     pub fn to_model(&self) -> (CreateLinkForm, LinkFormErrors) {
-        let fields = CreateLinkForm::fields();
-        let mut errors = LinkFormErrors::default();
-
-        // A guardrail parses to its value, or to blank plus a message on its
-        // field.
-        let mut parsed = |field: FieldIdentity, parsed: Result<Option<u32>, String>| {
-            parsed.unwrap_or_else(|message| {
-                errors.attach(Some(&field), message);
-                None
-            })
-        };
-        let max_uses = parsed(
-            fields.max_uses().identity(),
-            link_form::parse_max_uses(self.max_uses.as_deref().unwrap_or_default()),
-        );
-        let expires_in_days = parsed(
-            fields.expires_in_days().identity(),
-            link_form::parse_expires_in_days(self.expires_in_days.as_deref().unwrap_or_default()),
-        );
-
-        let model = CreateLinkForm {
-            description: self.description.clone().unwrap_or_default(),
-            internal_note: self.internal_note.clone().unwrap_or_default(),
-            permission: self.permission.clone().unwrap_or_default(),
-            approval_required: self.approval_required.is_some(),
-            max_uses,
-            expires_in_days,
-            repo_ids: self.repo_ids.clone(),
-        };
-        (model, errors)
+        self.clone()
+            .into_view_values(LinkFormErrors::default())
+            .to_model()
     }
 
     /// The submitted values as the form view model with `errors` attached.
@@ -123,8 +96,36 @@ pub struct ValidatedCreateLink {
     /// Otherwise `now` plus the submitted whole number of days.
     pub expires_at: Option<DateTime<Utc>>,
     /// The repository scope: a non-empty subset of the available
-    /// repositories, in the order the account makes them available.
+    /// repositories, ordered by repository ID.
     pub repos: Vec<InvitationLinkRepo>,
+}
+
+impl ValidatedCreateLink {
+    /// The creation command carrying this data under a creation identity:
+    /// the allocated link, the asserting admin, and the account's
+    /// installation. A retried submission replays when its command equals the
+    /// retained one.
+    pub fn into_command(
+        self,
+        link_id: InvitationLinkId,
+        admin: AccountAdmin,
+        account_id: u64,
+        installation_id: u64,
+    ) -> CreateLink {
+        CreateLink {
+            link_id,
+            admin,
+            account_id,
+            installation_id,
+            description: self.description,
+            internal_note: self.internal_note,
+            expires_at: self.expires_at,
+            max_uses: self.max_uses,
+            permission: self.permission,
+            approval_required: self.approval_required,
+            repos: self.repos,
+        }
+    }
 }
 
 /// Validate a submitted new invitation link form.
@@ -169,25 +170,30 @@ pub fn validate(
         None => Some(None),
         Some(days) => link_form::expiration_after(now, days).map(Some),
     };
-    let repos = link_form::repository_scope(&model.repo_ids, available_repos);
-    match (permission, expires_at, repos.is_empty()) {
-        (Some(permission), Some(expires_at), false) => Ok(ValidatedCreateLink {
-            description: model.description.trim().to_string(),
-            internal_note: normalize_internal_note(&model.internal_note),
-            permission,
-            approval_required: model.approval_required,
-            max_uses: model.max_uses,
-            expires_at,
-            repos,
-        }),
+    let repos = RepositoryScope::parse(link_form::repository_scope(
+        &model.repo_ids,
+        available_repos,
+    ));
+    match (
+        Description::parse(&model.description),
+        InternalNote::parse(&model.internal_note),
+        permission,
+        expires_at,
+        repos,
+    ) {
+        (Ok(description), Ok(internal_note), Some(permission), Some(expires_at), Ok(repos)) => {
+            Ok(ValidatedCreateLink {
+                description: description.into(),
+                internal_note: internal_note.map(String::from),
+                permission,
+                approval_required: model.approval_required,
+                max_uses: model.max_uses,
+                expires_at,
+                repos: repos.into(),
+            })
+        }
         _ => Err(Box::new(errors)),
     }
-}
-
-/// Internal note is optional and unvalidated: trimmed, and blank means none.
-fn normalize_internal_note(raw: &str) -> Option<String> {
-    let note = raw.trim();
-    (!note.is_empty()).then(|| note.to_string())
 }
 
 #[cfg(test)]
@@ -247,6 +253,7 @@ mod tests {
         assert_eq!(errors.summary, vec![SUMMARY.to_string()]);
         let filled = [
             &errors.description,
+            &errors.internal_note,
             &errors.permission,
             &errors.max_uses,
             &errors.expires_in_days,
@@ -618,13 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn repo_scope_follows_available_order_and_ignores_duplicates() {
-        let validated = validate(
-            &with_repo_ids(vec![12, 10, 12, 11, 10]),
-            &available_repos(),
-            now(),
-        )
-        .unwrap();
+    fn repo_scope_is_ordered_by_repository_id_and_ignores_duplicates() {
+        let mut available = available_repos();
+        available.reverse();
+        let validated =
+            validate(&with_repo_ids(vec![12, 10, 12, 11, 10]), &available, now()).unwrap();
 
         assert_eq!(
             validated.repos,
@@ -633,6 +638,45 @@ mod tests {
                 scope_repo(11, "acme/web"),
                 scope_repo(12, "acme/docs"),
             ]
+        );
+    }
+
+    #[test]
+    fn repo_scope_over_100_repositories_is_a_field_error() {
+        let available: Vec<_> = (1..=101)
+            .map(|id| repo(id, &format!("acme/repo-{id}")))
+            .collect();
+
+        let validated = validate(&with_repo_ids((1..=100).collect()), &available, now()).unwrap();
+        assert_eq!(validated.repos.len(), 100);
+
+        let errors = validate(&with_repo_ids((1..=101).collect()), &available, now()).unwrap_err();
+        assert_eq!(
+            single_field_errors(&errors).repo_scope.as_deref(),
+            Some(link_form::REPO_SCOPE_TOO_MANY)
+        );
+    }
+
+    #[test]
+    fn internal_note_over_16384_bytes_is_a_field_error() {
+        let with_note = |note: String| CreateLinkSubmission {
+            internal_note: Some(note),
+            ..valid_form()
+        };
+
+        let validated = validate(
+            &with_note(format!(" {} ", "x".repeat(16_384))),
+            &available_repos(),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(validated.internal_note, Some("x".repeat(16_384)));
+
+        let errors =
+            validate(&with_note("x".repeat(16_385)), &available_repos(), now()).unwrap_err();
+        assert_eq!(
+            single_field_errors(&errors).internal_note.as_deref(),
+            Some(link_form::INTERNAL_NOTE_TOO_LONG)
         );
     }
 }

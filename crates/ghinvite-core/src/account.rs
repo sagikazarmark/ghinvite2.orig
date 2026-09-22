@@ -51,7 +51,7 @@ pub struct Account {
 
 /// Either "all repos selected" or an explicit list of GitHub repo IDs.
 ///
-/// Wire format (matches `encode_selected_repos` in `crates/ghinvite-storage-sqlx/src/records.rs`):
+/// Wire format (matches [`crate::storage::installations::encode_selected_repos`]):
 /// - `All` ⇒ JSON string `"all"`
 /// - `Subset(v)` ⇒ JSON array of integers
 #[derive(Clone, Debug, PartialEq)]

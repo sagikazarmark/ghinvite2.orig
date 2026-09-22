@@ -1,6 +1,6 @@
 # Cloudflare Worker — Restate Service
 # Release: wrangler versions upload --config wrangler/restate-svc.toml
-# Register the immutable version Preview URL; see docs/deploy.md for bootstrap/cutover.
+# Register the immutable version Preview URL; see docs/deploy.md for bootstrap.
 # Build: run [build].command from the repository root with worker-build 0.8.1.
 
 name = "ghinvite-restate-svc"
@@ -19,8 +19,6 @@ database_id = "REPLACE_WITH_SAME_ID_AS_WEB_TOML"
 # Migrations are managed via wrangler/web.toml — do not apply here.
 
 [vars]
-# Switch only after the gates in docs/worker-admission-gate.md and admission-cutover.md.
-GHINVITE_ADMISSION_MODE = "legacy"
 GHINVITE_GITHUB_APP_ID = "REPLACE_WITH_GITHUB_APP_NUMERIC_ID"
 
 # Secrets (set via `wrangler secret put`):

@@ -2,15 +2,20 @@
 //!
 //! Restate exposes a simple HTTP surface for invoking services from outside
 //! the Restate runtime: `POST <ingress>/<ServiceName>/<Key>/<Method>` with a
-//! JSON body that matches the handler's `input` parameter. Send-style
-//! invocations (fire-and-forget) use a `?op=send` query parameter or a
-//! distinct endpoint; this wrapper exposes both `call` (request-response)
-//! and `send` (fire-and-forget) variants.
+//! JSON body that matches the handler's `input` parameter. Appending `/send`
+//! turns the request into a fire-and-forget invocation.
 //!
-//! The web binary uses `send` for every state-changing handler call so the
-//! HTTP request returns quickly (Restate handles retries / durability).
-//! `call` is reserved for the rare cases where the web wants the handler's
-//! return value before responding to the user.
+//! Two invocation styles, chosen by what the caller must know before it
+//! responds:
+//!
+//! - [`RestateClient::send`] enqueues the invocation and returns once Restate
+//!   has accepted it. Used where only durable hand-off matters, such as
+//!   webhook-driven commands that must acknowledge GitHub quickly.
+//! - [`RestateClient::call`] waits for the handler to finish and decodes its
+//!   output. Used when the web must observe completion before responding
+//!   (e.g. the installation setup return). Any non-success status is reported
+//!   as a rejection; [`crate::link_authority`] gives the invitation link
+//!   authority's statuses their meaning.
 
 use crate::error::{IngressFailure, Result, WebError};
 use reqwest::Client;
@@ -175,8 +180,8 @@ impl RestateClient {
         .await
     }
 
-    /// Request-response invocation. Use sparingly — most state changes use
-    /// `send`. Returns the handler's deserialized output type.
+    /// Request-response invocation: waits for the handler and returns its
+    /// deserialized output.
     pub async fn call<I: Serialize, O: DeserializeOwned>(
         &self,
         service: &str,
@@ -184,29 +189,21 @@ impl RestateClient {
         method: &str,
         input: &I,
     ) -> Result<O> {
-        self.call_inner(service, key, method, input, false).await
+        self.invoke(service, key, method, input)
+            .await
+            .map_err(WebError::Restate)
     }
 
-    /// Confirm authoritative completion. Transport failures remain unknown;
-    /// only documented terminal command statuses are definitive.
-    pub async fn authoritative_call<I: Serialize, O: DeserializeOwned>(
+    /// [`RestateClient::call`] with the failure left for the caller to
+    /// classify. A non-success status is [`IngressFailure::Rejected`]; a
+    /// transport failure, deadline or unusable body leaves the outcome unknown.
+    pub(crate) async fn invoke<I: Serialize, O: DeserializeOwned>(
         &self,
         service: &str,
         key: &str,
         method: &str,
         input: &I,
-    ) -> Result<O> {
-        self.call_inner(service, key, method, input, true).await
-    }
-
-    async fn call_inner<I: Serialize, O: DeserializeOwned>(
-        &self,
-        service: &str,
-        key: &str,
-        method: &str,
-        input: &I,
-        authoritative: bool,
-    ) -> Result<O> {
+    ) -> std::result::Result<O, IngressFailure> {
         // Same Send-bound rationale as `send` above.
         crate::wasm_compat::wasm_send(async move {
             let url = if key.is_empty() {
@@ -223,32 +220,20 @@ impl RestateClient {
                 .json(input)
                 .send()
                 .await
-                .map_err(|_| {
-                    WebError::Restate(IngressFailure::unreachable("ingress unreachable"))
-                })?;
+                .map_err(|_| IngressFailure::unreachable("ingress unreachable"))?;
             let status = resp.status();
             if !status.is_success() {
-                if authoritative {
-                    return Err(match status.as_u16() {
-                        400 => WebError::BadRequest("Invalid command.".into()),
-                        404 => WebError::NotFound,
-                        409 => WebError::Conflict,
-                        other => WebError::Restate(IngressFailure::OutcomeUnknown {
-                            detail: "ingress returned an unhandled status",
-                            status: Some(other),
-                        }),
-                    });
-                }
-                return Err(WebError::Restate(IngressFailure::Rejected {
+                return Err(IngressFailure::Rejected {
                     status: status.as_u16(),
-                }));
+                });
             }
-            let body = resp.bytes().await.map_err(|_| {
-                WebError::Restate(IngressFailure::OutcomeUnknown {
+            let body = resp
+                .bytes()
+                .await
+                .map_err(|_| IngressFailure::OutcomeUnknown {
                     detail: "ingress response body unreadable",
                     status: Some(status.as_u16()),
-                })
-            })?;
+                })?;
             // Restate may return an empty body for unit-returning handlers.
             let body: &[u8] = if body.is_empty() { b"null" } else { &body };
             // Deserializer errors can quote untrusted response values, including
@@ -256,10 +241,10 @@ impl RestateClient {
             serde_json::from_slice::<O>(body).map_err(|_| {
                 // The ingress answered; we could not use it. Keep the status it
                 // answered with — the outcome is unknown, not statusless.
-                WebError::Restate(IngressFailure::OutcomeUnknown {
+                IngressFailure::OutcomeUnknown {
                     detail: "ingress response could not be decoded",
                     status: Some(status.as_u16()),
-                })
+                }
             })
         })
         .await
@@ -277,7 +262,7 @@ mod tests {
     fn url_shape_for_keyed_send() {
         // We don't actually hit a server — just sanity check the URL builder
         // shape via a small introspection. The send method is async and
-        // does network I/O; deeper tests in Task 9+ use a wiremock server.
+        // does network I/O; `tests/restate_ingress.rs` uses a wiremock server.
         let c = RestateClient::new("http://127.0.0.1:8080").unwrap();
         // No public URL builder; we verified the test by inspection of the
         // method body. Construction and field check:

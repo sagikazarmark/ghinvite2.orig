@@ -5,38 +5,27 @@
 **Production rollout remains blocked under [#61](https://github.com/sagikazarmark/ghinvite2.orig/issues/61).**
 This procedure describes the target deployment and disposable remote rehearsal;
 documentation, passing local tests, and provisioning alone do not authorize rollout.
-#58/#59 completed native cutover tooling and local Worker/D1 verification. The
+#59 completed local Worker/D1 verification. The
 installation-availability integration (#60) and authenticated web ingress (#77)
 are implemented; their remote deployment evidence is still required.
 
 Run commands from the repository root against an explicitly selected Cloudflare
-account and Restate environment. For an existing installation, use this order:
+account and Restate environment, in this order:
 
-1. Close web ingress (including alternate Worker URLs), webhooks and scheduled
-   producers; set web `GHINVITE_ADMISSION_MODE=maintenance`. Inventory pinned
-   invocations, artifacts, bindings and uncertain external effects.
-2. Prepare the coordinated checkpoints and old-writer fencing/isolation from
-   [admission cutover](admission-cutover.md). Drain old installation invocations
-   on their original code before isolating their endpoints. The cutover SQLite
-   CLI is **not** a live D1 export/adoption tool; the remote procedure must first
-   be implemented and rehearsed under #61.
-3. Apply and verify remote migrations, then register a new immutable workflow
+1. Keep web ingress (including alternate Worker URLs), webhooks and scheduled
+   producers closed until readiness is verified.
+2. Apply and verify remote migrations, then register a new immutable workflow
    endpoint. Include [installation availability](installation-availability.md):
-   `Installation`, `AccountInstallationV1` and `InstallationProjectionV1` must ship
-   together. Unchanged wire interfaces do not imply unchanged journals.
-4. Complete the [invitation settlement cutover](invitation-settlement.md#deployment-and-pinned-invocations),
-   including versioned webhook/scheduler callers and retained receipts. Select
-   `authoritative` for the new workflow endpoint only through the cutover process.
-5. Deploy web in maintenance with its matching bindings. Follow the cutover
-   runbook for projection adoption, import, verification and activation/handoff,
-   then verify authoritative web operations on restricted rehearsal ingress before
-   reopening producers. Both configs default to `legacy`; neither a migration nor
-   a deployment switches authority. A fresh empty environment has no legacy rows
-   to import, but still requires the remote gates before authoritative live traffic.
+   `Installation`, `AccountInstallation` and `InstallationProjection` must ship
+   together, and so must the admission, lifecycle, delivery, settlement and
+   projection services bound by `build_endpoint`.
+3. Deploy web with its matching bindings, then verify authoritative web operations
+   on restricted rehearsal ingress before opening producers. Complete the remote
+   gates before live traffic.
 
-After activation/new-authority writes, recovery is compatible forward repair or
-reviewed reverse reconciliation, never a switch to stale SQL. Preserve admission
-outcomes, uses, deadlines, dispatch/create/settlement receipts and historical audits.
+Recovery is compatible forward repair or reviewed reverse reconciliation, never a
+switch to stale SQL. Preserve admission outcomes, uses, deadlines,
+dispatch/create/settlement receipts and historical audits.
 See [Worker recovery limits](worker-admission-gate.md#remaining-rollout-gates--fault-model-limits)
 and [rollback](#rollback) before any upgrade.
 
@@ -98,8 +87,8 @@ their environment-specific bindings.
 
 ### 3. Apply and verify remote database migrations
 
-For an existing database, close writers and retain the coordinated recovery point
-described above before applying changes. Rehearse on disposable D1 first. All
+For an existing database, close writers and retain a coordinated recovery point
+before applying changes. Rehearse on disposable D1 first. All
 commands in this section deliberately use **`--remote`** and the application's
 **`DB` binding**; local migration success is unrelated to remote schema state.
 
@@ -120,7 +109,7 @@ done
 Expect no unapplied migrations and ledger entries matching every SQL file in
 `migrations/` for the release (currently only `0001_initial.sql`). Compare the returned schema
 definitions with those migrations, including projection columns, delivery fences,
-settlement/member-webhook receipts, and the `admin_attempts_expiry` index. Expect
+settlement/member-webhook receipts, and the `attempt_continuations_expiry` index. Expect
 no foreign-key violations. Stop on missing/mismatched schema, migration errors or
 an unexpected UUID in Wrangler output. Apply migrations only via the web config,
 which declares `migrations_dir`; the workflow config is used here for readback.
@@ -204,10 +193,10 @@ first so `rust-toolchain.toml` applies. Do not put anything else in
 serve for `/`. (The `ssr_fixture` example in `crates/ghinvite-island` writes
 one for local smoke tests; re-run the script before deploying.)
 
-### 8. Create the workflow version, then deploy web in maintenance
+### 8. Create the workflow version, then deploy web
 
-Keep `preview_urls = true` in `wrangler/restate-svc.toml`. Provision secrets and
-the correct admission mode first. On first creation only, bootstrap the workflow
+Keep `preview_urls = true` in `wrangler/restate-svc.toml`. Provision secrets
+first. On first creation only, bootstrap the workflow
 Worker with `wrangler deploy --config wrangler/restate-svc.toml`; do not register
 its mutable hostname. For the release (and every subsequent upgrade):
 
@@ -218,14 +207,12 @@ wrangler versions upload --config wrangler/restate-svc.toml
 
 Record the full Worker version ID and its **version-prefixed Preview URL** from
 Wrangler output/Cloudflare Deployments, plus commit, artifact digest, SDK version,
-compatibility date, admission mode and binding identities. Use that exact URL for
+compatibility date and binding identities. Use that exact URL for
 registration. An alias such as `staging-...` can move and is not version-specific.
 `versions upload` makes the preview endpoint available without moving production
 hostname traffic; it does not select Restate's deployment.
 
-Deploy web with `GHINVITE_ADMISSION_MODE=maintenance` in its config while the
-cutover/rehearsal is in progress (restore the approved target mode only at the
-activation/readiness step):
+Deploy web, keeping its public ingress closed until readiness is verified:
 
 ```bash
 scripts/build-island.sh   # always first: Static Assets pick up dist/public
@@ -243,8 +230,8 @@ restate deployments list
 
 Verify the returned Restate deployment ID points to that exact version URL in the
 intended environment, and discovery exposes the expected services/handlers for
-the chosen admission mode. Registration changes routing for new invocations;
-keep producers closed until cutover and readiness are complete. Do not use
+this release. Registration changes routing for new invocations;
+keep producers closed until readiness is complete. Do not use
 `--force` to overwrite a deployment or bypass a compatibility refusal.
 
 Register a **new version URL on every workflow code/config release**, even if
@@ -255,17 +242,16 @@ replay in-flight SDK 0.10 journals against SDK 0.12 code.
 
 Retain each old version, exact endpoint, required compatible bindings/credentials
 and artifact while any invocation is pinned to it, including suspended workflows,
-retries and delayed timers. Inventory `pinned_deployment_id` using the
-[cutover inventory](admission-cutover.md#inventory-and-coordinated-checkpoint).
-Keep the original code reachable during an approved compatible drain, and verify
+retries and delayed timers. Inventory `pinned_deployment_id` in Restate's
+`sys_invocation` table. Keep the original code reachable during an approved compatible drain, and verify
 provider version/URL retention covers the drain and recovery window. Shared D1
 schema changes must remain compatible with every still-running pinned version.
 Deleting a version, disabling preview URLs, changing routes or revoking a needed
 credential can strand pinned work; a new registration does not migrate it.
 
-For an incompatible writer cutover, drain first or capture obligations/effects,
+For an incompatible handler change, drain first or capture obligations/effects,
 then permanently isolate the old URLs, controllers, DB access and outbound
-credentials before import/handoff. Preserve artifacts and journals for controlled
+credentials before handoff. Preserve artifacts and journals for controlled
 recovery even after isolation. A runtime pause/kill or SQL fence cannot stop an
 already-issued GitHub request. Retire a deployment only after every pinned
 invocation and uncertain effect is accounted for; never repoint its URL at new code.
@@ -280,10 +266,8 @@ development (`localhost`, loopback IPv4/IPv6).
 
 ### 10. Liveness and authenticated end-to-end readiness
 
-`/health` returns constant `ok`, including in maintenance: it does not query D1 or
-Restate. Maintenance returns 503 for other dynamic routes; static assets may
-still serve. After enabling the intended mode on restricted rehearsal
-ingress, these checks establish HTTP/asset liveness and webhook signature rejection:
+`/health` returns constant `ok`: it does not query D1 or Restate. On restricted
+rehearsal ingress, these checks establish HTTP/asset liveness and webhook signature rejection:
 
 ```bash
 export WEB_BASE_URL=https://YOUR_WEB_HOST
@@ -405,8 +389,8 @@ updating a secret alone is not proof that global invalidation has completed.
 
 Emergency cutover:
 
-1. Put web traffic into maintenance at the ingress, including alternate Worker
-   URLs, so no new session-dependent requests reach old-key deployments.
+1. Close web traffic at the ingress, including alternate Worker URLs, so no new
+   session-dependent requests reach old-key deployments.
 2. Stop routing to old versions and allow their in-flight requests to drain.
    Include requests awaiting GitHub or Restate; previously authorized operations
    are not retroactively cancelled by session invalidation.
@@ -481,16 +465,16 @@ Existing pinned version bindings must also retain working credentials until thei
 approved drain completes. A secret update on the current deployment does not prove
 older version URLs use that replacement. Inventory and rehearse credential rotation
 for retained versions under #61; if a key must be revoked immediately, isolate and
-account for affected work using the cutover recovery procedure.
+account for affected work using the
+[recovery procedure](admission-v1.md#recovery-and-audit-retention).
 
 ## Rollback
 
 Workflow recovery is governed by Restate deployment pinning, not by the Worker
 production hostname's traffic selection. Do not run a workflow `wrangler rollback`
 and assume it moves pinned invocations. Preserve their exact endpoints; select a
-compatible deployment for new work only after reviewing shared state/schema and
-the cutover phase. After activation or any new authoritative write, follow
-[forward repair/reconciliation](admission-cutover.md#recovery-restoration-and-audit-retention).
+compatible deployment for new work only after reviewing shared state/schema.
+Follow [forward repair/reconciliation](admission-v1.md#recovery-and-audit-retention).
 Never hot-swap code behind a registered URL or purge journals to bypass a failure.
 
 After session-key rotation, redeploy the earlier compatible code with the **current
@@ -503,11 +487,12 @@ wrangler versions list --config wrangler/web.toml
 wrangler rollback --config wrangler/web.toml
 ```
 
-Web rollback must also preserve the current ingress key, admission mode, command
-contracts and session protection. Worker code rollback does not revert D1 schema
+Web rollback must also preserve the current ingress key, command contracts and
+session protection. Worker code rollback does not revert D1 schema
 or Restate authority. A D1 snapshot alone is not a coordinated recovery point;
 independent restore can lose receipts and repeat effects. Retain paired recovery
-evidence and historical audit archives as specified in the cutover runbook.
+evidence and historical audit archives as specified in
+[admission recovery](admission-v1.md#recovery-and-audit-retention).
 
 ## Command validation and operator-owned execution (#61)
 
@@ -533,8 +518,7 @@ The operator must record reproducible evidence under #61 for:
 - Immutable endpoint/Restate deployment identities, signatures, authenticated
   ingress, discovery/routing, runtime compatibility and retained-version reachability.
 - Regional behavior and CPU/memory/subrequest/input/repository-scope limits.
-- Live D1 coordinated export/fence/adoption and restore rehearsal; old-writer and
-  issued-effect isolation; SDK 0.10 pinned-work inventory and compatible handoff.
+- Coordinated D1/Restate restore rehearsal and issued-effect isolation.
 - Administrative kill/purge, coordinated and independent restore, forward recovery,
   and preservation of operation/dispatch/create receipts and historical audits.
 - Installation availability and real GitHub effects/webhook evidence, remaining

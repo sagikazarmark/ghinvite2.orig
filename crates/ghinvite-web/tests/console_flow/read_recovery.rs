@@ -1,4 +1,5 @@
 use super::*;
+use ghinvite_core::storage::InstallationStorage;
 use std::sync::atomic::{AtomicU16, Ordering};
 
 struct MembershipFailureTransport {
@@ -53,7 +54,8 @@ async fn github_authorization_failures_use_dependency_statuses_without_disclosin
                 oauth: MockTransport::scripted(oauth_sign_in_expectations()),
                 status: upstream,
             }),
-            Arc::new(RecordingCommands::default()),
+            Arc::new(UnusedCommands),
+            std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
@@ -66,7 +68,7 @@ async fn github_authorization_failures_use_dependency_statuses_without_disclosin
 }
 
 #[tokio::test]
-async fn legacy_historical_settings_requires_current_authority_and_does_not_enable_writes() {
+async fn historical_settings_require_current_authority() {
     for (account_id, kind, authorized) in [
         (42, AccountType::User, true),
         (999, AccountType::User, false),
@@ -90,11 +92,11 @@ async fn legacy_historical_settings_requires_current_authority_and_does_not_enab
                 "https://api.github.com/user/memberships/orgs/historical",
                 serde_json::json!({"role": if authorized { "admin" } else { "member" }, "state":"active", "organization":{"id":9001}})));
         }
-        let commands = Arc::new(RecordingCommands::default());
         let state = AppState::new(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
-            commands.clone(),
+            Arc::new(UnusedCommands),
+            std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
@@ -118,24 +120,6 @@ async fn legacy_historical_settings_requires_current_authority_and_does_not_enab
         if authorized {
             assert!(html.contains("href=\"/install\""));
         }
-        for (method, path) in [
-            ("GET", "/console/accounts/historical/links/new"),
-            ("POST", "/console/accounts/historical/links"),
-            (
-                "POST",
-                "/console/accounts/historical/links/01ARZ3NDEKTSV4RRFFQ69G5FAV/revoke",
-            ),
-            (
-                "POST",
-                "/console/accounts/historical/requests/01ARZ3NDEKTSV4RRFFQ69G5FAV/approve",
-            ),
-        ] {
-            assert_eq!(
-                identity_request(&app, &cookie, method, path).await.status(),
-                StatusCode::NOT_FOUND
-            );
-        }
-        assert!(commands.calls.lock().unwrap().is_empty());
     }
 }
 
@@ -156,18 +140,22 @@ async fn authorization_read_failure_preserves_submission_without_account_disclos
             oauth_expectations().pop().unwrap(),
             installation_repos_expectation(),
         ]);
-        let (app, cookie, calls) =
-            build_signed_in_admin_app_with_recording_commands(expectations).await;
+        let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
         let csrf = common::csrf_token(&app, &cookie).await;
         let body = format!(
             "csrf_token={csrf}&description=Preserve+me&permission=push&repo_ids=10&repo_ids=11"
+        );
+        let identity = format!(
+            "link_id={}&anchor={}",
+            ghinvite_core::InvitationLinkId::new(),
+            Utc::now().timestamp()
         );
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/console/accounts/acme/links")
+                    .uri(format!("/console/accounts/acme/links?{identity}"))
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(body))
@@ -183,7 +171,13 @@ async fn authorization_read_failure_preserves_submission_without_account_disclos
         assert!(html.contains("name=\"repo_ids\" value=\"11\""));
         assert!(!html.contains("acme/api"));
         assert!(html.contains("Retry access verification"));
-        assert!(calls.lock().unwrap().is_empty());
+        // The retry resubmits to the same creation identity.
+        assert!(
+            html.contains(&identity.replace('&', "&amp;"))
+                || html.contains(&identity.replace('&', "&#38;")),
+            "{html}"
+        );
+        assert!(authority.calls().is_empty());
     }
 }
 
@@ -335,10 +329,10 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
         let state = AppState::new(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
-            Arc::new(RecordingCommands::default()),
+            Arc::new(UnusedCommands),
+            Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
-        )
-        .with_admission(Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()));
+        );
         let (app, cookie) = sign_in(build_app(state, tower_sessions::MemoryStore::default())).await;
         let response =
             identity_request(&app, &cookie, "GET", "/console/accounts/octocat/settings").await;
@@ -394,8 +388,7 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
             membership,
             installation_repos_expectation(),
         ]);
-        let (app, cookie, calls) =
-            build_signed_in_admin_app_with_recording_commands(expectations).await;
+        let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
         let response =
             identity_request(&app, &cookie, "GET", "/console/accounts/acme/links/new").await;
         assert_eq!(response.status(), status);
@@ -404,13 +397,18 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
         assert!(!html.contains("No repositories are available"));
         let csrf = common::csrf_token(&app, &cookie).await;
         let values = "description=Workshop&internal_note=Keep+this&permission=push&approval_required=true&max_uses=7&expires_in_days=9&repo_ids=10&repo_ids=11";
+        let uri = format!(
+            "/console/accounts/acme/links?link_id={}&anchor={}",
+            ghinvite_core::InvitationLinkId::new(),
+            Utc::now().timestamp()
+        );
         for (retry, expected_status) in [("", status), ("&reload_repos=true", StatusCode::OK)] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method("POST")
-                        .uri("/console/accounts/acme/links")
+                        .uri(&uri)
                         .header("cookie", &cookie)
                         .header("content-type", "application/x-www-form-urlencoded")
                         .body(Body::from(format!("csrf_token={csrf}&{values}{retry}")))
@@ -440,7 +438,7 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
                 assert!(html.contains("value=\"10\" checked"));
                 assert!(html.contains("value=\"11\" checked"));
             }
-            assert!(calls.lock().unwrap().is_empty());
+            assert!(authority.calls().is_empty());
         }
     }
 }
@@ -488,7 +486,8 @@ async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
                 oauth: MockTransport::scripted(oauth_sign_in_expectations()),
                 status,
             }),
-            Arc::new(RecordingCommands::default()),
+            Arc::new(UnusedCommands),
+            std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         ),
         tower_sessions::MemoryStore::default(),

@@ -105,6 +105,7 @@ fn failed_submission() -> LinkFormValues {
         internal_note: "Keep this note".to_string(),
         selected_repo_ids: vec![999],
         errors: LinkFormErrors {
+            internal_note: None,
             summary: vec![link_form::SUMMARY_MESSAGE.to_string()],
             description: Some(link_form::DESCRIPTION_REQUIRED.to_string()),
             permission: Some(link_form::PERMISSION_UNSUPPORTED.to_string()),
@@ -342,6 +343,7 @@ fn client_validation_failures_do_not_drop_server_only_diagnostics_on_first_rende
         internal_note: "Preserve the rejected request".into(),
         selected_repo_ids: vec![999],
         errors: LinkFormErrors {
+            internal_note: None,
             summary: summary.map(str::to_string).to_vec(),
             description: Some(link_form::DESCRIPTION_REQUIRED.into()),
             permission: Some(permission_error.into()),

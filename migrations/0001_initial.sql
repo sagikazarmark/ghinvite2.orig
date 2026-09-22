@@ -23,7 +23,8 @@ CREATE TABLE users (
   last_seen_at TEXT NOT NULL
 );
 
--- NULL projection revisions identify legacy-owned rows.
+-- Links and requests are written only by the projector; projection_revision is
+-- the snapshot revision it last applied, so a stale snapshot cannot regress a row.
 CREATE TABLE invitation_links (
   id                   TEXT    PRIMARY KEY,
   slug                 TEXT    NOT NULL UNIQUE,
@@ -40,9 +41,7 @@ CREATE TABLE invitation_links (
   revoked_at           TEXT,
   revoked_by           INTEGER REFERENCES users(user_id),
   description          TEXT    NOT NULL DEFAULT '',
-  projection_revision  INTEGER,
-  projection_content   TEXT,
-  projection_identity  TEXT
+  projection_revision  INTEGER NOT NULL
 );
 
 CREATE INDEX idx_invitation_links_account ON invitation_links(account_id);
@@ -66,18 +65,10 @@ CREATE TABLE invitation_requests (
   decided_at           TEXT,
   decline_reason       TEXT,
   created_at           TEXT    NOT NULL,
-  projection_revision  INTEGER,
-  projection_content   TEXT,
-  projection_identity  TEXT,
+  projection_revision  INTEGER NOT NULL,
   decision_deadline    TEXT,
   queue_account_id     INTEGER
 );
-
--- Admission uniqueness belongs to Restate. Reordered snapshots may temporarily
--- show multiple pending rows. Keep the legacy writer's guard until cutover.
-CREATE UNIQUE INDEX idx_one_pending_per_link_per_user
-  ON invitation_requests(invitation_link_id, requester_id)
-  WHERE state = 'pending' AND projection_revision IS NULL;
 
 CREATE INDEX idx_requests_link ON invitation_requests(invitation_link_id);
 
@@ -221,8 +212,7 @@ CREATE TABLE github_invitation_settlements (
   content        TEXT NOT NULL
 );
 
--- Defense in depth against an old invocation's delayed SQL write. Deployment
--- cutover must still drain/isolate legacy writers before enabling new ingress.
+-- Defense in depth against an old invocation's delayed SQL write.
 CREATE TRIGGER github_invitation_settlement_fence BEFORE UPDATE ON github_invitations
 WHEN EXISTS (SELECT 1 FROM github_invitation_settlements s WHERE s.invitation_id = OLD.id)
  AND (NEW.state IS NOT (SELECT json_extract(content, '$.state') FROM github_invitation_settlements WHERE invitation_id = OLD.id)
@@ -239,7 +229,7 @@ CREATE TABLE member_webhook_receipts (
 );
 
 -- Opaque, encrypted browser continuations. Never session authentication records.
-CREATE TABLE admin_attempts (
+CREATE TABLE attempt_continuations (
   scope       TEXT    NOT NULL,
   id          TEXT    NOT NULL,
   binding     TEXT    NOT NULL,
@@ -249,4 +239,4 @@ CREATE TABLE admin_attempts (
   UNIQUE (scope, binding)
 );
 
-CREATE INDEX admin_attempts_expiry ON admin_attempts(expires_at);
+CREATE INDEX attempt_continuations_expiry ON attempt_continuations(expires_at);

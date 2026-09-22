@@ -1,6 +1,6 @@
 //! Integration smoke for the public OAuth URL builder. Runs against
 //! `ghinvite-github`'s public re-exports — i.e. exercises the same import shape
-//! the web binary will use in Plan 4.
+//! the web binary uses.
 
 use ghinvite_github::oauth::{AuthorizeUrl, OAuthConfig};
 

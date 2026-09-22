@@ -47,7 +47,7 @@ async fn sqlite_records_are_protected_and_bound_to_the_requested_session() {
 }
 
 #[tokio::test]
-async fn wrong_keys_tampering_and_legacy_records_fail_closed_without_destroying_records() {
+async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destroying_records() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
@@ -74,13 +74,13 @@ async fn wrong_keys_tampering_and_legacy_records_fail_closed_without_destroying_
     changed_header[20] ^= 1;
     let mut unknown_format = raw.clone();
     unknown_format[0] ^= 1;
-    let plaintext_legacy = serde_json::to_vec(&store.load(&id).await.unwrap().unwrap()).unwrap();
+    let plaintext = serde_json::to_vec(&store.load(&id).await.unwrap().unwrap()).unwrap();
     for invalid in [
         tampered,
         changed_header,
         unknown_format,
         raw[..10].to_vec(),
-        plaintext_legacy,
+        plaintext,
     ] {
         backend
             .put(
@@ -111,6 +111,7 @@ async fn revocation_denies_a_late_write_even_when_the_session_record_is_recreate
         &ghinvite_web::session::Session {
             login: "octocat".into(),
             access_token: "secret-token".into(),
+            csrf_token: Some("csrf".into()),
             ..Default::default()
         },
     )

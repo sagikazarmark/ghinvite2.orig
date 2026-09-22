@@ -1,11 +1,17 @@
 //! Public ingress boundary: credentials stay on server-to-Restate requests.
 use ghinvite_web::restate_client::RestateAuth;
-use ghinvite_web::{RestateClient, WebError};
+use ghinvite_web::{LinkAuthority, RestateClient, WebError};
 use serde_json::{Value, json};
+use std::sync::Arc;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const API_KEY: &str = "test-ingress-key-do-not-expose";
+const CODE: &str = "abcdefgh12345678";
+
+fn authority(client: &RestateClient) -> LinkAuthority {
+    LinkAuthority::new(Arc::new(client.clone()))
+}
 
 #[test]
 fn bearer_credentials_require_https_except_on_loopback() {
@@ -98,9 +104,10 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .call::<_, u64>("Service", "", "read", &())
             .await
             .unwrap_err(),
-        client
-            .authoritative_call::<_, u64>("Object", "key", "read", &())
+        authority(&client)
+            .resolve(CODE)
             .await
+            .map_err(WebError::from)
             .unwrap_err(),
     ] {
         assert!(!format!("{error} {error:?}").contains(API_KEY));
@@ -117,9 +124,10 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .call::<_, Value>("Service", "", "read", &())
             .await
             .unwrap_err(),
-        client
-            .authoritative_call::<_, Value>("Object", "key", "read", &())
+        authority(&client)
+            .resolve(CODE)
             .await
+            .map_err(WebError::from)
             .unwrap_err(),
         client.send("Service", "", "write", &()).await.unwrap_err(),
     ] {
@@ -149,9 +157,10 @@ async fn rejected_credentials_and_upstream_errors_never_expose_response_content(
                     .call::<_, Value>("Installation", "42", "sync", &())
                     .await
                     .unwrap_err(),
-                client
-                    .authoritative_call::<_, Value>("InvitationLink", "link", "status", &())
+                authority(&client)
+                    .resolve(CODE)
                     .await
+                    .map_err(WebError::from)
                     .unwrap_err(),
                 client
                     .send("Installation", "42", "sync", &())
@@ -201,19 +210,21 @@ async fn configuration_requires_credentials_unless_local_mode_is_explicit() {
         .call::<_, ()>("Service", "", "read", &())
         .await
         .unwrap();
-    client
-        .authoritative_call::<_, ()>("Object", "key", "read", &())
-        .await
-        .unwrap();
+    let decision = serde_json::from_value(json!({
+        "link_id": ghinvite_core::InvitationLinkId::new(),
+        "request_id": ghinvite_core::RequestId::new(),
+        "operation_id": ghinvite_core::RequestId::new(),
+        "admin": {"account_id": 1, "user_id": 2}, "action": {"kind": "approve"}}))
+    .unwrap();
+    authority(&client).decision_status(decision).await.unwrap();
     client.send("Service", "", "write", &()).await.unwrap();
 }
 
 #[tokio::test]
-async fn authenticated_ingress_accepts_calls_authoritative_calls_and_sends() {
+async fn authenticated_ingress_accepts_calls_link_authority_calls_and_sends() {
     let ingress = MockServer::start().await;
     for endpoint in [
         "/Installation/42/sync",
-        "/InvitationLink/link/status",
         "/Installation/42/sync/send",
         "/Projection/apply",
         "/Projection/send/apply",
@@ -226,6 +237,14 @@ async fn authenticated_ingress_accepts_calls_authoritative_calls_and_sends() {
             .mount(&ingress)
             .await;
     }
+    let link = ghinvite_core::InvitationLinkId::new();
+    Mock::given(method("POST"))
+        .and(path(format!("/InvitationCode/{CODE}/resolve")))
+        .and(header("authorization", format!("Bearer {API_KEY}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(link))
+        .expect(1)
+        .mount(&ingress)
+        .await;
     let auth = RestateAuth::from_config(None, Some(API_KEY)).unwrap();
     let client = RestateClient::with_auth(ingress.uri(), auth).unwrap();
     let result: Value = client
@@ -233,11 +252,7 @@ async fn authenticated_ingress_accepts_calls_authoritative_calls_and_sends() {
         .await
         .unwrap();
     assert_eq!(result, json!({"ok": true}));
-    let result: Value = client
-        .authoritative_call("InvitationLink", "link", "status", &())
-        .await
-        .unwrap();
-    assert_eq!(result, json!({"ok": true}));
+    assert_eq!(authority(&client).resolve(CODE).await.unwrap(), link);
     client
         .send("Installation", "42", "sync", &())
         .await

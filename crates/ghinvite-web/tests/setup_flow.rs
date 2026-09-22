@@ -4,10 +4,8 @@ use ghinvite_core::{AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
 use ghinvite_web::commands::{
-    CreateInvitationLink, CreateInvitationLinkOutput, DecideInvitationRequest, GhinviteCommands,
-    OnboardInstallation, RecordInstallationUninstalled, RecordRepositorySelectionChange,
-    RepositorySelectionChangeSource, RevokeInvitationLink, RouteGithubInvitationWebhook,
-    SubmitInvitationRequest, UpdateInvitationLinkMetadata,
+    GhinviteCommands, OnboardInstallation, RecordInstallationUninstalled,
+    RecordRepositorySelectionChange, RepositorySelectionChangeSource, RouteGithubInvitationWebhook,
 };
 use ghinvite_web::{AppState, WebConfig, build_app};
 use std::collections::BTreeMap;
@@ -38,41 +36,6 @@ struct RecordingCommands {
 
 #[async_trait::async_trait]
 impl GhinviteCommands for RecordingCommands {
-    async fn create_invitation_link(
-        &self,
-        _command: CreateInvitationLink,
-    ) -> ghinvite_web::Result<CreateInvitationLinkOutput> {
-        panic!("unexpected create_invitation_link command")
-    }
-
-    async fn update_invitation_link_metadata(
-        &self,
-        _command: UpdateInvitationLinkMetadata,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected update_invitation_link_metadata command")
-    }
-
-    async fn revoke_invitation_link(
-        &self,
-        _command: RevokeInvitationLink,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected revoke_invitation_link command")
-    }
-
-    async fn submit_invitation_request(
-        &self,
-        _command: SubmitInvitationRequest,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected submit_invitation_request command")
-    }
-
-    async fn decide_invitation_request(
-        &self,
-        _command: DecideInvitationRequest,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected decide_invitation_request command")
-    }
-
     async fn onboard_installation(&self, command: OnboardInstallation) -> ghinvite_web::Result<()> {
         self.calls
             .lock()
@@ -119,7 +82,7 @@ impl GhinviteCommands for RecordingCommands {
 }
 
 async fn build_app_with(mock: MockTransport) -> (axum::Router, Arc<Mutex<Vec<RecordedCommand>>>) {
-    let storage: Arc<dyn ghinvite_core::storage::Storage> = Arc::new(
+    let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
@@ -131,6 +94,7 @@ async fn build_app_with(mock: MockTransport) -> (axum::Router, Arc<Mutex<Vec<Rec
         storage,
         transport,
         commands,
+        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     let session_store = tower_sessions::MemoryStore::default();

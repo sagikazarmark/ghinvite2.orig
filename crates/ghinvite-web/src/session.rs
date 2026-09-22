@@ -17,16 +17,14 @@ pub struct Session {
     /// `/oauth/callback`.
     pub oauth_csrf: Option<String>,
     /// Browser mutation authority, replaced with identity on authentication.
-    #[serde(default)]
+    /// Every authenticated session carries one; a record without it is invalid.
     pub csrf_token: Option<String>,
     /// Organization authority keyed by `"{user_id}:{account_id}"` (numeric
-    /// GitHub IDs), with a 60-second TTL. Legacy login-keyed entries deserialize
-    /// but are never used by authorization. Clear this map on session reset.
+    /// GitHub IDs), with a 60-second TTL. Clear this map on session reset.
     pub admin_checks: HashMap<String, AdminCheck>,
     /// Stored by `GET /login?return_to=<path>` and consumed by the OAuth callback
     /// to bounce the user back after sign-in. Only known relative paths are
     /// stored (open-redirect prevention).
-    #[serde(default)]
     pub return_to: Option<String>,
 }
 
@@ -39,6 +37,11 @@ pub struct AdminCheck {
 impl Session {
     pub fn is_authenticated(&self) -> bool {
         !self.login.is_empty()
+    }
+
+    /// Authenticated sessions always carry browser mutation authority.
+    fn is_well_formed(&self) -> bool {
+        !self.is_authenticated() || self.csrf_token.is_some()
     }
 }
 
@@ -63,39 +66,25 @@ pub fn validate_return_to(raw: &str) -> Option<String> {
 
 const SESSION_KEY: &str = "ghinvite";
 
-pub(crate) fn from_record(
-    record: &tower_sessions::session::Record,
-) -> Result<Session, serde_json::Error> {
-    record
-        .data
-        .get(SESSION_KEY)
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .map(Option::unwrap_or_default)
+/// Decode the stored session, or `None` when the record is malformed
+/// (unreadable, or authenticated without browser mutation authority).
+pub(crate) fn from_record(record: &tower_sessions::session::Record) -> Option<Session> {
+    let session = match record.data.get(SESSION_KEY) {
+        Some(value) => serde_json::from_value(value.clone()).ok()?,
+        None => Session::default(),
+    };
+    session.is_well_formed().then_some(session)
 }
 
 /// Read the session from a tower-sessions handle. Returns the default empty
-/// session if none is set.
+/// session if none is set. A malformed session confers no authority.
 pub async fn load(tower: &TowerSession) -> Result<Session, tower_sessions::session::Error> {
-    let mut session: Session = tower.get(SESSION_KEY).await?.unwrap_or_default();
-    // Legacy records have no stored token. Derive their authority from the
-    // existing unpredictable session ID without exposing that bearer ID. This
-    // is deterministic across concurrent requests and needs no write (including
-    // on 5xx responses, which tower-sessions does not persist). Successful OAuth
-    // always replaces it with a fresh random token and rotates the session ID.
-    if session.is_authenticated() && session.csrf_token.is_none() {
-        use base64::Engine;
-        use sha2::{Digest, Sha256};
-        if let Some(id) = tower.id() {
-            let mut hash = Sha256::new();
-            hash.update(b"ghinvite:legacy-browser-csrf:v1:");
-            hash.update(id.to_string().as_bytes());
-            session.csrf_token =
-                Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finalize()));
-        }
-    }
-    Ok(session)
+    let session: Session = tower.get(SESSION_KEY).await?.unwrap_or_default();
+    Ok(if session.is_well_formed() {
+        session
+    } else {
+        Session::default()
+    })
 }
 
 /// Persist the session.
@@ -157,6 +146,28 @@ mod tests {
             return_to: None,
         };
         assert!(s.is_authenticated());
+    }
+
+    #[test]
+    fn authenticated_record_without_csrf_token_is_malformed() {
+        let record = |session: serde_json::Value| tower_sessions::session::Record {
+            id: Default::default(),
+            data: [(SESSION_KEY.to_string(), session)].into(),
+            expiry_date: tower_sessions::cookie::time::OffsetDateTime::now_utc(),
+        };
+        let fields = |csrf_token: Option<&str>| {
+            serde_json::json!({
+                "user_id": 42, "login": "octocat", "access_token": "u_xxx",
+                "oauth_csrf": null, "csrf_token": csrf_token, "admin_checks": {},
+                "return_to": null
+            })
+        };
+        assert!(from_record(&record(fields(None))).is_none());
+        assert!(from_record(&record(fields(Some("token")))).is_some_and(|s| s.is_authenticated()));
+        assert!(
+            from_record(&record(serde_json::to_value(Session::default()).unwrap()))
+                .is_some_and(|s| !s.is_authenticated())
+        );
     }
 
     #[test]

@@ -30,7 +30,7 @@ transaction ends. Verify deployed data with `PRAGMA foreign_key_check`.
 - Files named `NNNN_short_description.sql` where `NNNN` is a zero-padded sequence number starting at `0001`.
 - SQLite-portable SQL only: no Postgres-isms, no `WITHOUT ROWID`, no `STRICT`.
 - No `CHECK (col IN (...))` on enum-shaped columns (see spec §7.2). Domain enums in `crates/ghinvite-core` validate values before write.
-- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format. Versioned projection batches use Chrono's equivalent UTC Serde encoding (`Z`), consistently for both writes and content checks.
+- Timestamps are ISO-8601 strings stored in `TEXT` columns, with chrono's default `to_rfc3339()` format. Projection batches use Chrono's equivalent UTC Serde encoding (`Z`), consistently for both writes and content checks.
 
 ### Audit ordering
 
@@ -54,19 +54,19 @@ Requester logins are optional enrichment in that same statement, with indexed
 user-ID lookups for the bounded page rather than separate per-request queries.
 
 The scalar seek bound plus exclusive `(time key, id)` boundary uses these indexes
-without a temporary sort. SQLite tests assert query-plan index/seek use; targeted
-D1 runtime tests execute the same query builder, including mixed encodings:
+without a temporary sort. SQLite tests assert query-plan index/seek use; the D1 storage gate executes the
+same query builder through the adapter, including mixed encodings, and asserts
+D1's plans:
 
 ```sh
-wrangler d1 migrations apply ghinvite --local --config wrangler/web.toml
-cargo test -p ghinvite-storage-d1 --features d1-suite --test d1_suite -- --ignored
+npm run test:storage --prefix tests/worker
 ```
 
 ### Pending queue
 
 `invitation_requests.queue_account_id` is the pending queue's derived key, taken
-from the owning invitation link. Portable SQLite triggers maintain it for both
-legacy and versioned projection writers (including link/request relationship
+from the owning invitation link. Portable SQLite triggers maintain it for every
+projection write (including link/request relationship
 updates and restoration of missing links). This is an indexing key, never an authorization source: the read also
 joins the current owning link and checks its account. An orphan link cannot
 establish account ownership and is excluded, as with the previous queue query.
@@ -86,26 +86,34 @@ and rows-read metadata through the authenticated Worker routes. Queue cursors
 are value boundaries, so a decided boundary row need not still exist; new or
 late-projected earlier requests appear on returning to the oldest page.
 
-### Admin attempts
+The console overview's pending count (`storage::pending_queue::COUNT_QUERY`) is
+one `COUNT(*)` statement with the same scoping (pending state, the
+`queue_account_id` seek, and the current owning link's account), so it counts
+exactly the rows the queue pages through without loading any of them.
 
-`admin_attempts` stores encrypted admin browser continuations separately from
-authentication sessions. A unique session/account scope plus logical binding
-atomically retains the first submitted input, including on D1. These are
+### Attempt continuations
+
+`attempt_continuations` stores encrypted browser continuations of in-flight
+console mutations and invitation requests separately from authentication
+sessions. A unique session-derived scope plus logical binding atomically retains
+the first submitted input, including on D1. A scope lists in retention (rowid)
+order. These are
 recovery records, not authoritative business receipts. Their `expires_at`
 integer is a Unix-second browser-session deadline (like session storage), not a
 domain timestamp. Reads exclude expired records. Each retention call deletes at
-most 100 expired continuations across all sessions, using the `admin_attempts_expiry`
+most 100 expired continuations across all sessions, using the `attempt_continuations_expiry`
 index, in both SQLite and D1. Cleanup runs with mutation traffic and
 does not affect authoritative Restate receipts or extend live session deadlines.
 
 ### Admission projection
 
-The v1 projection columns hold revisions, content/identity checks, deadlines,
-and audit identities. The `projection_assertions` table is transient within each
-SQLx transaction/D1 batch: named CHECK failures abort the entire application,
-and successful batches remove the assertion rows before commit. NULL revisions
-remain legacy-owned. The legacy pending-only uniqueness guard excludes versioned
-rows so reordered projections can converge without becoming admission authority.
+Links and requests are written only by the projector. `projection_revision` is
+the snapshot revision it last applied, so a stale snapshot cannot regress a row;
+there is no SQL uniqueness on requests, because Restate alone owns admission.
+Audit events keep their logical ID and content for immutability checks. The
+`projection_assertions` table is transient within each SQLx transaction/D1
+batch: named CHECK failures abort the entire application, and successful batches
+remove the assertion rows before commit.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
 ## Adding a new migration

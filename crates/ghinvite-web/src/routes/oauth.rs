@@ -185,7 +185,7 @@ async fn oauth_callback(
     let user_api = UserApiClient::new(state.github_transport.clone(), token.access_token.clone());
     let gh_user = user_api.get_user().await?;
 
-    // Upsert into our `users` table (Plan 1's storage).
+    // Upsert into our `users` table.
     let user_row = ghinvite_core::User {
         user_id: gh_user.id,
         login: gh_user.login.clone(),

@@ -1,12 +1,10 @@
 # Recoverable browser admission (#57)
 
-`AppState::with_admission(client)` opts an **isolated, migrated** web deployment
-into v1 admission, creation, metadata, revocation and decisions together. The
-native and Worker entry points do not enable it. Bind `admission_v1::bind` (which
-also binds `InvitationCodeV1`), the projector, lifecycle and delivery consumers
-on private Restate ingress. Never mix legacy and v1 writers for the same link.
-Migration #58 must populate invitation-code routing for imported links before
-opening browser traffic; missing authority is never reconstructed from SQL.
+The web `AppState::new` always routes admission, creation, metadata, revocation
+and decisions through v1 admission. `build_endpoint` binds `admission::bind`
+(which also binds `InvitationCode`), the projector, lifecycle and delivery
+consumers on private Restate ingress. Missing authority is never reconstructed
+from SQL.
 
 ## Browser protocol
 
@@ -19,7 +17,7 @@ are never admission input.
 
 Submission first calls `prepare_attempt`, binding normalized input to that ID in
 the link object, then calls `admit`. Preparation is **not acceptance**. It stores
-`v1/attempt/<id>` and a per-requester `v1/latest-attempt/<user>` recovery pointer.
+`attempt/<id>` and a per-requester `latest-attempt/<user>` recovery pointer.
 There is no automatic expiry and no request-history UI. Two tabs can have distinct
 IDs. Each can recover by its URL; opening the base invitation link recovers the
 latest prepared/decided attempt. Older URLs remain valid after the pointer moves.
@@ -42,12 +40,13 @@ same-attempt recovery is offered. If preparation never reached ingress, a separa
 current-page lookup restores the fresh action once authority is available again.
 The fresh form explicitly allocates a
 new ID and retains a link to the exact original, including across tabs. Before
-contacting ingress, the web caller explicitly saves normalized input in a separate
-protected session-backend record keyed by session, user, code and operation. These
-30-minute continuations are not login sessions and cannot confer authentication.
-Independent keys prevent concurrent tabs or session saves from erasing each
-other's input. A separate latest pointer is only a navigation aid; exact attempt
-URLs remain independent. This supplies reload/navigation recovery even if
+contacting ingress, the web caller retains normalized input as a sealed attempt
+continuation in SQL, scoped to session, user and code and identified by operation.
+Continuations expire with the browser session, are not login sessions and cannot
+confer authentication. One immutable record per operation prevents concurrent
+tabs or session saves from erasing each other's input. The most recently retained
+continuation is only a navigation aid; exact attempt URLs remain independent.
+This supplies reload/navigation recovery even if
 preparation never reaches Restate. Retained link-owned state provides permanent
 cross-session recovery once input reaches authority.
 No acceptance is claimed for locally saved or prepared input.
@@ -76,16 +75,16 @@ provides manual recovery; terminal status stops automatic refresh.
 
 `requester_page.can_start_fresh` is advisory, derived from authoritative link
 guardrails and the requester's current blocker (even when recovering an older
-receipt). Older responses missing this field default to false. Fresh inactive
-visits return the generic invitation-flow 404; existing authorized attempts and
-requests remain recoverable. Submission still reaches the replay lookup before
-admission eligibility, independently of page-time hints.
+receipt). Fresh inactive visits return the generic invitation-flow 404;
+existing authorized attempts and requests remain recoverable. Submission still
+reaches the replay lookup before admission eligibility, independently of
+page-time hints.
 
 ## Link routing and account admins
 
 Creation allocates a random invitation code in the journaled creation decision.
 Before acknowledgement, the link registers its immutable code-to-ID mapping in
-`InvitationCodeV1`. The registry never calls a link, preventing a synchronous
+`InvitationCode`. The registry never calls a link, preventing a synchronous
 exclusive-object cycle. Resolution needs no SQL and always routes commands to the
 canonical link ID. Registry state is retained alongside link authority.
 
@@ -95,7 +94,8 @@ expiration across retries. Current GitHub-derived account authorization and
 repository selection still run before creation. Metadata/detail/revoke use the
 link object with immutable account/user assertions rather than projected link
 authorization. Metadata has a separate optional current snapshot: retained
-creation input never changes, and older snapshot encodings remain readable.
+creation input never changes; the snapshot carries metadata only once it has
+been edited.
 The shared SQLx/D1 projection updates metadata using monotonic link revisions.
 
 ## Verification

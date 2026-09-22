@@ -45,12 +45,24 @@ pub struct PendingPage {
     pub next: Option<PendingBoundary>,
 }
 
+/// One [`query`] result row: a [`PendingRow`] as JSON text.
+#[derive(Debug, Deserialize)]
+pub struct JsonRow {
+    pub row_json: String,
+}
+
+/// The [`COUNT_QUERY`] result row.
+#[derive(Debug, Deserialize)]
+pub struct CountRow {
+    pub pending: u64,
+}
+
 impl PendingPage {
-    pub fn from_json(rows: Vec<String>) -> super::Result<Self> {
+    pub fn from_json(rows: Vec<JsonRow>) -> super::Result<Self> {
         let mut rows = rows
             .into_iter()
             .map(|row| {
-                serde_json::from_str::<PendingRow>(&row)
+                serde_json::from_str::<PendingRow>(&row.row_json)
                     .map_err(|e| super::Error::Corrupt(e.to_string()))
             })
             .collect::<super::Result<Vec<_>>>()?;
@@ -69,10 +81,18 @@ impl PendingPage {
 // index only seeks the timestamp on SQLite). Both components are fixed width.
 const SEEK_KEY: &str = "(substr(r.created_at,1,19) || '.' || substr(CASE WHEN substr(r.created_at,20,1) = '.' THEN replace(replace(substr(r.created_at,21),'+00:00',''),'Z','') ELSE '' END || '000000000',1,9) || '/' || r.id)";
 
+/// Pending-request count for one account, with the same scoping as [`query`]:
+/// pending state, seeked by the derived `queue_account_id`, and authorized by
+/// the current owning link's account (requests whose link is missing are not
+/// counted). One statement over `idx_pending_queue_seek`; no rows are loaded.
+pub const COUNT_QUERY: &str = "SELECT COUNT(*) AS pending FROM invitation_requests r
+      JOIN invitation_links owner ON owner.id = r.invitation_link_id AND owner.account_id = ?1
+      WHERE r.queue_account_id = ?1 AND r.state = 'pending'";
+
 /// One statement, at most 26 requests. Related links/repository scopes are
 /// materialized once per distinct page link, not once per request. No total count
 /// or all-account hydration. Missing users retain the historical ID fallback;
-/// links without a verifiable owner are excluded, as in the legacy queue.
+/// links without a verifiable owner are excluded.
 pub fn query(after: bool) -> String {
     let seek = if after {
         format!("AND {SEEK_KEY} > ?2")

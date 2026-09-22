@@ -16,7 +16,6 @@ for (const { name, scriptPath } of configurations) {
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
     kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
     bindings: {
-      GHINVITE_ADMISSION_MODE: 'authoritative',
       GHINVITE_BASE_URL: 'https://production.test', GHINVITE_SESSION_SECRET: '07'.repeat(32),
       GHINVITE_RESTATE_INGRESS: 'https://restate.invalid', GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
@@ -37,7 +36,7 @@ for (const { name, scriptPath } of configurations) {
       });
       assert.equal(response.status, 200);
       const manifest = await response.json();
-      for (const name of ['InvitationLinkV1', 'InvitationProjectionV1', 'Installation', 'AccountInstallationV1', 'InstallationProjectionV1']) {
+      for (const name of ['InvitationLink', 'InvitationProjection', 'Installation', 'AccountInstallation', 'InstallationProjection']) {
         assert.ok(manifest.services.some(service => service.name === name), `${name} must be packaged`);
       }
     }
@@ -47,7 +46,7 @@ for (const { name, scriptPath } of configurations) {
     const paths = name === 'ghinvite-web'
       ? [...source.matchAll(/method == "([^"]+)"|^\s*"([^"]+)"\s*=>/gm)].map(match => `/__fixture/${match[1] || match[2]}`)
       : [...source.matchAll(/"(\/__fixture\/[^\"]+)"/g)].map(match => match[1]);
-    assert.ok(paths.length >= 4, 'fixture inventory must not be empty');
+    assert.ok(paths.length >= 3, 'fixture inventory must not be empty');
     for (const path of new Set(paths)) {
       const response = await mf.dispatchFetch(`https://production.test${path}`, {
         method: 'POST', body: 'null', headers: { 'content-type': 'application/json' }, redirect: 'manual',

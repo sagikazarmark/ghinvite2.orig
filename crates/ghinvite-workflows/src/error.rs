@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn storage_conflict_is_terminal() {
         let e = HandlerError::Storage(ghinvite_core::storage::Error::Conflict(
-            ConflictKind::DuplicateSlug,
+            ConflictKind::DuplicateId,
         ));
         assert!(e.is_terminal());
     }

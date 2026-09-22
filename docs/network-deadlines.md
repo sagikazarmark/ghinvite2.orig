@@ -5,7 +5,7 @@ Production native and Worker callers apply the same per-HTTP-request policy:
 | Client | Deadline | Completion boundary |
 |---|---|---|
 | GitHub `ReqwestTransport` | 30 seconds | Response headers and complete body |
-| Restate `call` / `authoritative_call` | 15 seconds | Response headers and complete successful response body |
+| Restate `call` (including every `LinkAuthority` call) | 15 seconds | Response headers and complete successful response body |
 | Restate `send` | 15 seconds | Ingress acknowledgement headers; the unused body is dropped |
 
 These are total request deadlines, not idle/read timeouts. Receiving headers or
@@ -59,7 +59,7 @@ The transport gate compiles the actual web Worker and invokes public production
 clients via feature-gated test routes. Miniflare upstreams leave headers or a
 partially delivered body pending indefinitely; only the production Fetch deadline
 can return the result. An outer watchdog fails the test rather than forwarding a
-synthetic timeout. It covers GitHub and all three Restate invocation methods.
+synthetic timeout. It covers GitHub and both Restate invocation methods.
 
 The admission gate runs real Restate, workflows/web Workers, and D1. Both header
 and body stalls verify unknown delivery receipts, no second PUT after replay,

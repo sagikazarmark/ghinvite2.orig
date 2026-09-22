@@ -1,4 +1,4 @@
-//! Versioned commands for the private, link-owned request lifecycle interface.
+//! Commands for the private, link-owned request lifecycle interface.
 use crate::storage::projection::{AccountAdmin, RequestSnapshot};
 use crate::{InvitationLinkId, RequestId};
 use chrono::{DateTime, Utc};
@@ -41,7 +41,6 @@ pub enum DecisionAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DecideRequest {
-    pub version: u32,
     pub link_id: InvitationLinkId,
     pub request_id: RequestId,
     pub operation_id: LifecycleOperationId,

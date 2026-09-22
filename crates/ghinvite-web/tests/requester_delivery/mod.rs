@@ -1,5 +1,7 @@
 use super::*;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
+use ghinvite_core::storage::projection::fixture::Seed;
+use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
 use ghinvite_storage_sqlx::SqlxStorage;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path_regex};
@@ -11,12 +13,12 @@ struct DeliveryFixture {
     invitations: Vec<GithubInvitation>,
 }
 
-async fn fixture(authoritative: bool) -> DeliveryFixture {
+async fn fixture() -> DeliveryFixture {
     let storage = Arc::new(SqlxStorage::in_memory().await.unwrap());
-    fixture_with_storage(authoritative, storage).await
+    fixture_with_storage(storage).await
 }
 
-async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) -> DeliveryFixture {
+async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
     storage
         .insert_installation(&sample_account())
         .await
@@ -53,7 +55,7 @@ async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) ->
         repo_full_name: format!("acme/{name}"),
     })
     .collect();
-    storage.insert_invitation_link(&link).await.unwrap();
+    storage.seed_link(&link).await.unwrap();
     let mut request = request_with_state(
         RequestId::new(),
         link.id,
@@ -61,10 +63,7 @@ async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) ->
         RequestState::Approved,
     );
     request.justification = Some("private internal justification".into());
-    storage
-        .insert_invitation_request_and_increment_uses(&request)
-        .await
-        .unwrap();
+    storage.seed_request(&request).await.unwrap();
     let mut invitations = vec![];
     for (i, repo) in link.repos.iter().take(9).enumerate() {
         let invitation = GithubInvitation {
@@ -94,7 +93,6 @@ async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) ->
         storage
             .project_delivery(&CreateReceipt {
                 command: CreateCommand {
-                    version: 1,
                     invitation_id: invitation.id,
                     link_id: link.id,
                     request_id: request.id,
@@ -110,7 +108,6 @@ async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) ->
                 confirmed_at: outcome.confirmed().then(Utc::now),
                 outcome,
                 revision: 1,
-                recovered: false,
             })
             .await
             .unwrap();
@@ -137,20 +134,16 @@ async fn fixture_with_storage(authoritative: bool, storage: Arc<SqlxStorage>) ->
         ])))
         .mount(&ingress)
         .await;
-    let mut state = AppState::new(
+    let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(oauth_expectations(
             "octocat",
             REQUESTER_ID,
         ))),
-        Arc::new(RecordingCommands::default()),
+        Arc::new(UnusedCommands),
+        Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
-    if authoritative {
-        state = state.with_admission(Arc::new(
-            ghinvite_web::RestateClient::new(ingress.uri()).unwrap(),
-        ));
-    }
     DeliveryFixture {
         app: build_app(state, tower_sessions::MemoryStore::default()),
         storage,
@@ -167,22 +160,22 @@ async fn failed_observations_preserve_known_outcomes_and_mark_updates_unavailabl
         sqlx::SqlitePool::connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
             .await
             .unwrap();
-    let legacy = fixture_with_storage(false, storage).await;
-    let cookie = sign_in(legacy.app.clone()).await;
+    let observed = fixture_with_storage(storage).await;
+    let cookie = sign_in(observed.app.clone()).await;
     // A database read failure is distinct from an empty/missing projection.
     sqlx::query("DROP TABLE github_invitations")
         .execute(&pool)
         .await
         .unwrap();
-    let html = status_html(&legacy, &cookie).await;
+    let html = status_html(&observed, &cookie).await;
     assert!(html.contains("GitHub invitation created"));
     assert!(html.contains("Latest status updates are unavailable"));
     assert!(!html.contains("no such table"));
-    drop(legacy);
+    drop(observed);
     pool.close().await;
     std::fs::remove_file(path).unwrap();
 
-    let fixture = fixture(true).await;
+    let fixture = fixture().await;
     Mock::given(path_regex("/delivery_progress$"))
         .respond_with(ResponseTemplate::new(503).set_body_string("private upstream diagnostic"))
         .with_priority(1)
@@ -198,23 +191,21 @@ async fn failed_observations_preserve_known_outcomes_and_mark_updates_unavailabl
 
 #[tokio::test]
 async fn receipt_free_already_collaborator_is_not_reported_as_invitation_acceptance() {
-    for authoritative in [true, false] {
-        let fixture = fixture(authoritative).await;
-        let mut invitation = fixture.invitations[0].clone();
-        invitation.id = GithubInvitationId::new();
-        invitation.repo_id = 13; // Repository with no retained create receipt.
-        invitation.github_invitation_id = None;
-        invitation.state = InvitationState::Accepted;
-        fixture
-            .storage
-            .insert_github_invitation(&invitation)
-            .await
-            .unwrap();
-        let cookie = sign_in(fixture.app.clone()).await;
-        let html = status_html(&fixture, &cookie).await;
-        assert!(!html.contains("Your GitHub invitation was accepted"));
-        assert_eq!(html.matches("Already a collaborator").count(), 2);
-    }
+    let fixture = fixture().await;
+    let mut invitation = fixture.invitations[0].clone();
+    invitation.id = GithubInvitationId::new();
+    invitation.repo_id = 13; // Repository with no retained create receipt.
+    invitation.github_invitation_id = None;
+    invitation.state = InvitationState::Accepted;
+    fixture
+        .storage
+        .insert_github_invitation(&invitation)
+        .await
+        .unwrap();
+    let cookie = sign_in(fixture.app.clone()).await;
+    let html = status_html(&fixture, &cookie).await;
+    assert!(!html.contains("Your GitHub invitation was accepted"));
+    assert_eq!(html.matches("Already a collaborator").count(), 2);
 }
 
 async fn settle(fixture: &DeliveryFixture) {
@@ -226,13 +217,7 @@ async fn settle(fixture: &DeliveryFixture) {
     ]) {
         fixture
             .storage
-            .update_github_invitation(&ghinvite_core::storage::GithubInvitationUpdate {
-                id: invitation.id,
-                state,
-                github_invitation_id: invitation.github_invitation_id,
-                error_message: None,
-                updated_at: Utc::now(),
-            })
+            .debug_set_github_invitation(invitation.id, state, invitation.github_invitation_id)
             .await
             .unwrap();
     }
@@ -257,47 +242,42 @@ async fn status_html(fixture: &DeliveryFixture, cookie: &str) -> String {
 
 #[tokio::test]
 async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes() {
-    for authoritative in [true, false] {
-        let fixture = fixture(authoritative).await;
-        let cookie = sign_in(fixture.app.clone()).await;
-        assert!(
-            status_html(&fixture, &cookie)
-                .await
-                .contains("GitHub invitation created")
-        );
-        settle(&fixture).await;
-        let html = status_html(&fixture, &cookie).await;
-        for label in [
-            "Repository access accepted",
-            "GitHub invitation declined",
-            "GitHub invitation cancelled",
-            "GitHub invitation expired",
-        ] {
-            assert!(
-                html.contains(label),
-                "missing {label} (authoritative={authoritative})"
-            );
-        }
-        assert!(!html.contains("private "));
-        assert!(!html.contains("AI coding workshop"));
-        assert!(!html.contains("Submit request"));
-        assert!(
-            fixture
-                .ingress
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .all(|r| ["resolve", "requester_page", "delivery_progress"]
-                    .contains(&r.url.path().rsplit('/').next().unwrap()))
-        );
+    let fixture = fixture().await;
+    let cookie = sign_in(fixture.app.clone()).await;
+    assert!(
+        status_html(&fixture, &cookie)
+            .await
+            .contains("GitHub invitation created")
+    );
+    settle(&fixture).await;
+    let html = status_html(&fixture, &cookie).await;
+    for label in [
+        "Repository access accepted",
+        "GitHub invitation declined",
+        "GitHub invitation cancelled",
+        "GitHub invitation expired",
+    ] {
+        assert!(html.contains(label), "missing {label}");
     }
+    assert!(!html.contains("private "));
+    assert!(!html.contains("AI coding workshop"));
+    assert!(!html.contains("Submit request"));
+    assert!(
+        fixture
+            .ingress
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| ["resolve", "requester_page", "delivery_progress"]
+                .contains(&r.url.path().rsplit('/').next().unwrap()))
+    );
 }
 
 #[tokio::test]
 async fn mixed_delivery_gives_outcome_specific_next_steps_without_claiming_missing_delivery_failed()
 {
-    let fixture = fixture(true).await;
+    let fixture = fixture().await;
     let cookie = sign_in(fixture.app.clone()).await;
     let html = status_html(&fixture, &cookie).await;
     for copy in [
@@ -340,7 +320,7 @@ async fn delivery_browser_server() {
             axum::routing::get(move || {
                 let current = login_current.clone();
                 async move {
-                    let fixture = fixture(true).await;
+                    let fixture = fixture().await;
                     let cookie = sign_in(fixture.app.clone()).await;
                     *current.lock().await = Some(fixture);
                     (

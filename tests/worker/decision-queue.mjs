@@ -15,7 +15,7 @@ const mf = new Miniflare({
   compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
   kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
   bindings: {
-    GHINVITE_ADMISSION_MODE: 'authoritative', GHINVITE_BASE_URL: 'https://queue.test',
+    GHINVITE_BASE_URL: 'https://queue.test',
     GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: 'https://restate.test',
     GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
@@ -24,7 +24,7 @@ const mf = new Miniflare({
   async outboundService(request) {
     if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
     if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
-    if (/^https:\/\/restate.test\/InvitationLinkV1\/[A-Z0-9]+\/decide$/.test(request.url)) {
+    if (/^https:\/\/restate.test\/InvitationLink\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
       assert.ok(receipt, 'unexpected decision');
       if (loseAcknowledgement) { loseAcknowledgement = false; return new Response('acknowledgement lost', { status: 503 }); }
@@ -44,11 +44,11 @@ try {
   for (const user of [42, 99]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   let request = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
-  await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-    VALUES (?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture')`).bind(link).run();
+  await db.prepare(`INSERT INTO invitation_links (id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+    VALUES (?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture',1)`).bind(link).run();
   await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(link).run();
-  await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline)
-    VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z')`).bind(request, link).run();
+  await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline,projection_revision)
+    VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z',1)`).bind(request, link).run();
 
   const login = await mf.dispatchFetch('https://queue.test/login', { redirect: 'manual' });
   const state = new URL(login.headers.get('location')).searchParams.get('state');
@@ -136,7 +136,7 @@ try {
   // Expired records from other sessions are physically reclaimed in bounded
   // batches by retention, while the live original input remains recoverable.
   await db.batch(Array.from({ length: 205 }, (_, i) => db.prepare(
-    'INSERT INTO admin_attempts(scope,id,binding,payload,expires_at) VALUES (?,?,?,?,?)'
+    'INSERT INTO attempt_continuations(scope,id,binding,payload,expires_at) VALUES (?,?,?,?,?)'
   ).bind('expired-session', `expired-${i}`, `expired-${i}`, 'expired-ciphertext', 1)));
   const retryOriginal = () => mf.dispatchFetch(`https://queue.test${recovery}`, {
     method: 'POST', headers: { cookie, 'content-type': 'application/x-www-form-urlencoded' }, redirect: 'manual',
@@ -146,7 +146,7 @@ try {
   assert.equal(retry.status, 303);
   assert.deepEqual(decisions.at(-1), original);
   for (const remaining of [105, 5, 0]) {
-    assert.equal(await db.prepare("SELECT count(*) AS count FROM admin_attempts WHERE scope='expired-session'").first('count'), remaining);
+    assert.equal(await db.prepare("SELECT count(*) AS count FROM attempt_continuations WHERE scope='expired-session'").first('count'), remaining);
     if (remaining > 0) assert.equal((await retryOriginal()).status, 303);
   }
   assert.deepEqual(decisions.at(-1), original);
@@ -178,13 +178,19 @@ try {
   assert.ok(first.html.includes('>Deadline fixture</a>'));
   // Work stays page-bounded as another account and terminal history grow.
   const otherLink = '01ARZ3NDEKTSV4RRFFQ69G5FD0';
-  await db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-    VALUES(?,'OtherQueue000001',1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account')`).bind(otherLink).run();
+  await db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+    VALUES(?,'OtherQueue000001',1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account',1)`).bind(otherLink).run();
   await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
     `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,projection_revision)
      VALUES(?,?,99,?,'2025-01-01T00:00:00Z',1)`
   ).bind(id(i + 200), i % 2 ? otherLink : link, i % 2 ? 'pending' : 'approved')));
   assert.ok(!(await page()).html.includes('Private other account'));
+  // The overview counts the same account-scoped pending rows in one D1 statement.
+  const overview = await mf.dispatchFetch('https://queue.test/console/accounts/octocat', { headers: { cookie, 'x-test-observe-d1': '1' } });
+  assert.equal(overview.status, 200, await overview.clone().text());
+  const overviewPlans = JSON.parse(overview.headers.get('x-test-d1-plans')).join('\n');
+  assert.match(overviewPlans, /idx_pending_queue_seek \(queue_account_id=\?/, overviewPlans);
+  assert.ok((await overview.text()).includes('53 pending invitation requests need an account admin decision.'));
   // A large equal-time prefix must be skipped by the index, not scanned then
   // filtered on request ID. Keep every earlier request pending while seeking.
   await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
@@ -229,8 +235,8 @@ try {
     db.prepare('PRAGMA defer_foreign_keys=ON'),
     db.prepare('DELETE FROM invitation_links WHERE id=?').bind(link),
     db.prepare('UPDATE invitation_requests SET queue_account_id=NULL WHERE invitation_link_id=?').bind(link),
-    db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description)
-      VALUES(?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored')`).bind(link),
+    db.prepare(`INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+      VALUES(?,'QueueDeadline001',1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored',1)`).bind(link),
   ]);
   assert.ok((await page()).html.includes('>Restored</a>'));
   const failed = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', {

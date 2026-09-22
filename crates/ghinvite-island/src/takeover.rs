@@ -193,6 +193,7 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     }
     if dom.internal_note.edited_text() {
         adopted.internal_note = dom.internal_note.value.clone();
+        adopted.errors.retire(&fields.internal_note().identity());
     }
     if dom.permission.edited() {
         adopted.permission = dom.permission.value.clone();

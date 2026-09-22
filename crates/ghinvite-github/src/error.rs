@@ -25,9 +25,9 @@ pub struct RateLimit {
     pub retry_after: Option<Duration>,
 }
 
-/// All failure modes a GitHub-side call can produce. Callers in Plan 3 / Plan 4
-/// will branch on these variants; in particular `Error::Status(404)` on a
-/// `get_repo` is *not* fatal — it just means the App lost access.
+/// All failure modes a GitHub-side call can produce. Callers branch on these
+/// variants; in particular `Error::Status(404)` on a `get_repo` is *not*
+/// fatal — it just means the App lost access.
 ///
 /// Every string in here is a diagnostic, not a payload. Error values are
 /// formatted into logs and into Restate terminal errors long after the request
@@ -95,7 +95,7 @@ pub enum Error {
 
 impl Error {
     /// Convenience: extract the status code of any response-carrying variant,
-    /// throttled responses included. Plan 3 handlers branch on specific codes
+    /// throttled responses included. Handlers branch on specific codes
     /// (404 = lost access, 422 = already a member, etc.), so giving them this
     /// rather than `match`ing keeps call sites tight.
     pub fn status(&self) -> Option<u16> {

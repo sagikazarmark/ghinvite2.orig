@@ -214,13 +214,6 @@ pub(super) async fn page(
 fn details(event: &AuditEvent) -> String {
     let m = &event.metadata;
     let mut parts = Vec::new();
-    if matches!(
-        event.event_type,
-        EventType::InvitationSent | EventType::InvitationAccepted | EventType::InvitationSendFailed
-    ) && m.get("recovered").and_then(|v| v.as_bool()) == Some(true)
-    {
-        parts.push("Confirmed outcome observed during recovery".into());
-    }
     match event.event_type {
         EventType::InvitationLinkMetadataUpdated => {
             if let Some(fields) = m.get("changed_fields").and_then(|v| v.as_array()) {

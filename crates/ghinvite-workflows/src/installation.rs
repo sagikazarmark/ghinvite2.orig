@@ -1,7 +1,7 @@
 //! `Installation` Virtual Object: the installation-keyed entry point GitHub's
 //! webhooks still address. It owns no installation history of its own — each
 //! handler resolves the account and calls
-//! [`crate::availability::AccountInstallationV1`], which is where installation
+//! [`crate::availability::AccountInstallation`], which is where installation
 //! facts and their projections live.
 //!
 //! `onboard` and `uninstall` pass their input on. `repos_changed` does not: a
@@ -45,20 +45,13 @@ pub struct UninstallInput {
     pub uninstalled_at: DateTime<Utc>,
 }
 
-#[restate_sdk::object]
-pub trait Installation {
-    async fn onboard(input: Json<OnboardInput>) -> std::result::Result<(), TerminalError>;
-    async fn repos_changed(
-        input: Json<ReposChangedInput>,
-    ) -> std::result::Result<(), TerminalError>;
-    async fn uninstall(input: Json<UninstallInput>) -> std::result::Result<(), TerminalError>;
-}
-
-pub struct InstallationImpl {
+pub struct Installation {
     pub state: AppState,
 }
 
-impl Installation for InstallationImpl {
+#[restate_sdk::object]
+impl Installation {
+    #[handler]
     async fn onboard(
         &self,
         ctx: ObjectContext<'_>,
@@ -78,7 +71,7 @@ impl Installation for InstallationImpl {
             ));
         }
         ctx.set("account_id", input.account_id);
-        ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+        ctx.object_client::<crate::availability::AccountInstallationClient>(
             input.account_id.to_string(),
         )
         .onboard(Json(input))
@@ -86,6 +79,7 @@ impl Installation for InstallationImpl {
         .await
     }
 
+    #[handler]
     async fn repos_changed(
         &self,
         ctx: ObjectContext<'_>,
@@ -97,7 +91,7 @@ impl Installation for InstallationImpl {
             return Ok(());
         }
         if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
-            ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+            ctx.object_client::<crate::availability::AccountInstallationClient>(
                 account_id.to_string(),
             )
             .refresh(Json(input.installation_id))
@@ -107,6 +101,7 @@ impl Installation for InstallationImpl {
         Ok(())
     }
 
+    #[handler]
     async fn uninstall(
         &self,
         ctx: ObjectContext<'_>,
@@ -116,7 +111,7 @@ impl Installation for InstallationImpl {
         validate_key(&ctx, input.installation_id)?;
         ctx.set("uninstalled", true);
         if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
-            ctx.object_client::<crate::availability::AccountInstallationV1Client>(
+            ctx.object_client::<crate::availability::AccountInstallationClient>(
                 account_id.to_string(),
             )
             .uninstall(Json(input))
@@ -136,7 +131,7 @@ fn validate_key(ctx: &ObjectContext<'_>, id: u64) -> std::result::Result<(), Ter
     }
     Ok(())
 }
-impl InstallationImpl {
+impl Installation {
     async fn account_id(
         &self,
         ctx: &ObjectContext<'_>,
