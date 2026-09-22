@@ -27,6 +27,16 @@ fence: this lifecycle has no transition back to `Sent`. It does not require a
 timestamp comparison. `Sent` rows with upstream IDs but no retained create
 receipt still use this boundary directly.
 
+`cancel` settles Cancelled on GitHub's 204. GitHub answers the DELETE with the
+same 404 whether the invitation is gone or the installation no longer sees the
+repository, so a 404 settles only after the link's installation verifies it
+still reaches the scoped numeric repository ID. An unavailable repository is
+"cannot observe now" ([ADR 0006](adr/0006-delivery-and-settlement-checks-stay-distinct.md)):
+nothing is settled and the row stays `Sent` for reconciliation. A failed
+repository read fails the command with that error, so a transient one retries
+and nothing is settled either way. The check runs after the DELETE, not before,
+to keep the common deleted path to one GitHub call.
+
 The post-settlement SQL fence is defense in depth. Retain the settlement table
 with invitation and audit records in backups/restores. Independently restoring
 SQL or manually deleting settlement receipts requires coordinated recovery before

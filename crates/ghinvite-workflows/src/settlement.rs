@@ -1,4 +1,5 @@
 //! Invitation-keyed settlement.
+use crate::repository_access::{RepositoryAccess, verify_repository_access};
 use crate::{AppState, github_invitation::*};
 use chrono::{DateTime, Utc};
 use ghinvite_core::{
@@ -334,8 +335,7 @@ async fn cancel_or_expire(
             return Ok(());
         }
     } else {
-        // Either answer leaves nothing for this installation to cancel. A
-        // failed token mint is an error here, never `NotFound`: the
+        // A failed token mint is an error here, never `NotFound`: the
         // installation being gone says nothing about the invitation.
         match state
             .github
@@ -347,7 +347,25 @@ async fn cancel_or_expire(
             )
             .await?
         {
-            InvitationDeletion::Deleted | InvitationDeletion::NotFound => (),
+            InvitationDeletion::Deleted => (),
+            // GitHub answers the same 404 when this installation no longer
+            // sees the repository, so the invitation may still be pending.
+            // Only a repository the installation verifiably reaches makes the
+            // 404 mean the invitation. Verifying after the DELETE rather than
+            // before keeps the common, deleted path to one GitHub call.
+            InvitationDeletion::NotFound => match verify_repository_access(
+                &state.github,
+                &context.account,
+                context.repo.repo_id,
+                &context.repository,
+            )
+            .await
+            {
+                RepositoryAccess::Verified => (),
+                // Cannot observe now (ADR 0006): nothing is settled.
+                RepositoryAccess::Unavailable(_) => return Ok(()),
+                RepositoryAccess::Unread(error) => return Err(error.into()),
+            },
         }
     }
     record(
@@ -371,6 +389,18 @@ mod tests {
     use std::sync::Arc;
 
     async fn seeded_state(mock: MockTransport) -> (AppState, GithubInvitation) {
+        let (state, row, _) = seeded(mock).await;
+        (state, row)
+    }
+
+    /// [`seeded_state`] plus the concrete storage, for debug-only audit reads.
+    async fn seeded(
+        mock: MockTransport,
+    ) -> (
+        AppState,
+        GithubInvitation,
+        Arc<ghinvite_storage_sqlx::SqlxStorage>,
+    ) {
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
                 .await
@@ -384,7 +414,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        (state, row)
+        (state, row, storage)
     }
 
     #[tokio::test]
@@ -538,17 +568,110 @@ mod tests {
         .await
     }
 
+    const REPO_URL: &str = "https://api.github.test/repos/acme/api";
+
+    async fn cancelled_events(storage: &ghinvite_storage_sqlx::SqlxStorage) -> usize {
+        storage
+            .debug_list_audit(100)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|event| {
+                event.event_type == ghinvite_core::audit::EventType::InvitationCancelled
+            })
+            .count()
+    }
+
     #[tokio::test]
-    async fn cancelling_an_invitation_github_already_removed_settles_it() {
+    async fn cancelling_settles_on_githubs_deletion_without_another_read() {
         let mock = MockTransport::scripted(vec![
             token_mint(9),
-            Expectation::status(Method::Delete, DELETE_URL, 404),
+            Expectation::status(Method::Delete, DELETE_URL, 204),
         ]);
-        let (state, row) = seeded_state(mock.clone()).await;
+        let (state, row, storage) = seeded(mock.clone()).await;
 
         cancel_row(&state, &row).await.unwrap();
 
         assert_eq!(stored_state(&state, &row).await, InvitationState::Cancelled);
+        assert_eq!(cancelled_events(&storage).await, 1);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_invitation_github_already_removed_settles_it() {
+        // The 404 is read as the invitation only once the installation is
+        // shown to still reach the repository.
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(Method::Delete, DELETE_URL, 404),
+            Expectation::ok_json(
+                Method::Get,
+                REPO_URL,
+                serde_json::json!({"id":10,"full_name":"acme/api","private":true}),
+            ),
+        ]);
+        let (state, row, storage) = seeded(mock.clone()).await;
+
+        cancel_row(&state, &row).await.unwrap();
+
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Cancelled);
+        assert_eq!(cancelled_events(&storage).await, 1);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_404_from_a_repository_the_installation_no_longer_reaches_settles_nothing() {
+        // GitHub answers the DELETE with the same 404 when the installation
+        // cannot see the repository; the invitation may still be pending.
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(Method::Delete, DELETE_URL, 404),
+            Expectation::status(Method::Get, REPO_URL, 404),
+        ]);
+        let (state, row, storage) = seeded(mock.clone()).await;
+
+        cancel_row(&state, &row).await.unwrap_err();
+
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Sent);
+        assert_eq!(cancelled_events(&storage).await, 0);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_404_under_a_name_now_held_by_another_repository_settles_nothing() {
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(Method::Delete, DELETE_URL, 404),
+            Expectation::ok_json(
+                Method::Get,
+                REPO_URL,
+                serde_json::json!({"id":12,"full_name":"acme/api","private":true}),
+            ),
+        ]);
+        let (state, row, storage) = seeded(mock.clone()).await;
+
+        // Cannot observe now: nothing is settled and the row stays Sent.
+        cancel_row(&state, &row).await.unwrap();
+
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Sent);
+        assert_eq!(cancelled_events(&storage).await, 0);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn a_404_whose_repository_read_fails_retries_rather_than_settling() {
+        let mock = MockTransport::scripted(vec![
+            token_mint(9),
+            Expectation::status(Method::Delete, DELETE_URL, 404),
+            Expectation::status(Method::Get, REPO_URL, 502),
+        ]);
+        let (state, row, storage) = seeded(mock.clone()).await;
+
+        let err = cancel_row(&state, &row).await.unwrap_err();
+
+        assert!(!err.is_terminal(), "got {err:?}");
+        assert_eq!(stored_state(&state, &row).await, InvitationState::Sent);
+        assert_eq!(cancelled_events(&storage).await, 0);
         mock.assert_exhausted();
     }
 
