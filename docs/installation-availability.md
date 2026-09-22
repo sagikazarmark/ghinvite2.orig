@@ -46,7 +46,15 @@ continuation for an identity the account does not adopt — superseded or retire
 ## Admission and approval
 
 The link command compares retained operation input/outcome **before** consulting
-availability. A fresh attempt requests an account-keyed observation. Known absent,
+availability. A fresh attempt asks the account for an eligibility answer. The
+account answers from its retained observation, without exclusivity and without
+reading GitHub, when that observation is available, covers the whole immutable
+link scope, and was taken less than five minutes ago; such an acceptance writes
+no state and schedules nothing. Every other case — an unavailable, unknown,
+older or never-taken observation, or a scope the observation does not cover —
+takes a fresh account-keyed observation inside the exclusive handler, so an
+answer that rejects always rests on a live read
+([ADR 0004](adr/0004-delivery-identity-and-uncertain-results.md)). Known absent,
 suspended, or identity-mismatched installations reject with
 `installation_unavailable`; any missing repository in the immutable link scope
 rejects with `repository_unavailable`. Both are retained business outcomes.

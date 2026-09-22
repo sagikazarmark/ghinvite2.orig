@@ -141,6 +141,8 @@ An invitation link's permission level is fixed when the invitation link is creat
 ### Available Repositories
 The repositories a GitHub App installation currently makes available to ghinvite for an account.
 
+An observation of available repositories is recent for a short window after it is taken. Invitation request admission may accept on a recent observation alone. It never rejects on one: a rejection is retained permanently, so it rests on a current reading of GitHub. Access lost inside that window is not an admission error; it surfaces later as blocked delivery.
+
 ### Repository Scope
 The non-empty set of repositories selected on an invitation link for which invitation requests may request repository access.
 
