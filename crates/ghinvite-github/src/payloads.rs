@@ -22,14 +22,14 @@ pub struct GhUser {
 /// `GET /user/memberships/orgs/{login}` response. Authority must be bound to
 /// the returned organization's immutable ID, not the requested login.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GhMembership {
+pub(crate) struct GhMembership {
     pub role: String,  // "admin" | "member"
     pub state: String, // "active" | "pending"
     pub organization: GhOrganization,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GhOrganization {
+pub(crate) struct GhOrganization {
     pub id: u64,
 }
 
