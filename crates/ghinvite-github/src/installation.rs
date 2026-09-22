@@ -14,10 +14,6 @@ use std::sync::Arc;
 
 const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
-/// Backstop on the pending-invitation walk. At 100 per page this is far past
-/// any real repository; exceeding it is a paging fault, not a complete list.
-const MAX_INVITATION_PAGES: usize = 1000;
-
 /// Long-lived handle. Construct once per worker invocation (the cache is
 /// in-process; restart drops it).
 #[derive(Clone)]
@@ -350,44 +346,35 @@ impl InstallationClient {
         owner: &str,
         repo: &str,
     ) -> Result<Vec<GhInvitationListItem>> {
-        let mut path = format!(
+        let first = format!(
             "/repos/{}/{}/invitations?per_page=100",
             path_segment(owner),
             path_segment(repo)
         );
         let mut listed = Vec::new();
-        // Every page already walked. A cycle of any length — not just a link
-        // back to the page in hand — is a paging fault, and catching it here
-        // spends one request on it instead of the whole page budget.
-        let mut walked = std::collections::HashSet::new();
-        for _ in 0..MAX_INVITATION_PAGES {
-            if !walked.insert(path.clone()) {
-                // `path` came out of an upstream `Link` header; the fault is
-                // the revisit, which needs none of its text to state.
-                return Err(crate::Error::InvalidInput(
-                    "pagination returned to a page already walked".into(),
-                ));
-            }
-            let req = self
-                .auth_request(installation_id, Method::Get, &path)
-                .await?;
-            let resp = match self.transport.send(req).await?.ensure_success() {
-                Ok(resp) => resp,
-                Err(err) => {
-                    tracing::warn!(status = ?err.status(), "github request failed");
-                    return Err(err);
-                }
-            };
-            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
-            listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
-            match next {
-                Some(next) => path = next,
-                None => return Ok(listed),
-            }
-        }
-        Err(crate::Error::InvalidInput(
-            "incomplete pending invitation listing".into(),
-        ))
+        crate::pagination::walk_link_pages(
+            first,
+            &self.base_url,
+            crate::pagination::MAX_PAGES,
+            |path| async move {
+                let req = self
+                    .auth_request(installation_id, Method::Get, &path)
+                    .await?;
+                self.transport
+                    .send(req)
+                    .await?
+                    .ensure_success()
+                    .inspect_err(|err| {
+                        tracing::warn!(status = ?err.status(), "github request failed");
+                    })
+            },
+            |resp| {
+                listed.extend(resp.json::<Vec<GhInvitationListItem>>()?);
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(listed)
     }
 
     /// `GET /repos/{owner}/{repo}/collaborators/{username}` — confirm membership.

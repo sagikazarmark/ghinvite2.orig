@@ -5,9 +5,60 @@
 //! that is no longer pending) must be able to tell "walked every page" from
 //! "stopped early", so this module only ever reports a next page or nothing,
 //! and refuses to follow a link that leaves the configured API base.
+//! [`walk_link_pages`] is the one walk every `Link`-paged listing shares: it
+//! reads to the last page or fails, never returning what it read so far.
 
 use crate::error::{Error, Result};
 use crate::transport::Response;
+use std::collections::HashSet;
+
+/// Backstop on one `Link` walk. At 100 per page this is far past any real
+/// listing; exceeding it is a paging fault, not a complete list.
+pub(crate) const MAX_PAGES: usize = 1000;
+
+/// Walk a `Link`-paged listing from `first` to its last page.
+///
+/// `fetch` sends one page's path and returns its successful response;
+/// `absorb` takes each page in order once its next link has been read. The
+/// walk is complete only when it returns `Ok`: a failed fetch, an
+/// untrustworthy `Link` header, a revisited page, or more than `max_pages`
+/// pages is an error, because a listing cut short is an incomplete
+/// observation, not a shorter one.
+pub(crate) async fn walk_link_pages<Fut>(
+    first: String,
+    base_url: &str,
+    max_pages: usize,
+    mut fetch: impl FnMut(String) -> Fut,
+    mut absorb: impl FnMut(Response) -> Result<()>,
+) -> Result<()>
+where
+    Fut: Future<Output = Result<Response>>,
+{
+    let mut path = first;
+    // Every page already walked. A cycle of any length — not just a link back
+    // to the page in hand — is a paging fault, and catching it here spends one
+    // request on it instead of the whole page budget.
+    let mut walked = HashSet::new();
+    for _ in 0..max_pages {
+        if !walked.insert(path.clone()) {
+            // `path` came out of an upstream `Link` header; the fault is the
+            // revisit, which needs none of its text to state.
+            return Err(Error::InvalidInput(
+                "pagination returned to a page already walked".into(),
+            ));
+        }
+        let resp = fetch(path).await?;
+        let next = next_page_path(&resp, base_url)?;
+        absorb(resp)?;
+        match next {
+            Some(next) => path = next,
+            None => return Ok(()),
+        }
+    }
+    Err(Error::InvalidInput(
+        "listing exceeded its page bound".into(),
+    ))
+}
 
 /// The `rel="next"` target of a `Link` header, as a path under `base_url`.
 ///
@@ -246,5 +297,66 @@ mod tests {
         let link = "<https://api.github.test/x?page=1>; rel=\"prev\", <https://api.github.test/x";
         let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+    }
+
+    /// Walk a listing whose page `n` links to `links[n]`, recording every
+    /// path fetched and every page absorbed.
+    async fn walk(links: &[Option<&str>], max_pages: usize) -> (Result<()>, Vec<String>, usize) {
+        let mut fetched = Vec::new();
+        let mut absorbed = 0;
+        let result = walk_link_pages(
+            "/x?page=0".into(),
+            "https://api.github.test",
+            max_pages,
+            |path| {
+                let page: usize = path.rsplit('=').next().unwrap().parse().unwrap();
+                fetched.push(path);
+                let link = links[page]
+                    .map(|next| format!("<https://api.github.test{next}>; rel=\"next\""));
+                async move { Ok(response(link.as_deref())) }
+            },
+            |_| {
+                absorbed += 1;
+                Ok(())
+            },
+        )
+        .await;
+        (result, fetched, absorbed)
+    }
+
+    #[tokio::test]
+    async fn a_walk_reads_every_page_to_the_last() {
+        let (result, fetched, absorbed) =
+            walk(&[Some("/x?page=1"), Some("/x?page=2"), None], MAX_PAGES).await;
+        result.unwrap();
+        assert_eq!(fetched, ["/x?page=0", "/x?page=1", "/x?page=2"]);
+        assert_eq!(absorbed, 3);
+    }
+
+    #[tokio::test]
+    async fn a_walk_refuses_a_cycle_on_the_first_revisit() {
+        let (result, fetched, _) = walk(
+            &[Some("/x?page=1"), Some("/x?page=2"), Some("/x?page=0")],
+            MAX_PAGES,
+        )
+        .await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(fetched.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_walk_past_its_page_bound_is_an_error_not_a_partial_list() {
+        let (result, fetched, _) = walk(&[Some("/x?page=1"), Some("/x?page=2"), None], 2).await;
+        let err = result.unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(fetched, ["/x?page=0", "/x?page=1"]);
+    }
+
+    #[tokio::test]
+    async fn a_walk_that_ends_exactly_at_its_page_bound_is_complete() {
+        let (result, _, absorbed) = walk(&[Some("/x?page=1"), None], 2).await;
+        result.unwrap();
+        assert_eq!(absorbed, 2);
     }
 }
