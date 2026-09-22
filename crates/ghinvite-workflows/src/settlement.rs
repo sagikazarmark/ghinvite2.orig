@@ -13,6 +13,8 @@ use restate_sdk::{
 };
 use serde::{Deserialize, Serialize};
 
+mod context;
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReconcileEvidence {
     pub expected: GithubInvitation,
@@ -33,9 +35,7 @@ pub async fn observe(
     if !eligible(row) {
         return Ok(None);
     }
-    let Some(context) =
-        crate::invitation_context::load_verified_settlement_context(state, row).await?
-    else {
+    let Some(context) = context::load_verified(state, row).await? else {
         return Ok(None);
     };
     let pending = state
@@ -108,14 +108,12 @@ async fn settle(
     if !eligible(&expected) {
         return Ok(());
     }
-    let context =
-        crate::invitation_context::load_github_invitation_account_context(state, expected.id)
-            .await?;
+    let account_id = context::account_id(state, &expected).await?;
     let event_type = ghinvite_core::storage::settlement::event_type(next)?;
     // One terminal event per invitation, independent of invocation/journal retention.
     let event = AuditEvent {
         id: ghinvite_core::AuditEventId::from_ulid(expected.id.as_ulid()),
-        account_id: context.account.account_id,
+        account_id,
         occurred_at: at,
         event_type,
         actor_kind: actor,
@@ -264,8 +262,7 @@ async fn cancel_or_expire(
     if !eligible(&row) {
         return Ok(());
     }
-    let context =
-        crate::invitation_context::load_github_invitation_context(state, id, installation).await?;
+    let context = context::load(state, &row, installation).await?;
     if expire {
         let pending = state
             .github
