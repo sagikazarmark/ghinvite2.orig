@@ -29,10 +29,63 @@ pub(super) enum Command {
     Decision(DecideRequest),
 }
 
+/// The attempt identity of the creation of `link_id`. The creation form
+/// allocates the link id, so a resubmitted form finds its own attempt.
+fn create_id(link_id: ghinvite_core::InvitationLinkId) -> String {
+    format!("create-{link_id}")
+}
+
+/// What recovering a creation found under its identity.
+pub(super) enum CreateRecovery {
+    /// No creation is retained for the link: submit this one fresh.
+    Fresh,
+    /// A creation was retained and this is the page for it: the original's
+    /// outcome, or a conflict when the resubmitted input differs.
+    Answered(Response),
+    /// The retained creation was replayed and definitively rejected.
+    Rejected,
+}
+
+/// Recover the creation of `link_id` retained in this session, before
+/// anything about the submission is recomputed. `same_input` says whether
+/// the resubmitted form carries the original's business input; only then is
+/// the original replayed.
+pub(super) async fn recover_create(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    link_id: ghinvite_core::InvitationLinkId,
+    same_input: impl FnOnce(&CreateLink) -> bool,
+) -> crate::Result<CreateRecovery> {
+    let Some(Command::Create(original)) = load(state, admin, &create_id(link_id)).await? else {
+        return Ok(CreateRecovery::Fresh);
+    };
+    let matches = same_input(&original);
+    let command = Command::Create(original);
+    if !matches {
+        return Ok(CreateRecovery::Answered(conflict(admin, &command)));
+    }
+    Ok(match submit(state, admin, command).await {
+        Ok(response) => CreateRecovery::Answered(response),
+        Err(CreateRejected) => CreateRecovery::Rejected,
+    })
+}
+
+/// The page for a creation of `link_id` still retained in this session, whose
+/// outcome the authority cannot yet show.
+pub(super) async fn pending_create(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    link_id: ghinvite_core::InvitationLinkId,
+) -> crate::Result<Option<Response>> {
+    Ok(load(state, admin, &create_id(link_id))
+        .await?
+        .map(|command| unknown(admin, &command)))
+}
+
 impl Command {
     fn id(&self) -> String {
         match self {
-            Self::Create(c) => format!("create-{}", c.link_id),
+            Self::Create(c) => create_id(c.link_id),
             Self::Revoke(c) => format!("revoke-{}", c.link_id),
             Self::Decision(c) => format!(
                 "decision-{}-{}",
@@ -74,7 +127,7 @@ fn scope(admin: &RequireConsoleAdminOf) -> crate::Result<Scope> {
     )
 }
 
-pub(super) async fn load(
+async fn load(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     id: &str,
@@ -342,7 +395,7 @@ pub(super) async fn submit(
     }
 }
 
-pub(super) fn unknown(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
+fn unknown(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
     render_attempt(
         admin,
         command,
@@ -402,7 +455,7 @@ fn failed(admin: &RequireConsoleAdminOf, command: &Command, error: AuthorityErro
 }
 
 /// The attempt's identity is bound to input other than what was submitted.
-pub(super) fn conflict(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
+fn conflict(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
     render_attempt(
         admin,
         command,
