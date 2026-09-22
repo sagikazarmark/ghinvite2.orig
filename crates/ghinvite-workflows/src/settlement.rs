@@ -99,38 +99,57 @@ pub async fn observe(
     }))
 }
 
-async fn settle(
-    state: &AppState,
-    expected: GithubInvitation,
-    next: InvitationState,
+/// What a settlement records: the terminal state, when it was reached, and who
+/// reached it.
+struct Outcome {
+    state: InvitationState,
     at: DateTime<Utc>,
     actor: ActorKind,
     by_user: Option<u64>,
     metadata: serde_json::Value,
+}
+
+/// Settle `expected` on evidence from outside, auditing it under the account
+/// its link belongs to.
+async fn settle(
+    state: &AppState,
+    expected: GithubInvitation,
+    outcome: Outcome,
 ) -> crate::Result<()> {
     if !eligible(&expected) {
         return Ok(());
     }
     let account_id = context::account_id(state, &expected).await?;
-    let event_type = ghinvite_core::storage::settlement::event_type(next)?;
+    record(state, account_id, expected, outcome).await
+}
+
+/// Record `outcome` for `expected`, audited under `account_id`, which the
+/// caller has already read.
+async fn record(
+    state: &AppState,
+    account_id: u64,
+    expected: GithubInvitation,
+    outcome: Outcome,
+) -> crate::Result<()> {
+    let event_type = ghinvite_core::storage::settlement::event_type(outcome.state)?;
     // One terminal event per invitation, independent of invocation/journal retention.
     let event = AuditEvent {
         id: ghinvite_core::AuditEventId::from_ulid(expected.id.as_ulid()),
         account_id,
-        occurred_at: at,
+        occurred_at: outcome.at,
         event_type,
-        actor_kind: actor,
-        actor_id: by_user,
+        actor_kind: outcome.actor,
+        actor_id: outcome.by_user,
         target_kind: TargetKind::GithubInvitation,
         target_id: expected.id.to_string(),
-        metadata,
+        metadata: outcome.metadata,
         request_id: None,
     };
     state
         .storage
         .settle_github_invitation(&Settlement {
             expected,
-            state: next,
+            state: outcome.state,
             event,
         })
         .await?;
@@ -157,15 +176,17 @@ pub async fn reconcile(
         settle(
             state,
             input.expected.clone(),
-            if input.accepted {
-                InvitationState::Accepted
-            } else {
-                InvitationState::Cancelled
+            Outcome {
+                state: if input.accepted {
+                    InvitationState::Accepted
+                } else {
+                    InvitationState::Cancelled
+                },
+                at: input.at,
+                actor: ActorKind::System,
+                by_user: None,
+                metadata: serde_json::json!({"reconciled": true}),
             },
-            input.at,
-            ActorKind::System,
-            None,
-            serde_json::json!({"reconciled": true}),
         )
         .await
         .map_err(crate::error::to_sdk_handler_error)
@@ -189,14 +210,16 @@ pub async fn webhook(
         settle(
             state,
             row,
-            match input.action {
-                WebhookAction::Accepted => InvitationState::Accepted,
-                WebhookAction::Declined => InvitationState::Declined,
+            Outcome {
+                state: match input.action {
+                    WebhookAction::Accepted => InvitationState::Accepted,
+                    WebhookAction::Declined => InvitationState::Declined,
+                },
+                at: input.at,
+                actor: ActorKind::Github,
+                by_user: None,
+                metadata: serde_json::json!({"action": input.action}),
             },
-            input.at,
-            ActorKind::Github,
-            None,
-            serde_json::json!({"action": input.action}),
         )
         .await
         .map_err(crate::error::to_sdk_handler_error)
@@ -217,8 +240,9 @@ pub async fn cancel(
             input.invitation_id,
             input.installation_id,
             input.at,
-            input.by_user,
-            false,
+            Withdrawal::Cancel {
+                by_user: input.by_user,
+            },
         )
         .await
         .map_err(crate::error::to_sdk_handler_error)
@@ -239,8 +263,7 @@ pub async fn expire(
             input.invitation_id,
             input.installation_id,
             input.at,
-            None,
-            true,
+            Withdrawal::Expire,
         )
         .await
         .map_err(crate::error::to_sdk_handler_error)
@@ -249,13 +272,42 @@ pub async fn expire(
     .await
 }
 
+/// Why ghinvite, rather than GitHub, ends an invitation.
+#[derive(Clone, Copy, Debug)]
+enum Withdrawal {
+    /// `by_user` is `None` when the system cancels.
+    Cancel {
+        by_user: Option<u64>,
+    },
+    Expire,
+}
+
+impl Withdrawal {
+    fn outcome(self, at: DateTime<Utc>) -> Outcome {
+        let (state, by_user, reason) = match self {
+            Withdrawal::Cancel { by_user } => (InvitationState::Cancelled, by_user, "cancel"),
+            Withdrawal::Expire => (InvitationState::Expired, None, "tick_expire"),
+        };
+        Outcome {
+            state,
+            at,
+            actor: if by_user.is_some() {
+                ActorKind::User
+            } else {
+                ActorKind::System
+            },
+            by_user,
+            metadata: serde_json::json!({"reason": reason, "by_user": by_user}),
+        }
+    }
+}
+
 async fn cancel_or_expire(
     state: &AppState,
     id: ghinvite_core::GithubInvitationId,
     installation: u64,
     at: DateTime<Utc>,
-    by_user: Option<u64>,
-    expire: bool,
+    withdrawal: Withdrawal,
 ) -> crate::Result<()> {
     let row = state
         .storage
@@ -266,7 +318,7 @@ async fn cancel_or_expire(
         return Ok(());
     }
     let context = context::load(state, &row, installation).await?;
-    if expire {
+    if let Withdrawal::Expire = withdrawal {
         let pending = state
             .github
             .list_invitations(
@@ -298,7 +350,13 @@ async fn cancel_or_expire(
             InvitationDeletion::Deleted | InvitationDeletion::NotFound => (),
         }
     }
-    settle(state, row, if expire { InvitationState::Expired } else { InvitationState::Cancelled }, at, if by_user.is_some() { ActorKind::User } else { ActorKind::System }, by_user, serde_json::json!({"reason": if expire { "tick_expire" } else { "cancel" }, "by_user": by_user})).await
+    record(
+        state,
+        context.account.account_id,
+        row,
+        withdrawal.outcome(at),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -470,7 +528,14 @@ mod tests {
     }
 
     async fn cancel_row(state: &AppState, row: &GithubInvitation) -> crate::Result<()> {
-        cancel_or_expire(state, row.id, 9, dt("2026-05-05T13:00:00Z"), Some(7), false).await
+        cancel_or_expire(
+            state,
+            row.id,
+            9,
+            dt("2026-05-05T13:00:00Z"),
+            Withdrawal::Cancel { by_user: Some(7) },
+        )
+        .await
     }
 
     #[tokio::test]

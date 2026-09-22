@@ -165,103 +165,10 @@ async fn installation_account(state: &AppState, installation_id: u64) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
-    use ghinvite_core::storage::{InstallationStorage, RecordStorage};
-    use ghinvite_core::{
-        AccountType, GithubInvitationId, InvitationLinkId, InvitationState, Permission, RequestId,
-        RequestState, SelectedRepos, Slug,
+    use crate::test_support::{
+        SeededRequest, dt, fixture_state, fixture_state_with_storage, seed_request_chain,
     };
-    use rand::SeedableRng;
-
-    async fn seed_request_chain_with_repos(
-        storage: &ghinvite_storage_sqlx::SqlxStorage,
-        repos: Vec<ghinvite_core::InvitationLinkRepo>,
-    ) -> (RequestId, InvitationLinkId) {
-        storage
-            .insert_installation(&ghinvite_core::Account {
-                installation_id: 9,
-                account_id: 100,
-                account_login: "acme".into(),
-                account_type: AccountType::Organization,
-                installed_at: dt("2026-05-04T12:00:00Z"),
-                uninstalled_at: None,
-                selected_repos: SelectedRepos::All,
-            })
-            .await
-            .unwrap();
-        storage
-            .upsert_user(&ghinvite_core::User {
-                user_id: 7,
-                login: "creator".into(),
-                avatar_url: None,
-                last_seen_at: dt("2026-05-04T12:00:00Z"),
-            })
-            .await
-            .unwrap();
-        storage
-            .upsert_user(&ghinvite_core::User {
-                user_id: 8,
-                login: "alice".into(),
-                avatar_url: None,
-                last_seen_at: dt("2026-05-04T12:00:00Z"),
-            })
-            .await
-            .unwrap();
-
-        let link = ghinvite_core::InvitationLink {
-            id: InvitationLinkId::new(),
-            slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(21)),
-            installation_id: 9,
-            account_id: 100,
-            created_by: 7,
-            created_at: dt("2026-05-04T12:00:00Z"),
-            expires_at: None,
-            max_uses: None,
-            uses_count: 0,
-            permission: Permission::Push,
-            approval_required: false,
-            description: "AI coding workshop".into(),
-            internal_note: None,
-            revoked_at: None,
-            revoked_by: None,
-            repos,
-        };
-        let request_id = RequestId::new();
-        let request = ghinvite_core::InvitationRequest {
-            id: request_id,
-            invitation_link_id: link.id,
-            requester_id: 8,
-            justification: None,
-            state: RequestState::Approved,
-            decided_by: Some(7),
-            decided_at: Some(dt("2026-05-04T13:00:00Z")),
-            decline_reason: None,
-            decision_deadline: None,
-            created_at: dt("2026-05-04T12:30:00Z"),
-        };
-        {
-            use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
-            storage
-                .apply_transition(&fixture::envelope(&link, &[request], 1))
-                .await
-                .unwrap();
-        }
-
-        (request_id, link.id)
-    }
-
-    async fn seed_request_chain(
-        storage: &ghinvite_storage_sqlx::SqlxStorage,
-    ) -> (RequestId, InvitationLinkId) {
-        seed_request_chain_with_repos(
-            storage,
-            vec![ghinvite_core::InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: "acme/api".into(),
-            }],
-        )
-        .await
-    }
+    use ghinvite_core::{GithubInvitationId, InvitationState, RequestId};
 
     /// A sent invitation for `repo_id` under `request_id`. Only the row is
     /// needed: every entry point takes it as its caller already holds it.
@@ -278,6 +185,13 @@ mod tests {
         }
     }
 
+    fn scope_of_only_api() -> Vec<ghinvite_core::InvitationLinkRepo> {
+        vec![ghinvite_core::InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: "acme/api".into(),
+        }]
+    }
+
     fn scope_of_only_web() -> Vec<ghinvite_core::InvitationLinkRepo> {
         vec![ghinvite_core::InvitationLinkRepo {
             repo_id: 11,
@@ -288,7 +202,10 @@ mod tests {
     #[tokio::test]
     async fn context_loads_request_link_repository_and_account() {
         let (state, storage) = fixture_state_with_storage().await;
-        let (request_id, link_id) = seed_request_chain(&storage).await;
+        let SeededRequest {
+            link_id,
+            request_id,
+        } = seed_request_chain(&storage, scope_of_only_api()).await;
 
         let context = load(&state, &sent_invitation(request_id, 10), 9)
             .await
@@ -322,7 +239,8 @@ mod tests {
     #[tokio::test]
     async fn a_repository_outside_the_link_scope_is_an_invariant() {
         let (state, storage) = fixture_state_with_storage().await;
-        let (request_id, _) = seed_request_chain_with_repos(&storage, scope_of_only_web()).await;
+        let SeededRequest { request_id, .. } =
+            seed_request_chain(&storage, scope_of_only_web()).await;
 
         let err = load(&state, &sent_invitation(request_id, 10), 9)
             .await
@@ -339,7 +257,8 @@ mod tests {
     #[tokio::test]
     async fn another_installation_is_an_invariant() {
         let (state, storage) = fixture_state_with_storage().await;
-        let (request_id, _) = seed_request_chain(&storage).await;
+        let SeededRequest { request_id, .. } =
+            seed_request_chain(&storage, scope_of_only_api()).await;
 
         let err = load(&state, &sent_invitation(request_id, 10), 10)
             .await
@@ -356,7 +275,8 @@ mod tests {
     #[tokio::test]
     async fn the_audited_account_does_not_require_the_repository_in_scope() {
         let (state, storage) = fixture_state_with_storage().await;
-        let (request_id, _) = seed_request_chain_with_repos(&storage, scope_of_only_web()).await;
+        let SeededRequest { request_id, .. } =
+            seed_request_chain(&storage, scope_of_only_web()).await;
 
         let account = account_id(&state, &sent_invitation(request_id, 10))
             .await

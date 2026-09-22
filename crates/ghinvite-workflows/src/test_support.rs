@@ -115,17 +115,22 @@ pub(crate) struct SeededInvitation {
     pub request_id: ghinvite_core::RequestId,
 }
 
-/// Seed: installation 9 / account 100, two users, one invitation link with one
-/// repo (repo ID 10), one approved invitation request, and one
-/// `github_invitation` row in `Sent` state with upstream ID 9988.
-pub(crate) async fn seed_pending_invitation(
+/// Identities of the rows [`seed_request_chain`] inserted.
+pub(crate) struct SeededRequest {
+    pub link_id: ghinvite_core::InvitationLinkId,
+    pub request_id: ghinvite_core::RequestId,
+}
+
+/// Seed: installation 9 / account 100, two users (creator 7, requester 8), one
+/// invitation link scoped to `repos`, and one approved invitation request.
+pub(crate) async fn seed_request_chain(
     storage: &ghinvite_storage_sqlx::SqlxStorage,
-    repo_full_name: &str,
-) -> SeededInvitation {
+    repos: Vec<ghinvite_core::InvitationLinkRepo>,
+) -> SeededRequest {
     use ghinvite_core::storage::projection::ProjectionStorage;
     use ghinvite_core::{
-        AccountType, GithubInvitationId, InvitationLink, InvitationLinkId, InvitationLinkRepo,
-        InvitationState, Permission, RequestId, RequestState, SelectedRepos, Slug,
+        AccountType, InvitationLink, InvitationLinkId, Permission, RequestId, RequestState,
+        SelectedRepos, Slug,
     };
     use rand::SeedableRng;
 
@@ -168,10 +173,7 @@ pub(crate) async fn seed_pending_invitation(
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: repo_full_name.into(),
-        }],
+        repos,
     };
     let request_id = RequestId::new();
     let request = ghinvite_core::InvitationRequest {
@@ -194,6 +196,31 @@ pub(crate) async fn seed_pending_invitation(
         ))
         .await
         .unwrap();
+    SeededRequest {
+        link_id: link.id,
+        request_id,
+    }
+}
+
+/// Seed: [`seed_request_chain`] scoped to one repo (repo ID 10), and one
+/// `github_invitation` row in `Sent` state with upstream ID 9988.
+pub(crate) async fn seed_pending_invitation(
+    storage: &ghinvite_storage_sqlx::SqlxStorage,
+    repo_full_name: &str,
+) -> SeededInvitation {
+    use ghinvite_core::{GithubInvitationId, InvitationLinkRepo, InvitationState};
+
+    let SeededRequest {
+        link_id,
+        request_id,
+    } = seed_request_chain(
+        storage,
+        vec![InvitationLinkRepo {
+            repo_id: 10,
+            repo_full_name: repo_full_name.into(),
+        }],
+    )
+    .await;
     let invitation_id = GithubInvitationId::new();
     storage
         .insert_github_invitation(&ghinvite_core::GithubInvitation {
@@ -210,7 +237,7 @@ pub(crate) async fn seed_pending_invitation(
         .unwrap();
     SeededInvitation {
         invitation_id,
-        link_id: link.id,
+        link_id,
         request_id,
     }
 }
