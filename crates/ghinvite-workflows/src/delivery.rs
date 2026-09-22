@@ -209,10 +209,7 @@ impl GithubCreate {
             ));
         }
         ctx.set("input", Json(command.clone()));
-        let Json(Attempt {
-            mut receipt,
-            throttled_for_secs,
-        }) = ctx
+        let Json(attempted) = ctx
             .run(|| async {
                 let attempted = attempt(&self.state, &command).await?;
                 #[cfg(feature = "integration")]
@@ -232,14 +229,10 @@ impl GithubCreate {
             })
             .name("guarded_github_create")
             .await?;
-        receipt.revision = previous.as_ref().map_or(1, |r| r.revision + 1);
-        if matches!(
-            previous.as_ref().map(|r| &r.outcome),
-            Some(CreateOutcome::OutcomeUnknown)
-        ) && matches!(receipt.outcome, CreateOutcome::Blocked { .. })
-        {
-            receipt.outcome = CreateOutcome::OutcomeUnknown;
-        }
+        let NextReceipt {
+            receipt,
+            recheck_after,
+        } = next_receipt(previous.as_ref(), attempted);
         ctx.set("receipt", Json(receipt.clone()));
         ctx.run(|| async {
             project(&self.state, &receipt).await?;
@@ -258,24 +251,17 @@ impl GithubCreate {
         })
         .name("project_create_receipt")
         .await?;
-        // A throttle clears on GitHub's own schedule, usually long before a
-        // missing dependency does, so it rechecks on the bounded wait GitHub
-        // asked for. It earns that recheck even where the outcome stayed
-        // unknown: rereading is safe, and it is the only way a delivery GitHub
-        // would not let us read ever resolves on its own. Either way the object
-        // lock is released first — the wait is a continuation, not a held retry.
-        // Exactly one recheck stands per invitation. A sooner one does not
+        // The object lock is released before the recheck — the wait is a
+        // continuation, not a held retry. Exactly one recheck stands per
+        // invitation. A sooner one does not
         // supersede a pending later one: a timer already sent cannot be
         // withdrawn, so superseding means two timers, and telling which is
         // stale needs a due time and a token on `recheck` — retained protocol,
         // for a case only explicit recovery during a blocked window reaches.
         // It costs that recovery the pending hour; it settles nothing wrongly.
-        let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
-        if (blocked || throttled_for_secs.is_some())
+        if let Some(wait) = recheck_after
             && ctx.get::<bool>("recheck_scheduled").await?.is_none()
         {
-            let wait =
-                throttled_for_secs.map_or(BLOCKED_RECHECK_INTERVAL, std::time::Duration::from_secs);
             ctx.set("recheck_scheduled", true);
             ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
                 .recheck(Json(command))
@@ -322,6 +308,49 @@ impl Attempt {
 /// Throttling replaces this with GitHub's own guidance, which the same bound
 /// caps, so an unexplained block never rechecks more slowly than a named one.
 const BLOCKED_RECHECK_INTERVAL: std::time::Duration = crate::throttle::MAXIMUM;
+
+/// The receipt a create retains after an attempt, and how long to wait before
+/// rechecking it.
+#[derive(Debug)]
+struct NextReceipt {
+    receipt: CreateReceipt,
+    recheck_after: Option<std::time::Duration>,
+}
+
+/// Fold an attempt over the receipt retained before it.
+///
+/// A retained outcome unknown is never downgraded to blocked (ADR 0004).
+/// `attempt` normally answers unknown itself from the delivery fence; the
+/// retained receipt is the authority that keeps it so if the fence cannot.
+///
+/// A throttle clears on GitHub's own schedule, usually long before a missing
+/// dependency does, so it rechecks on the bounded wait GitHub asked for. It
+/// earns that recheck even where the outcome stayed unknown: rereading is
+/// safe, and it is the only way a delivery GitHub would not let us read ever
+/// resolves on its own.
+fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextReceipt {
+    let Attempt {
+        mut receipt,
+        throttled_for_secs,
+    } = attempt;
+    receipt.revision = previous.map_or(1, |r| r.revision + 1);
+    if matches!(
+        previous.map(|r| &r.outcome),
+        Some(CreateOutcome::OutcomeUnknown)
+    ) && matches!(receipt.outcome, CreateOutcome::Blocked { .. })
+    {
+        receipt.outcome = CreateOutcome::OutcomeUnknown;
+    }
+    let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
+    let recheck_after = match throttled_for_secs {
+        Some(secs) => Some(std::time::Duration::from_secs(secs)),
+        None => blocked.then_some(BLOCKED_RECHECK_INTERVAL),
+    };
+    NextReceipt {
+        receipt,
+        recheck_after,
+    }
+}
 
 async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, HandlerError> {
     let dependency = || Error::ProjectionDependency;
@@ -417,6 +446,16 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         Ok(user) => user,
         Err(error) => return Ok(unread(&error, "requester identity unverified")),
     };
+    // Mint the PUT's credential before the fence: a mint failure inside the PUT
+    // would read as GitHub's answer to a write that was never sent. A token
+    // this fresh outlives the PUT, which then reuses it from the cache.
+    if let Err(error) = state
+        .github
+        .installation_token(account.installation_id)
+        .await
+    {
+        return Ok(unread(&error, "installation token unavailable"));
+    }
     // A database write fence protects retries of this run closure even when
     // GitHub succeeded but Restate never journaled its response. It never expires.
     let generation = state.storage.claim_delivery_attempt(command).await?;
@@ -907,5 +946,154 @@ mod tests {
         assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
         assert_eq!(attempted.throttled_for_secs, Some(20));
         mock.assert_exhausted();
+    }
+
+    /// A token mint whose token is already past its refresh window, so the
+    /// next call mints again.
+    fn stale_token_mint() -> Expectation {
+        let mut mint = token_mint(9);
+        mint.response.body = br#"{"token":"ghs_old","expires_at":"2000-01-01T00:00:00Z"}"#.to_vec();
+        mint
+    }
+
+    #[tokio::test]
+    async fn a_failed_token_mint_blocks_before_the_fence_is_claimed() {
+        // Every read mints afresh; the mint that would authorize the PUT fails.
+        let mut script = identity_expectations();
+        script[0] = stale_token_mint();
+        script.insert(2, stale_token_mint());
+        script.insert(4, stale_token_mint());
+        script.push(Expectation {
+            method: Method::Post,
+            url: "https://api.github.test/app/installations/9/access_tokens".into(),
+            required_headers: Default::default(),
+            expected_body: None,
+            response: refusal(502, &[], "Bad Gateway"),
+        });
+        let mock = MockTransport::scripted(script);
+        let (state, command) = state_with_pending_create(mock.clone()).await;
+
+        let attempted = attempt(&state, &command).await.unwrap();
+
+        // Nothing was sent, so this is a prerequisite that blocked, not a PUT
+        // whose outcome is unknown.
+        assert_eq!(
+            attempted.receipt.outcome,
+            CreateOutcome::Blocked {
+                reason: "installation token unavailable".into()
+            }
+        );
+        assert!(fence_is_open(&state, &command).await);
+        mock.assert_exhausted();
+    }
+
+    fn receipt(outcome: CreateOutcome, revision: u64) -> CreateReceipt {
+        CreateReceipt {
+            command: CreateCommand {
+                invitation_id: GithubInvitationId::new(),
+                link_id: ghinvite_core::InvitationLinkId::new(),
+                request_id: ghinvite_core::RequestId::new(),
+                approval_id: "approval-1".into(),
+                account_id: 100,
+                installation_id: 9,
+                requester_id: 8,
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+                permission: ghinvite_core::Permission::Push,
+                approved_at: dt("2026-05-04T13:00:00Z"),
+            },
+            outcome,
+            revision,
+            confirmed_at: None,
+        }
+    }
+
+    fn blocked() -> CreateOutcome {
+        CreateOutcome::Blocked {
+            reason: "repository unavailable".into(),
+        }
+    }
+
+    fn attempted(outcome: CreateOutcome, throttled_for_secs: Option<u64>) -> Attempt {
+        Attempt {
+            receipt: receipt(outcome, 1),
+            throttled_for_secs,
+        }
+    }
+
+    #[test]
+    fn a_first_attempt_is_revision_one() {
+        let next = next_receipt(None, attempted(CreateOutcome::OutcomeUnknown, None));
+
+        assert_eq!(next.receipt.revision, 1);
+    }
+
+    #[test]
+    fn a_later_attempt_follows_the_retained_revision() {
+        let previous = receipt(blocked(), 4);
+
+        let next = next_receipt(Some(&previous), attempted(blocked(), None));
+
+        assert_eq!(next.receipt.revision, 5);
+    }
+
+    #[test]
+    fn a_retained_unknown_outcome_is_never_downgraded_to_blocked() {
+        // The fence normally makes `attempt` answer unknown itself; the
+        // retained receipt keeps that true even if the fence row is gone.
+        let previous = receipt(CreateOutcome::OutcomeUnknown, 1);
+
+        let next = next_receipt(Some(&previous), attempted(blocked(), None));
+
+        assert_eq!(next.receipt.outcome, CreateOutcome::OutcomeUnknown);
+        assert_eq!(next.recheck_after, None);
+    }
+
+    #[test]
+    fn a_retained_unknown_outcome_still_rechecks_on_githubs_wait() {
+        let previous = receipt(CreateOutcome::OutcomeUnknown, 1);
+
+        let next = next_receipt(Some(&previous), attempted(blocked(), Some(45)));
+
+        assert_eq!(next.receipt.outcome, CreateOutcome::OutcomeUnknown);
+        assert_eq!(next.recheck_after, Some(std::time::Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn a_retained_unknown_outcome_may_be_confirmed() {
+        let previous = receipt(CreateOutcome::OutcomeUnknown, 1);
+
+        let next = next_receipt(
+            Some(&previous),
+            attempted(CreateOutcome::Created { upstream_id: 77 }, None),
+        );
+
+        assert_eq!(
+            next.receipt.outcome,
+            CreateOutcome::Created { upstream_id: 77 }
+        );
+        assert_eq!(next.recheck_after, None);
+    }
+
+    #[test]
+    fn a_block_rechecks_on_the_dependency_cadence() {
+        let next = next_receipt(None, attempted(blocked(), None));
+
+        assert_eq!(next.receipt.outcome, blocked());
+        assert_eq!(next.recheck_after, Some(BLOCKED_RECHECK_INTERVAL));
+    }
+
+    #[test]
+    fn a_throttled_block_rechecks_on_githubs_wait() {
+        let next = next_receipt(None, attempted(blocked(), Some(45)));
+
+        assert_eq!(next.recheck_after, Some(std::time::Duration::from_secs(45)));
+    }
+
+    #[test]
+    fn an_unthrottled_unknown_outcome_waits_for_explicit_recovery() {
+        let next = next_receipt(None, attempted(CreateOutcome::OutcomeUnknown, None));
+
+        assert_eq!(next.recheck_after, None);
     }
 }

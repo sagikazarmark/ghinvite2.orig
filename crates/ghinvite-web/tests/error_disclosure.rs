@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -73,8 +73,7 @@ async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
     let state = AppState::new(
         storage,
         transport,
-        Arc::new(RestateCommands::new(restate)),
-        std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
+        restate,
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
     build_app(state, tower_sessions::MemoryStore::default())

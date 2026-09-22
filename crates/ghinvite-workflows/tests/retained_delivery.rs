@@ -93,7 +93,6 @@ async fn member_webhook_ingress(
     let state = ghinvite_web::AppState::new(
         storage,
         Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
-        Arc::new(ghinvite_web::RestateCommands::new(restate.clone())),
         restate,
         ghinvite_web::WebConfig {
             webhook_secret: MEMBER_WEBHOOK_SECRET.to_vec(),

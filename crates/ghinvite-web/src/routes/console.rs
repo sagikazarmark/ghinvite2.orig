@@ -19,6 +19,7 @@ use dioxus::prelude::*;
 
 mod attempts;
 mod audit;
+mod cursor;
 mod request_history;
 
 pub fn router() -> Router<AppState> {
@@ -507,39 +508,34 @@ async fn create_link(
 
     // Recover before present repository eligibility; expiry and repository names
     // are canonical business input, not values to recompute on retry.
-    match attempts::load(&state, &admin, &format!("create-{link_id}")).await {
-        Ok(Some(attempts::Command::Create(original))) => {
-            let repos = original
-                .repos
-                .iter()
-                .map(|r| RepositoryChoice {
-                    id: r.repo_id,
-                    full_name: r.repo_full_name.clone(),
-                })
-                .collect::<Vec<_>>();
-            // Identity is the retained command's own; only the business input
-            // re-derived from this submission can differ.
-            let matches = create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
-                v.into_command(
-                    original.link_id,
-                    original.admin.clone(),
-                    original.account_id,
-                    original.installation_id,
-                ) == original
-            });
-            let command = attempts::Command::Create(original);
-            if !matches {
-                return attempts::conflict(&admin, &command);
-            }
-            return match attempts::submit(&state, &admin, command).await {
-                Ok(response) => response,
-                Err(attempts::CreateRejected) => {
-                    let repos = load_installation_repos_for_form(&state, &admin).await;
-                    rejected_creation_response(&admin, repos, form, now, link_id)
-                }
-            };
+    let recovery = attempts::recover_create(&state, &admin, link_id, |original| {
+        let repos = original
+            .repos
+            .iter()
+            .map(|r| RepositoryChoice {
+                id: r.repo_id,
+                full_name: r.repo_full_name.clone(),
+            })
+            .collect::<Vec<_>>();
+        // Identity is the retained command's own; only the business input
+        // re-derived from this submission can differ.
+        create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
+            v.into_command(
+                original.link_id,
+                original.admin.clone(),
+                original.account_id,
+                original.installation_id,
+            ) == *original
+        })
+    })
+    .await;
+    match recovery {
+        Ok(attempts::CreateRecovery::Fresh) => {}
+        Ok(attempts::CreateRecovery::Answered(response)) => return response,
+        Ok(attempts::CreateRecovery::Rejected) => {
+            let repos = load_installation_repos_for_form(&state, &admin).await;
+            return rejected_creation_response(&admin, repos, form, now, link_id);
         }
-        Ok(_) => {}
         Err(e) => return e.into_response(),
     }
 
@@ -766,8 +762,8 @@ async fn link_detail(
     let link = match authoritative_link(&state, &admin, link_id).await {
         Ok(link) => link,
         Err(e) => {
-            match attempts::load(&state, &admin, &format!("create-{link_id}")).await {
-                Ok(Some(command)) => return attempts::unknown(&admin, &command),
+            match attempts::pending_create(&state, &admin, link_id).await {
+                Ok(Some(response)) => return response,
                 Err(error) => return error.into_response(),
                 Ok(None) => {}
             }
@@ -830,18 +826,12 @@ async fn requests_queue(
     admin: RequireConsoleAdminOf,
     axum::extract::Query(query): axum::extract::Query<QueueQuery>,
 ) -> impl IntoResponse {
-    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-    let after = match query.after.as_deref().map(|token| {
-        if token.len() > 512 {
-            return None;
-        }
-        let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
-        let boundary: ghinvite_core::storage::pending_queue::PendingBoundary =
-            serde_json::from_slice(&bytes).ok()?;
-        (1..=9999)
-            .contains(&chrono::Datelike::year(&boundary.created_at))
-            .then_some(boundary)
-    }) {
+    use ghinvite_core::storage::pending_queue::PendingBoundary;
+    let after = match query
+        .after
+        .as_deref()
+        .map(|token| cursor::decode(token, |boundary: &PendingBoundary| boundary.created_at))
+    {
         Some(Some(boundary)) => Some(boundary),
         None => None,
         Some(None) => {
@@ -863,7 +853,7 @@ async fn requests_queue(
         format!(
             "/console/accounts/{}/requests?after={}",
             admin.account.account_login,
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&boundary).expect("queue cursor serializes"))
+            cursor::encode(&boundary)
         )
     });
     let rows = page

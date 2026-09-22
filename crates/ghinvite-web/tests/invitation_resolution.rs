@@ -9,10 +9,6 @@ use ghinvite_core::{
 };
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::commands::{
-    GhinviteCommands, OnboardInstallation, RecordInstallationUninstalled,
-    RecordRepositorySelectionChange, RouteGithubInvitationWebhook,
-};
 use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
@@ -26,8 +22,8 @@ use common::link_authority::{CODE_SERVICE, LINK_SERVICE};
 
 #[tokio::test]
 async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
+    use ghinvite_web::RestateClient;
     use ghinvite_web::restate_client::RestateAuth;
-    use ghinvite_web::{RestateClient, RestateCommands};
     use wiremock::{Mock, MockServer, ResponseTemplate};
     const API_KEY: &str = "browser-secrecy-ingress-test-key";
     let ingress = MockServer::start().await;
@@ -59,7 +55,6 @@ async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
             "octocat",
             REQUESTER_ID,
         ))),
-        Arc::new(RestateCommands::new(restate.clone())),
         restate,
         config,
     );
@@ -204,7 +199,6 @@ async fn lost_response_app_with_control(
                 .chain(oauth_expectations("othercat", REQUESTER_ID + 1))
                 .collect(),
         )),
-        Arc::new(UnusedCommands),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -675,7 +669,6 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
             "octocat",
             REQUESTER_ID,
         ))),
-        Arc::new(UnusedCommands),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -954,42 +947,6 @@ fn encoded_return_to(path: &str) -> String {
     url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
 }
 
-/// The requester routes reach Restate through the admission client, never
-/// through the installation command facade.
-#[derive(Default)]
-struct UnusedCommands;
-
-#[async_trait::async_trait]
-impl GhinviteCommands for UnusedCommands {
-    async fn onboard_installation(
-        &self,
-        _command: OnboardInstallation,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected onboard_installation command")
-    }
-
-    async fn record_repository_selection_change(
-        &self,
-        _command: RecordRepositorySelectionChange,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected record_repository_selection_change command")
-    }
-
-    async fn record_installation_uninstalled(
-        &self,
-        _command: RecordInstallationUninstalled,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected record_installation_uninstalled command")
-    }
-
-    async fn route_github_invitation_webhook(
-        &self,
-        _command: RouteGithubInvitationWebhook,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected route_github_invitation_webhook command")
-    }
-}
-
 fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
 }
@@ -1077,7 +1034,6 @@ async fn build_test_app(link: InvitationLink, mock: MockTransport) -> axum::Rout
     let state = AppState::new(
         Arc::new(storage),
         Arc::new(mock),
-        Arc::new(UnusedCommands),
         Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );

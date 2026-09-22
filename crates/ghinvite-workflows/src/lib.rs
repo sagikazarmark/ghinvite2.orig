@@ -22,7 +22,6 @@ pub mod delivery;
 pub mod error;
 pub mod github_invitation;
 pub mod installation;
-pub mod invitation_context;
 pub mod projection;
 pub mod reconcile;
 pub mod repository_access;

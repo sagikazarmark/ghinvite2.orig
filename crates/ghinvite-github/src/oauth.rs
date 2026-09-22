@@ -15,6 +15,9 @@ use crate::transport::{HttpTransport, Method, Request};
 use std::sync::Arc;
 use url::Url;
 
+/// Upper bound on repository pages walked for one listing (100 per page).
+const MAX_REPOSITORY_PAGES: usize = 1000;
+
 /// Configuration for the GitHub App's OAuth surface. The web binary owns the
 /// `client_secret`; the Restate worker never sees it.
 #[derive(Clone, Debug)]
@@ -229,10 +232,12 @@ impl UserApiClient {
 
     /// `GET /user/installations/{installation_id}/repositories` — repos the
     /// signed-in user can see through this app installation. Used by the
-    /// console's link-create form to render a repo-picker.
+    /// console's link-create form to render a repo-picker, and by setup to
+    /// record a selected installation's repositories.
     ///
-    /// Reads a single `?per_page=100` page; repositories beyond the first 100
-    /// are not listed.
+    /// Follows GitHub's `Link: rel="next"` pages to the end; `total_count` is
+    /// GitHub's own. A listing that cycles or exceeds
+    /// `MAX_REPOSITORY_PAGES` is an error rather than a partial list.
     #[tracing::instrument(
         skip(self),
         fields(method = "list_user_installation_repos", installation_id)
@@ -241,16 +246,40 @@ impl UserApiClient {
         &self,
         installation_id: u64,
     ) -> Result<GhInstallationRepos> {
-        let path = format!("/user/installations/{installation_id}/repositories?per_page=100");
-        let req = self.auth_request(Method::Get, &path);
-        let resp = self.transport.send(req).await?;
-        if !(200..300).contains(&resp.status) {
-            tracing::warn!(
-                status = resp.status,
-                "github GET /user/installations/{installation_id}/repositories returned non-2xx"
-            );
+        let mut path = format!("/user/installations/{installation_id}/repositories?per_page=100");
+        let mut listed: Option<GhInstallationRepos> = None;
+        // Every page already walked: a cycle of any length is a paging fault.
+        let mut walked = std::collections::HashSet::new();
+        for _ in 0..MAX_REPOSITORY_PAGES {
+            if !walked.insert(path.clone()) {
+                return Err(Error::InvalidInput(
+                    "pagination returned to a page already walked".into(),
+                ));
+            }
+            let req = self.auth_request(Method::Get, &path);
+            let resp = self.transport.send(req).await?;
+            if !(200..300).contains(&resp.status) {
+                tracing::warn!(
+                    status = resp.status,
+                    "github GET /user/installations/{installation_id}/repositories returned non-2xx"
+                );
+            }
+            let resp = resp.ensure_success()?;
+            let next = crate::pagination::next_page_path(&resp, &self.base_url)?;
+            let page: GhInstallationRepos = resp.json()?;
+            match &mut listed {
+                Some(listed) => listed.repositories.extend(page.repositories),
+                None => listed = Some(page),
+            }
+            match next {
+                Some(next) => path = next,
+                None => return Ok(listed.expect("at least one page was read")),
+            }
         }
-        resp.ensure_success()?.json()
+        // A listing cut short is an incomplete observation, not a shorter one.
+        Err(Error::InvalidInput(
+            "repository listing exceeded its page bound".into(),
+        ))
     }
 }
 
@@ -588,5 +617,67 @@ mod user_api_tests {
         assert_eq!(resp.total_count, 2);
         assert_eq!(resp.repositories.len(), 2);
         assert_eq!(resp.repositories[0].full_name, "acme/api");
+    }
+
+    fn repos_page(url: &str, ids: &[u64], next: Option<&str>) -> Expectation {
+        let repositories: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({"id": id, "full_name": format!("acme/r{id}"), "private": true}))
+            .collect();
+        let mut headers = BTreeMap::new();
+        if let Some(next) = next {
+            headers.insert("link".into(), format!("<{next}>; rel=\"next\""));
+        }
+        Expectation {
+            method: Method::Get,
+            url: url.into(),
+            required_headers: BTreeMap::new(),
+            expected_body: None,
+            response: Response {
+                status: 200,
+                headers,
+                body: serde_json::json!({"total_count": 3, "repositories": repositories})
+                    .to_string()
+                    .into(),
+            },
+        }
+    }
+
+    const REPOS_URL: &str =
+        "https://api.github.test/user/installations/77/repositories?per_page=100";
+    const REPOS_PAGE_2: &str =
+        "https://api.github.test/user/installations/77/repositories?per_page=100&page=2";
+
+    #[tokio::test]
+    async fn list_user_installation_repos_walks_every_page() {
+        let mock = MockTransport::scripted(vec![
+            repos_page(REPOS_URL, &[10, 11], Some(REPOS_PAGE_2)),
+            repos_page(REPOS_PAGE_2, &[12], None),
+        ]);
+        let resp = client_with(mock.clone())
+            .list_user_installation_repos(77)
+            .await
+            .unwrap();
+
+        let ids: Vec<_> = resp.repositories.iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![10, 11, 12]);
+        assert_eq!(resp.total_count, 3);
+        mock.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn list_user_installation_repos_refuses_a_paging_cycle() {
+        let mock = MockTransport::scripted(vec![
+            repos_page(REPOS_URL, &[10], Some(REPOS_PAGE_2)),
+            repos_page(REPOS_PAGE_2, &[11], Some(REPOS_URL)),
+        ]);
+
+        let err = client_with(mock.clone())
+            .list_user_installation_repos(77)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        mock.assert_exhausted();
     }
 }

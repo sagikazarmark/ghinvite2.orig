@@ -6,7 +6,9 @@
 
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
-use ghinvite_core::{RequestId, RequestState};
+use ghinvite_core::delivery::CreateCommand;
+use ghinvite_core::request_lifecycle::DecisionOutcome;
+use ghinvite_core::{GithubInvitationId, RequestId, RequestState};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -16,6 +18,7 @@ use super::{
     TerminalDecision, WorkflowEnvelope,
 };
 use crate::availability::Eligibility;
+use crate::request_lifecycle::ApprovedDispatch;
 
 /// A retained admission outcome, replayed for the same attempt.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,6 +305,78 @@ pub(super) fn decide_lifecycle(
         request,
         projection,
         clear_blocker,
+    })
+}
+
+/// What an account admin's decision did to `request`, as `transition_request`
+/// left it. `was_pending` is its state before the transition.
+///
+/// A decline matches only under the same reason, so a second decline with a
+/// different reason is incompatible rather than already completed.
+pub(super) fn decision_outcome(
+    was_pending: bool,
+    action: &DecisionAction,
+    request: &RequestSnapshot,
+) -> DecisionOutcome {
+    let matching = match action {
+        DecisionAction::Approve => request.state == RequestState::Approved,
+        DecisionAction::Decline { reason } => {
+            request.state == RequestState::Declined
+                && request
+                    .decision
+                    .as_ref()
+                    .is_some_and(|d| &d.decline_reason == reason)
+        }
+    };
+    if !matching {
+        DecisionOutcome::Incompatible
+    } else if was_pending {
+        DecisionOutcome::Applied
+    } else {
+        DecisionOutcome::AlreadyCompleted
+    }
+}
+
+/// `request` as its requester may see it: a decline reason is admin-only.
+pub(super) fn requester_view(mut request: RequestSnapshot) -> RequestSnapshot {
+    if let Some(decision) = &mut request.decision {
+        decision.decline_reason = None;
+    }
+    request
+}
+
+/// The delivery plan for an approved `request`: one create per repository in
+/// the link's scope, in scope order, each under a fresh identity from
+/// `new_id`. `None` when the request carries no decision to deliver.
+pub(super) fn dispatch_plan(
+    dispatch_id: String,
+    link: &LinkSnapshot,
+    request: &RequestSnapshot,
+    mut new_id: impl FnMut() -> GithubInvitationId,
+) -> Option<ApprovedDispatch> {
+    let decision = request.decision.as_ref()?;
+    let commands = link
+        .creation
+        .repos
+        .iter()
+        .map(|repo| CreateCommand {
+            invitation_id: new_id(),
+            link_id: link.link_id,
+            request_id: request.request_id,
+            approval_id: decision.decision_id.clone(),
+            account_id: link.creation.account_id,
+            installation_id: link.creation.installation_id,
+            requester_id: request.requester_id,
+            repo_id: repo.repo_id,
+            repo_full_name: repo.repo_full_name.clone(),
+            permission: link.creation.permission,
+            approved_at: decision.effective_at,
+        })
+        .collect();
+    Some(ApprovedDispatch {
+        dispatch_id,
+        input: WorkflowEnvelope::from_authority(link, request.clone()),
+        commands,
     })
 }
 
@@ -1090,5 +1165,144 @@ mod tests {
         assert_eq!(decision.request, request);
         assert_eq!(decision.projection, None);
         assert!(!decision.clear_blocker);
+    }
+
+    fn decided(link: &LinkSnapshot, action: DecisionAction) -> (RequestSnapshot, DecideRequest) {
+        let mut request = pending(link, now() + Duration::days(1));
+        let command = command(&request, action);
+        transition_request(&mut request, Some(&command), now()).unwrap();
+        (request, command)
+    }
+
+    fn decline(reason: Option<&str>) -> DecisionAction {
+        DecisionAction::Decline {
+            reason: reason.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_decision_that_moved_a_pending_request_is_applied() {
+        let link = link(true);
+        for action in [DecisionAction::Approve, decline(Some("Not a contributor"))] {
+            let (request, command) = decided(&link, action.clone());
+
+            assert_eq!(
+                decision_outcome(true, &command.action, &request),
+                DecisionOutcome::Applied,
+                "action={action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_decision_on_a_decided_request_is_already_completed() {
+        let link = link(true);
+        let (request, command) = decided(&link, decline(Some("Not a contributor")));
+
+        assert_eq!(
+            decision_outcome(false, &command.action, &request),
+            DecisionOutcome::AlreadyCompleted
+        );
+    }
+
+    #[test]
+    fn a_decision_the_request_did_not_take_is_incompatible() {
+        let link = link(true);
+        let (approved, _) = decided(&link, DecisionAction::Approve);
+        let (declined, _) = decided(&link, decline(Some("Not a contributor")));
+        let expired = with_state(pending(&link, now()), RequestState::Expired);
+
+        for (request, action) in [
+            (&approved, decline(None)),
+            (&declined, DecisionAction::Approve),
+            // A decline under another reason is another decision.
+            (&declined, decline(Some("Spam"))),
+            (&declined, decline(None)),
+            (&expired, DecisionAction::Approve),
+        ] {
+            for was_pending in [true, false] {
+                assert_eq!(
+                    decision_outcome(was_pending, &action, request),
+                    DecisionOutcome::Incompatible,
+                    "state={:?} action={action:?}",
+                    request.state
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_requester_never_sees_the_decline_reason() {
+        let link = link(true);
+        let (declined, _) = decided(&link, decline(Some("Not a contributor")));
+
+        let seen = requester_view(declined.clone());
+
+        assert_eq!(seen.decision.as_ref().unwrap().decline_reason, None);
+        assert_eq!(seen.state, declined.state);
+        assert_eq!(
+            seen.decision.unwrap().decision_id,
+            declined.decision.unwrap().decision_id
+        );
+    }
+
+    fn two_repo_link() -> LinkSnapshot {
+        let mut link = link(true);
+        link.creation.repos.push(InvitationLinkRepo {
+            repo_id: 12,
+            repo_full_name: "acme/gadgets".into(),
+        });
+        link
+    }
+
+    #[test]
+    fn a_dispatch_plan_has_one_create_per_repository_in_scope_order() {
+        let link = two_repo_link();
+        let (request, _) = decided(&link, DecisionAction::Approve);
+        let decision = request.decision.clone().unwrap();
+        let ids = [
+            ghinvite_core::GithubInvitationId::new(),
+            ghinvite_core::GithubInvitationId::new(),
+        ];
+        let mut next = ids.iter().copied();
+
+        let plan = dispatch_plan("dispatch/1".into(), &link, &request, || {
+            next.next().unwrap()
+        })
+        .unwrap();
+
+        assert_eq!(plan.dispatch_id, "dispatch/1");
+        assert_eq!(plan.input.request, request);
+        let repos: Vec<_> = plan
+            .commands
+            .iter()
+            .map(|c| (c.invitation_id, c.repo_id, c.repo_full_name.as_str()))
+            .collect();
+        assert_eq!(
+            repos,
+            vec![(ids[0], 11, "acme/widgets"), (ids[1], 12, "acme/gadgets")]
+        );
+        for command in &plan.commands {
+            assert_eq!(command.link_id, link.link_id);
+            assert_eq!(command.request_id, request.request_id);
+            assert_eq!(command.approval_id, decision.decision_id);
+            assert_eq!(command.approved_at, decision.effective_at);
+            assert_eq!(command.account_id, 5);
+            assert_eq!(command.installation_id, 6);
+            assert_eq!(command.requester_id, REQUESTER);
+            assert_eq!(command.permission, Permission::Push);
+        }
+    }
+
+    #[test]
+    fn an_undecided_request_has_no_dispatch_plan() {
+        let link = link(true);
+        let request = pending(&link, now() + Duration::days(1));
+
+        let plan = dispatch_plan("dispatch/1".into(), &link, &request, || {
+            ghinvite_core::GithubInvitationId::new()
+        });
+
+        assert!(plan.is_none());
     }
 }

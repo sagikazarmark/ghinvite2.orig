@@ -23,7 +23,7 @@ use ghinvite_core::{
     Permission, RequestId, RequestState, SelectedRepos, Slug, User,
 };
 use ghinvite_github::transport::{HttpTransport, Method, Request as GithubRequest, Response};
-use ghinvite_web::{AppState, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -330,7 +330,6 @@ async fn document_fixture() -> (axum::Router, String) {
     let state = AppState::new(
         storage,
         Arc::new(FixtureGithub),
-        Arc::new(RestateCommands::new(restate.clone())),
         restate,
         WebConfig::for_local_dev_with_secret([7; 32]),
     );

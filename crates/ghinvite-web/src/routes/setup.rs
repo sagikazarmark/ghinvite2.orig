@@ -89,7 +89,7 @@ async fn handle_github_setup(
     let account_login = installation.account.login.clone();
 
     handle_setup_return(
-        state.commands.as_ref(),
+        &state.commands,
         SetupReturn {
             action,
             installation_id: installation.id,

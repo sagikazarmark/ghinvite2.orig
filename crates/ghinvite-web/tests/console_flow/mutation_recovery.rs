@@ -15,7 +15,6 @@ async fn recovery_app(ingress: &MockServer) -> (axum::Router, String) {
     let state = AppState::new(
         storage,
         Arc::new(BrowserGithub),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -117,7 +116,6 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
     let state = AppState::new(
         storage.clone(),
         Arc::new(BrowserGithub),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -329,7 +327,6 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -642,7 +639,6 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
     let state = AppState::new(
         storage.clone(),
         Arc::new(BrowserGithub),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -854,7 +850,6 @@ async fn mutation_recovery_browser_server() {
         AppState::new(
             storage,
             Arc::new(BrowserGithub),
-            Arc::new(UnusedCommands),
             Arc::new(RestateClient::new(ingress.uri()).unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         ),

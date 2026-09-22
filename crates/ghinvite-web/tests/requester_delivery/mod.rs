@@ -140,7 +140,6 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
             "octocat",
             REQUESTER_ID,
         ))),
-        Arc::new(UnusedCommands),
         Arc::new(ghinvite_web::RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );

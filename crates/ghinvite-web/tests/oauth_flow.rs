@@ -7,7 +7,7 @@ use ghinvite_core::storage::InstallationStorage;
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,12 +52,9 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
         })
         .await
         .unwrap();
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );

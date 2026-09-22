@@ -4,7 +4,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -44,8 +44,6 @@ async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Rout
     );
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(vec![]));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let config = WebConfig {
         webhook_secret: webhook_secret.to_vec(),
         ..WebConfig::for_local_dev_with_secret([7; 32])
@@ -53,7 +51,6 @@ async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Rout
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         config,
     );
@@ -651,8 +648,6 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
     );
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(vec![]));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let config = WebConfig {
         island_assets_dir,
         ..WebConfig::for_local_dev_with_secret([7; 32])
@@ -660,7 +655,6 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         config,
     );

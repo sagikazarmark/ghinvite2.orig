@@ -16,10 +16,9 @@ use dioform_derive::Form;
 // The `Props` derive expands to paths under `dioxus_core`, which `dioxus`'s
 // prelude normally brings in; this module only needs the derive itself.
 use dioxus::{dioxus_core, prelude::Props};
-use ghinvite_core::invitation_link::REPOSITORY_SCOPE_MAX_REPOS;
 use ghinvite_core::{
     Description, DescriptionError, InternalNote, InternalNoteTooLong, InvitationLinkRepo,
-    Permission,
+    Permission, RepositoryScope, RepositoryScopeError,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -310,6 +309,7 @@ pub const EXPIRES_IN_DAYS_TOO_FAR: &str =
     "Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.";
 pub const REPO_SCOPE_REQUIRED: &str = "Repository scope is required. Select at least one available repository for this invitation link.";
 pub const REPO_SCOPE_TOO_MANY: &str = "Repository scope is limited to 100 repositories. Select fewer repositories, or create another invitation link for the rest.";
+pub const REPO_SCOPE_UNUSABLE: &str = "GitHub returned repository details that cannot be used in a repository scope. Reload the repositories, then try again.";
 
 // --- parsers ----------------------------------------------------------------
 //
@@ -377,8 +377,8 @@ fn parse_optional_count(
 /// - `expires_in_days`: blank or at least 1, and `now` must be advanceable by
 ///   that many days to a representable timestamp.
 /// - `repo_ids`: at least one selected id must be an available repository,
-///   every selected id must still be available, and at most
-///   [`REPOSITORY_SCOPE_MAX_REPOS`] may be selected.
+///   every selected id must still be available, and the available
+///   repositories they select must form a [`RepositoryScope`].
 ///
 /// The `>= 1` checks on the numeric guardrails are deliberately duplicated
 /// from the parsers: the parsers reject `0` at the text boundary (so the
@@ -437,15 +437,20 @@ pub fn register_validators(
 
     let available = available_repos.to_vec();
     core.register_sync_field_validator(fields.repo_ids(), "repo_scope", move |selected, _| {
-        let scope = repository_scope(selected, &available);
-        if scope.is_empty() {
-            vec![REPO_SCOPE_REQUIRED.to_string()]
-        } else if let Some(message) = missing_repository_notice(selected, &available) {
-            vec![message]
-        } else if scope.len() > REPOSITORY_SCOPE_MAX_REPOS {
-            vec![REPO_SCOPE_TOO_MANY.to_string()]
-        } else {
-            vec![]
+        // A selection naming repositories that went away is reported before
+        // core's rules, which only see the ones still available.
+        if let Some(message) = missing_repository_notice(selected, &available)
+            && !repository_scope(selected, &available).is_empty()
+        {
+            return vec![message];
+        }
+        match RepositoryScope::parse(repository_scope(selected, &available)) {
+            Ok(_) => vec![],
+            Err(RepositoryScopeError::Empty) => vec![REPO_SCOPE_REQUIRED.to_string()],
+            Err(RepositoryScopeError::TooMany) => vec![REPO_SCOPE_TOO_MANY.to_string()],
+            Err(RepositoryScopeError::Duplicate | RepositoryScopeError::InvalidRepository) => {
+                vec![REPO_SCOPE_UNUSABLE.to_string()]
+            }
         }
     });
 }
@@ -817,7 +822,10 @@ mod tests {
         use ghinvite_core::invitation_link::{DESCRIPTION_MAX_CHARS, INTERNAL_NOTE_MAX_BYTES};
         assert!(DESCRIPTION_TOO_LONG.contains(&DESCRIPTION_MAX_CHARS.to_string()));
         assert!(INTERNAL_NOTE_TOO_LONG.contains(&INTERNAL_NOTE_MAX_BYTES.to_string()));
-        assert!(REPO_SCOPE_TOO_MANY.contains(&REPOSITORY_SCOPE_MAX_REPOS.to_string()));
+        assert!(
+            REPO_SCOPE_TOO_MANY
+                .contains(&ghinvite_core::invitation_link::REPOSITORY_SCOPE_MAX_REPOS.to_string())
+        );
     }
 
     #[test]

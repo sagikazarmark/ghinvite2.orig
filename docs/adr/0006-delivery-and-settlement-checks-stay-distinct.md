@@ -14,7 +14,7 @@ change its policy.
 | Caller | Reads identity from | Installation check | Answers |
 |---|---|---|---|
 | Delivery (`GithubCreate`, `crates/ghinvite-workflows/src/delivery.rs`) | The input-bound `CreateCommand` | Local active installation only | Blocked Delivery, Throttled Delivery or Delivery Outcome Unknown in the create receipt |
-| Settlement (`crates/ghinvite-workflows/src/settlement.rs`, context in `invitation_context.rs`) | The SQL `github_invitations` row | Verified with GitHub, including suspension | "Cannot observe now" (`None`); nothing is settled |
+| Settlement (`crates/ghinvite-workflows/src/settlement.rs`, context in `settlement/context.rs`) | The SQL `github_invitations` row | Verified with GitHub, including suspension | "Cannot observe now" (`None`); nothing is settled |
 | Availability (`crates/ghinvite-workflows/src/availability.rs`) | The account and link scope | Account installation state | Account-level admission eligibility |
 
 Two pieces are shared because their meaning is identical for every caller:

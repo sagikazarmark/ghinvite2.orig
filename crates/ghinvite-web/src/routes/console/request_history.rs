@@ -3,7 +3,6 @@ use crate::views::request_history::{
     HistoryRow, RepositoryDelivery, RequestDetailPage, RequestHistoryPage,
 };
 use axum::{extract::Path, http::StatusCode};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ghinvite_core::storage::{RecordStorage, request_history::Boundary};
 use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, RequestState};
 
@@ -19,15 +18,11 @@ fn cursor(uri: &Uri, link: InvitationLinkId) -> Option<Boundary> {
     let tokens: Vec<_> = url::form_urlencoded::parse(uri.query().unwrap_or_default().as_bytes())
         .filter(|(key, _)| key == "before")
         .collect();
-    if tokens.len() != 1 || tokens[0].1.len() > 512 {
+    let [(_, token)] = tokens.as_slice() else {
         return None;
-    }
-    let decoded = URL_SAFE_NO_PAD.decode(tokens[0].1.as_bytes()).ok()?;
-    let value: Cursor = serde_json::from_slice(&decoded).ok()?;
-    (value.v == 1
-        && value.link == link
-        && (1..=9999).contains(&chrono::Datelike::year(&value.boundary.admitted_at)))
-    .then_some(value.boundary)
+    };
+    let value = super::cursor::decode(token, |c: &Cursor| c.boundary.admitted_at)?;
+    (value.v == 1 && value.link == link).then_some(value.boundary)
 }
 
 /// The account's own invitation link. Another account's link is concealed as missing.
@@ -97,14 +92,11 @@ pub(super) async fn history(
     {
         Ok(page) => {
             if let Some(boundary) = page.older {
-                let token = URL_SAFE_NO_PAD.encode(
-                    serde_json::to_vec(&Cursor {
-                        v: 1,
-                        link: id,
-                        boundary,
-                    })
-                    .expect("cursor serializes"),
-                );
+                let token = super::cursor::encode(&Cursor {
+                    v: 1,
+                    link: id,
+                    boundary,
+                });
                 older_href = Some(format!(
                     "/console/accounts/{}/links/{id}/requests?before={token}",
                     admin.account.account_login

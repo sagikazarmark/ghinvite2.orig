@@ -2,7 +2,7 @@
 //! On Cloudflare Workers, `ghinvite-web-worker` serves `build_app()` instead.
 
 use ghinvite_web::session_store::{ProtectedStore, SqliteBackend};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -39,7 +39,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.restate_ingress,
         config.restate_auth.clone(),
     )?);
-    let commands = Arc::new(RestateCommands::new(restate.clone()));
 
     // Session store: a local sqlite database.
     let session_pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
@@ -47,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend.migrate().await?;
     let session_store = ProtectedStore::new(backend, config.session_secret);
 
-    let state = AppState::new(storage, transport, commands, restate, config);
+    let state = AppState::new(storage, transport, restate, config);
     let app = build_app(state, session_store);
 
     let addr = "127.0.0.1:8787".parse::<std::net::SocketAddr>()?;

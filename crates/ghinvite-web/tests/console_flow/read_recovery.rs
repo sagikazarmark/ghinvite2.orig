@@ -54,7 +54,6 @@ async fn github_authorization_failures_use_dependency_statuses_without_disclosin
                 oauth: MockTransport::scripted(oauth_sign_in_expectations()),
                 status: upstream,
             }),
-            Arc::new(UnusedCommands),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
@@ -95,7 +94,6 @@ async fn historical_settings_require_current_authority() {
         let state = AppState::new(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
-            Arc::new(UnusedCommands),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
@@ -329,7 +327,6 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
         let state = AppState::new(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
-            Arc::new(UnusedCommands),
             Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
@@ -486,7 +483,6 @@ async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
                 oauth: MockTransport::scripted(oauth_sign_in_expectations()),
                 status,
             }),
-            Arc::new(UnusedCommands),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         ),

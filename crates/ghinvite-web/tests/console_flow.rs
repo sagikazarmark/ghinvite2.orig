@@ -8,11 +8,7 @@ use ghinvite_core::storage::{AuditStorage, ConsoleStorage, InstallationStorage, 
 use ghinvite_core::{Account, AccountType, SelectedRepos};
 use ghinvite_github::mocks::{Expectation, MockTransport};
 use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::commands::{
-    GhinviteCommands, OnboardInstallation, RecordInstallationUninstalled,
-    RecordRepositorySelectionChange, RouteGithubInvitationWebhook,
-};
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -83,7 +79,6 @@ async fn deadline_queue_app(
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(UnusedCommands),
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -258,7 +253,6 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -334,7 +328,6 @@ async fn pending_decision_remains_accessible_after_uninstall() {
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -397,7 +390,6 @@ async fn isolated_lifecycle_decision_uses_authorized_identity_and_reports_expiry
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(UnusedCommands),
         Arc::new(RestateClient::new(ingress.uri()).unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -590,7 +582,6 @@ async fn identity_app(account: &Account, expectations: Vec<Expectation>) -> (axu
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(UnusedCommands),
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -794,7 +785,6 @@ async fn organization_authority_cache_cannot_follow_a_reused_account_name() {
     let state = AppState::new(
         storage.clone(),
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(UnusedCommands),
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -916,7 +906,6 @@ async fn expired_or_future_organization_authority_is_reverified_and_errors_never
                     404,
                 ),
             ])),
-            Arc::new(UnusedCommands),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
@@ -948,7 +937,6 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
         let state = AppState::new(
             storage.clone(),
             Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-            Arc::new(UnusedCommands),
             authority.client(),
             WebConfig::for_local_dev_with_secret([7; 32]),
         );
@@ -978,42 +966,6 @@ async fn personal_owner_can_edit_links_by_identity_after_rename() {
     }
 }
 
-/// Console routes reach Restate through the authority, never through the
-/// installation command facade, so every command here is a test failure.
-#[derive(Default)]
-struct UnusedCommands;
-
-#[async_trait::async_trait]
-impl GhinviteCommands for UnusedCommands {
-    async fn onboard_installation(
-        &self,
-        _command: OnboardInstallation,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected onboard_installation command")
-    }
-
-    async fn record_repository_selection_change(
-        &self,
-        _command: RecordRepositorySelectionChange,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected record_repository_selection_change command")
-    }
-
-    async fn record_installation_uninstalled(
-        &self,
-        _command: RecordInstallationUninstalled,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected record_installation_uninstalled command")
-    }
-
-    async fn route_github_invitation_webhook(
-        &self,
-        _command: RouteGithubInvitationWebhook,
-    ) -> ghinvite_web::Result<()> {
-        panic!("unexpected route_github_invitation_webhook command")
-    }
-}
-
 async fn build_test_app() -> axum::Router {
     use ghinvite_github::mocks::MockTransport;
     let storage = Arc::new(
@@ -1023,12 +975,9 @@ async fn build_test_app() -> axum::Router {
     );
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(vec![]));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1058,12 +1007,9 @@ async fn build_signed_in_admin_app() -> (axum::Router, String) {
     let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(oauth_expectations()));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1130,7 +1076,6 @@ async fn build_signed_in_admin_app_with_authority(
     let state = AppState::new(
         storage,
         transport,
-        Arc::new(UnusedCommands),
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1292,12 +1237,9 @@ async fn build_signed_in_admin_app_with_console_installations(
     let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1327,12 +1269,9 @@ async fn build_signed_in_app_with_failed_installation_discovery() -> (axum::Rout
     });
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1356,12 +1295,9 @@ async fn build_signed_in_app_without_installation() -> (axum::Router, String) {
     ));
     let transport: Arc<dyn ghinvite_github::HttpTransport> =
         Arc::new(MockTransport::scripted(expectations));
-    let restate = Arc::new(RestateClient::new("http://127.0.0.1:8080").unwrap());
-    let commands = Arc::new(RestateCommands::new(restate));
     let state = AppState::new(
         storage,
         transport,
-        commands,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -1997,7 +1933,6 @@ async fn links_app_with_authority(
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
-        Arc::new(UnusedCommands),
         authority.client(),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );
@@ -2809,7 +2744,6 @@ async fn audit_authorization_preserves_login_urls_and_conceals_unavailable_accou
     let state = AppState::new(
         storage,
         Arc::new(MockTransport::scripted(oauth_sign_in_expectations())),
-        Arc::new(UnusedCommands),
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
         WebConfig::for_local_dev_with_secret([7; 32]),
     );

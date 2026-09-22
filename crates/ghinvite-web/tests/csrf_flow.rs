@@ -16,7 +16,7 @@ use ghinvite_github::{
     mocks::{Expectation, MockTransport},
     transport::Method,
 };
-use ghinvite_web::{AppState, RestateClient, RestateCommands, WebConfig, build_app};
+use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -126,7 +126,6 @@ impl Browser {
             AppState::new(
                 storage,
                 Arc::new(MockTransport::scripted(expectations)),
-                Arc::new(RestateCommands::new(restate.clone())),
                 restate,
                 WebConfig::for_local_dev_with_secret([7; 32]),
             ),

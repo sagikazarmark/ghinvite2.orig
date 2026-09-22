@@ -32,3 +32,19 @@ reused with different input. Keeping one concrete module and faking the wire
 keeps those semantics on the tested path. Attempt continuations
 ([ADR 0007](0007-attempt-continuations-share-storage-not-outcomes.md)) triage the
 typed errors this module returns.
+
+## Amendment (2026-09-22): every web call into Restate follows this rule
+
+The web's installation and webhook commands (`RestateCommands`,
+`crates/ghinvite-web/src/commands.rs`) used to sit behind a
+`GhinviteCommands` trait. That trait had one production adapter and four
+hand-written test fakes, two of which only panicked. The fakes recorded
+command structs, so tests never exercised how those commands reach Restate:
+the service, key and handler names, call versus one-way send, or the rule
+that a failed mutation is reported as outcome unknown.
+
+The same decision now covers them: web calls into Restate are concrete
+modules over ingress, with no trait and no in-memory adapter. Tests run the
+real module against an in-process server that answers the ingress paths and
+records the calls it received. `AppState` builds the link authority and the
+commands from one `RestateClient`, as production already did.

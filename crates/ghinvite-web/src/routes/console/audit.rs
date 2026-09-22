@@ -10,7 +10,6 @@ use axum::{
     http::{StatusCode, Uri},
     response::{Html, IntoResponse},
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dioxus::prelude::*;
 use ghinvite_core::{
     audit::{ActorKind, AuditEvent, EventType, TargetKind},
@@ -41,15 +40,8 @@ impl Query {
                 .collect();
         let event = params.get("event").and_then(|v| v.parse().ok());
         let decode = |token: &String| -> Option<AuditBoundary> {
-            if token.len() > 512 {
-                return None;
-            }
-            let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
-            let cursor: Cursor = serde_json::from_slice(&bytes).ok()?;
-            if cursor.v != 1
-                || cursor.event != event
-                || !(1..=9999).contains(&chrono::Datelike::year(&cursor.time))
-            {
+            let cursor = super::cursor::decode(token, |c: &Cursor| c.time)?;
+            if cursor.v != 1 || cursor.event != event {
                 return None;
             }
             Some(AuditBoundary {
@@ -78,8 +70,7 @@ impl Query {
                 time: b.occurred_at,
                 id: b.id,
             };
-            let token =
-                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&cursor).expect("cursor serializes"));
+            let token = super::cursor::encode(&cursor);
             params.append_pair(
                 if matches!(position, AuditPosition::Before(_)) {
                     "before"
