@@ -50,21 +50,11 @@ pub fn router() -> Router<AppState> {
         .route("/console/accounts/{login}/requests", get(requests_queue))
         .route(
             "/console/accounts/{login}/links/{link_id}/requests",
-            get(request_history::history).layer(
-                tower_http::set_header::SetResponseHeaderLayer::overriding(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("private, no-store"),
-                ),
-            ),
+            get(request_history::history),
         )
         .route(
             "/console/accounts/{login}/requests/{request_id}",
-            get(request_history::detail).layer(
-                tower_http::set_header::SetResponseHeaderLayer::overriding(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("private, no-store"),
-                ),
-            ),
+            get(request_history::detail),
         )
         .route("/console/accounts/{login}/attempts", get(attempts::index))
         .route(
@@ -80,18 +70,18 @@ pub fn router() -> Router<AppState> {
             axum::routing::post(decline_request),
         )
         .route("/console/accounts/{login}/settings", get(settings_page))
-        .route(
-            "/console/accounts/{login}/audit",
-            get(audit::page).layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
-                axum::http::header::CACHE_CONTROL,
-                axum::http::HeaderValue::from_static("private, no-store"),
-            )),
-        )
+        .route("/console/accounts/{login}/audit", get(audit::page))
         .route(
             "/console/accounts/{login}/{*rest}",
             get(not_found).fallback(plain_not_found),
         )
         .route("/console/{*rest}", get(console_unknown))
+        // Every Console answer belongs to one signed-in admin, including the
+        // redirects and plain refusals the HTML-only layer in `build_app` skips.
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("private, no-store"),
+        ))
 }
 
 async fn console_index(

@@ -1964,6 +1964,84 @@ async fn console_audit_page_for_admin_renders_empty_history() {
     assert!(text.contains("Event type"));
 }
 
+/// Every Console response is private to the signed-in admin, whatever its
+/// shape: a page, the redirect after a form, or a refusal.
+#[tokio::test]
+async fn console_responses_are_never_stored() {
+    let storage = Arc::new(
+        ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap(),
+    );
+    let authority = FakeLinkAuthority::start().await;
+    let (app, cookie) = links_app_with_authority(storage, "admin", &authority).await;
+    let link = list_link(1);
+    authority.seed_link(&link);
+
+    let saved = post_edit(
+        &app,
+        &cookie,
+        &link.id.to_string(),
+        "description=Updated&internal_note=",
+    )
+    .await;
+    assert_eq!(saved.status(), StatusCode::SEE_OTHER);
+    let mut responses = vec![("POST edit", saved)];
+    for (label, method, path) in [
+        (
+            "links page",
+            "GET",
+            "/console/accounts/acme/links".to_owned(),
+        ),
+        (
+            "link page",
+            "GET",
+            format!("/console/accounts/acme/links/{}", link.id),
+        ),
+        (
+            "attempts page",
+            "GET",
+            "/console/accounts/acme/attempts".into(),
+        ),
+        (
+            "not-found page",
+            "GET",
+            "/console/accounts/acme/missing".into(),
+        ),
+        (
+            "plain refusal",
+            "POST",
+            "/console/accounts/acme/missing".into(),
+        ),
+    ] {
+        responses.push((label, identity_request(&app, &cookie, method, &path).await));
+    }
+    let signed_out = build_test_app()
+        .await
+        .oneshot(
+            Request::builder()
+                .uri("/console/accounts/acme/links")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(signed_out.status(), StatusCode::SEE_OTHER);
+    responses.push(("sign-in redirect", signed_out));
+
+    for (label, response) in responses {
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .map(|value| value.to_str().unwrap()),
+            Some("private, no-store"),
+            "{label} ({})",
+            response.status()
+        );
+    }
+}
+
 #[tokio::test]
 async fn console_overview_keeps_five_recent_links_and_opens_filtered_collections() {
     let storage = Arc::new(

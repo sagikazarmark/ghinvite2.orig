@@ -192,11 +192,7 @@ pub(super) async fn index(State(state): State<AppState>, admin: RequireConsoleAd
                     }
                 }
             });
-            (
-                [(axum::http::header::CACHE_CONTROL, "private, no-store")],
-                Html(html),
-            )
-                .into_response()
+            Html(html).into_response()
         }
         Err(e) => e.into_response(),
     }
@@ -505,10 +501,5 @@ fn render_attempt(
             }
         }
     });
-    (
-        status,
-        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
-        Html(html),
-    )
-        .into_response()
+    (status, Html(html)).into_response()
 }
