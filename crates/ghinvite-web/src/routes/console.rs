@@ -211,6 +211,18 @@ fn console_not_found_response(admin: &RequireConsoleAdminOf) -> axum::response::
     (axum::http::StatusCode::NOT_FOUND, Html(html)).into_response()
 }
 
+/// The id a Console route names in its path. A malformed id names nothing,
+/// so it answers exactly like a missing resource: the Console's own
+/// not-found page, which only a verified admin may see.
+// The rejection is the rendered response the handler returns as-is.
+#[allow(clippy::result_large_err)]
+fn path_id<T: std::str::FromStr>(
+    admin: &RequireConsoleAdminOf,
+    raw: &str,
+) -> Result<T, axum::response::Response> {
+    raw.parse().map_err(|_| console_not_found_response(admin))
+}
+
 async fn overview(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
@@ -615,8 +627,9 @@ async fn edit_link_form(
     admin: RequireConsoleAdminOf,
     axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse() else {
-        return console_not_found_response(&admin);
+    let id = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
     let link = match authoritative_link(&state, &admin, id).await {
         Ok(link) => link,
@@ -641,8 +654,9 @@ async fn save_link_details(
     axum::extract::Path((_login, id)): axum::extract::Path<(String, String)>,
     CsrfForm(values): CsrfForm<LinkEditValues>,
 ) -> axum::response::Response {
-    let Ok(id) = id.parse() else {
-        return console_not_found_response(&admin);
+    let id = match path_id(&admin, &id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
     };
     if let Err(error) = authoritative_link(&state, &admin, id).await {
         return match error {
@@ -737,13 +751,11 @@ fn edit_link_response(
 async fn link_detail(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, link_id)): axum::extract::Path<(String, String)>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let link_id = match ghinvite_core::InvitationLinkId::from_str(&link_id_str) {
+    let link_id = match path_id(&admin, &link_id) {
         Ok(id) => id,
-        Err(_) => return console_not_found_response(&admin),
+        Err(not_found) => return not_found,
     };
     let link = match authoritative_link(&state, &admin, link_id).await {
         Ok(link) => link,
@@ -787,14 +799,12 @@ async fn link_detail(
 async fn revoke_link(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, link_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, link_id)): axum::extract::Path<(String, String)>,
     _form: CsrfForm<EmptyForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let link_id = match ghinvite_core::InvitationLinkId::from_str(&link_id_str) {
+    let link_id = match path_id(&admin, &link_id) {
         Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
+        Err(not_found) => return not_found,
     };
     attempts::execute(
         &state,
@@ -889,20 +899,13 @@ struct QueueQuery {
 async fn approve_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, request_id)): axum::extract::Path<(String, String)>,
     CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let request_id = match ghinvite_core::RequestId::from_str(&request_id_str) {
-        Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
-    };
-
     authoritative_decision(
         &state,
         &admin,
-        request_id,
+        &request_id,
         form,
         ghinvite_core::request_lifecycle::DecisionAction::Approve,
     )
@@ -912,20 +915,13 @@ async fn approve_request(
 async fn decline_request(
     axum::extract::State(state): axum::extract::State<AppState>,
     admin: RequireConsoleAdminOf,
-    axum::extract::Path((_login, request_id_str)): axum::extract::Path<(String, String)>,
+    axum::extract::Path((_login, request_id)): axum::extract::Path<(String, String)>,
     CsrfForm(form): CsrfForm<LifecycleForm>,
 ) -> impl IntoResponse {
-    use std::str::FromStr;
-
-    let request_id = match ghinvite_core::RequestId::from_str(&request_id_str) {
-        Ok(id) => id,
-        Err(_) => return crate::error::WebError::NotFound.into_response(),
-    };
-
     authoritative_decision(
         &state,
         &admin,
-        request_id,
+        &request_id,
         form,
         ghinvite_core::request_lifecycle::DecisionAction::Decline { reason: None },
     )
@@ -941,11 +937,15 @@ struct LifecycleForm {
 async fn authoritative_decision(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
-    request_id: ghinvite_core::RequestId,
+    request_id: &str,
     form: LifecycleForm,
     action: ghinvite_core::request_lifecycle::DecisionAction,
 ) -> axum::response::Response {
     use ghinvite_core::request_lifecycle::DecideRequest;
+    let request_id = match path_id(admin, request_id) {
+        Ok(id) => id,
+        Err(not_found) => return not_found,
+    };
     let (Some(link_id), Some(operation_id)) = (form.link_id, form.operation_id) else {
         return crate::WebError::BadRequest(
             "Missing lifecycle command identity. Reload the queue.".into(),

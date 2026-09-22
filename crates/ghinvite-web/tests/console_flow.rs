@@ -3507,26 +3507,46 @@ async fn console_unknown_post_route_stays_plain_404() {
     assert_eq!(&body[..], b"Not Found");
 }
 
+/// A malformed id names nothing, so every Console route that takes one
+/// answers the admin exactly as for a missing resource: the Console's own
+/// not-found page, reads and mutations alike.
 #[tokio::test]
-async fn console_post_missing_resource_stays_plain_404() {
+async fn console_malformed_path_ids_render_the_console_404() {
     let (app, cookie) = build_signed_in_admin_app().await;
-    let token = common::csrf_token(&app, &cookie).await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/console/accounts/acme/links/not-a-link-id/revoke")
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(format!("csrf_token={token}")))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    let base = "/console/accounts/acme";
+    let mut responses = Vec::new();
+    for path in [
+        "links/not-a-link-id",
+        "links/not-a-link-id/edit",
+        "links/not-a-link-id/requests",
+        "requests/not-a-request-id",
+    ] {
+        responses.push((
+            path,
+            identity_request(&app, &cookie, "GET", &format!("{base}/{path}")).await,
+        ));
+    }
+    for (path, body) in [
+        ("links/not-a-link-id/edit", "description=Kept"),
+        ("links/not-a-link-id/revoke", ""),
+        ("requests/not-a-request-id/approve", ""),
+        ("requests/not-a-request-id/decline", ""),
+    ] {
+        responses.push((
+            path,
+            post_form(&app, &cookie, &format!("{base}/{path}"), body).await,
+        ));
+    }
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&body[..], b"Not Found");
+    for (path, response) in responses {
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        let html = response_html(response).await;
+        assert!(
+            html.contains("This console page is not available."),
+            "{path}: {html}"
+        );
+        assert!(html.contains("href=\"/console/accounts/acme\""), "{path}");
+    }
 }
 
 const LINK_CREATED: &str = "Invitation link created.";
