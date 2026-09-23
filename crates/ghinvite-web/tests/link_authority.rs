@@ -4,6 +4,12 @@
 //! that applied but whose acknowledgement was lost. Requester attempts follow
 //! the object's admission rules: an operation replays its receipt and is bound
 //! to its first input, and a rejection is a final receipt.
+//!
+//! Every test here therefore exercises the web's half of the exchange — what
+//! it sends and what it makes of the answer — never the rules themselves,
+//! which live in `ghinvite-workflows` and are pinned by that crate's own
+//! tests. A test name here that claimed a rule would hold whether or not the
+//! rule did.
 
 #[path = "common/link_authority.rs"]
 mod fake;
@@ -149,8 +155,12 @@ async fn a_decision_applies_once_and_its_operation_replays_the_receipt() {
     assert_eq!(opposite.request.state, RequestState::Approved);
 }
 
+/// The arbitration itself is `rules::transition_request`, pinned by
+/// `expiry_at_the_deadline_wins_over_a_late_command`; what is checked here is
+/// that the web reports the expiry the authority answers rather than the
+/// approval it asked for.
 #[tokio::test]
-async fn a_decision_past_the_deadline_expires_the_request() {
+async fn a_decision_the_authority_expired_is_reported_incompatible() {
     let link = link();
     let (fake, authority) = authority_with(&link).await;
     let request = pending(&link, Utc::now() - Duration::hours(1));
@@ -424,8 +434,12 @@ async fn the_requester_page_recovers_the_latest_attempt_and_conceals_the_rest() 
     assert_eq!(page.request.unwrap().request_id, accepted(&receipt));
 }
 
+/// The redaction itself is `rules::requester_view`, pinned by
+/// `a_requester_never_sees_the_decline_reason`; what is checked here is that
+/// the web carries the authority's declined answer through to the page as it
+/// was given, redaction included, and stops blocking on it.
 #[tokio::test]
-async fn the_requester_never_sees_the_decline_reason() {
+async fn a_declined_request_reaches_the_requester_page_without_a_reason() {
     let link = link();
     let (fake, authority) = authority_with(&link).await;
     let command = admit(&link, 99, None);

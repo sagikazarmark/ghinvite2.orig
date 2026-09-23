@@ -418,6 +418,35 @@ fn validate_admin(admin: &AccountAdmin, account_id: u64) -> Result<(), TerminalE
     Ok(())
 }
 
+async fn admin_link(
+    ctx: &ObjectContext<'_>,
+    link_id: InvitationLinkId,
+    admin: &AccountAdmin,
+) -> Result<LinkSnapshot, TerminalError> {
+    validate_key(ctx, link_id).await?;
+    let Json(link) = ctx
+        .get::<Json<LinkSnapshot>>(keys::LINK)
+        .await?
+        .ok_or_else(missing)?;
+    validate_admin(admin, link.creation.account_id)?;
+    Ok(link)
+}
+
+async fn requester_request(
+    ctx: &ObjectContext<'_>,
+    query: &RequestStatus,
+) -> Result<RequestSnapshot, TerminalError> {
+    validate_key(ctx, query.link_id).await?;
+    let Json(request) = ctx
+        .get::<Json<RequestSnapshot>>(&keys::request(query.request_id))
+        .await?
+        .ok_or_else(missing)?;
+    if query.requester_id == 0 || request.requester_id != query.requester_id {
+        return Err(missing());
+    }
+    Ok(request)
+}
+
 fn normalize_decision(input: &mut DecideRequest) -> Result<String, TerminalError> {
     if let DecisionAction::Decline { reason } = &mut input.action {
         *reason = reason
@@ -444,12 +473,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(input): Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(mut link) = ctx
-            .get::<Json<LinkSnapshot>>(keys::LINK)
-            .await?
-            .ok_or_else(missing)?;
-        validate_admin(&input.admin, link.creation.account_id)?;
+        let mut link = admin_link(&ctx, input.link_id, &input.admin).await?;
         let metadata = LinkMetadata::parse(&input.description, input.internal_note.as_deref())
             .map_err(|_| invalid())?;
         if link.description() == metadata.description
@@ -622,14 +646,7 @@ impl InvitationLink {
         Json(query): Json<RequestStatus>,
     ) -> Result<Json<Vec<ghinvite_core::delivery::RepositoryProgress>>, TerminalError> {
         use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
-        validate_key(&ctx, query.link_id).await?;
-        let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&keys::request(query.request_id))
-            .await?
-            .ok_or_else(missing)?;
-        if request.requester_id != query.requester_id {
-            return Err(missing());
-        }
+        let request = requester_request(&ctx, &query).await?;
         if request.state != RequestState::Approved {
             return Ok(Json(Vec::new()));
         }
@@ -758,14 +775,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(input): Json<RequestStatus>,
     ) -> Result<Json<crate::request_lifecycle::ApprovedDispatch>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&keys::request(input.request_id))
-            .await?
-            .ok_or_else(missing)?;
-        if input.requester_id == 0 || request.requester_id != input.requester_id {
-            return Err(missing());
-        }
+        let request = requester_request(&ctx, &input).await?;
         if request.state != RequestState::Approved {
             return Err(conflict());
         }
@@ -888,13 +898,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(input): Json<AdminLinkCommand>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>(keys::LINK)
-            .await?
-            .ok_or_else(missing)?;
-        validate_admin(&input.admin, link.creation.account_id)?;
-        Ok(Json(link))
+        Ok(Json(admin_link(&ctx, input.link_id, &input.admin).await?))
     }
 
     #[handler]
@@ -903,14 +907,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(input): Json<RequestStatus>,
     ) -> Result<Json<RequestSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(request) = ctx
-            .get::<Json<RequestSnapshot>>(&keys::request(input.request_id))
-            .await?
-            .ok_or_else(missing)?;
-        if input.requester_id == 0 || request.requester_id != input.requester_id {
-            return Err(missing());
-        }
+        let request = requester_request(&ctx, &input).await?;
         let request = self.transition(&ctx, request, None).await?;
         Ok(Json(rules::requester_view(request)))
     }
@@ -921,12 +918,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(mut input): Json<DecideRequest>,
     ) -> Result<Json<Option<DecisionReceipt>>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>(keys::LINK)
-            .await?
-            .ok_or_else(missing)?;
-        validate_admin(&input.admin, link.creation.account_id)?;
+        admin_link(&ctx, input.link_id, &input.admin).await?;
         let key = normalize_decision(&mut input)?;
         match ctx.get::<Json<LifecycleRecord>>(&key).await? {
             Some(Json(old)) if old.input == input => Ok(Json(Some(old.receipt))),
@@ -941,12 +933,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(mut input): Json<DecideRequest>,
     ) -> Result<Json<DecisionReceipt>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>(keys::LINK)
-            .await?
-            .ok_or_else(missing)?;
-        validate_admin(&input.admin, link.creation.account_id)?;
+        admin_link(&ctx, input.link_id, &input.admin).await?;
         let key = normalize_decision(&mut input)?;
         if let Some(Json(old)) = ctx.get::<Json<LifecycleRecord>>(&key).await? {
             if old.input != input {
@@ -981,12 +968,7 @@ impl InvitationLink {
         ctx: ObjectContext<'_>,
         Json(input): Json<AdminLinkCommand>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
-        validate_key(&ctx, input.link_id).await?;
-        let Json(link) = ctx
-            .get::<Json<LinkSnapshot>>(keys::LINK)
-            .await?
-            .ok_or_else(missing)?;
-        validate_admin(&input.admin, link.creation.account_id)?;
+        let link = admin_link(&ctx, input.link_id, &input.admin).await?;
         if link.revoked_at.is_some() {
             return Ok(Json(link));
         }
