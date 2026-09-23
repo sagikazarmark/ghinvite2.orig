@@ -99,8 +99,10 @@ pub(crate) fn unique_violation(message: &str) -> bool {
     message.contains("UNIQUE constraint failed")
 }
 
-/// Every storage port. Adapters implement each part; the conformance suite and
-/// composition roots use the whole. Callers depend on the parts they use.
+/// Every storage port. Adapters implement each part and receive this through
+/// the blanket impl below; the conformance suite is what names the whole.
+/// Callers depend on the parts they use, bundled as `WebStorage` and
+/// `WorkflowStorage`, which is what the composition roots name.
 pub trait Storage:
     RecordStorage
     + ConsoleStorage
