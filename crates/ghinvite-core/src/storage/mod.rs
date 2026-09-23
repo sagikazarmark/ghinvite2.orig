@@ -428,8 +428,12 @@ pub trait AuditStorage: Send + Sync + 'static {
 mod tests {
     use super::*;
 
+    /// Message text only: both drivers wrap SQLite's wording in a prefix of
+    /// their own, and the constraint is read out from under it. That either
+    /// driver really reports these failures this way is pinned against a live
+    /// database by `test_suite::scenario_insert_conflict_kinds`.
     #[test]
-    fn insert_failures_classify_by_sqlite_text_whatever_the_driver_prefix() {
+    fn a_failed_insert_classifies_by_the_constraint_named_in_its_message() {
         let classified = |message: &str| classify_insert(message.into());
         assert!(matches!(
             classified(
