@@ -135,6 +135,8 @@ scenarios![
     scenario_delivery_attempt_fence,
     scenario_member_webhook_binding,
     scenario_settlement_audit_conflict,
+    scenario_insert_conflict_kinds,
+    scenario_installation_update_not_found,
 ];
 
 /// Run the full cross-cutting suite against any `Storage` impl.
@@ -995,4 +997,101 @@ async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S
             .collect::<Vec<_>>(),
         [&winner]
     );
+}
+
+/// A refused insert names the constraint it hit, not just "the write failed":
+/// re-onboarding branches on [`ConflictKind::DuplicateId`], and only the
+/// partial unique index tells an account's second *active* installation apart.
+async fn scenario_insert_conflict_kinds<S: Storage + ProjectionStorage>(s: S) {
+    use super::{ConflictKind, Error};
+    s.insert_installation(&sample_account(1, 9013, "acme13"))
+        .await
+        .unwrap();
+    let second_active = s
+        .insert_installation(&sample_account(2, 9013, "acme13"))
+        .await;
+    assert!(
+        matches!(
+            second_active,
+            Err(Error::Conflict(ConflictKind::DuplicateActiveInstallation))
+        ),
+        "{second_active:?}"
+    );
+    // Account 9014 has no active row, so only the primary key is violated.
+    let reused_id = s
+        .insert_installation(&sample_account(1, 9014, "acme14"))
+        .await;
+    assert!(
+        matches!(reused_id, Err(Error::Conflict(ConflictKind::DuplicateId))),
+        "{reused_id:?}"
+    );
+
+    s.upsert_user(&sample_user(713, "creator")).await.unwrap();
+    s.upsert_user(&sample_user(813, "asker")).await.unwrap();
+    let link = sample_link(9013, 1, 713, 1300);
+    let request = sample_request(link.id, 813);
+    seed(&s, &link, std::slice::from_ref(&request), 1).await;
+    let invitation = GithubInvitation {
+        id: GithubInvitationId::new(),
+        invitation_request_id: request.id,
+        repo_id: 10,
+        github_invitation_id: None,
+        state: InvitationState::Sending,
+        error_message: None,
+        created_at: dt("2026-05-04T13:00:00Z"),
+        updated_at: dt("2026-05-04T13:00:00Z"),
+    };
+    s.insert_github_invitation(&invitation).await.unwrap();
+    let replayed = s.insert_github_invitation(&invitation).await;
+    assert!(
+        matches!(replayed, Err(Error::Conflict(ConflictKind::DuplicateId))),
+        "{replayed:?}"
+    );
+    let orphan = s
+        .insert_github_invitation(&GithubInvitation {
+            id: GithubInvitationId::new(),
+            invitation_request_id: RequestId::new(),
+            ..invitation
+        })
+        .await;
+    assert!(
+        matches!(orphan, Err(Error::Conflict(ConflictKind::ForeignKey))),
+        "{orphan:?}"
+    );
+}
+
+/// Installation updates address one live row: an unknown or already
+/// uninstalled installation is missing, not a storage failure, and the
+/// refused update leaves the row alone.
+async fn scenario_installation_update_not_found<S: Storage>(s: S) {
+    use super::Error;
+    let subset = SelectedRepos::Subset(vec![10]);
+    assert!(matches!(
+        s.mark_installation_uninstalled(1, dt("2026-05-04T18:00:00Z"))
+            .await,
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        s.update_installation_repos(1, &subset).await,
+        Err(Error::NotFound)
+    ));
+    s.insert_installation(&sample_account(1, 9015, "acme15"))
+        .await
+        .unwrap();
+    s.update_installation_repos(1, &subset).await.unwrap();
+    s.mark_installation_uninstalled(1, dt("2026-05-04T18:00:00Z"))
+        .await
+        .unwrap();
+    assert!(matches!(
+        s.mark_installation_uninstalled(1, dt("2026-05-04T19:00:00Z"))
+            .await,
+        Err(Error::NotFound)
+    ));
+    assert!(matches!(
+        s.update_installation_repos(1, &SelectedRepos::All).await,
+        Err(Error::NotFound)
+    ));
+    let row = s.get_installation(1).await.unwrap().unwrap();
+    assert_eq!(row.selected_repos, subset);
+    assert_eq!(row.uninstalled_at, Some(dt("2026-05-04T18:00:00Z")));
 }
