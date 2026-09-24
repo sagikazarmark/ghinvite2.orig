@@ -151,6 +151,15 @@ unsafe impl Sync for D1Storage {}
 
 #[async_trait]
 impl ProjectionStorage for D1Storage {
+    async fn apply_request(&self, envelope: &projection::RequestProjectionEnvelope) -> Result<()> {
+        let input = projection::request_sql::encode(envelope)?;
+        wasm_send(self.batch(
+            projection::request_sql::STATEMENTS,
+            &input,
+            projection::sql::classify,
+        ))
+        .await
+    }
     async fn apply_transition(&self, envelope: &ProjectionEnvelope) -> Result<()> {
         let input = projection::sql::encode(envelope)?;
         wasm_send(self.batch(

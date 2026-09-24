@@ -24,7 +24,7 @@ const mf = new Miniflare({
   async outboundService(request) {
     if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
     if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
-    if (/^https:\/\/restate.test\/InvitationLink\/[A-Z0-9]+\/decide$/.test(request.url)) {
+    if (/^https:\/\/restate.test\/InvitationRequest\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
       assert.ok(receipt, 'unexpected decision');
       if (loseAcknowledgement) { loseAcknowledgement = false; return new Response('acknowledgement lost', { status: 503 }); }
@@ -128,7 +128,7 @@ try {
   assert.deepEqual(concurrent.map(r => r.status).sort(), [303, 502]);
   assert.equal(decisions.length, 5, 'D1 atomically binds just one original decision');
   const original = decisions.at(-1);
-  const recovery = `/console/accounts/octocat/attempts/decision-${link}-${original.operation_id}`;
+  const recovery = `/console/accounts/octocat/attempts/decision-${original.request_id}-${original.operation_id}`;
   const list = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/attempts', { headers: { cookie } });
   assert.ok((await list.text()).includes(recovery));
   const status = await mf.dispatchFetch(`https://queue.test${recovery}`, { headers: { cookie } });

@@ -59,7 +59,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         });
     let builder = ghinvite_workflows::admission::bind_protocol_fixture(builder);
     let builder = ghinvite_workflows::projection::bind(builder, storage.clone());
-    let builder = ghinvite_workflows::request_lifecycle::bind(builder);
+    let builder = ghinvite_workflows::request_owner::bind(builder);
     let endpoint = ghinvite_workflows::delivery::bind(builder, state).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -127,9 +127,15 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     let link = ghinvite_core::InvitationLinkId::new();
     let call = |handler: &str, input: Value| {
-        client
-            .post(format!("{ingress}/InvitationLink/{link}/{handler}"))
-            .json(&input)
+        let route = if handler == "prepare_dispatch" {
+            format!(
+                "InvitationRequest/{}/approved_plan",
+                input["request_id"].as_str().unwrap()
+            )
+        } else {
+            format!("InvitationLink/{link}/{handler}")
+        };
+        client.post(format!("{ingress}/{route}")).json(&input)
     };
     let response = call("create", json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},"description":"Withheld parents","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]})).send().await.unwrap();
     assert!(response.status().is_success());
@@ -469,10 +475,10 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .execute(&sql)
         .await
         .unwrap();
-    post(&client, &format!("{ingress}/InvitationLink/{manual}/decide"), json!({"link_id":manual,"request_id":request,"operation_id":ghinvite_core::RequestId::new(),"admin":{"account_id":100,"user_id":7},"action":{"kind":"approve"}})).await;
+    post(&client, &format!("{ingress}/InvitationRequest/{request}/decide"), json!({"link_id":manual,"request_id":request,"operation_id":ghinvite_core::RequestId::new(),"admin":{"account_id":100,"user_id":7},"action":{"kind":"approve"}})).await;
     let manual_plan = post(
         &client,
-        &format!("{ingress}/InvitationLink/{manual}/prepare_dispatch"),
+        &format!("{ingress}/InvitationRequest/{request}/approved_plan"),
         json!({"link_id":manual,"request_id":request,"requester_id":8}),
     )
     .await;

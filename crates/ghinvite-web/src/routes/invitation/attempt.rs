@@ -136,12 +136,56 @@ pub async fn page(
         }
     };
     if operation.is_none()
-        && !fresh
-        && let Some(local) = local
+        && let Some(local) = local.as_ref()
     {
         let local_id = String::from(local.operation_id.clone());
-        if page.attempt.is_none() {
-            return Redirect::to(&attempt_url(code, &local_id)).into_response();
+        if page
+            .attempt
+            .as_ref()
+            .is_none_or(|a| a.input.operation_id != local.operation_id)
+        {
+            // Prefer local only if its own authoritative outcome is still
+            // unresolved. A completed old browser record cannot hide a newer
+            // request from another browser. Fresh navigation retains this path.
+            let unresolved = match authority
+                .requester_page(code, session.user_id, Some(local.operation_id.clone()))
+                .await
+            {
+                Ok(known) => known.attempt.as_ref().is_none_or(|a| a.receipt.is_none()),
+                Err(AuthorityError::Missing | AuthorityError::Unknown(_)) => true,
+                Err(_) => false,
+            };
+            if unresolved {
+                let original = attempt_url(code, &local_id);
+                let fresh_id = ghinvite_core::RequestId::new().to_string();
+                return View {
+                    id: if fresh && page.can_start_fresh {
+                        &fresh_id
+                    } else {
+                        &local_id
+                    },
+                    justification: if fresh && page.can_start_fresh {
+                        None
+                    } else {
+                        local.justification.as_deref()
+                    },
+                    page: Some(&page),
+                    message: if fresh && page.can_start_fresh {
+                        FRESH_ATTEMPT
+                    } else {
+                        RETRY_UNKNOWN
+                    },
+                    original: Some(&original),
+                    mode: if fresh && page.can_start_fresh {
+                        FormMode::Fresh
+                    } else {
+                        FormMode::Retry
+                    },
+                    status: StatusCode::OK,
+                    delivery: vec![],
+                }
+                .render(session, code);
+            }
         }
     }
     if !page.can_start_fresh && page.attempt.is_none() && page.request.is_none() {
@@ -155,7 +199,11 @@ pub async fn page(
     let (id, justification, receipt) = match &page.attempt {
         Some(attempt) if !fresh => (
             String::from(attempt.input.operation_id.clone()),
-            attempt.input.justification.clone(),
+            local
+                .as_ref()
+                .filter(|local| local.operation_id == attempt.input.operation_id)
+                .map(|local| local.justification.clone())
+                .unwrap_or_else(|| attempt.input.justification.clone()),
             attempt.receipt.clone(),
         ),
         _ => (ghinvite_core::RequestId::new().to_string(), None, None),
@@ -280,7 +328,10 @@ pub async fn submit(
     };
     // Retain the input before ingress: if the request never reaches the
     // authority, this is all that recovers the attempt.
-    let input = AttemptInput::from(&command);
+    let input = AttemptInput {
+        operation_id: command.operation_id.clone(),
+        justification,
+    };
     let id = String::from(input.operation_id.clone());
     let retained = async {
         AttemptContinuations::new(state)
@@ -289,7 +340,18 @@ pub async fn submit(
     };
     match retained.await {
         Ok(Retention::Retained) => {}
-        Ok(Retention::Conflict(_) | Retention::Bound(_)) => return conflict(session, code, &input),
+        Ok(Retention::Conflict(original)) => {
+            let canonical = admit_command(
+                link_id,
+                &id,
+                session.user_id,
+                original.justification.clone(),
+            );
+            if !canonical.is_ok_and(|original| original == command) {
+                return conflict(session, code, &input);
+            }
+        }
+        Ok(Retention::Bound(_)) => return conflict(session, code, &input),
         Err(error) => return safe_error(code, error),
     }
     // Persist recovery input before admission. If the response is lost, the
@@ -316,6 +378,7 @@ pub async fn submit(
                 StatusCode::CONFLICT,
             ),
         },
+        Err(AuthorityError::Unknown(_)) => unknown(session, code, &input),
         Err(error) => failed(session, code, &command, error),
     }
 }

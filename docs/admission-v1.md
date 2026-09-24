@@ -1,5 +1,11 @@
 # Authoritative admission (#53)
 
+The request lifecycle/dispatch and notification sections below describe the
+historical #53–#59 implementation. #121 supersedes them with the persistent
+[request authority](request-lifecycle-v1.md) and ADR 0009: links now retain
+admission receipts and request indexes, while request VOs own lifecycle,
+eligibility verdicts, initialization projection and approved dispatch.
+
 #59 completed local Worker/D1 verification; production activation remains
 blocked by the operator-owned remote gates in #61.
 

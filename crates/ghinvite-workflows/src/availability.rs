@@ -30,6 +30,12 @@ pub enum Eligibility {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct AdmissionEvidence {
+    pub eligibility: Eligibility,
+    pub valid_until: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Observation {
     Available { repo_ids: Vec<u64> },
@@ -460,24 +466,6 @@ fn retained_eligibility(
     .then_some(Eligibility::Available)
 }
 
-/// What admission makes of its `eligibility` call. A call fails only with the
-/// callee's terminal error: unavailable retained authority is transient, so
-/// eligibility is unknown and the same attempt can retry. Anything else (an
-/// unusable key or an undecodable scope) means caller and callee disagree,
-/// an invariant failure admission must not present as an outage.
-pub(crate) fn called_eligibility(
-    called: Result<Eligibility, TerminalError>,
-) -> Result<Eligibility, TerminalError> {
-    match called {
-        Ok(eligibility) => Ok(eligibility),
-        Err(error) if error.code() == 503 => Ok(Eligibility::Unknown),
-        Err(error) => Err(TerminalError::new_with_code(
-            500,
-            format!("installation eligibility refused: {}", error.message()),
-        )),
-    }
-}
-
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
 }
@@ -494,6 +482,71 @@ const RECENT_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(5
 
 #[restate_sdk::object]
 impl AccountInstallation {
+    #[handler]
+    async fn admission_evidence(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
+        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
+            return Err(invalid());
+        }
+        if let Some(Json(status)) = ctx.get::<Json<InstallationStatus>>("installation").await? {
+            let Json(now) = ctx
+                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
+                .name("evidence_time")
+                .await?;
+            if let Some(answer) = retained_eligibility(&status, &scope, now) {
+                return Ok(Json(AdmissionEvidence {
+                    eligibility: answer,
+                    valid_until: status.observed_at.unwrap() + chrono::Duration::minutes(5),
+                }));
+            }
+        }
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
+            .observe_admission_evidence(Json(scope))
+            .call()
+            .await
+    }
+
+    #[handler]
+    async fn observe_admission_evidence(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
+        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
+            return Err(invalid());
+        }
+        if ctx
+            .get::<Json<InstallationStatus>>("installation")
+            .await?
+            .is_none()
+        {
+            return Err(TerminalError::new_with_code(
+                503,
+                "installation authority unavailable",
+            ));
+        }
+        let status = self.load(&ctx).await?;
+        let status = self.refresh_status(&ctx, status).await?;
+        let Json(now) = ctx
+            .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
+            .name("evidence_time")
+            .await?;
+        let answer = eligibility(&status.observation, &scope);
+        // Negative answers are never cached for admission. Allow only the short
+        // live handoff; an interrupted caller must obtain a new observation.
+        let allowance = if matches!(answer, Eligibility::Available) {
+            chrono::Duration::minutes(5)
+        } else {
+            chrono::Duration::seconds(1)
+        };
+        Ok(Json(AdmissionEvidence {
+            eligibility: answer,
+            valid_until: status.observed_at.unwrap_or(now) + allowance,
+        }))
+    }
     /// Small, retained-only delivery context. Missing authority is uncertainty;
     /// a known uninstall is a known missing prerequisite. Neither reads SQL.
     #[handler]
@@ -1246,38 +1299,6 @@ mod tests {
                 None,
                 "observation={observation:?}"
             );
-        }
-    }
-
-    #[test]
-    fn an_answered_eligibility_call_is_the_eligibility() {
-        assert_eq!(
-            called_eligibility(Ok(Eligibility::Available)).unwrap(),
-            Eligibility::Available
-        );
-    }
-
-    #[test]
-    fn unavailable_authority_leaves_eligibility_unknown() {
-        assert_eq!(
-            called_eligibility(Err(TerminalError::new_with_code(
-                503,
-                "authority unavailable"
-            )))
-            .unwrap(),
-            Eligibility::Unknown
-        );
-    }
-
-    #[test]
-    fn a_refused_eligibility_call_is_an_invariant_failure_not_unknown() {
-        for refusal in [
-            invalid(),
-            TerminalError::new_with_code(400, "Cannot decode input payload"),
-        ] {
-            let error = called_eligibility(Err(refusal.clone())).unwrap_err();
-            assert_eq!(error.code(), 500, "refusal={refusal}");
-            assert!(error.message().contains(refusal.message()));
         }
     }
 

@@ -186,7 +186,7 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
     let link = ghinvite_core::InvitationLinkId::new();
     let request = ghinvite_core::RequestId::new();
     let operation = ghinvite_core::RequestId::new();
-    let original = format!("/console/accounts/octocat/attempts/decision-{link}-{operation}");
+    let original = format!("/console/accounts/octocat/attempts/decision-{request}-{operation}");
     post(
         &app,
         &cookie,
@@ -264,7 +264,7 @@ async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_reco
 }
 
 #[tokio::test]
-async fn exact_operation_conflict_takes_precedence_over_request_recovery() {
+async fn operation_identity_on_another_request_does_not_override_request_recovery() {
     let authority = FakeLinkAuthority::start().await;
     authority.fail("decide", 503);
     let (app, cookie) = recovery_app(&authority).await;
@@ -293,10 +293,9 @@ async fn exact_operation_conflict_takes_precedence_over_request_recovery() {
         &format!("csrf_token={csrf}&link_id={link}&operation_id={first_operation}"),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let html = response_html(response).await;
-    assert!(html.contains("Operation conflict"));
-    assert!(html.contains(first_operation));
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()["location"].to_str().unwrap();
+    assert!(location.contains(&format!("decision-{second_request}-{second_operation}")));
     assert_eq!(authority.calls().len(), 2);
 }
 
@@ -503,7 +502,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let url = format!("/console/accounts/octocat/attempts/decision-{link}-{operation}");
+        let url = format!("/console/accounts/octocat/attempts/decision-{request}-{operation}");
         assert!(response_html(response).await.contains(&url));
         let original = authority.received::<DecideRequest>("decide")[0].clone();
         let response = post(

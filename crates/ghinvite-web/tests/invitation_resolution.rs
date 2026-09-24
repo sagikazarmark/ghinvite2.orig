@@ -557,6 +557,117 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
     assert_eq!(count(&authority, "admit"), 1);
 }
 
+#[tokio::test]
+async fn unresolved_local_attempt_keeps_exact_input_alongside_older_authority() {
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    let cookie = sign_in(&app).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let older = RequestId::new().to_string();
+    seed_admitted(&authority, &link, &older, None, RequestState::Declined);
+    authority.fail("prepare_attempt", 503);
+    let newer = RequestId::new().to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "csrf_token={csrf}&operation_id={newer}&justification=++Exact++input++"
+                )))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(body_text(response).await.contains("  Exact  input  "));
+    for fresh in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/i/{ACTIVE_SLUG}?fresh={fresh}"))
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let html = body_text(response).await;
+        assert!(
+            html.contains(&format!("operation_id={newer}")),
+            "local uncertainty stays recoverable"
+        );
+        assert!(
+            html.contains("Current request status: declined"),
+            "older authority stays visible"
+        );
+        if !fresh {
+            assert!(html.contains("  Exact  input  "));
+        }
+    }
+}
+
+#[tokio::test]
+async fn prepared_uncertain_attempt_retries_with_original_whitespace() {
+    let Requester { app, authority, .. } = requester().await;
+    let cookie = sign_in(&app).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    authority.fail("admit", 503);
+    let id = RequestId::new().to_string();
+    let body = format!("csrf_token={csrf}&operation_id={id}&justification=++Docs++");
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(body_text(response).await.contains("  Docs  "));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "retry reaches uncertain ingress rather than conflicting locally"
+    );
+    assert_eq!(count(&authority, "admit"), 2);
+}
+
 /// Set the admission fixture's authority: revoke or restore the link, and
 /// decide the requester's open requests.
 async fn fixture_state(

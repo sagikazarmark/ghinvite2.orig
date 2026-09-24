@@ -9,6 +9,7 @@ pub(crate) mod forms;
 pub mod link_authority;
 pub mod middleware;
 pub mod render;
+pub mod request_authority;
 pub mod restate_client;
 pub mod routes;
 pub mod session;

@@ -1,5 +1,12 @@
 # Installation availability (#60)
 
+Admission evidence carries an absolute validity bound through the cross-owner
+call. An undecided acceptance resumed outside the positive observation's
+five-minute freshness window returns retryable uncertainty and obtains a new
+observation on retry. Negative evidence is never cached for admissions; it has a
+one-second live-handoff bound so a delayed/replayed undecided rejection must read
+again. Link guardrails are evaluated in the final use-consuming decision.
+
 ## Command ownership
 
 `Installation/<numeric installation ID>` validates its key and retains the numeric

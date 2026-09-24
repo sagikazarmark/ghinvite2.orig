@@ -113,6 +113,7 @@ scenarios![
     scenario_integers_stored_exactly_or_refused,
     scenario_invitation_link_lifecycle,
     scenario_recorded_request_deadlines,
+    scenario_request_owner_projection,
     scenario_request_history,
     scenario_github_invitation_lifecycle,
     scenario_audit_appends,
@@ -127,6 +128,105 @@ scenarios![
     scenario_insert_conflict_kinds,
     scenario_installation_update_not_found,
 ];
+
+pub async fn scenario_request_owner_projection<S: Storage + ProjectionStorage>(s: S) {
+    use super::projection::{AuditIntent, RequestProjectionEnvelope};
+    use crate::request_lifecycle::{RequestSnapshot, TerminalDecision};
+    s.insert_installation(&sample_account(1, 9001, "acme"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(701, "admin")).await.unwrap();
+    let link = sample_link(9001, 1, 701);
+    let id = RequestId::new();
+    let admitted = dt("2026-05-04T12:00:00Z");
+    let deadline = dt("2026-05-11T12:00:00Z");
+    let initial = RequestSnapshot {
+        request_id: id,
+        link_id: link.id,
+        account_id: 9001,
+        requester_id: 701,
+        justification: None,
+        state: RequestState::Pending,
+        admitted_at: admitted,
+        decision_deadline: Some(deadline),
+        revision: 1,
+        decision: None,
+    };
+    let created = AuditIntent {
+        event_id: format!("request.created/{id}"),
+        kind: EventType::RequestCreated,
+        actor_id: Some(701),
+        target_id: id.to_string(),
+        effective_at: admitted,
+        evaluated_at: admitted,
+    };
+    let mut terminal = initial.clone();
+    terminal.state = RequestState::Expired;
+    terminal.revision = 2;
+    terminal.decision = Some(TerminalDecision {
+        decision_id: format!("request.expired/{id}"),
+        decided_by: None,
+        effective_at: deadline,
+        evaluated_at: deadline,
+        decline_reason: None,
+    });
+    let expired = AuditIntent {
+        event_id: format!("request.expired/{id}"),
+        kind: EventType::RequestExpired,
+        actor_id: None,
+        target_id: id.to_string(),
+        effective_at: deadline,
+        evaluated_at: deadline,
+    };
+    let envelope = RequestProjectionEnvelope {
+        request: terminal.clone(),
+        events: vec![expired],
+    };
+    assert!(matches!(
+        s.apply_request(&envelope).await,
+        Err(super::Error::ProjectionDependency)
+    ));
+    seed(&s, &link, &[], 1).await;
+    s.apply_request(&envelope).await.unwrap();
+    assert_eq!(
+        s.get_invitation_request(id).await.unwrap().unwrap().state,
+        RequestState::Expired
+    );
+    // A late initialization supplies missing audit without regressing a terminal row.
+    s.apply_request(&RequestProjectionEnvelope {
+        request: initial,
+        events: vec![created],
+    })
+    .await
+    .unwrap();
+    s.apply_request(&envelope).await.unwrap();
+    assert_eq!(
+        s.get_invitation_request(id).await.unwrap().unwrap().state,
+        RequestState::Expired
+    );
+    let audit = s
+        .list_audit_events(9001, None, super::AuditPosition::Latest)
+        .await
+        .unwrap();
+    assert_eq!(
+        audit
+            .events
+            .iter()
+            .filter(|e| e.target_id == id.to_string())
+            .count(),
+        2
+    );
+    // Even fields that are not displayed by SQL are part of equal-revision content.
+    terminal.decision.as_mut().unwrap().evaluated_at = deadline + chrono::Duration::seconds(1);
+    assert!(matches!(
+        s.apply_request(&RequestProjectionEnvelope {
+            request: terminal,
+            events: vec![]
+        })
+        .await,
+        Err(super::Error::ProjectionInvariant(_))
+    ));
+}
 
 /// Run the full cross-cutting suite against any `Storage` impl.
 ///

@@ -340,7 +340,7 @@ fn json<T: serde::Serialize>(value: &T) -> Response {
 
 fn decision_key(command: &DecideRequest) -> (String, String) {
     (
-        command.link_id.to_string(),
+        command.request_id.to_string(),
         String::from(command.operation_id.clone()),
     )
 }
@@ -386,9 +386,17 @@ async fn handle(
 }
 
 fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Value) -> Response {
-    if service != LINK_SERVICE {
+    if service != LINK_SERVICE && service != "InvitationRequest" {
         return status(404);
     }
+    let key = if service == "InvitationRequest" {
+        if body["request_id"].as_str() != Some(&key) {
+            return status(404);
+        }
+        body["link_id"].as_str().unwrap_or_default().to_owned()
+    } else {
+        key
+    };
     let Ok(link_id) = key.parse::<InvitationLinkId>() else {
         return status(404);
     };

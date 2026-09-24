@@ -1,7 +1,7 @@
 //! Bounded admission after-images. Parents are verified identities,
 //! not profile snapshots: their owners must restore missing installations/users.
 use crate::audit::EventType;
-use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
+use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestState};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -134,26 +134,19 @@ impl LinkSnapshot {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct RequestSnapshot {
-    pub request_id: RequestId,
-    pub link_id: InvitationLinkId,
-    pub account_id: u64,
-    pub requester_id: u64,
-    pub justification: Option<String>,
-    pub state: RequestState,
-    pub admitted_at: DateTime<Utc>,
-    pub decision_deadline: Option<DateTime<Utc>>,
-    pub revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decision: Option<crate::request_lifecycle::TerminalDecision>,
-}
+pub use crate::request_lifecycle::RequestSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectionEnvelope {
     pub transition_id: String,
     pub link: LinkSnapshot,
     pub requests: Vec<RequestSnapshot>,
+    pub events: Vec<AuditIntent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RequestProjectionEnvelope {
+    pub request: RequestSnapshot,
     pub events: Vec<AuditIntent>,
 }
 
@@ -174,8 +167,10 @@ pub struct AuditIntent {
 #[async_trait::async_trait]
 pub trait ProjectionStorage: Send + Sync + 'static {
     async fn apply_transition(&self, envelope: &ProjectionEnvelope) -> super::Result<()>;
+    async fn apply_request(&self, envelope: &RequestProjectionEnvelope) -> super::Result<()>;
 }
 
+pub mod request_sql;
 pub mod sql;
 
 /// Test seeding through the projector.

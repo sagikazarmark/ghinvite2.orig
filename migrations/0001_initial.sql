@@ -65,6 +65,7 @@ CREATE TABLE invitation_requests (
   decline_reason       TEXT,
   created_at           TEXT    NOT NULL,
   projection_revision  INTEGER NOT NULL,
+  projection_content   TEXT,
   decision_deadline    TEXT,
   queue_account_id     INTEGER
 );

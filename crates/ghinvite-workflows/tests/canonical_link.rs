@@ -44,6 +44,15 @@ struct DelayedProjection {
 }
 #[async_trait::async_trait]
 impl ProjectionStorage for DelayedProjection {
+    async fn apply_request(
+        &self,
+        envelope: &ghinvite_core::storage::projection::RequestProjectionEnvelope,
+    ) -> ghinvite_core::storage::Result<()> {
+        if self.delayed.load(Ordering::SeqCst) {
+            return Err(ghinvite_core::storage::Error::ProjectionDependency);
+        }
+        self.storage.apply_request(envelope).await
+    }
     async fn apply_transition(
         &self,
         envelope: &ProjectionEnvelope,
@@ -230,7 +239,7 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     let state = ghinvite_web::AppState::new(
         storage.clone(),
         Arc::new(GithubHttpStub {
-            base,
+            base: base.clone(),
             transport: ReqwestTransport::with_client(client.clone()),
         }),
         Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()),
@@ -400,6 +409,80 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     .await;
     assert!(status.contains("Request accepted at"));
     assert!(status.contains("Awaiting review"));
+    let page: serde_json::Value = client
+        .post(format!("{ingress}/InvitationLink/{id}/requester_page"))
+        .json(&json!({"link_id":id,"requester_id":7,"operation_id":operation}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let request_id = page["request"]["request_id"].as_str().unwrap();
+    let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
+    let decision_operation = ghinvite_core::RequestId::new();
+    let decision_body = format!("csrf_token={csrf}&link_id={id}&operation_id={decision_operation}");
+    // Current requester identity differs from the stub's default numeric identity.
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"creator","addressed_id":7}))
+        .send()
+        .await
+        .unwrap();
+    let approved = request(&app, &cookie, &approve, Some(&decision_body)).await;
+    assert_eq!(approved.status(), StatusCode::SEE_OTHER);
+    let approved_page =
+        html(request(&app, &cookie, "/console/accounts/acme/requests", None).await).await;
+    assert!(approved_page.contains("Request approved"));
+    let declined = request(
+        &app,
+        &cookie,
+        &format!("/console/accounts/acme/requests/{request_id}/decline"),
+        Some(&format!(
+            "csrf_token={csrf}&link_id={id}&operation_id={}&reason=private",
+            ghinvite_core::RequestId::new()
+        )),
+    )
+    .await;
+    assert_eq!(declined.status(), StatusCode::CONFLICT);
+    assert!(html(declined).await.contains("not applied"));
+    let status = html(
+        request(
+            &app,
+            &cookie,
+            &format!("{public}?operation_id={operation}"),
+            None,
+        )
+        .await,
+    )
+    .await;
+    assert!(status.contains("Request accepted at"));
+    assert!(!status.contains("Awaiting review"));
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let calls: serde_json::Value = client
+                .get(format!("{base}/calls"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if calls["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|c| c["method"] == "PUT")
+                .count()
+                == 1
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("recorded approval delivers while SQL projection is withheld");
     assert!(
         storage
             .get_invitation_link_by_id(id.parse().unwrap())

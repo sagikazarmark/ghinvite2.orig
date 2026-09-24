@@ -89,7 +89,7 @@ impl Command {
             Self::Revoke(c) => format!("revoke-{}", c.link_id),
             Self::Decision(c) => format!(
                 "decision-{}-{}",
-                c.link_id,
+                c.request_id,
                 String::from(c.operation_id.clone())
             ),
         }

@@ -1,11 +1,11 @@
-//! Commands for the private, link-owned request lifecycle interface.
-use crate::storage::projection::{AccountAdmin, RequestSnapshot};
-use crate::{InvitationLinkId, RequestId};
+//! Commands and retained records for the private request authority.
+use crate::storage::projection::AccountAdmin;
+use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Link-scoped identity, allocated before submission and retained on uncertainty.
+/// Request-scoped identity, allocated before submission and retained on uncertainty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(try_from = "String", into = "String")]
 pub struct LifecycleOperationId(RequestId);
@@ -81,9 +81,45 @@ pub struct RequestStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct TerminalSignal {
-    pub link_id: InvitationLinkId,
+pub struct RequestSnapshot {
     pub request_id: RequestId,
-    pub decision_id: String,
+    pub link_id: InvitationLinkId,
+    pub account_id: u64,
+    pub requester_id: u64,
+    pub justification: Option<String>,
+    pub state: RequestState,
+    pub admitted_at: DateTime<Utc>,
+    pub decision_deadline: Option<DateTime<Utc>>,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<TerminalDecision>,
+}
+
+/// Immutable admission-time policy and repository scope, never a mutable snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InitializeRequest {
+    pub request: RequestSnapshot,
+    pub installation_id: u64,
+    pub repos: Vec<InvitationLinkRepo>,
+    pub permission: Permission,
+    pub approval_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovedDispatch {
+    pub dispatch_id: String,
+    pub input: InitializeRequest,
+    pub commands: Vec<crate::delivery::CreateCommand>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SubmittedCommand {
+    pub command: crate::delivery::CreateCommand,
+    pub invocation_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct DeliveryStatus {
+    pub plan: ApprovedDispatch,
+    pub submitted: Vec<SubmittedCommand>,
 }

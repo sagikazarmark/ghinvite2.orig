@@ -234,10 +234,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let state = ghinvite_workflows::AppState::new(storage.clone(), github);
     let builder = ghinvite_workflows::admission::bind_protocol_fixture(Endpoint::builder());
     let builder = ghinvite_workflows::projection::bind(builder, storage.clone());
-    let workflow_faults =
-        Arc::new(ghinvite_workflows::request_lifecycle::WorkflowFaults::default());
+    let workflow_faults = Arc::new(ghinvite_workflows::request_owner::Faults::default());
     let builder =
-        ghinvite_workflows::request_lifecycle::bind_with_faults(builder, workflow_faults.clone());
+        ghinvite_workflows::request_owner::bind_with_faults(builder, workflow_faults.clone());
     let faults = Arc::new(ghinvite_workflows::delivery::DeliveryFaults::default());
     faults
         .lose_http_result
@@ -291,6 +290,30 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let link = ghinvite_core::InvitationLinkId::new();
     let call = |service: &str, key: String, handler: &str, input: Value| {
+        let request_route = service == "InvitationLink"
+            && matches!(
+                handler,
+                "prepare_dispatch"
+                    | "delivery_status"
+                    | "delivery_progress"
+                    | "decide"
+                    | "request_status"
+            );
+        let service = if request_route {
+            "InvitationRequest"
+        } else {
+            service
+        };
+        let key = if request_route {
+            input["request_id"].as_str().unwrap().to_owned()
+        } else {
+            key
+        };
+        let handler = if handler == "prepare_dispatch" {
+            "approved_plan"
+        } else {
+            handler
+        };
         let key = if service == "RepositoryDelivery" {
             if handler == "create" || handler == "recheck" {
                 let command = if handler == "recheck" {
@@ -366,9 +389,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap().to_owned();
     let completed = client
-        .get(format!(
-            "{ingress}/restate/workflow/InvitationRequest/{request}/attach"
-        ))
+        .post(format!("{ingress}/InvitationRequest/{request}/dispatch"))
         .send()
         .await
         .unwrap();
@@ -488,13 +509,24 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let command = plan["commands"][0].clone();
         let id = command["invitation_id"].as_str().unwrap().to_owned();
-        let result: Value = call("RepositoryDelivery", id.clone(), "create", command.clone())
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let result: Value = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot: Value = client
+                    .post(format!("{ingress}/RepositoryDelivery/{request}:10/status"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if !snapshot.is_null() {
+                    break snapshot["create"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert_eq!(result["outcome"]["kind"], expected);
         assert_create_audit(&*storage, &result).await;
         let replay: Value = call("RepositoryDelivery", id, "create", command)
@@ -599,43 +631,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap()
             .state,
         ghinvite_core::InvitationState::Declined
-    );
-    let signal = json!({"link_id":link,"request_id":request,"revision":plan["input"]["request"]["revision"],"decision_id":command["approval_id"]});
-    let needed: Value = call(
-        "InvitationLink",
-        link.to_string(),
-        "notification_needed",
-        signal.clone(),
-    )
-    .send()
-    .await
-    .unwrap()
-    .json()
-    .await
-    .unwrap();
-    assert_eq!(needed, false);
-    assert!(
-        call("InvitationRequest", request.into(), "notify", signal)
-            .send()
-            .await
-            .unwrap()
-            .status()
-            .is_success()
-    );
-    let promise: Value = client
-        .post(format!(
-            "{ingress}/InvitationRequest/{request}/notification_status"
-        ))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        promise,
-        Value::Null,
-        "late delivery recreated an orphan promise"
     );
     let calls: Value = client
         .get(format!("{base}/calls"))
@@ -750,6 +745,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .status()
             .is_success()
     );
+    workflow_faults
+        .pause_after_send
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     let recovered = client
         .post(format!("{ingress}/DeliveryRecovery/recover"))
         .json(&query)
@@ -761,8 +759,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .pause_after_send
         .store(false, std::sync::atomic::Ordering::SeqCst);
     client
-        .get(format!(
-            "{ingress}/restate/workflow/InvitationRequest/{partial_request}/attach"
+        .post(format!(
+            "{ingress}/InvitationRequest/{partial_request}/dispatch"
         ))
         .send()
         .await
@@ -952,7 +950,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .json()
     .await
     .unwrap();
-    assert_eq!(progress, json!([{"repo_id":10,"stage":"approved"}]));
+    assert_eq!(progress, json!([{"repo_id":10,"stage":"planned"}]));
     let plan: Value = call(
         "InvitationLink",
         rejected_link.to_string(),
@@ -2001,7 +1999,9 @@ async fn assert_create_audit(
         .into_iter()
         .filter(|event| event.target_id == receipt["command"]["invitation_id"].as_str().unwrap())
         // Only create outcomes; a later settlement publishes its own event.
-        .filter(|event| event.id.to_string() != receipt["command"]["invitation_id"].as_str().unwrap())
+        .filter(|event| {
+            event.id.to_string() != receipt["command"]["invitation_id"].as_str().unwrap()
+        })
         .collect();
     let (kind, actor) = match receipt["outcome"]["kind"].as_str().unwrap() {
         "created" => (EventType::InvitationSent, ActorKind::System),

@@ -5,10 +5,8 @@ use std::sync::{Arc, Mutex};
 
 mod common;
 
-use common::link_authority::LINK_SERVICE;
-
 #[tokio::test]
-async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
+async fn lifecycle_calls_request_authority_and_preserves_truthful_result() {
     let calls = Arc::new(Mutex::new(vec![]));
     let observed = calls.clone();
     let request = json!({"request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAA",
@@ -49,8 +47,8 @@ async fn lifecycle_calls_link_authority_and_preserves_truthful_result() {
     assert_eq!(
         calls[0].0,
         (
-            LINK_SERVICE.into(),
-            command.link_id.to_string(),
+            "InvitationRequest".into(),
+            command.request_id.to_string(),
             "decide".into()
         )
     );

@@ -18,7 +18,37 @@ pub struct InvitationProjection {
 
 /// Bind alongside `admission::bind`; keep ingress private.
 pub fn bind(builder: Builder, storage: Arc<dyn ProjectionStorage>) -> Builder {
-    builder.bind(InvitationProjection { storage })
+    builder
+        .bind(RequestProjection {
+            storage: storage.clone(),
+        })
+        .bind(InvitationProjection { storage })
+}
+
+pub struct RequestProjection {
+    storage: Arc<dyn ProjectionStorage>,
+}
+
+#[restate_sdk::object]
+impl RequestProjection {
+    #[handler]
+    async fn apply(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(envelope): Json<ghinvite_core::storage::projection::RequestProjectionEnvelope>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != envelope.request.request_id.to_string() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
+        ctx.run(|| async {
+            self.storage
+                .apply_request(&envelope)
+                .await
+                .map_err(HandlerError::from)
+        })
+        .name("apply_request_projection")
+        .await
+    }
 }
 
 #[restate_sdk::object]

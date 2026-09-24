@@ -13,7 +13,7 @@ export async function approvedDelivery({ ingress, githubUrl, http, db, creation,
   await link('create', input);
   const admitted = await link('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
   assert.equal(admitted.result.state, 'approved');
-  const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+  const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   const command = plan.commands[0];
   const receiver = (handler, body) => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/${handler}`, body);
   const unknown = await eventually(() => receiver('status'), row => row?.create.outcome.kind === 'outcome_unknown');

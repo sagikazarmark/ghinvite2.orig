@@ -35,5 +35,18 @@ SQL winner table. Use fresh migrations and a fresh Restate environment with matc
 web and workflow builds on both native and Worker deployments; no legacy retained
 state importer is provided. Environment reset is an explicit operator action.
 
-The request-owner restructuring described elsewhere in #116 remains a separate
-slice; this ADR does not claim the entire parent target is implemented.
+Issue #121 implements the request-owner slice. `InvitationRequest` is a persistent
+Virtual Object with short exclusive initialization, decision, eligibility and
+expiry handlers. It retains request-scoped operation receipts, the immutable
+approved manifest and repository submission progress. Delayed expiry messages
+replace workflow sleeps and terminal promises. `RequestProjection` is its sole
+mutable SQL snapshot producer; link projection carries only link/admission facts.
+
+The link retains original admission receipts and a latest-request index. Before a
+fresh admission it asks that request for an input-bound eligibility verdict.
+Blocking verdicts retain their evaluation time and bind rejection even when
+publication resumes after deadline. Definitive terminal verdicts permit a fresh
+use-consuming decision under current link guardrails and availability evidence.
+Expected missing authority yields retryable uncertainty. Initialization completes
+before acceptance is acknowledged; admission replay performs no new handoff.
+Calls remain acyclic: request handlers never synchronously wait on the link.

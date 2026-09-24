@@ -1,76 +1,54 @@
-# Authoritative request lifecycle (#55)
+# Request authority
 
-`build_endpoint` binds `admission::bind`, `projection::bind`, and
-`request_lifecycle::bind` on the private Restate endpoint. The web
-`AppState::new` always uses the Restate request lifecycle
-(`AppState::with_request_lifecycle` only substitutes a test double). Its admin
-routes retain current GitHub account-admin authorization and CSRF checks.
+`request_owner::bind` registers `InvitationRequest`, a Virtual Object keyed by
+request ULID. Private ingress supplies authenticated requester identities and
+currently verified account-admin assertions. The concrete web `RequestAuthority`
+calls the owner for decisions and delivery progress; link requester-page reads
+inspect the request owner before returning lifecycle status.
 
-## Commands and replay
+## Retained records
 
-`InvitationLink/<link_id>/decide` takes the link ID, request ID, a strict ULID
-operation ID, verified account/admin IDs, and `approve` or `decline { reason }`.
-The identity is `(link_id, lifecycle operation ID)` in its own command namespace.
-Canonical input binds request, actor, action and trimmed optional reason.
-Missing/empty reasons normalize to absent; timestamps are not accepted. Reusing
-an identity with different input returns generic conflict. Authorization precedes
-receipt lookup. Receipts are retained without automatic expiry.
+- Immutable initialization context: admission time, requester, link/account,
+  original installation provenance, repositories, permission and approval policy.
+- Current request snapshot and terminal decision, independent of SQL projection.
+- Request-scoped, canonical-input-bound decision receipts (actor/action/reason).
+- Input-bound admission eligibility verdicts with their original evaluation time.
+- Immutable approved manifest and per-repository durable-send progress.
 
-The result distinguishes `applied`, `already_completed` (same action and, for a
-decline, same normalized reason), and `incompatible`. Replaying the same operation
-returns its original result. Another authorized admin can observe a matching
-already-completed action without rewriting its original actor. An incompatible
-decision returns current state, not a claim of approval. Imported cancelled states
-remain terminal and retry-eligible, with no new cancellation command.
+Manual requests have an absolute seven-day deadline established at admission.
+Decisions strictly before it may apply; equality or later expires pending state.
+A complete journaled decision remains binding after recovery past deadline.
+Inspection materializes overdue expiry. Early delayed messages schedule another
+wake; terminal states are immutable. Auto-approval is an admission-time fact with
+no pending deadline. No handler sleeps awaiting an administrator.
 
-Pending deadlines are snapshotted at admission, seven days independently of link
-expiration. The complete journaled decision samples current time: strictly before
-deadline allows an admin decision; equality/later expires. Expiry's effective time
-is the deadline and evaluation time is recorded separately. Exclusive status and
-fresh admission materialize expiry; admission receipt replay does not. Combined
-expiry/readmission touches at most two requests. Uses are never refunded.
+The link's latest-request pointer is an index. A fresh admission gets a retained
+operation-bound verdict from the request. A blocking verdict determines the
+attempt's existing-request rejection and evaluation time, even if publication is
+interrupted across the deadline. A terminal verdict permits admission subject to
+current link guardrails. Missing expected request authority means retryable
+uncertainty. Requests never call back synchronously to the link or release its
+pointer asynchronously.
 
-## Projection, workflow, and handoff
+Approval retains the entire manifest before arranging durable dispatch. Dispatch
+does not await GitHub completion. `InvitationRequest/<id>/recover`, or the private
+`DeliveryRecovery/recover` ingress, resubmits the retained commands explicitly.
+Admission replay never redrives delivery. GitHub effects remain protected by the
+repository-delivery owner and SQL/D1 attempt fence.
 
-One immutable logical terminal event is projected with the terminal request.
-Decision actor/time/reason update the existing SQLx/D1 request columns, with the
-same revision and identity checks as other projected fields. Audit payloads exclude
-decline reasons. Requester status removes the reason; the web page renders only
-lifecycle state. `/i/<code>?request_id=<id>` can read an acknowledged request before
-its projected row arrives. The complete [v1 browser path](browser-admission-v1.md)
-also resolves fresh link codes and attempts directly through Restate.
+`RequestProjection` applies owner snapshots and immutable audit facts atomically.
+Terminal snapshots can create missing rows once link/user parents exist. Stale
+snapshots cannot regress state and still publish missing audit facts;
+equal-revision content differences are invariant failures.
 
-The workflow reads exclusive authority on startup and after any wake. A direct
-`terminal` promise carries identity/revision, never approval authority. The link
-only awaits durable one-way sends, so workflow-to-link calls cannot form a
-synchronous cycle. Early timers recheck and wait the remaining absolute duration;
-delayed execution immediately rechecks eligibility. There is no scheduler latency
-guarantee. Auto-approved requests never enter the pending wait.
+## Verification and deployment
 
-The wake target is absolute. Immediately when constructing the SDK sleep syscall,
-the adapter recomputes its relative argument from the current clock without
-branching on that clock. SDK 0.10 journals the sleep's absolute timestamp and its
-replay comparison ignores the timestamp (shared-core `SleepCommandMessage`
-`header_eq` compares the name). Thus an already journaled sleep retains its target,
-while interrupted setup creates a due sleep rather than replaying a stale duration.
-Native tests interrupt precisely between the target journal and sleep construction.
+Run `scripts/test-restate.sh request_owner`, `authoritative_admission`,
+`canonical_link`, `retained_delivery`, and `durable_projection`. The shared storage
+suite includes request projection ordering/conflicts on SQLx and actual D1.
 
-`prepare_dispatch` returns a stable approved handoff and retains it under
-`dispatch/<request_id>` in the link object. The workflow result exposes that
-handoff. This is an authorization/input checkpoint, not evidence of submission or
-GitHub delivery. #56 extends it with per-repository dispatch and receiving receipts.
-Workflow journal/promise cleanup cannot delete link-owned receipts, terminal state,
-or handoff. Admission replay never restarts a workflow. Late notifications may
-recreate orphan promise state after cleanup; they do not start the workflow.
-
-## Verification
-
-`bash scripts/test-restate.sh authoritative_admission` exercises the real native
-runtime in request-response mode, controlled exact deadline boundaries, combined
-expiry/rejection, interrupted journal/write/send recovery, direct notifications,
-absolute timers, and workflow retention versus link authority.
-`bash scripts/test-restate.sh durable_projection` verifies lifecycle projection
-through actual SQLx writes, outage, invariant repair, and lost acknowledgements.
-Web tests cover link-keyed calls, current authorization, incompatible responses,
-and authoritative requester status with no projected request. Worker/D1 runtime
-execution remains a separate rollout verification obligation.
+This is a clean prelaunch cutover. Native and Worker deployments require matching
+web/workflow artifacts, fresh migrations and a fresh Restate environment. The old
+Workflow registration, terminal promises and link decision/dispatch handlers are
+removed; existing retained state is not imported. Environment reset remains an
+explicit operator action.

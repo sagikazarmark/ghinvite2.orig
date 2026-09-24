@@ -43,7 +43,7 @@ pub enum AuthorityError {
 }
 
 impl AuthorityError {
-    fn from_ingress(failure: IngressFailure) -> Self {
+    pub(crate) fn from_ingress(failure: IngressFailure) -> Self {
         match failure {
             IngressFailure::Rejected { status: 400 } => Self::Invalid,
             IngressFailure::Rejected { status: 404 } => Self::Missing,
@@ -126,17 +126,22 @@ impl LinkAuthority {
     }
 
     pub async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt> {
-        self.link(command.link_id, "decide", &command).await
+        crate::request_authority::RequestAuthority::new(self.client.clone())
+            .decide(command)
+            .await
     }
 
     /// Read the retained receipt without applying an undecided command on GET.
     pub async fn decision_status(&self, command: DecideRequest) -> Result<Option<DecisionReceipt>> {
-        self.link(command.link_id, "decision_status", &command)
+        crate::request_authority::RequestAuthority::new(self.client.clone())
+            .decision_status(command)
             .await
     }
 
     pub async fn delivery_progress(&self, query: RequestStatus) -> Result<Vec<RepositoryProgress>> {
-        self.link(query.link_id, "delivery_progress", &query).await
+        crate::request_authority::RequestAuthority::new(self.client.clone())
+            .delivery_progress(query)
+            .await
     }
 
     /// Call only after the enclosing route has authorized this request/scope.
@@ -299,11 +304,14 @@ mod tests {
             .expect(1)
             .mount(&ingress)
             .await;
-        Mock::given(path(format!("/{LINK}/{link}/decision_status")))
-            .respond_with(ResponseTemplate::new(200))
-            .expect(1)
-            .mount(&ingress)
-            .await;
+        let request_id = ghinvite_core::RequestId::new();
+        Mock::given(path(format!(
+            "/InvitationRequest/{request_id}/decision_status"
+        )))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&ingress)
+        .await;
         let authority = LinkAuthority::new(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
         assert!(matches!(
             authority
@@ -312,7 +320,7 @@ mod tests {
             Err(AuthorityError::Missing)
         ));
         let command: DecideRequest = serde_json::from_value(serde_json::json!({
-            "link_id": link, "request_id": ghinvite_core::RequestId::new(),
+            "link_id": link, "request_id": request_id,
             "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 1, "user_id": 2}, "action": {"kind": "approve"}}))
         .unwrap();

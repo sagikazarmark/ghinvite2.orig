@@ -24,6 +24,12 @@ struct LostAcknowledgement {
 }
 #[async_trait::async_trait]
 impl ProjectionStorage for LostAcknowledgement {
+    async fn apply_request(
+        &self,
+        envelope: &ghinvite_core::storage::projection::RequestProjectionEnvelope,
+    ) -> ghinvite_core::storage::Result<()> {
+        self.storage.apply_request(envelope).await
+    }
     async fn apply_transition(
         &self,
         envelope: &ProjectionEnvelope,
@@ -42,47 +48,6 @@ impl ProjectionStorage for LostAcknowledgement {
     }
 }
 
-// #55 owns lifecycle execution; only its startup contract is needed here.
-struct RequestSink;
-
-#[restate_sdk::workflow(name = "InvitationRequest")]
-impl RequestSink {
-    #[handler]
-    async fn notification_status(
-        &self,
-        _: restate_sdk::context::SharedWorkflowContext<'_>,
-    ) -> Result<
-        restate_sdk::serde::Json<Option<admission::TerminalSignal>>,
-        restate_sdk::errors::TerminalError,
-    > {
-        Ok(restate_sdk::serde::Json(None))
-    }
-    #[handler]
-    async fn notify(
-        &self,
-        _: restate_sdk::context::SharedWorkflowContext<'_>,
-        _: restate_sdk::serde::Json<admission::TerminalSignal>,
-    ) -> Result<(), restate_sdk::errors::TerminalError> {
-        Ok(())
-    }
-    #[handler]
-    async fn run(
-        &self,
-        _: restate_sdk::context::WorkflowContext<'_>,
-        _: restate_sdk::serde::Json<admission::WorkflowEnvelope>,
-    ) -> Result<
-        restate_sdk::serde::Json<ghinvite_workflows::request_lifecycle::WorkflowResult>,
-        restate_sdk::errors::TerminalError,
-    > {
-        Ok(restate_sdk::serde::Json(
-            ghinvite_workflows::request_lifecycle::WorkflowResult {
-                state: ghinvite_core::RequestState::Pending,
-                dispatch: None,
-            },
-        ))
-    }
-}
-
 #[tokio::test]
 async fn commands_continue_during_sql_outage_and_projection_recovers() {
     timeout(Duration::from_secs(90), async {
@@ -96,8 +61,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
             sleep(Duration::from_millis(100)).await;
         }
         let acknowledgements = Arc::new(LostAcknowledgement { storage: storage.clone(), committed_attempts: AtomicUsize::new(0), committed_revisions: Default::default() });
-        let endpoint = projection::bind(admission::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())
-            .bind(RequestSink).build();
+        let endpoint = ghinvite_workflows::request_owner::bind(projection::bind(admission::bind_protocol_fixture(Endpoint::builder()), acknowledgements.clone())).build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
@@ -118,7 +82,8 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         let link_id = InvitationLinkId::new();
         let command = |handler: &'static str, input: Value| {
             let client = client.clone();
-            let url = format!("{ingress}/InvitationLink/{link_id}/{handler}");
+            let url = if handler == "decide" { format!("{ingress}/InvitationRequest/{}/decide", input["request_id"].as_str().unwrap()) }
+                else { format!("{ingress}/InvitationLink/{link_id}/{handler}") };
             async move {
                 let response = client.post(url).json(&input).send().await.unwrap();
                 assert!(response.status().is_success(), "{}", response.text().await.unwrap());

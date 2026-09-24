@@ -125,9 +125,20 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let link = ghinvite_core::InvitationLinkId::new().to_string();
     let call = |handler: &str, input: Value| {
-        client
-            .post(format!("{ingress}/InvitationLink/{link}/{handler}"))
-            .json(&input)
+        let route = if matches!(handler, "request_status" | "decide" | "prepare_dispatch") {
+            let handler = if handler == "prepare_dispatch" {
+                "approved_plan"
+            } else {
+                handler
+            };
+            format!(
+                "InvitationRequest/{}/{handler}",
+                input["request_id"].as_str().unwrap()
+            )
+        } else {
+            format!("InvitationLink/{link}/{handler}")
+        };
+        client.post(format!("{ingress}/{route}")).json(&input)
     };
     let creation = json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Availability","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]});

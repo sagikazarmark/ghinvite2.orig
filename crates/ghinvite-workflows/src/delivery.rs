@@ -92,74 +92,14 @@ impl DeliveryRecovery {
         &self,
         ctx: Context<'_>,
         Json(query): Json<crate::admission::RequestStatus>,
-    ) -> Result<Json<crate::request_lifecycle::DeliveryStatus>, TerminalError> {
-        let link =
-            ctx.object_client::<crate::admission::InvitationLinkClient>(query.link_id.to_string());
-        let Json(plan) = link.prepare_dispatch(Json(query.clone())).call().await?;
-        // Confirmed replay also repairs a missing SQL projection. It cannot
-        // reissue PUT; uncertain replay only reconciles.
-        let ctx = &ctx;
-        submit_plan(
-            ctx,
-            &link,
-            &plan,
-            move |command| async move {
-                let Json(receipt) = ctx
-                    .object_client::<RepositoryDeliveryClient>(command.delivery_key())
-                    .status()
-                    .call()
-                    .await?;
-                if let Some(receipt) = receipt
-                    && receipt.create.command != command
-                {
-                    return Err(TerminalError::new_with_code(
-                        409,
-                        "receiving identity conflict",
-                    ));
-                }
-                Ok(())
-            },
-            || async { Ok(()) },
+    ) -> Result<Json<ghinvite_core::request_lifecycle::DeliveryStatus>, TerminalError> {
+        ctx.object_client::<crate::request_owner::InvitationRequestClient>(
+            query.request_id.to_string(),
         )
-        .await?;
-        link.delivery_status(Json(query)).call().await
-    }
-}
-
-/// Send each planned create to its receiving object and record the submission
-/// with the link, one repository at a time: a repository's send is journaled
-/// before its record, and its record before the next repository's send.
-/// `before_send` may refuse a command before it is sent; `after_send` runs
-/// between a send and its record.
-pub(crate) async fn submit_plan<'ctx, B, A>(
-    ctx: &impl ContextClient<'ctx>,
-    link: &crate::admission::InvitationLinkClient<'ctx>,
-    plan: &crate::request_lifecycle::ApprovedDispatch,
-    mut before_send: impl FnMut(CreateCommand) -> B,
-    mut after_send: impl FnMut() -> A,
-) -> Result<(), TerminalError>
-where
-    B: std::future::Future<Output = Result<(), TerminalError>>,
-    A: std::future::Future<Output = Result<(), TerminalError>>,
-{
-    for command in &plan.commands {
-        before_send(command.clone()).await?;
-        let receiver = ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key());
-        let invocation_id = receiver
-            .create(Json(command.clone()))
-            .send()
-            .await?
-            .invocation_id()
-            .to_owned();
-        after_send().await?;
-        link.record_submitted(Json(crate::request_lifecycle::SubmittedCommand {
-            command: command.clone(),
-            invocation_id,
-        }))
+        .recover(Json(query))
         .call()
-        .await?;
+        .await
     }
-    Ok(())
 }
 
 #[restate_sdk::object]
@@ -249,12 +189,8 @@ impl RepositoryDelivery {
             }
             Some(_) => (),
             None => {
-                ctx.object_client::<crate::admission::InvitationLinkClient>(
-                    command.link_id.to_string(),
-                )
-                .authorize_delivery(Json(command.clone()))
-                .call()
-                .await?;
+                // Only the private request-owned issuance path produces approved
+                // commands. Bind the complete command before any external work.
                 ctx.set("input", Json(command.clone()));
             }
         }

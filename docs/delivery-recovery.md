@@ -1,23 +1,20 @@
 # Approved-request delivery recovery
 
-`build_endpoint` binds `admission`, `projection`, `request_lifecycle`,
+`build_endpoint` binds `admission`, `projection`, `request_owner`,
 and `delivery::bind(builder, state)`. Keep ingress private. Deployment of these
 services together is required: durable sends cannot complete if the receiving
 service has not been registered.
 
 ## Retained authority
 
-- Link `dispatch/<request>` contains the immutable approval-bound plan, including
+- Request `plan` contains the immutable approval-bound plan, including
   one invitation ID per repository. Scope is limited to 100 at link creation.
-- Link `submitted/<invitation>` stores the first acknowledged durable invocation
+- Request `submitted/<repository>` stores the acknowledged durable invocation
   identity. This means submitted, not GitHub success.
-- Link `consumed/<request>` records lifecycle consumption after fan-out (or
-  after observing a non-approved terminal decision).
 - `RepositoryDelivery/<request>:<repository>` retains the bound command, original
   create receipt, current snapshot and terminal settlement audit without TTL.
-  First use validates exact command membership through the private link owner's
-  `authorize_delivery` issuance check before binding input or attempting effects.
-  Bound retries use that authorization without fetching the approved plan again.
+  First use binds the complete command issued by the private request-owned
+  dispatch path. Bound retries use that input without fetching a plan again.
   The command contains immutable numeric account/requester/repository identities,
   repository address, permission, approval ID/time and installation provenance.
   The create receipt remains unchanged by subsequent invitation settlement.
@@ -192,22 +189,12 @@ exists to prevent, and the lock is one invitation's rather than the account's.
 Giving those handlers their own bounded continuations is follow-up work, not part
 of #80's delivery and observation scope.
 
-## Notification retention and orphan promises
+## Request retention
 
-`notification_needed` validates the terminal fact and checks the retained consumed
-checkpoint; the workflow's notify handler consults it before resolving an absent
-promise. Deliberate late redelivery after consumption is suppressed. Read private
-`InvitationRequest/<request>/notification_status` to observe retained promise
-state without starting the run handler.
-
-A notify invocation already in flight at cleanup may have journaled an earlier
-`needed=true`, so it can still leave an orphan promise. For cleanup, first fence
-notification ingress for that request, drain outstanding notify invocations, verify
-the authoritative consumed checkpoint, and confirm no workflow run is active using
-Restate's invocation inspector. Export state before removing only that workflow's
-orphan state through the Restate administrative state API. Never purge link or
-invitation-object state, never restart the workflow to clean a promise, and never
-interpret an absent promise as loss of the authoritative decision.
+The request VO retains decisions, manifests and submission progress independently
+of invocation cleanup. There are no terminal promises or notification-consumption
+records. Explicit delivery recovery resubmits the original request-owned manifest;
+admission replay only returns the original receipt. See [request authority](request-lifecycle-v1.md).
 
 ## Verification
 

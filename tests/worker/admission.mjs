@@ -98,6 +98,12 @@ const creation = () => ({ link_id: id(), admin: { account_id: 100, user_id: 7 },
   expires_at: null, max_uses: 1, permission: 'pull', approval_required: true,
   repos: [{ repo_id: 10, repo_full_name: 'acme/api' }] });
 const http = async (url, body, method = 'POST') => {
+  // Lifecycle calls are request-scoped; fixture call sites still group a journey
+  // by link, but the wire always addresses the concrete current owner.
+  if (url.includes('/InvitationLink/') && ['decide', 'request_status', 'delivery_progress', 'prepare_dispatch'].includes(url.split('/').at(-1))) {
+    const handler = url.split('/').at(-1);
+    url = `${new URL(url).origin}/InvitationRequest/${body.request_id}/${handler === 'prepare_dispatch' ? 'approved_plan' : handler}`;
+  }
   const response = await fetch(url, { method, headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), accept: 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25_000) });
   const text = await response.text();
@@ -182,7 +188,7 @@ try {
       const incoming = request.url.startsWith('/invoke/') ? frames(body) : [];
       const invocation = incoming[0]?.type === 0 ? fields(incoming[0].payload).get(2)?.toString() : undefined;
       const objectKey = incoming[0]?.type === 0 ? fields(incoming[0].payload).get(6)?.toString() : undefined;
-      if ((interruption?.blocked && interruption.blocked === invocation) || (pauseWorkflows && request.url.endsWith('/InvitationRequest/run'))) {
+      if ((interruption?.blocked && interruption.blocked === invocation) || (pauseWorkflows && request.url.endsWith('/InvitationRequest/dispatch'))) {
         response.writeHead(503); response.end(); return;
       }
       const result = await mf.dispatchFetch(`http://worker.test${request.url}`, {
@@ -201,7 +207,8 @@ try {
       if (incoming.length) traffic.push({ path: request.url, input: body.length, output: output.length,
         frames: outgoing.map(frame => ({ type: frame.type, bytes: frame.payload.length })), invocation, objectKey });
       response.writeHead(result.status, Object.fromEntries([...result.headers].filter(([key]) => !['transfer-encoding', 'connection', 'keep-alive'].includes(key))));
-      const cut = interruption && body.includes(Buffer.from(interruption.operation)) && outgoing.find(frame => frame.type === (interruption.type ?? 0x0403));
+      const cut = interruption && body.includes(Buffer.from(interruption.operation)) && outgoing.find(frame => frame.type === (interruption.type ?? 0x0403)
+        && (interruption.type || fields(frame.payload).get(1)?.toString() === 'link'));
       if (cut && !interruption.blocked) {
         interruption.blocked = invocation;
         // Deliver the real first state write, lose the remainder. Restate must
@@ -366,12 +373,11 @@ try {
   const declined = await timed('decide', { link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'decline', reason: 'fixture' } });
   assert.equal(declined.request.state, 'declined');
-  await eventually(() => http(`${ingress}/InvitationRequest/${thirdReceipt.result.request_id}/notification_status`), Boolean);
   clock = undefined;
   pauseWorkflows = false;
-  const completed = await http(`${ingress}/restate/workflow/InvitationRequest/${thirdReceipt.result.request_id}/attach`, undefined, 'GET');
+   const completed = await http(`${ingress}/InvitationRequest/${thirdReceipt.result.request_id}/request_status`, {link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id, requester_id: 91});
   assert.equal(completed.state, 'declined');
-  console.log('PASS exact deadline equality, overdue readmission without refund, direct notification before durable startup');
+   console.log('PASS exact deadline equality, overdue readmission without refund, request-owned terminal decision');
   pauseWorkflows = true;
   const timerInput = creation();
   const timerCall = (handler, body) => http(`${ingress}/InvitationLink/${timerInput.link_id}/${handler}`, body);
@@ -380,12 +386,10 @@ try {
   const timerReceipt = await timerCall('admit', { link_id: timerInput.link_id, operation_id: id(), requester_id: 92 });
   clock = undefined;
   pauseWorkflows = false;
-  await eventually(async () => traffic.filter(row => row.objectKey === timerReceipt.result.request_id), rows =>
-    rows.some(row => row.frames.some(frame => frame.type === 0x040C)) && rows.some(row => row.frames.some(frame => frame.type === 0x0001)));
   assert.ok(Date.now() < Date.parse(timerReceipt.result.decision_deadline), 'timer scheduled before deadline');
   const waiting = await timerCall('request_status', { link_id: timerInput.link_id, request_id: timerReceipt.result.request_id, requester_id: 92 });
   assert.equal(waiting.state, 'pending');
-  const timerResult = await http(`${ingress}/restate/workflow/InvitationRequest/${timerReceipt.result.request_id}/attach`, undefined, 'GET');
+   const timerResult = await eventually(() => db.prepare('SELECT state FROM invitation_requests WHERE id=?').bind(timerReceipt.result.request_id).first(), row => row?.state === 'expired');
   assert.equal(timerResult.state, 'expired');
   assert.ok(Date.now() >= Date.parse(timerReceipt.result.decision_deadline));
   console.log('PASS actual Worker durable timer expiry after short historical admission window');
@@ -496,10 +500,9 @@ try {
   const manualDecision = await manual('decide', { link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
     operation_id: id(), admin: manualInput.admin, action: { kind: 'approve' } });
   assert.equal(manualDecision.request.state, 'approved');
-  const manualResult = await http(`${ingress}/restate/workflow/InvitationRequest/${manualReceipt.result.request_id}/attach`, undefined, 'GET');
-  assert.equal(manualResult.state, 'approved');
-  await eventually(() => delivery(manualResult.dispatch.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
-  console.log('PASS manual approval and direct notification to waiting Worker lifecycle');
+   const manualPlan = await manual('prepare_dispatch', {link_id: manualInput.link_id, request_id: manualReceipt.result.request_id, requester_id:91});
+   await eventually(() => delivery(manualPlan.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
+   console.log('PASS manual approval and request-owned Worker dispatch');
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
     pause: value => { pauseWorkflows = value; } });

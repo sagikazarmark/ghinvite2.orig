@@ -9,7 +9,7 @@ test('native submission survives acknowledgement loss, revocation, two tabs and 
   await page.getByLabel('Justification').fill('  original context  ');
   await page.getByRole('button', { name: 'Submit request' }).click();
   await expect(page.getByRole('status')).toContainText('Outcome unknown');
-  await expect(page.getByLabel('Justification')).toHaveValue('original context');
+  await expect(page.getByLabel('Justification')).toHaveValue('  original context  ');
   await expect(page.getByLabel('Justification')).toHaveAttribute('readonly');
   await page.getByRole('button', { name: 'Retry same attempt' }).click();
   await expect(page.getByRole('status')).toContainText('Request accepted at');

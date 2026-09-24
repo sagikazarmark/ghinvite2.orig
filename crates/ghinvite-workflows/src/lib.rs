@@ -1,7 +1,7 @@
 //! Restate handler services for ghinvite.
 //!
 //! Restate is the authority for every durable state change —
-//! [`admission`] and [`request_lifecycle`] for invitation requests,
+//! [`admission`] and [`request_owner`] for invitation requests,
 //! [`delivery`] and [`settlement`] for GitHub invitations,
 //! [`availability`] for installations — and [`projection`] keeps the
 //! queryable SQL records.
@@ -24,7 +24,7 @@ pub mod installation;
 pub mod projection;
 pub mod reconcile;
 pub mod repository_access;
-pub mod request_lifecycle;
+pub mod request_owner;
 pub mod settlement;
 pub mod state;
 pub mod throttle;
@@ -70,7 +70,7 @@ pub fn build_endpoint(
         });
     let builder = admission::bind(builder);
     let builder = projection::bind(builder, projection);
-    let builder = request_lifecycle::bind(builder);
+    let builder = request_owner::bind(builder);
     let mut builder = delivery::bind(builder, state);
     if let Some(key) = identity_key {
         builder = builder
