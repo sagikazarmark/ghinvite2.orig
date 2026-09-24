@@ -13,13 +13,14 @@ service has not been registered.
   identity. This means submitted, not GitHub success.
 - Link `consumed/<request>` records lifecycle consumption after fan-out (or
   after observing a non-approved terminal decision).
-- `GithubCreate/<invitation>` retains `input` and `receipt` without TTL.
+- `RepositoryDelivery/<request>:<repository>` retains the bound command, original
+  create receipt, current snapshot and terminal settlement audit without TTL.
   First use validates exact command membership through the private link owner's
   `authorize_delivery` issuance check before binding input or attempting effects.
   Bound retries use that authorization without fetching the approved plan again.
   The command contains immutable numeric account/requester/repository identities,
   repository address, permission, approval ID/time and installation provenance.
-  The receipt is independent of the database invitation lifecycle.
+  The create receipt remains unchanged by subsequent invitation settlement.
 - `delivery_attempts` is an input-bound database **write fence**, not the receipt
   authority. Claiming an attempt generation permits one PUT. If its own
   acknowledgement or the subsequent HTTP result is lost, recovery reads GitHub
@@ -32,14 +33,14 @@ service has not been registered.
   release the fence.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
-- `DeliveryProjection/<invitation>/apply` is an independent durable queue, bound
+- `DeliveryProjection/<request>:<repository>/apply` is an independent durable queue, bound
   by `delivery::bind`. Create retains its input-bound receipt (including stable
   audit facts), durably sends projection and any continuation, then returns.
   SQL dependency, invariant, or availability failures retry in that queue and
   never prevent the create owner from handling recovery commands. Confirmed
   replay sends the same receipt for repair without contacting GitHub.
 
-Retained `GithubCreate/status` reports the actual delivery result during a
+Retained `RepositoryDelivery/status` reports create history and current lifecycle during a
 projection outage. SQL-backed views may show the last projected observation or
 updates unavailable; projection failure is not a definitive GitHub failure.
 
@@ -109,7 +110,7 @@ repair after workflow retention, call the private ordinary service
 operator/caller. It obtains the retained plan, checks receiving receipts for input
 conflicts, durably resubmits original commands, and records submission checkpoints.
 It never starts `InvitationRequest/run`. Its response describes submission only;
-read `GithubCreate/<id>/status` or the current request page for delivery outcomes.
+read `RepositoryDelivery/<request>:<repository>/status` or the current request page for delivery outcomes.
 
 Blocked creates schedule a one-hour dependency recheck, or the throttling wait
 below when that is what blocked them; explicit recovery may

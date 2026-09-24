@@ -163,9 +163,25 @@ pub(super) async fn detail(
     };
     let receipts = state.storage.list_delivery_for_request(id).await;
     let invitations = state.storage.list_github_invitations_for_request(id).await;
-    let delivery_unavailable = receipts.is_err() || invitations.is_err();
-    let receipts = receipts.unwrap_or_default();
-    let invitations = invitations.unwrap_or_default();
+    let mut delivery_unavailable = receipts.is_err() || invitations.is_err();
+    let mut receipts = receipts.unwrap_or_default();
+    let mut invitations = invitations.unwrap_or_default();
+    for repo in &link.repos {
+        match state
+            .link_authority
+            .delivery_snapshot(id, repo.repo_id)
+            .await
+        {
+            Ok(Some(snapshot)) => {
+                receipts.retain(|r| r.create.command.repo_id != repo.repo_id);
+                invitations.retain(|r| r.repo_id != repo.repo_id);
+                invitations.push(snapshot.invitation());
+                receipts.push(snapshot);
+            }
+            Ok(None) => (),
+            Err(_) => delivery_unavailable = true,
+        }
+    }
     let delivery: Vec<_> = link
         .repos
         .iter()
@@ -180,7 +196,7 @@ pub(super) async fn detail(
             ),
             receipts: receipts
                 .iter()
-                .filter(|r| r.command.repo_id == repo.repo_id)
+                .filter(|r| r.create.command.repo_id == repo.repo_id)
                 .cloned()
                 .collect(),
             invitations: invitations

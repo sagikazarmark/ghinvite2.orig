@@ -155,8 +155,15 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
+    let delivery_key = format!(
+        "{}:{}",
+        command["request_id"].as_str().unwrap(),
+        command["repo_id"]
+    );
     let response = client
-        .post(format!("{ingress}/GithubCreate/{id}/create"))
+        .post(format!(
+            "{ingress}/RepositoryDelivery/{delivery_key}/create"
+        ))
         .json(&command)
         .send()
         .await
@@ -169,6 +176,29 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let receipt: Value = response.json().await.unwrap();
     assert_eq!(receipt["outcome"]["kind"], "created");
     assert_eq!(receipt["command"], command);
+    // Settlement is retained beside the original create even while every
+    // projected parent is unavailable. Replays return that original receipt.
+    post(
+        &client,
+        &format!("{ingress}/RepositoryDelivery/{delivery_key}/on_webhook"),
+        json!({"invitation_id":id,"action":"accepted","at":"2026-09-24T12:00:00Z"}),
+    )
+    .await;
+    let snapshot = post(
+        &client,
+        &format!("{ingress}/RepositoryDelivery/{delivery_key}/status"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(snapshot["create"], receipt);
+    assert_eq!(snapshot["settlement"]["state"], "accepted");
+    let replay = post(
+        &client,
+        &format!("{ingress}/RepositoryDelivery/{delivery_key}/create"),
+        command.clone(),
+    )
+    .await;
+    assert_eq!(replay, receipt);
     assert!(storage.get_installation(9).await.unwrap().is_none());
     assert!(storage.get_user(8).await.unwrap().is_none());
     assert!(
@@ -204,8 +234,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     let blocked_command = plan["commands"][1].clone();
     let blocked_url = format!(
-        "{ingress}/GithubCreate/{}/create",
-        blocked_command["invitation_id"].as_str().unwrap()
+        "{ingress}/RepositoryDelivery/{}:{}/create",
+        blocked_command["request_id"].as_str().unwrap(),
+        blocked_command["repo_id"]
     );
     let blocked = post(&client, &blocked_url, blocked_command.clone()).await;
     assert_eq!(blocked["outcome"]["kind"], "blocked");
@@ -216,8 +247,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     unauthorized["invitation_id"] = json!(ghinvite_core::GithubInvitationId::new());
     let response = client
         .post(format!(
-            "{ingress}/GithubCreate/{}/create",
-            unauthorized["invitation_id"].as_str().unwrap()
+            "{ingress}/RepositoryDelivery/{delivery_key}/create"
         ))
         .json(&unauthorized)
         .send()
@@ -307,6 +337,44 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let resumed = post(&client, &blocked_url, blocked_command.clone()).await;
     assert_eq!(resumed["outcome"]["kind"], "created");
     assert_eq!(resumed["command"], blocked_command);
+    let owner_url = blocked_url.trim_end_matches("/create");
+    let pending = post(&client, &format!("{owner_url}/status"), Value::Null).await;
+    // A withdrawal authorized for the retired installation cannot use its replacement.
+    post(&client, &format!("{owner_url}/cancel"), json!({"invitation_id":blocked_command["invitation_id"],"installation_id":9,"by_user":7,"at":chrono::Utc::now()})).await;
+    assert_eq!(
+        post(&client, &format!("{owner_url}/status"), Value::Null).await,
+        pending
+    );
+    // Competing valid withdrawal/webhook commands choose one retained winner.
+    let webhook_url = format!("{owner_url}/on_webhook");
+    let cancel_url = format!("{owner_url}/cancel");
+    tokio::join!(
+        post(
+            &client,
+            &cancel_url,
+            json!({"invitation_id":blocked_command["invitation_id"],"installation_id":19,"by_user":7,"at":chrono::Utc::now()})
+        ),
+        post(
+            &client,
+            &webhook_url,
+            json!({"invitation_id":blocked_command["invitation_id"],"action":"accepted","at":chrono::Utc::now()})
+        )
+    );
+    let winner = post(&client, &format!("{owner_url}/status"), Value::Null).await;
+    assert!(matches!(
+        winner["settlement"]["state"].as_str(),
+        Some("accepted" | "cancelled")
+    ));
+    assert_eq!(winner["create"], resumed);
+    post(&client, &webhook_url, json!({"invitation_id":blocked_command["invitation_id"],"action":"declined","at":chrono::Utc::now()})).await;
+    assert_eq!(
+        post(&client, &format!("{owner_url}/status"), Value::Null).await,
+        winner
+    );
+    assert_eq!(
+        post(&client, &blocked_url, blocked_command.clone()).await,
+        resumed
+    );
     let ledger: Value = client
         .get(format!("{base}/calls"))
         .send()
@@ -410,13 +478,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .await;
     let manual_command = manual_plan["commands"][0].clone();
     let manual_url = format!(
-        "{ingress}/GithubCreate/{}/create",
-        manual_command["invitation_id"].as_str().unwrap()
+        "{ingress}/RepositoryDelivery/{}:{}/create",
+        manual_command["request_id"].as_str().unwrap(),
+        manual_command["repo_id"]
     );
-    let response = client.post(&manual_url).json(&manual_command).send().await;
-    assert!(
-        response.is_err(),
-        "unavailable fence cannot authorize a PUT"
+    let unavailable = post(&client, &manual_url, manual_command.clone()).await;
+    assert_eq!(
+        unavailable["outcome"]["kind"], "blocked",
+        "fence outage before claim releases owner exclusivity"
     );
     assert_eq!(puts(&client, &base).await, 0);
     assert_eq!(
@@ -438,6 +507,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .execute(&sql)
         .await
         .unwrap();
+    // Recovery rechecks the fence before attempting the write.
+    let recovered = post(&client, &manual_url, manual_command.clone()).await;
+    assert_eq!(recovered["outcome"]["kind"], "outcome_unknown");
     let unknown = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let status = post(
@@ -446,8 +518,8 @@ async fn approved_delivery_progresses_without_projected_parents() {
                 Value::Null,
             )
             .await;
-            if status["outcome"]["kind"] == "outcome_unknown" {
-                break status;
+            if status["create"]["outcome"]["kind"] == "outcome_unknown" {
+                break status["create"].clone();
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

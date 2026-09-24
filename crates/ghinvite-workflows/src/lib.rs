@@ -59,9 +59,6 @@ pub fn build_endpoint(
         .bind(installation::Installation {
             state: state.clone(),
         })
-        .bind(github_invitation::GithubInvitation {
-            state: state.clone(),
-        })
         .bind(reconcile::Reconcile {
             state: state.clone(),
         })

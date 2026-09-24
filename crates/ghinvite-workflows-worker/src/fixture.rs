@@ -32,10 +32,6 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
                 .await
                 .map(|value| serde_json::to_value(value).unwrap())
         }
-        "/__fixture/settle" => storage
-            .settle_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
-            .await
-            .map(|_| serde_json::Value::Null),
         "/__fixture/insert_invitation" => storage
             .insert_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
             .await

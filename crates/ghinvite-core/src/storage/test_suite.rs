@@ -277,7 +277,7 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         "outcome":{"kind":"created","upstream_id":99123},"revision":2,
         "confirmed_at":"2026-05-04T13:00:00.123456789Z"
     })).unwrap();
-    s.project_delivery(&receipt).await.unwrap();
+    s.project_delivery(&receipt.clone().into()).await.unwrap();
     let invitation = s.get_github_invitation(id).await.unwrap().unwrap();
     assert_eq!(invitation.invitation_request_id, request.id);
     assert_eq!(invitation.repo_id, 10);
@@ -308,9 +308,9 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         serde_json::json!({"repo_full_name":"acme/api","requester_id":8,"github_invitation_id":99123})
     );
     // The invitation settles; replaying the create receipt changes nothing.
-    let sent = s.get_github_invitation(id).await.unwrap().unwrap();
-    s.settle_github_invitation(&super::settlement::Settlement {
-        expected: sent,
+    let mut settled = crate::delivery::DeliverySnapshot::from(receipt.clone());
+    settled.revision += 1;
+    settled.settlement = Some(crate::delivery::Settlement {
         state: InvitationState::Declined,
         event: AuditEvent {
             id: AuditEventId::new(),
@@ -324,10 +324,9 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
             metadata: serde_json::Value::Null,
             request_id: None,
         },
-    })
-    .await
-    .unwrap();
-    s.project_delivery(&receipt).await.unwrap();
+    });
+    s.project_delivery(&settled).await.unwrap();
+    s.project_delivery(&receipt.clone().into()).await.unwrap();
     assert_eq!(
         s.list_audit_events(100, Some(EventType::InvitationSent), AuditPosition::Latest)
             .await
@@ -365,8 +364,8 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         value["command"]["invitation_id"] = serde_json::json!(id);
         value["outcome"] = outcome;
         let confirmed: crate::delivery::CreateReceipt = serde_json::from_value(value).unwrap();
-        s.project_delivery(&confirmed).await.unwrap();
-        s.project_delivery(&confirmed).await.unwrap();
+        s.project_delivery(&confirmed.clone().into()).await.unwrap();
+        s.project_delivery(&confirmed.into()).await.unwrap();
         let events = s
             .list_audit_events(100, Some(kind), AuditPosition::Latest)
             .await
@@ -397,8 +396,8 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         value["command"]["invitation_id"] = serde_json::json!(GithubInvitationId::new());
         value["outcome"] = outcome;
         value.as_object_mut().unwrap().remove("confirmed_at");
-        let unconfirmed = serde_json::from_value(value).unwrap();
-        s.project_delivery(&unconfirmed).await.unwrap();
+        let unconfirmed: crate::delivery::CreateReceipt = serde_json::from_value(value).unwrap();
+        s.project_delivery(&unconfirmed.into()).await.unwrap();
     }
     assert_eq!(
         s.list_audit_events(100, None, AuditPosition::Latest)
@@ -414,11 +413,11 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
     newer.revision = 3;
     newer.confirmed_at = None;
     newer.outcome = crate::delivery::CreateOutcome::OutcomeUnknown;
-    s.project_delivery(&newer).await.unwrap();
+    s.project_delivery(&newer.clone().into()).await.unwrap();
     let mut older = receipt.clone();
     older.command = newer.command.clone();
-    s.project_delivery(&older).await.unwrap();
-    s.project_delivery(&older).await.unwrap();
+    s.project_delivery(&older.clone().into()).await.unwrap();
+    s.project_delivery(&older.clone().into()).await.unwrap();
     let events = s
         .list_audit_events(100, Some(EventType::InvitationSent), AuditPosition::Latest)
         .await
@@ -433,12 +432,12 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         s.list_delivery_for_request(request.id)
             .await
             .unwrap()
-            .contains(&newer)
+            .contains(&newer.into())
     );
     let mut conflict = older.clone();
     conflict.confirmed_at = Some(dt("2026-05-04T14:00:00Z"));
     assert!(
-        s.project_delivery(&conflict).await.is_err(),
+        s.project_delivery(&conflict.into()).await.is_err(),
         "same event identity cannot change content even on stale receipt"
     );
     assert_eq!(
@@ -451,7 +450,7 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
     let mut wrong_account = older.clone();
     wrong_account.command.account_id = 101;
     assert!(
-        s.project_delivery(&wrong_account).await.is_err(),
+        s.project_delivery(&wrong_account.into()).await.is_err(),
         "stale receipts must still enforce command identity"
     );
     assert!(
@@ -495,7 +494,7 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
     };
     let id = receipt.command.invitation_id;
     assert!(matches!(
-        s.project_delivery(&receipt).await,
+        s.project_delivery(&receipt.clone().into()).await,
         Err(Error::ProjectionDependency)
     ));
     assert!(s.get_github_invitation(id).await.unwrap().is_none());
@@ -517,7 +516,7 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
     // The adapter commits, but its caller loses the acknowledgement. A retry
     // is the only available action; it must return exactly the committed facts.
     let lost_ack: Result<(), Error> = async {
-        s.project_delivery(&receipt).await?;
+        s.project_delivery(&receipt.clone().into()).await?;
         Err(Error::Database(
             "fixture: commit acknowledgement lost".into(),
         ))
@@ -530,7 +529,7 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
         .await
         .unwrap()
         .events;
-    s.project_delivery(&receipt).await.unwrap();
+    s.project_delivery(&receipt.clone().into()).await.unwrap();
     assert_eq!(
         s.get_github_invitation(id).await.unwrap(),
         Some(invitation.clone())
@@ -545,7 +544,7 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
     stale.outcome = CreateOutcome::Blocked {
         reason: "installation unavailable".into(),
     };
-    s.project_delivery(&stale).await.unwrap();
+    s.project_delivery(&stale.clone().into()).await.unwrap();
     let mut equal_conflict = stale.clone();
     equal_conflict.revision = 2;
     let mut identity_conflict = stale;
@@ -555,12 +554,12 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
     audit_conflict.confirmed_at = Some(dt("2026-05-04T14:00:00Z"));
     for conflict in [equal_conflict, identity_conflict, audit_conflict] {
         assert!(matches!(
-            s.project_delivery(&conflict).await,
+            s.project_delivery(&conflict.into()).await,
             Err(Error::ProjectionInvariant(_))
         ));
         assert_eq!(
             s.list_delivery_for_request(request.id).await.unwrap(),
-            vec![receipt.clone()]
+            vec![crate::delivery::DeliverySnapshot::from(receipt.clone())]
         );
         assert_eq!(
             s.get_github_invitation(id).await.unwrap(),
@@ -583,7 +582,7 @@ pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorag
     let mut conflict = receipt;
     conflict.command.invitation_id = wrong_row.id;
     assert!(matches!(
-        s.project_delivery(&conflict).await,
+        s.project_delivery(&conflict.into()).await,
         Err(Error::ProjectionInvariant(_))
     ));
     assert_eq!(
@@ -790,8 +789,9 @@ async fn scenario_github_invitation_lifecycle<S: Storage + ProjectionStorage>(s:
         vec![g.clone()]
     );
 
-    s.settle_github_invitation(&super::settlement::Settlement {
-        expected: g.clone(),
+    let mut settled = delivery_fixture(&link, &req, &g);
+    settled.revision += 1;
+    settled.settlement = Some(crate::delivery::Settlement {
         state: InvitationState::Accepted,
         event: AuditEvent {
             id: AuditEventId::new(),
@@ -805,9 +805,8 @@ async fn scenario_github_invitation_lifecycle<S: Storage + ProjectionStorage>(s:
             metadata: serde_json::Value::Null,
             request_id: None,
         },
-    })
-    .await
-    .unwrap();
+    });
+    s.project_delivery(&settled).await.unwrap();
 
     let accepted = s.get_github_invitation(g.id).await.unwrap().unwrap();
     assert_eq!(accepted.state, InvitationState::Accepted);
@@ -1061,14 +1060,18 @@ async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S
     })
     .await
     .unwrap();
-    let settlement = |event: AuditEvent| super::settlement::Settlement {
-        expected: sent.clone(),
-        state: InvitationState::Accepted,
-        event,
+    let settlement = |event: AuditEvent| {
+        let mut snapshot = delivery_fixture(&link, &request, &sent);
+        snapshot.revision += 1;
+        snapshot.settlement = Some(crate::delivery::Settlement {
+            state: InvitationState::Accepted,
+            event,
+        });
+        snapshot
     };
     assert!(matches!(
-        s.settle_github_invitation(&settlement(event.clone())).await,
-        Err(super::Error::Database(_))
+        s.project_delivery(&settlement(event.clone())).await,
+        Err(super::Error::ProjectionInvariant(_))
     ));
     assert_eq!(
         s.get_github_invitation(sent.id).await.unwrap(),
@@ -1078,18 +1081,20 @@ async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S
         id: AuditEventId::new(),
         ..event.clone()
     };
-    s.settle_github_invitation(&settlement(winner.clone()))
+    s.project_delivery(&settlement(winner.clone()))
         .await
         .unwrap();
-    s.settle_github_invitation(&settlement(winner.clone()))
+    s.project_delivery(&settlement(winner.clone()))
         .await
         .unwrap();
-    s.settle_github_invitation(&settlement(AuditEvent {
-        id: AuditEventId::new(),
-        ..winner.clone()
-    }))
-    .await
-    .unwrap();
+    assert!(
+        s.project_delivery(&settlement(AuditEvent {
+            id: AuditEventId::new(),
+            ..winner.clone()
+        }))
+        .await
+        .is_err()
+    );
     assert_eq!(
         s.get_github_invitation(sent.id)
             .await
@@ -1106,10 +1111,40 @@ async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S
     assert_eq!(
         history
             .iter()
-            .filter(|e| e.target_id == sent.id.to_string())
+            .filter(|e| e.target_id == sent.id.to_string()
+                && e.event_type == EventType::InvitationAccepted)
             .collect::<Vec<_>>(),
         [&winner]
     );
+}
+
+/// A complete owner envelope for storage conformance fixtures.
+pub fn delivery_fixture(
+    link: &InvitationLink,
+    request: &InvitationRequest,
+    row: &GithubInvitation,
+) -> crate::delivery::DeliverySnapshot {
+    crate::delivery::CreateReceipt {
+        command: crate::delivery::CreateCommand {
+            invitation_id: row.id,
+            link_id: link.id,
+            request_id: request.id,
+            approval_id: "fixture-approval".into(),
+            account_id: link.account_id,
+            installation_id: link.installation_id,
+            requester_id: request.requester_id,
+            repo_id: row.repo_id,
+            repo_full_name: "acme/api".into(),
+            permission: link.permission,
+            approved_at: row.created_at,
+        },
+        outcome: crate::delivery::CreateOutcome::Created {
+            upstream_id: row.github_invitation_id.unwrap(),
+        },
+        revision: 1,
+        confirmed_at: Some(row.updated_at),
+    }
+    .into()
 }
 
 /// A refused insert names the constraint it hit, not just "the write failed":

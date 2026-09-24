@@ -195,12 +195,22 @@ pub async fn page(
             .await
             .ok();
         for repo in &page.repos {
+            let current = state
+                .link_authority
+                .delivery_snapshot(request.request_id, repo.repo_id)
+                .await;
+            let unavailable = current.is_err();
+            let current = current.ok().flatten();
+            let current = current
+                .as_ref()
+                .map(std::slice::from_ref)
+                .unwrap_or_else(|| receipts.as_deref().unwrap_or_default());
             let row = ghinvite_ui::invitation::delivery_presentation(
                 repo,
-                receipts.as_deref().unwrap_or_default(),
+                current,
                 progress.as_deref().unwrap_or_default(),
                 invitations.as_deref().unwrap_or_default(),
-                receipts.is_none() || invitations.is_none() || progress.is_none(),
+                unavailable || current.is_empty() || progress.is_none(),
             );
             delivery.push(row);
         }

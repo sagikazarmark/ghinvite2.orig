@@ -101,7 +101,12 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
         })).unwrap();
         // An audit failure must also roll back initial row creation.
         sqlx::query("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").execute(&fault).await.unwrap();
-        assert!(storage.project_delivery(&receipt).await.is_err());
+        assert!(
+            storage
+                .project_delivery(&receipt.clone().into())
+                .await
+                .is_err()
+        );
         assert!(storage.get_github_invitation(id).await.unwrap().is_none());
         assert!(
             !storage
@@ -109,7 +114,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .unwrap()
                 .iter()
-                .any(|r| r.command.invitation_id == id)
+                .any(|r| r.create.command.invitation_id == id)
         );
         sqlx::query("DROP TRIGGER fail_delivery_audit")
             .execute(&fault)
@@ -121,13 +126,21 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
             confirmed_at: None,
             ..receipt.clone()
         };
-        storage.project_delivery(&unknown).await.unwrap();
+        storage
+            .project_delivery(&unknown.clone().into())
+            .await
+            .unwrap();
         let receipt = ghinvite_core::delivery::CreateReceipt {
             revision: 2,
             ..receipt
         };
         sqlx::query("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").execute(&fault).await.unwrap();
-        assert!(storage.project_delivery(&receipt).await.is_err());
+        assert!(
+            storage
+                .project_delivery(&receipt.clone().into())
+                .await
+                .is_err()
+        );
         let initial = storage.get_github_invitation(id).await.unwrap().unwrap();
         assert_eq!(initial.state, ghinvite_core::InvitationState::Sending);
         assert_eq!(initial.updated_at, receipt.command.approved_at);
@@ -137,7 +150,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .unwrap()
                 .iter()
-                .any(|row| row == &unknown)
+                .any(|row| row.create == unknown)
         );
         assert!(
             storage
@@ -151,7 +164,10 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
             .execute(&fault)
             .await
             .unwrap();
-        storage.project_delivery(&receipt).await.unwrap();
+        storage
+            .project_delivery(&receipt.clone().into())
+            .await
+            .unwrap();
         let events = storage
             .list_audit_events(100, Some(kind.parse().unwrap()), AuditPosition::Latest)
             .await
@@ -160,7 +176,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].actor_kind.to_string(), actor);
         assert_eq!(events[0].occurred_at, receipt.confirmed_at.unwrap());
-        storage.project_delivery(&receipt).await.unwrap();
+        storage.project_delivery(&receipt.into()).await.unwrap();
         assert_eq!(
             storage
                 .list_audit_events(100, Some(kind.parse().unwrap()), AuditPosition::Latest)

@@ -35,7 +35,19 @@ pub const MEMBER_CANDIDATES: &str = "SELECT g.id, g.invitation_request_id,
     FROM github_invitations g
     JOIN invitation_requests r ON r.id = g.invitation_request_id
     JOIN invitation_links l ON l.id = r.invitation_link_id
-    WHERE l.account_id = ?1 AND g.repo_id = ?2 AND r.requester_id = ?3 LIMIT 2";
+    WHERE l.account_id = ?1 AND g.repo_id = ?2 AND r.requester_id = ?3
+    AND NOT EXISTS (
+      SELECT 1 FROM invitation_links scope WHERE scope.account_id = ?1
+      AND scope.uses_count > (SELECT COUNT(*) FROM invitation_requests seen WHERE seen.invitation_link_id = scope.id)
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM invitation_requests pending
+      JOIN invitation_links scope ON scope.id = pending.invitation_link_id
+      JOIN invitation_link_repos repo ON repo.invitation_link_id = scope.id
+      WHERE scope.account_id = ?1 AND pending.requester_id = ?3 AND repo.repo_id = ?2
+      AND pending.state = 'approved'
+      AND NOT EXISTS (SELECT 1 FROM github_invitations known WHERE known.invitation_request_id = pending.id AND known.repo_id = ?2)
+    ) LIMIT 2";
 
 /// Bind body hash and nullable invitation ID; the first binding is retained.
 pub const BIND_MEMBER_WEBHOOK: &str = "INSERT INTO member_webhook_receipts(payload_sha256, invitation_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING";

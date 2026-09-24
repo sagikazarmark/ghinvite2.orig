@@ -3,8 +3,8 @@
 Restate handler services for ghinvite. `build_endpoint` binds every service on
 one endpoint, and these services own every durable state change:
 `InvitationLink` and `InvitationRequest` own admission and the request
-lifecycle, `GithubCreate` owns delivery, and `AccountInstallation` owns
-installations. `GithubInvitation` keeps only its settlement handlers and
+lifecycle, `RepositoryDelivery/<request>:<repository>` owns create and settlement,
+and `AccountInstallation` owns installations.
 `Reconcile` only `daily_run`.
 
 SQL is a projection written through `InvitationProjection`, a Virtual Object
@@ -87,8 +87,8 @@ changed:
   (`link/{id}/metadata/{revision}`) before sending it; unchanged metadata
   produces no event, and the event carries no description or internal-note
   values.
-- GitHub invitation settlement (`settlement`) carries its `AuditEvent` in the
-  `Settlement` that `settle_github_invitation` applies; the event ID derives
+- GitHub invitation settlement (`settlement`) retains its `AuditEvent` in the
+  delivery snapshot that `DeliveryProjection` applies; the event ID derives
   from the invitation ID, so an invitation settles with one event.
 - Installation changes (`availability`) journal their `AuditEvent` first,
   project the installation, then call `AuditStorage::audit`, which accepts an

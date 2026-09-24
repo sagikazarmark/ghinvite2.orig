@@ -1,19 +1,20 @@
 # GitHub invitation settlement
 
-Issue [#63](https://github.com/sagikazarmark/ghinvite2.orig/issues/63) adds
-settlement handlers on the existing `GithubInvitation/<invitation_id>`
-Virtual Object:
+Issue #120 unifies creation and settlement in
+`RepositoryDelivery/<request_id>:<repo_id>`. The internal invitation ID is bound
+once by the approved command; another ID cannot create another writer.
 
 - `on_webhook`, `reconcile`, `cancel`, and `tick_expire` share object
-  exclusivity and one `DeliveryStorage::settle_github_invitation` transition boundary.
+  exclusivity with creation and retain one terminal winner before projecting it.
 - `Reconcile/daily_run` journals read-only GitHub evidence, then calls the
   invitation owner with the observed invitation identity, state, and upstream ID.
   Concurrent sweeps can observe the same row; only the first valid settlement wins.
 - Only `Sent` rows with an upstream ID qualify. `Sending` placeholders, including
-  blocked and outcome-unknown creates, remain with `GithubCreate`. A missing
+  blocked and outcome-unknown creates, keep separate create semantics. A missing
   GitHub list entry cannot resolve an uncertain create.
-- A conditional insert retains the winning terminal transition. The SQLx
-  transaction / D1 batch commits this receipt, its audit, and its state together.
+- The owner retains the winning terminal transition. Independent `DeliveryProjection`
+  execution applies one revision lineage. The SQLx transaction / D1 batch commits
+  the complete snapshot, create audit and settlement audit together.
   There is no state-committed/audit-missing window. An acknowledgement lost after
   commit is safe to retry. The invitation ID supplies the stable terminal audit
   ID; the retained winner supplies immutable event content on later evidence.
@@ -24,23 +25,22 @@ Virtual Object:
 
 The expected `Sent` state and exact upstream/request/repository identity are the
 fence: this lifecycle has no transition back to `Sent`. It does not require a
-timestamp comparison. `Sent` rows with upstream IDs but no retained create
-receipt still use this boundary directly.
+timestamp comparison. Projected `Sent` rows cannot reconstruct absent authority.
 
 `cancel` settles Cancelled on GitHub's 204. GitHub answers the DELETE with the
 same 404 whether the invitation is gone or the installation no longer sees the
-repository, so a 404 settles only after the link's installation verifies it
+repository, so a 404 settles only after the current account installation verifies it
 still reaches the scoped numeric repository ID. An unavailable repository is
 "cannot observe now" ([ADR 0006](adr/0006-delivery-and-settlement-checks-stay-distinct.md)):
 nothing is settled and the row stays `Sent` for reconciliation. A failed
-repository read fails the command with that error, so a transient one retries
-and nothing is settled either way. The check runs after the DELETE, not before,
-to keep the common deleted path to one GitHub call.
+repository read leaves lifecycle unchanged. Installation/account/repository identity
+is verified before deletion and rechecked after a 404. A withdrawal naming a retired
+installation cannot borrow its replacement's credentials. `tick_expire` remains an
+explicit operation with its existing pending-invitation evidence requirement; request
+decision deadlines do not schedule it. Automatic lifecycle cadence remains in #86.
 
-The post-settlement SQL fence is defense in depth. Retain the settlement table
-with invitation and audit records in backups/restores. Independently restoring
-SQL or manually deleting settlement receipts requires coordinated recovery before
-resuming writes.
+The post-settlement SQL fence is defense in depth over the projected snapshot.
+Retain owner state, HTTP fences, webhook routing receipts and audit history together.
 
 ## Verification
 
@@ -57,8 +57,9 @@ The native and Worker runtime scenarios cover a blocked create, intervening swee
 successful retry and preserved upstream ID; accepted webhook versus delayed
 reconciliation evidence; concurrent reconciliation; atomic rollback on audit
 failure; and one terminal audit. The D1 test executes the real batch and loses its
-acknowledgement before retry, and exercises fixture-seeded Sent rows, cancellation,
-and expiration. The SQLx boundary also verifies audit-ID conflict rollback and
+acknowledgement before retry. The native approved-delivery test races supported
+withdrawal with webhook settlement while parent projections are withheld.
+The SQLx boundary also verifies audit-ID conflict rollback and
 rejection of a late write after settlement.
 
 ## Member-added webhooks
@@ -74,9 +75,15 @@ account must equal the repository owner. Matching uses immutable account,
 repository, and requester IDs, including links from historical installations;
 repository names, user logins, and `sender` do not select a request. The lookup
 returns at most two historical candidates. Exactly one candidate in `Sent` with
-an upstream invitation ID is dispatched as acceptance through
-`GithubInvitation/<id>/on_webhook`. Web ingress retains routing receipts in SQL;
-only the lifecycle owner settles invitation state and publishes its audit.
+an upstream invitation ID schedules exact-invitation observation through
+`RepositoryDelivery/<request>:<repository>/on_webhook`. Web ingress retains routing receipts in SQL;
+only the delivery owner settles invitation state and arranges audit projection.
+Detected missing request/delivery candidates cause conservative no-match routing.
+Even apparently complete projections cannot prove association: a matched member
+event only requests read-only verification by `DeliveryObservation`. Its payload
+alone cannot settle an invitation. A complete listing must show the exact upstream
+ID absent, followed by verified numeric membership evidence. Observation runs outside
+owner exclusivity and applies identity/phase-bound evidence through the owner.
 
 Before dispatch, `member_webhook_receipts` retains the first match or no-match
 under the SHA-256 of the exact authenticated body. The delivery header is not
@@ -120,10 +127,10 @@ recorder. The native `retained_delivery` gate uses the actual web route, product
 command adapter, real Restate, and SQLx invitation/audit reads. A proxy forwards
 the durable send then loses its acknowledgement; redelivery, an audit write
 outage, and concurrent delayed reconciliation leave one accepted transition and
-one GitHub-actor audit. The Worker gate also exercises the new identity lookup and
+one reconciliation audit. The Worker gate also exercises the new identity lookup and
 retained match/no-match bindings against actual D1. These are local runtime proofs, **not captured live GitHub
 deliveries or proof of GitHub subscription availability**. Existing #63 D1
-settlement verification applies to the unchanged atomic lifecycle boundary.
+settlement verification now exercises the unified owner and atomic projection boundary.
 
 ```sh
 cargo test --locked -p ghinvite-web --lib signed_member
@@ -148,12 +155,12 @@ unverified identities leave the invitation recoverable for a later sweep;
 transient API/storage failures retain the existing retry behavior.
 
 The original link installation ID, request, fixed scope, create receipt and audit
-history are preserved. Settlement still runs through the invitation-keyed owner.
+history are preserved. Settlement runs through the request/repository-keyed owner.
 The native runtime test covers A approval → blocked delivery → B delivery →
 credential outage/identity mismatch → missed-webhook settlement. The Worker gate
 covers replacement discovery and account mismatch using actual D1 and Restate.
 Account-based discovery and authority verification happen inside the
-`daily_run` candidate/observation run closures.
+the sweep's retained-owner reads and GitHub observation run closures.
 
 ## Complete pending-invitation observation
 

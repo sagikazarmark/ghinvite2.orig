@@ -423,16 +423,17 @@ try {
   const progressQuery = { link_id: autoInput.link_id, request_id: approved.result.request_id, requester_id: 91 };
   const progress = await eventually(() => auto('delivery_progress', progressQuery), rows => rows.some(row => row.stage === 'submitted'));
   const plan = await auto('prepare_dispatch', progressQuery);
-  const receiving = await eventually(() => http(`${ingress}/GithubCreate/${plan.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
+  const delivery = (command, handler, body) => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/${handler}`, body);
+  const receiving = (await eventually(() => delivery(plan.commands[0], 'status'), value => value?.create.outcome.kind === 'created')).create;
   assert.ok(receiving.outcome.upstream_id > 0);
-  await http(`${ingress}/GithubCreate/${receiving.command.invitation_id}/create`, receiving.command);
+  await delivery(receiving.command, 'create', receiving.command);
   const createEvents = async receipt => (await storage('audit', 100)).events.filter(event => event.target_id === receipt.command.invitation_id);
   const firstEvents = await createEvents(receiving);
   assert.equal(firstEvents.length, 1);
   assert.equal(firstEvents[0].event_type, 'invitation.sent');
   assert.equal(firstEvents[0].occurred_at, receiving.confirmed_at);
   assert.equal(firstEvents[0].actor_kind, 'system');
-  await http(`${ingress}/GithubCreate/${receiving.command.invitation_id}/create`, receiving.command);
+  await delivery(receiving.command, 'create', receiving.command);
   assert.deepEqual(await createEvents(receiving), firstEvents);
   // D1 batch rolls back receipt/lifecycle if the audit insertion fails. Retry
   // after repair (and replay after an unobserved successful response) is safe.
@@ -443,17 +444,18 @@ try {
   ]) {
     const receipt = { ...receiving, command: { ...receiving.command, invitation_id: id() }, outcome };
     await db.prepare("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").run();
-    await storage('delivery', receipt, 409);
-    assert.ok(!(await storage('delivery-read', receipt.command.request_id)).some(row => row.command.invitation_id === receipt.command.invitation_id));
+    const snapshot = { create: receipt, revision: receipt.revision, settlement: null };
+    await storage('delivery', snapshot, 409);
+    assert.ok(!(await storage('delivery-read', receipt.command.request_id)).some(row => row.create.command.invitation_id === receipt.command.invitation_id));
     assert.deepEqual(await createEvents(receipt), []);
     await db.prepare('DROP TRIGGER fail_delivery_audit').run();
-    await storage('delivery', receipt);
+    await storage('delivery', snapshot);
     const events = await createEvents(receipt);
     assert.equal(events.length, 1);
     assert.equal(events[0].event_type, eventType);
     assert.equal(events[0].actor_kind, actor);
     assert.equal(events[0].occurred_at, receipt.confirmed_at);
-    await storage('delivery', receipt);
+    await storage('delivery', snapshot);
     assert.deepEqual(await createEvents(receipt), events);
   }
   console.log('PASS actual D1 audit-write failure rollback and lost-ack replay for all three confirmed outcomes');
@@ -474,14 +476,14 @@ try {
     await call('create', input);
     const admitted = await call('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
     const plan = await call('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
-    const receipt = await http(`${ingress}/GithubCreate/${plan.commands[0].invitation_id}/create`, plan.commands[0]);
+    const receipt = await delivery(plan.commands[0], 'create', plan.commands[0]);
     assert.equal(receipt.outcome.kind, kind);
     const events = await createEvents(receipt);
     assert.equal(events.length, 1);
     assert.equal(events[0].event_type, eventType);
     assert.equal(events[0].actor_kind, actor);
     assert.equal(events[0].occurred_at, receipt.confirmed_at);
-    assert.deepEqual(await http(`${ingress}/GithubCreate/${receipt.command.invitation_id}/create`, receipt.command), receipt);
+    assert.deepEqual(await delivery(receipt.command, 'create', receipt.command), receipt);
     assert.deepEqual(await createEvents(receipt), events);
   }
   await http(`${githubUrl}/reset`, undefined, 'DELETE');
@@ -496,7 +498,7 @@ try {
   assert.equal(manualDecision.request.state, 'approved');
   const manualResult = await http(`${ingress}/restate/workflow/InvitationRequest/${manualReceipt.result.request_id}/attach`, undefined, 'GET');
   assert.equal(manualResult.state, 'approved');
-  await eventually(() => http(`${ingress}/GithubCreate/${manualResult.dispatch.commands[0].invitation_id}/status`), value => value?.outcome.kind === 'created');
+  await eventually(() => delivery(manualResult.dispatch.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
   console.log('PASS manual approval and direct notification to waiting Worker lifecycle');
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,

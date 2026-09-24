@@ -242,7 +242,7 @@ pub trait ConsoleStorage: Send + Sync + 'static {
     async fn list_delivery_for_request(
         &self,
         id: RequestId,
-    ) -> Result<Vec<crate::delivery::CreateReceipt>>;
+    ) -> Result<Vec<crate::delivery::DeliverySnapshot>>;
 
     async fn list_github_invitations_for_request(
         &self,
@@ -391,7 +391,7 @@ pub trait DeliveryStorage: Send + Sync + 'static {
     /// audit facts. Missing parents are ProjectionDependency; conflicting input
     /// or equal-revision content is ProjectionInvariant. Stale receipts cannot
     /// regress lifecycle but still publish their audit; identical replay is safe.
-    async fn project_delivery(&self, receipt: &crate::delivery::CreateReceipt) -> Result<()>;
+    async fn project_delivery(&self, receipt: &crate::delivery::DeliverySnapshot) -> Result<()>;
 
     /// Insert a GitHub invitation fixture/import row. Create delivery uses the
     /// complete atomic `project_delivery` operation instead.
@@ -402,10 +402,6 @@ pub trait DeliveryStorage: Send + Sync + 'static {
     ///   `invitation_request_id` references a row that does not exist.
     /// - [`Error::Database`] for any other failure.
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
-
-    /// Atomically settle the observed Sent invitation and publish its audit.
-    /// Stale evidence is a no-op; replay after acknowledgement loss is safe.
-    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()>;
 
     /// In-flight GitHub invitations across all historical installations of an
     /// immutable account. Installation IDs on links remain original provenance.

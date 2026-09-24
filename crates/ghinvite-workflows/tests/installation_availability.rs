@@ -303,8 +303,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     for command in plan["commands"].as_array().unwrap() {
         let receipt: Value = client
             .post(format!(
-                "{ingress}/GithubCreate/{}/create",
-                command["invitation_id"].as_str().unwrap()
+                "{ingress}/RepositoryDelivery/{}:{}/create",
+                command["request_id"].as_str().unwrap(),
+                command["repo_id"]
             ))
             .json(command)
             .send()

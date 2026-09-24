@@ -139,6 +139,21 @@ impl LinkAuthority {
         self.link(query.link_id, "delivery_progress", &query).await
     }
 
+    /// Call only after the enclosing route has authorized this request/scope.
+    pub async fn delivery_snapshot(
+        &self,
+        request_id: ghinvite_core::RequestId,
+        repo_id: u64,
+    ) -> Result<Option<ghinvite_core::delivery::DeliverySnapshot>> {
+        self.call(
+            "RepositoryDelivery",
+            &ghinvite_core::delivery::delivery_key(request_id, repo_id),
+            "status",
+            &(),
+        )
+        .await
+    }
+
     async fn link<I: Serialize, O: DeserializeOwned>(
         &self,
         link_id: InvitationLinkId,

@@ -53,7 +53,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       await http(`${ingress}/InvitationLink/${pending.link_id}/create`, pending);
       const attempt = { link_id: pending.link_id, operation_id: id(), requester_id: 91 };
       const seen = fault(phase, installationId);
-      const write = call(`GithubCreate/${command.invitation_id}/create`, command);
+      const write = call(`RepositoryDelivery/${command.request_id}:${command.repo_id}/create`, command);
       await waitForFault(seen.write, 'GitHub PUT');
       const admission = call(`InvitationLink/${pending.link_id}/admit`, attempt);
       await waitForFault(seen.observation, `installation ${installationId} observation`);
@@ -73,10 +73,10 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       assert.equal(recovered.result.kind, 'accepted');
       assert.deepEqual(await http(`${ingress}/InvitationLink/${pending.link_id}/admit`, attempt), recovered);
       for (let n = 0; n < 2; n++) {
-        const replay = await http(`${ingress}/GithubCreate/${command.invitation_id}/create`, command);
+        const replay = await http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/create`, command);
         assert.equal(replay.outcome.kind, 'outcome_unknown');
       }
-      assert.equal((await http(`${ingress}/GithubCreate/${command.invitation_id}/status`)).outcome.kind, 'outcome_unknown');
+      assert.equal((await http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/status`)).create.outcome.kind, 'outcome_unknown');
       assert.equal(seen.puts(), 1, 'timeout fence prohibits automatic repeat PUT');
       console.log(`PASS Worker ${phase} timeout: retained unknown delivery/fence, admission 503, released account exclusivity, same-attempt recovery`);
     }

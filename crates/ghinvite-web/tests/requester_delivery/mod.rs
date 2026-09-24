@@ -5,7 +5,7 @@ use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
 use ghinvite_core::request_lifecycle::TerminalDecision;
 use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
-use ghinvite_core::storage::{DeliveryStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
 use ghinvite_storage_sqlx::SqlxStorage;
 
@@ -94,24 +94,27 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
             _ => CreateOutcome::Failed { status: 422 },
         };
         storage
-            .project_delivery(&CreateReceipt {
-                command: CreateCommand {
-                    invitation_id: invitation.id,
-                    link_id: link.id,
-                    request_id: request.id,
-                    approval_id: "private approval identity".into(),
-                    account_id: link.account_id,
-                    installation_id: link.installation_id,
-                    requester_id: REQUESTER_ID,
-                    repo_id: repo.repo_id,
-                    repo_full_name: repo.repo_full_name.clone(),
-                    permission: link.permission,
-                    approved_at: Utc::now(),
-                },
-                confirmed_at: outcome.confirmed().then(Utc::now),
-                outcome,
-                revision: 1,
-            })
+            .project_delivery(
+                &CreateReceipt {
+                    command: CreateCommand {
+                        invitation_id: invitation.id,
+                        link_id: link.id,
+                        request_id: request.id,
+                        approval_id: "private approval identity".into(),
+                        account_id: link.account_id,
+                        installation_id: link.installation_id,
+                        requester_id: REQUESTER_ID,
+                        repo_id: repo.repo_id,
+                        repo_full_name: repo.repo_full_name.clone(),
+                        permission: link.permission,
+                        approved_at: Utc::now(),
+                    },
+                    confirmed_at: outcome.confirmed().then(Utc::now),
+                    outcome,
+                    revision: 1,
+                }
+                .into(),
+            )
             .await
             .unwrap();
         invitations.push(invitation);
@@ -224,11 +227,31 @@ async fn settle(fixture: &DeliveryFixture) {
         InvitationState::Cancelled,
         InvitationState::Expired,
     ]) {
-        fixture
+        let mut snapshot = fixture
             .storage
-            .debug_set_github_invitation(invitation.id, state, invitation.github_invitation_id)
+            .list_delivery_for_request(invitation.invitation_request_id)
             .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.create.command.invitation_id == invitation.id)
             .unwrap();
+        snapshot.revision += 1;
+        snapshot.settlement = Some(ghinvite_core::delivery::Settlement {
+            state,
+            event: ghinvite_core::audit::AuditEvent {
+                id: ghinvite_core::AuditEventId::from_ulid(invitation.id.as_ulid()),
+                account_id: snapshot.create.command.account_id,
+                occurred_at: Utc::now(),
+                event_type: ghinvite_core::storage::settlement::event_type(state).unwrap(),
+                actor_kind: ghinvite_core::audit::ActorKind::Github,
+                actor_id: None,
+                target_kind: ghinvite_core::audit::TargetKind::GithubInvitation,
+                target_id: invitation.id.to_string(),
+                metadata: serde_json::Value::Null,
+                request_id: None,
+            },
+        });
+        fixture.storage.project_delivery(&snapshot).await.unwrap();
     }
 }
 
@@ -271,13 +294,9 @@ async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes
     assert!(!html.contains("private "));
     assert!(!html.contains("AI coding workshop"));
     assert!(!html.contains("Submit request"));
-    assert!(
-        fixture
-            .authority
-            .calls()
-            .iter()
-            .all(|method| { ["requester_page", "delivery_progress"].contains(&method.as_str()) })
-    );
+    assert!(fixture.authority.calls().iter().all(|method| {
+        ["requester_page", "delivery_progress", "status"].contains(&method.as_str())
+    }));
 }
 
 #[tokio::test]

@@ -123,13 +123,10 @@ impl DeliveryStorage for LostAuditAcknowledgement {
     async fn delivery_attempt_exists(&self, _: GithubInvitationId) -> Result<bool> {
         unreachable!()
     }
-    async fn project_delivery(&self, _: &ghinvite_core::delivery::CreateReceipt) -> Result<()> {
+    async fn project_delivery(&self, _: &ghinvite_core::delivery::DeliverySnapshot) -> Result<()> {
         unreachable!()
     }
     async fn insert_github_invitation(&self, _: &GithubInvitation) -> Result<()> {
-        unreachable!()
-    }
-    async fn settle_github_invitation(&self, _: &settlement::Settlement) -> Result<()> {
         unreachable!()
     }
     async fn list_pending_github_invitations_for_account(

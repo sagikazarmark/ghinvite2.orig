@@ -93,8 +93,8 @@ impl RestateCommands {
     ) -> Result<()> {
         self.restate
             .send(
-                "GithubInvitation",
-                &command.invitation_id.to_string(),
+                "RepositoryDelivery",
+                &ghinvite_core::delivery::delivery_key(command.request_id, command.repo_id),
                 "on_webhook",
                 &command,
             )
@@ -137,8 +137,13 @@ pub struct RecordInstallationUninstalled {
 #[derive(Clone, Debug, Serialize)]
 pub struct RouteGithubInvitationWebhook {
     pub invitation_id: ghinvite_core::GithubInvitationId,
+    #[serde(skip)]
+    pub request_id: ghinvite_core::RequestId,
+    #[serde(skip)]
+    pub repo_id: u64,
     pub action: GithubInvitationWebhookAction,
     pub at: DateTime<Utc>,
+    pub verify: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -298,11 +303,18 @@ pub fn github_webhook_dispatcher(
                     if let Some(invitation_id) =
                         storage.bind_member_webhook(&digest, candidate).await?
                     {
+                        let invitation = storage
+                            .get_github_invitation(invitation_id)
+                            .await?
+                            .ok_or(crate::WebError::NotFound)?;
                         commands
                             .route_github_invitation_webhook(RouteGithubInvitationWebhook {
                                 invitation_id,
+                                request_id: invitation.invitation_request_id,
+                                repo_id: invitation.repo_id,
                                 action: GithubInvitationWebhookAction::Accepted,
                                 at: received_at,
+                                verify: true,
                             })
                             .await?;
                     }
@@ -328,8 +340,11 @@ pub fn github_webhook_dispatcher(
                     commands
                         .route_github_invitation_webhook(RouteGithubInvitationWebhook {
                             invitation_id: invitation.id,
+                            request_id: invitation.invitation_request_id,
+                            repo_id: invitation.repo_id,
                             action: payload.action,
                             at: received_at,
+                            verify: false,
                         })
                         .await
                 }
@@ -512,8 +527,10 @@ mod tests {
         invitation_id: ghinvite_core::GithubInvitationId,
         action: &str,
     ) {
-        assert_eq!(call.service, "GithubInvitation");
-        assert_eq!(call.key, invitation_id.to_string());
+        assert_eq!(call.service, "RepositoryDelivery");
+        let (request, repo) = call.key.split_once(':').unwrap();
+        assert!(request.parse::<ghinvite_core::RequestId>().is_ok());
+        assert_eq!(repo, "10");
         assert_eq!(call.method, "on_webhook");
         assert!(call.send);
         assert_eq!(call.body["invitation_id"], invitation_id.to_string());
@@ -807,8 +824,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].service, "GithubInvitation");
-        assert_eq!(calls[0].key, invitation_id.to_string());
+        assert_eq!(calls[0].service, "RepositoryDelivery");
+        assert_eq!(calls[0].body["invitation_id"], invitation_id.to_string());
         assert_eq!(calls[0].method, "on_webhook");
         assert!(calls[0].send);
         assert_eq!(calls[0].body["action"], "accepted");
@@ -1584,28 +1601,35 @@ mod tests {
         let commands = RestateCommands::new(Arc::new(RestateClient::new(base).unwrap()));
         let accepted_id = ghinvite_core::GithubInvitationId::new();
         let declined_id = ghinvite_core::GithubInvitationId::new();
+        let request_id = ghinvite_core::RequestId::new();
 
         commands
             .route_github_invitation_webhook(RouteGithubInvitationWebhook {
                 invitation_id: accepted_id,
+                request_id,
+                repo_id: 10,
                 action: GithubInvitationWebhookAction::Accepted,
                 at: at("2026-05-20T12:00:00Z"),
+                verify: false,
             })
             .await
             .unwrap();
         commands
             .route_github_invitation_webhook(RouteGithubInvitationWebhook {
                 invitation_id: declined_id,
+                request_id,
+                repo_id: 10,
                 action: GithubInvitationWebhookAction::Declined,
                 at: at("2026-05-20T12:01:00Z"),
+                verify: false,
             })
             .await
             .unwrap();
 
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].service, "GithubInvitation");
-        assert_eq!(calls[0].key, accepted_id.to_string());
+        assert_eq!(calls[0].service, "RepositoryDelivery");
+        assert_eq!(calls[0].key, format!("{request_id}:10"));
         assert_eq!(calls[0].method, "on_webhook");
         assert!(calls[0].send);
         assert_eq!(calls[0].body["action"], "accepted");

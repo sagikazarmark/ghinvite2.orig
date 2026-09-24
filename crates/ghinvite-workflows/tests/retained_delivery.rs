@@ -1,6 +1,6 @@
 //! Public ingress + real SQL + GitHub HTTP boundary acceptance for #56.
 #![cfg(feature = "integration")]
-use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, RecordStorage};
+use ghinvite_core::storage::{ConsoleStorage, RecordStorage};
 use ghinvite_core::{RequestId, storage::Storage};
 use restate_sdk::endpoint::{Endpoint, HandleOptions, ProtocolMode};
 use serde_json::{Value, json};
@@ -89,14 +89,14 @@ async fn member_webhook_ingress(
     let recorded = invocations.clone();
     let ingress = ingress.to_owned();
     let proxy = axum::Router::new().route(
-        "/GithubInvitation/{id}/on_webhook/send",
+        "/RepositoryDelivery/{id}/on_webhook/send",
         post(move |Path(id): Path<String>, Json(input): Json<Value>| {
             let client = client.clone();
             let ingress = ingress.clone();
             let recorded = recorded.clone();
             async move {
                 let response = client
-                    .post(format!("{ingress}/GithubInvitation/{id}/on_webhook/send"))
+                    .post(format!("{ingress}/RepositoryDelivery/{id}/on_webhook/send"))
                     .json(&input)
                     .send()
                     .await
@@ -168,6 +168,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let base = format!("http://{}", stub.local_addr().unwrap());
     let credentials_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let repository_reassigned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let throttle_observation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let throttle = throttle_observation.clone();
     let github_tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let unavailable = credentials_unavailable.clone();
     let reassigned = repository_reassigned.clone();
@@ -177,7 +179,17 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             let unavailable = unavailable.clone();
             let reassigned = reassigned.clone();
             let tokens = tokens.clone();
+            let throttle = throttle.clone();
             async move {
+                if request.uri().path() == "/repos/acme/api/invitations"
+                    && throttle.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return axum::response::Response::builder()
+                        .status(429)
+                        .header("retry-after", "1")
+                        .body(axum::body::Body::from("{}"))
+                        .unwrap();
+                }
                 if let Some(token) = request
                     .headers()
                     .get("authorization")
@@ -243,9 +255,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .bind(ghinvite_workflows::availability::InstallationProjection {
             state: state.clone(),
         })
-        .bind(ghinvite_workflows::github_invitation::GithubInvitation {
-            state: state.clone(),
-        })
         .bind(ghinvite_workflows::reconcile::Reconcile {
             state: state.clone(),
         });
@@ -282,6 +291,30 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let link = ghinvite_core::InvitationLinkId::new();
     let call = |service: &str, key: String, handler: &str, input: Value| {
+        let key = if service == "RepositoryDelivery" {
+            if handler == "create" || handler == "recheck" {
+                let command = if handler == "recheck" {
+                    &input["command"]
+                } else {
+                    &input
+                };
+                format!(
+                    "{}:{}",
+                    command["request_id"].as_str().unwrap(),
+                    command["repo_id"]
+                )
+            } else if handler == "reconcile" {
+                format!(
+                    "{}:{}",
+                    input["expected"]["invitation_request_id"].as_str().unwrap(),
+                    input["expected"]["repo_id"]
+                )
+            } else {
+                key
+            }
+        } else {
+            key
+        };
         client
             .post(format!("{ingress}/{service}/{key}/{handler}"))
             .json(&input)
@@ -358,7 +391,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .is_some(),
         "workflow must durably submit: {checkpoint}"
     );
-    let response = call("GithubCreate", id.clone(), "create", command.clone())
+    let response = call("RepositoryDelivery", id.clone(), "create", command.clone())
         .send()
         .await
         .unwrap();
@@ -370,7 +403,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let result: Value = response.json().await.unwrap();
     assert_eq!(result["outcome"]["kind"], "created");
     let original_event = assert_create_audit(&*storage, &result).await.unwrap();
-    let replay: Value = call("GithubCreate", id.clone(), "create", command.clone())
+    let replay: Value = call("RepositoryDelivery", id.clone(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -387,7 +420,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let mut changed = command.clone();
     changed["permission"] = json!("admin");
     assert_eq!(
-        call("GithubCreate", id, "create", changed)
+        call("RepositoryDelivery", id, "create", changed)
             .send()
             .await
             .unwrap()
@@ -455,7 +488,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let command = plan["commands"][0].clone();
         let id = command["invitation_id"].as_str().unwrap().to_owned();
-        let result: Value = call("GithubCreate", id.clone(), "create", command.clone())
+        let result: Value = call("RepositoryDelivery", id.clone(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -464,7 +497,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap();
         assert_eq!(result["outcome"]["kind"], expected);
         assert_create_audit(&*storage, &result).await;
-        let replay: Value = call("GithubCreate", id, "create", command)
+        let replay: Value = call("RepositoryDelivery", id, "create", command)
             .send()
             .await
             .unwrap()
@@ -500,7 +533,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .await
             .unwrap();
         assert_eq!(
-            serde_json::to_value(&rows[0]).unwrap()["outcome"],
+            serde_json::to_value(&rows[0].create).unwrap()["outcome"],
             replay["outcome"]
         );
     }
@@ -527,36 +560,22 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(outcomes.len(), 1);
-    assert_eq!(serde_json::to_value(&outcomes[0]).unwrap(), result);
+    assert_eq!(serde_json::to_value(&outcomes[0].create).unwrap(), result);
     // The independent lifecycle can decline without resetting create authority.
     let invitation_id: ghinvite_core::GithubInvitationId =
         command["invitation_id"].as_str().unwrap().parse().unwrap();
-    let sent = storage
-        .get_github_invitation(invitation_id)
-        .await
-        .unwrap()
-        .unwrap();
-    storage
-        .settle_github_invitation(&ghinvite_core::storage::settlement::Settlement {
-            expected: sent,
-            state: ghinvite_core::InvitationState::Declined,
-            event: ghinvite_core::audit::AuditEvent {
-                id: ghinvite_core::AuditEventId::new(),
-                account_id: 100,
-                occurred_at: chrono::Utc::now(),
-                event_type: ghinvite_core::audit::EventType::InvitationDeclined,
-                actor_kind: ghinvite_core::audit::ActorKind::Github,
-                actor_id: None,
-                target_kind: ghinvite_core::audit::TargetKind::GithubInvitation,
-                target_id: invitation_id.to_string(),
-                metadata: serde_json::Value::Null,
-                request_id: None,
-            },
-        })
-        .await
-        .unwrap();
+    let response = call(
+        "RepositoryDelivery",
+        format!("{request}:10"),
+        "on_webhook",
+        json!({"invitation_id":invitation_id,"action":"declined","at":chrono::Utc::now()}),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
     let replay: Value = call(
-        "GithubCreate",
+        "RepositoryDelivery",
         command["invitation_id"].as_str().unwrap().into(),
         "create",
         command.clone(),
@@ -683,7 +702,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     let first = partial_plan["commands"][0].clone();
     call(
-        "GithubCreate",
+        "RepositoryDelivery",
         first["invitation_id"].as_str().unwrap().into(),
         "create",
         first.clone(),
@@ -750,7 +769,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     for command in partial_plan["commands"].as_array().unwrap() {
         let response = call(
-            "GithubCreate",
+            "RepositoryDelivery",
             command["invitation_id"].as_str().unwrap().into(),
             "create",
             command.clone(),
@@ -791,7 +810,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     let second = partial_plan["commands"][1].clone();
     let mismatch: Value = call(
-        "GithubCreate",
+        "RepositoryDelivery",
         second["invitation_id"].as_str().unwrap().into(),
         "create",
         second.clone(),
@@ -811,7 +830,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     for command in partial_plan["commands"].as_array().unwrap() {
         let result: Value = call(
-            "GithubCreate",
+            "RepositoryDelivery",
             command["invitation_id"].as_str().unwrap().into(),
             "create",
             command.clone(),
@@ -961,7 +980,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(progress, json!([{"repo_id":10,"stage":"planned"}]));
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
-    let rejected: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let rejected: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1004,7 +1023,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .send()
         .await
         .unwrap();
-    let resumed: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let resumed: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1022,8 +1041,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         sent.github_invitation_id,
         resumed["outcome"]["upstream_id"].as_u64()
     );
-    // Retained delayed evidence arrives after webhook settlement. Real SQL audit
-    // failure keeps the public command retrying; the eventual commit is atomic.
+    // Retained delayed evidence arrives after webhook settlement. SQL audit
+    // failure stalls only projection; the retained winner is already observable.
     storage.debug_set_audit_failure(true).await.unwrap();
     let (web_url, invocations, web_server, proxy_server) =
         member_webhook_ingress(storage.clone(), &ingress, client.clone()).await;
@@ -1033,9 +1052,74 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let first = send_signed_member(&client, &web_url, "member-1", &payload).await;
     assert_eq!(first.status(), 500);
     assert_eq!(invocations.lock().unwrap().len(), 1);
+    // A matching projected candidate is not sufficient: its exact invitation
+    // is still pending, so even a member event cannot accept it.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let pending: Value = client
+        .post(format!(
+            "{ingress}/RepositoryDelivery/{}:10/status",
+            command["request_id"].as_str().unwrap()
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(pending["settlement"].is_null());
+    client
+        .delete(format!(
+            "{base}/repos/acme/api/invitations/{}",
+            sent.github_invitation_id.unwrap()
+        ))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"user-84","addressed_id":84,"role_name":"write"}))
+        .send()
+        .await
+        .unwrap();
+    throttle_observation.store(true, std::sync::atomic::Ordering::SeqCst);
     let retry = send_signed_member(&client, &web_url, "member-1", &payload).await;
     assert_eq!(retry.status(), 204);
     assert_eq!(invocations.lock().unwrap().len(), 2);
+    let accepted_invocation = invocations.lock().unwrap()[0].clone();
+    assert!(
+        client
+            .get(format!(
+                "{ingress}/restate/invocation/{accepted_invocation}/attach"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let snapshot: Value = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let snapshot: Value = client
+                .post(format!(
+                    "{ingress}/RepositoryDelivery/{}:10/status",
+                    command["request_id"].as_str().unwrap()
+                ))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if snapshot["settlement"]["state"] == "accepted" {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(snapshot["settlement"]["state"], "accepted", "{snapshot}");
+    assert_eq!(snapshot["create"], resumed);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(
         storage
@@ -1062,13 +1146,36 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let evidence = json!({"expected":sent,"accepted":false,"at":chrono::Utc::now()});
     let (a, b, duplicate) = tokio::join!(
-        call("GithubInvitation", id.into(), "reconcile", evidence.clone()).send(),
-        call("GithubInvitation", id.into(), "reconcile", evidence).send(),
+        call(
+            "RepositoryDelivery",
+            id.into(),
+            "reconcile",
+            evidence.clone()
+        )
+        .send(),
+        call("RepositoryDelivery", id.into(), "reconcile", evidence).send(),
         send_signed_member(&client, &web_url, "member-2", &payload)
     );
     assert!(a.unwrap().status().is_success());
     assert!(b.unwrap().status().is_success());
     assert_eq!(duplicate.status(), 204);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if storage
+                .get_github_invitation(sent.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state
+                == ghinvite_core::InvitationState::Accepted
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("settlement projection converges independently");
     // Unsupported reordered removal is not contradictory settlement evidence.
     let mut removed = payload.clone();
     removed["action"] = json!("removed");
@@ -1101,8 +1208,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         1
     );
     let event = events.iter().find(|event| event.target_id == id).unwrap();
-    assert_eq!(event.actor_kind, ghinvite_core::audit::ActorKind::Github);
-    assert_eq!(event.metadata, json!({"action":"accepted"}));
+    assert_eq!(event.actor_kind, ghinvite_core::audit::ActorKind::System);
+    assert_eq!(event.metadata, json!({"reconciled":true}));
     let completed_invocations = invocations.lock().unwrap().clone();
     for invocation in completed_invocations {
         assert!(
@@ -1175,7 +1282,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let command = plan["commands"][0].clone();
         let id = command["invitation_id"].as_str().unwrap();
-        let unknown: Value = call("GithubCreate", id.into(), "create", command.clone())
+        let unknown: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -1189,7 +1296,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .send()
             .await
             .unwrap();
-        let reconciled: Value = call("GithubCreate", id.into(), "create", command.clone())
+        let reconciled: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
             .send()
             .await
             .unwrap()
@@ -1266,7 +1373,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .status()
         .is_success()
     );
-    let blocked: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let blocked: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1277,7 +1384,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert!(call("Installation", "19".into(), "onboard", json!({"installation_id":19,"actor_user_id":7,"account_id":100,
         "account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
         .send().await.unwrap().status().is_success());
-    let delivered: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let delivered: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1412,8 +1519,14 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         storage
             .list_delivery_for_request(original_request.id)
             .await
-            .unwrap(),
+            .unwrap()
+            .into_iter()
+            .map(|s| s.create)
+            .collect::<Vec<_>>(),
         original_deliveries
+            .into_iter()
+            .map(|s| s.create)
+            .collect::<Vec<_>>()
     );
     let retained_plan: Value = call(
         "InvitationLink",
@@ -1472,7 +1585,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .send()
         .await
         .unwrap();
-    let throttled: Value = call("GithubCreate", id.into(), "create", command.clone())
+    faults
+        .lose_release_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let throttled: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1491,7 +1607,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // Explicit recovery is an exclusive command too. It returns while SQL is
     // stalled and keeps the original pending timer instead of adding an hour.
     credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
-    let redriven: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let redriven: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1499,10 +1615,16 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(redriven["outcome"]["kind"], "blocked");
+    assert_eq!(
+        faults
+            .release_ack_losses
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
     assert_eq!(redriven["revision"], 2);
     for _ in 0..2 {
         let stale = call(
-            "GithubCreate",
+            "RepositoryDelivery",
             id.into(),
             "recheck",
             json!({"command":command,"generation":0}),
@@ -1513,7 +1635,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         assert!(stale.status().is_success());
     }
     let retained: Value = client
-        .post(format!("{ingress}/GithubCreate/{id}/status"))
+        .post(format!(
+            "{ingress}/RepositoryDelivery/{}:10/status",
+            command["request_id"].as_str().unwrap()
+        ))
         .send()
         .await
         .unwrap()
@@ -1521,7 +1646,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(
-        retained, redriven,
+        retained["create"], redriven,
         "stale wakes cannot consume the scheduled generation"
     );
     credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -1530,8 +1655,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let mut recovered = Value::Null;
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let status = client.post(format!("{ingress}/GithubCreate/{id}/status"));
+        let status = client.post(format!(
+            "{ingress}/RepositoryDelivery/{}:10/status",
+            command["request_id"].as_str().unwrap()
+        ));
         recovered = status.send().await.unwrap().json().await.unwrap();
+        recovered = recovered["create"].clone();
         if recovered["outcome"]["kind"] == "created" {
             break;
         }
@@ -1543,7 +1672,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .load(std::sync::atomic::Ordering::SeqCst)
             > 0
     );
-    let replay: Value = call("GithubCreate", id.into(), "create", command.clone())
+    let replay: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
         .unwrap()
@@ -1589,7 +1718,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // Replayed/stale wakes cannot reopen confirmed delivery or perform a PUT.
     for generation in [1, 1, 0] {
         let response = call(
-            "GithubCreate",
+            "RepositoryDelivery",
             id.into(),
             "recheck",
             json!({"command":command,"generation":generation}),
@@ -1600,14 +1729,17 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         assert!(response.status().is_success());
     }
     let status: Value = client
-        .post(format!("{ingress}/GithubCreate/{id}/status"))
+        .post(format!(
+            "{ingress}/RepositoryDelivery/{}:10/status",
+            command["request_id"].as_str().unwrap()
+        ))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(status, recovered);
+    assert_eq!(status["create"], recovered);
     assert_eq!(
         status["revision"], 3,
         "only the original timer advances the redriven delivery"
@@ -1689,7 +1821,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         faults
             .interruptions
             .store(0, std::sync::atomic::Ordering::SeqCst);
-        let request = call("GithubCreate", id.into(), "create", command.clone());
+        let request = call("RepositoryDelivery", id.into(), "create", command.clone());
         let response = tokio::spawn(async move { request.send().await.unwrap() });
         tokio::time::timeout(Duration::from_secs(10), async {
             while faults
@@ -1702,8 +1834,28 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         })
         .await
         .expect("delivery paused at journal boundary");
+        let competing = if stage == "after-receipt" {
+            let ack: Value = client
+                .post(format!(
+                    "{ingress}/RepositoryDelivery/{}:10/on_webhook/send",
+                    command["request_id"].as_str().unwrap()
+                ))
+                .json(&json!({"invitation_id":id,"action":"accepted","at":chrono::Utc::now()}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            Some(ack["invocationId"].as_str().unwrap().to_owned())
+        } else {
+            None
+        };
         let retained: Value = client
-            .post(format!("{ingress}/GithubCreate/{id}/status"))
+            .post(format!(
+                "{ingress}/RepositoryDelivery/{}:10/status",
+                command["request_id"].as_str().unwrap()
+            ))
             .send()
             .await
             .unwrap()
@@ -1721,27 +1873,54 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         assert!(aborted > 0, "interrupt live SDK execution");
         let result: Value = response.await.unwrap().json().await.unwrap();
         assert_eq!(
-            result, retained,
+            result, retained["create"],
             "replay keeps outcome, identity and timestamp at {stage}"
         );
         let recovered = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let status: Value = client
-                    .post(format!("{ingress}/GithubCreate/{id}/status"))
+                    .post(format!(
+                        "{ingress}/RepositoryDelivery/{}:10/status",
+                        command["request_id"].as_str().unwrap()
+                    ))
                     .send()
                     .await
                     .unwrap()
                     .json()
                     .await
                     .unwrap();
-                if status["outcome"]["kind"] == "created" {
-                    break status;
+                if status["create"]["outcome"]["kind"] == "created" {
+                    break status["create"].clone();
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
         .await
         .expect("interrupted continuation completes");
+        if let Some(invocation) = competing {
+            assert!(
+                client
+                    .get(format!("{ingress}/restate/invocation/{invocation}/attach"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+            let snapshot: Value = client
+                .post(format!(
+                    "{ingress}/RepositoryDelivery/{}:10/status",
+                    command["request_id"].as_str().unwrap()
+                ))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(snapshot["create"], recovered);
+            assert_eq!(snapshot["settlement"]["state"], "accepted");
+        }
         assert_create_audit(&*storage, &recovered).await.unwrap();
         let calls: Value = client
             .get(format!("{base}/calls"))
@@ -1802,7 +1981,7 @@ async fn assert_create_audit(
                 .await
                 .unwrap();
             if rows.iter().any(|row| {
-                row.command.invitation_id.to_string()
+                row.create.command.invitation_id.to_string()
                     == receipt["command"]["invitation_id"].as_str().unwrap()
                     && row.revision >= receipt["revision"].as_u64().unwrap()
             }) {
@@ -1822,7 +2001,7 @@ async fn assert_create_audit(
         .into_iter()
         .filter(|event| event.target_id == receipt["command"]["invitation_id"].as_str().unwrap())
         // Only create outcomes; a later settlement publishes its own event.
-        .filter(|event| event.event_type != EventType::InvitationDeclined)
+        .filter(|event| event.id.to_string() != receipt["command"]["invitation_id"].as_str().unwrap())
         .collect();
     let (kind, actor) = match receipt["outcome"]["kind"].as_str().unwrap() {
         "created" => (EventType::InvitationSent, ActorKind::System),

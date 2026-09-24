@@ -76,9 +76,25 @@ impl Reconcile {
             if exhausted.contains(&account_id) {
                 continue;
             }
+            let owner = ctx.object_client::<crate::delivery::RepositoryDeliveryClient>(
+                ghinvite_core::delivery::delivery_key(row.invitation_request_id, row.repo_id),
+            );
+            let Json(Some(snapshot)) = owner.status().call().await? else {
+                continue;
+            };
+            let Json(Some(account)) = ctx
+                .object_client::<crate::availability::AccountInstallationClient>(
+                    account_id.to_string(),
+                )
+                .current_installation()
+                .call()
+                .await?
+            else {
+                continue;
+            };
             let evidence = loop {
                 let Json(observed) = ctx.run(|| async {
-                    match crate::settlement::observe(&self.state, &row, input.at).await {
+                    match crate::settlement::observe(&self.state, &snapshot, &account, input.at).await {
                         Ok(evidence) => Ok(Json(Observed::Evidence(evidence))),
                         Err(e) => match e.rate_limit() {
                             Some(limit) => Ok(Json(Observed::Throttled {
@@ -108,12 +124,7 @@ impl Reconcile {
                 }
             };
             if let Some(evidence) = evidence {
-                ctx.object_client::<crate::github_invitation::GithubInvitationClient>(
-                    row.id.to_string(),
-                )
-                .reconcile(Json(evidence))
-                .call()
-                .await?;
+                owner.reconcile(Json(evidence)).call().await?;
             }
         }
         Ok(())

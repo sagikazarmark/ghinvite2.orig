@@ -5,14 +5,14 @@ use crate::{decode, to_db_err, u64_to_i64};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::{AuditEvent, EventType};
-use ghinvite_core::delivery::{CreateCommand, CreateReceipt};
+use ghinvite_core::delivery::{CreateCommand, DeliverySnapshot};
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use ghinvite_core::storage::{
     AuditPage, AuditPosition, AuditStorage, ConsoleStorage, ContinuationStorage, DeliveryStorage,
     Error, InstallationStorage, RecordStorage, Result, WebhookStorage, attempt_continuations,
     audit_read, audit_write, classify_insert, delivery_attempts, delivery_projection,
     github_invitations, installations, invitation_links, invitation_requests, pending_queue,
-    request_history, settlement, users,
+    request_history, users,
 };
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
@@ -324,7 +324,7 @@ impl ConsoleStorage for SqlxStorage {
         pending_queue::PendingPage::from_json(self.all(query).await?)
     }
 
-    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
+    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<DeliverySnapshot>> {
         let query = sqlx::query(delivery_projection::FOR_REQUEST).bind(id.to_string());
         let rows: Vec<delivery_projection::ReceiptRow> = self.all(query).await?;
         rows.into_iter().map(|row| row.decode()).collect()
@@ -552,7 +552,7 @@ impl DeliveryStorage for SqlxStorage {
         Ok(self.optional::<IgnoredAny>(query).await?.is_some())
     }
 
-    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
+    async fn project_delivery(&self, receipt: &DeliverySnapshot) -> Result<()> {
         let encoded = delivery_projection::encode(receipt)?;
         self.transaction(
             &delivery_projection::statements(),
@@ -576,12 +576,6 @@ impl DeliveryStorage for SqlxStorage {
             .await
             .map_err(|e| classify_insert(e.to_string()))?;
         Ok(())
-    }
-
-    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
-        let input = settlement::encode(transition)?;
-        self.transaction(settlement::STATEMENTS, &input, Error::Database)
-            .await
     }
 
     async fn list_pending_github_invitations_for_account(

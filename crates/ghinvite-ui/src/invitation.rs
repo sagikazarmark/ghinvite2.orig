@@ -178,7 +178,7 @@ pub struct DeliveryPresentation {
 
 pub fn delivery_presentation(
     repo: &ghinvite_core::InvitationLinkRepo,
-    receipts: &[ghinvite_core::delivery::CreateReceipt],
+    receipts: &[ghinvite_core::delivery::DeliverySnapshot],
     progress: &[ghinvite_core::delivery::RepositoryProgress],
     invitations: &[ghinvite_core::GithubInvitation],
     read_unavailable: bool,
@@ -188,16 +188,18 @@ pub fn delivery_presentation(
         InvitationState,
         delivery::{CreateOutcome, DispatchStage},
     };
-    let outcome = receipts
+    let snapshot = receipts
         .iter()
-        .find(|r| r.command.repo_id == repo.repo_id)
-        .map(|r| &r.outcome);
+        .find(|r| r.create.command.repo_id == repo.repo_id);
+    let outcome = snapshot.map(|r| &r.create.outcome);
     let stage = progress
         .iter()
         .find(|r| r.repo_id == repo.repo_id)
         .map(|r| &r.stage);
     let invitation = invitations.iter().find(|r| r.repo_id == repo.repo_id);
-    let lifecycle = invitation.map(|r| r.state);
+    let lifecycle = snapshot
+        .map(|s| s.invitation().state)
+        .or_else(|| invitation.map(|r| r.state));
     // Settlement is later evidence; a retained create receipt is historical.
     let status = match (lifecycle, outcome) {
         (Some(InvitationState::Declined), _) => S::Declined,

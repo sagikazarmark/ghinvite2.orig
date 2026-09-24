@@ -211,13 +211,18 @@ impl RestateClient {
             } else {
                 format!("{}/{}/{}/{}", self.ingress_base, service, key, method)
             };
-            let resp = self
+            let request = self
                 .client
                 .post(&url)
                 // A single reqwest deadline spans headers and body consumption
                 // on both native and Wasm; a timeout never proves no effect.
-                .timeout(std::time::Duration::from_secs(15))
-                .json(input)
+                .timeout(std::time::Duration::from_secs(15));
+            let request = if serde_json::to_value(input).is_ok_and(|value| value.is_null()) {
+                request
+            } else {
+                request.json(input)
+            };
+            let resp = request
                 .send()
                 .await
                 .map_err(|_| IngressFailure::unreachable("ingress unreachable"))?;

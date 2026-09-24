@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::{AuditEvent, EventType};
-use ghinvite_core::delivery::{CreateCommand, CreateReceipt};
+use ghinvite_core::delivery::{CreateCommand, DeliverySnapshot};
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
 use ghinvite_core::storage::{
@@ -12,7 +12,7 @@ use ghinvite_core::storage::{
     Error, InstallationStorage, RecordStorage, Result, WebhookStorage, attempt_continuations,
     audit_read, audit_write, classify_insert, decode_row, delivery_attempts, delivery_projection,
     github_invitations, installations, invitation_links, invitation_requests, pending_queue,
-    projection, request_history, settlement, users,
+    projection, request_history, users,
 };
 use ghinvite_core::{
     Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
@@ -323,7 +323,7 @@ impl ConsoleStorage for D1Storage {
         .await
     }
 
-    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<CreateReceipt>> {
+    async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<DeliverySnapshot>> {
         wasm_send(async {
             let values = [text(&id.to_string())];
             let rows: Vec<delivery_projection::ReceiptRow> =
@@ -597,7 +597,7 @@ impl DeliveryStorage for D1Storage {
         .await
     }
 
-    async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
+    async fn project_delivery(&self, receipt: &DeliverySnapshot) -> Result<()> {
         let encoded = delivery_projection::encode(receipt)?;
         let statements = delivery_projection::statements();
         wasm_send(self.batch(&statements, &encoded, delivery_projection::classify)).await
@@ -622,11 +622,6 @@ impl DeliveryStorage for D1Storage {
             Ok(())
         })
         .await
-    }
-
-    async fn settle_github_invitation(&self, transition: &settlement::Settlement) -> Result<()> {
-        let input = settlement::encode(transition)?;
-        wasm_send(self.batch(settlement::STATEMENTS, &input, Error::Database)).await
     }
 
     async fn list_pending_github_invitations_for_account(

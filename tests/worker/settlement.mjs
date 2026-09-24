@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 // Public command and Storage boundaries; SQL is used only for fault injection.
 export async function settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually, requestId, invitationId, pause }) {
   const at = new Date().toISOString();
-  const lifecycle = (key, handler, body) => http(`${ingress}/GithubInvitation/${key}/${handler}`, body);
+  const lifecycle = async (key, handler, body) => {
+    const row = await storage('invitation', key);
+    return http(`${ingress}/RepositoryDelivery/${row.invitation_request_id}:${row.repo_id}/${handler}`, body);
+  };
   const sent = await eventually(() => storage('invitation', invitationId), row => row?.state === 'sent');
   const requester = (await storage('request', requestId)).requester_id;
   const candidates = await storage('member-candidates', [100, sent.repo_id, requester]);
@@ -23,7 +26,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await http(`${ingress}/restate/invocation/${invocation.invocationId}/attach`, undefined, 'GET');
   const evidence = { expected: sent, accepted: false, at };
   await Promise.all([lifecycle(sent.id, 'reconcile', evidence), lifecycle(sent.id, 'reconcile', evidence)]);
-  assert.equal((await storage('invitation', sent.id)).state, 'accepted');
+  await eventually(() => storage('invitation', sent.id), row => row.state === 'accepted');
   let events = (await storage('audit', 100)).events.filter(event => event.target_id === sent.id);
   assert.equal(events.length, 2);
   assert.equal(events.filter(event => event.event_type === 'invitation.sent').length, 1);
@@ -34,28 +37,25 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   // D1 really commits, then the JS binding loses the batch acknowledgement.
   const row = { ...sent, id: id(), invitation_request_id: requestId, github_invitation_id: 987654 };
   await storage('insert_invitation', row);
-  const transition = { expected: row, state: 'cancelled', event: { id: id(), account_id: 100, occurred_at: at,
+  const original = await http(`${ingress}/RepositoryDelivery/${sent.invitation_request_id}:${sent.repo_id}/status`);
+  const transition = { create: { ...original.create, command: { ...original.create.command, invitation_id: row.id }, outcome: { kind: 'created', upstream_id: 987654 } }, revision: original.revision + 1,
+    settlement: { state: 'cancelled', event: { id: id(), account_id: 100, occurred_at: at,
     event_type: 'invitation.cancelled', actor_kind: 'system', actor_id: null, target_kind: 'github_invitation', target_id: row.id,
-    metadata: { reconciled: true }, request_id: null } };
-  await storage('settle', transition, 409, { 'x-test-lose-batch-ack': '1' });
+    metadata: { reconciled: true }, request_id: null } } };
+  await storage('delivery', transition, 409, { 'x-test-lose-batch-ack': '1' });
   assert.equal((await storage('invitation', row.id)).state, 'cancelled');
-  await storage('settle', transition);
+  await storage('delivery', transition);
   events = (await storage('audit', 100)).events.filter(event => event.target_id === row.id);
-  assert.deepEqual(events, [transition.event]);
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.find(event => event.event_type === 'invitation.cancelled'), transition.settlement.event);
   await assert.rejects(db.prepare("UPDATE github_invitations SET state='accepted', github_invitation_id=NULL WHERE id=?").bind(row.id).run(), /settled invitation writer conflict/);
   assert.equal((await storage('invitation', row.id)).state, 'cancelled');
-  // Settlement reads only the SQL row, so fixture-seeded Sent rows need no create receipt.
+  // Projected rows do not manufacture owner authority.
   const cancelled = { ...row, id: id(), github_invitation_id: 987655 };
   await storage('insert_invitation', cancelled);
   assert.equal((await storage('member-candidates', [100, sent.repo_id, requester])).length, 2, 'ambiguous lookup returns at most two rows');
   assert.equal(await storage('member-binding', ['b'.repeat(64), cancelled.id]), sent.id, 'another request cannot replace the binding');
   console.log('PASS #84 actual D1 immutable-identity lookup, bounded historical ambiguity and retained webhook bindings');
-  await lifecycle(cancelled.id, 'cancel', { invitation_id: cancelled.id, installation_id: 1, by_user: 7, at });
-  assert.equal((await storage('invitation', cancelled.id)).state, 'cancelled');
-  const expiring = { ...sent, id: id() };
-  await storage('insert_invitation', expiring);
-  await lifecycle(expiring.id, 'tick_expire', { invitation_id: expiring.id, installation_id: 1, at });
-  assert.equal((await storage('invitation', expiring.id)).state, 'expired');
 
   // A real blocked receiver, ordinary concurrent sweeps, then safe recovery.
   pause(true);
@@ -66,20 +66,19 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'access_lost_once' });
   const command = plan.commands[0];
-  const create = () => http(`${ingress}/GithubCreate/${command.invitation_id}/create`, command);
+  const create = () => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/create`, command);
   assert.equal((await create()).outcome.kind, 'blocked');
   await Promise.all([http(`${ingress}/Reconcile/daily_run`, { at }), http(`${ingress}/Reconcile/daily_run`, { at })]);
   assert.equal((await storage('invitation', command.invitation_id)).state, 'sending');
   const recovered = await create();
   assert.equal(recovered.outcome.kind, 'created');
-  const repaired = await storage('invitation', command.invitation_id);
+  const repaired = await eventually(() => storage('invitation', command.invitation_id), row => row?.state === 'sent');
   assert.equal(repaired.state, 'sent');
   assert.equal(repaired.github_invitation_id, recovered.outcome.upstream_id);
-  const renamed = { ...sent, id: id(), github_invitation_id: 987656 };
-  await storage('insert_invitation', renamed);
+  await http(`${githubUrl}/repos/acme/api/invitations/${recovered.outcome.upstream_id}`, undefined, 'DELETE');
   await http(`${githubUrl}/identity`, { login: 'renamed', addressed_id: 91, role_name: 'write' });
   await http(`${ingress}/Reconcile/daily_run`, { at });
-  assert.equal((await storage('invitation', renamed.id)).state, 'accepted', 'settlement resolves numeric requester identity after rename');
+  await eventually(() => storage('invitation', command.invitation_id), row => row.state === 'accepted');
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   // #65: real D1 candidate discovery across installation provenance, with the
   // replacement established through the production account installation owner.
@@ -97,7 +96,8 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await account('onboard', { installation_id: 19, account_id: 100, account_login: 'acme', account_type: 'Organization',
     actor_user_id: 7, selected_repos: 'all', installed_at: at });
   const historicalCommand = historicalPlan.commands[0];
-  const delivered = await eventually(() => http(`${ingress}/GithubCreate/${historicalCommand.invitation_id}/create`, historicalCommand), value => value.outcome.kind === 'created');
+  const deliveryUrl = `${ingress}/RepositoryDelivery/${historicalCommand.request_id}:${historicalCommand.repo_id}`;
+  const delivered = await eventually(() => http(`${deliveryUrl}/create`, historicalCommand), value => value.outcome.kind === 'created');
   assert.equal(delivered.command.installation_id, 1);
   await http(`${githubUrl}/repos/acme/api/invitations/${delivered.outcome.upstream_id}`, undefined, 'DELETE');
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91, role_name: 'write' });
@@ -106,18 +106,37 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.equal((await storage('invitation', historicalCommand.invitation_id)).state, 'sent', 'another account cannot settle history');
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
   await http(`${ingress}/Reconcile/daily_run`, { at });
-  const settled = await storage('invitation', historicalCommand.invitation_id);
+  const settled = await eventually(() => storage('invitation', historicalCommand.invitation_id), row => row?.state === 'accepted');
   assert.equal(settled.state, 'accepted');
   assert.equal(settled.github_invitation_id, delivered.outcome.upstream_id);
   assert.deepEqual(await storage('link', historicalInput.link_id), originalLink);
   assert.deepEqual(await storage('request', query.request_id), originalRequest);
   assert.deepEqual(await historical('prepare_dispatch', query), historicalPlan);
-  assert.deepEqual(await http(`${ingress}/GithubCreate/${historicalCommand.invitation_id}/status`), delivered);
+  assert.deepEqual((await http(`${deliveryUrl}/status`)).create, delivered);
   const accepted = (await storage('audit', 100)).events.filter(event => event.target_id === settled.id && event.event_type === 'invitation.accepted');
   assert.equal(accepted.length, 1);
   assert.deepEqual(accepted[0].metadata, { reconciled: true });
   await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  // Fresh approved owners, rather than fixture rows, exercise supported withdrawal.
+  for (const handler of ['cancel', 'tick_expire']) {
+    const input = { ...creation(), installation_id: 19, approval_required: false };
+    await http(`${ingress}/InvitationLink/${input.link_id}/create`, input);
+    const admitted = await http(`${ingress}/InvitationLink/${input.link_id}/admit`, { link_id: input.link_id, operation_id: id(), requester_id: 91 });
+    const plan = await http(`${ingress}/InvitationLink/${input.link_id}/prepare_dispatch`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+    const command = plan.commands[0];
+    const url = `${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}`;
+    const creating = http(`${url}/create`, command);
+    // Queue competing terminal work while the create is completing.
+    const created = await creating;
+    await http(`${url}/${handler}`, { invitation_id: command.invitation_id, installation_id: 19, by_user: 7, at });
+    const winner = await http(`${url}/status`);
+    assert.equal(winner.settlement.state, handler === 'cancel' ? 'cancelled' : 'expired');
+    assert.deepEqual(winner.create, created);
+    await http(`${url}/on_webhook`, { invitation_id: command.invitation_id, action: 'declined', at });
+    assert.deepEqual(await http(`${url}/status`), winner);
+    assert.deepEqual(await http(`${url}/create`, command), created);
+  }
   console.log('PASS #65 real Restate + D1 historical delivery through replacement, account mismatch and missed-webhook recovery');
   pause(false);
-  console.log('PASS #63 real Restate + D1 settlement races, atomic audit rollback, lost batch acknowledgement, fixture-seeded Sent rows and blocked-create recovery');
+  console.log('PASS real Restate + D1 retained settlement, atomic projection/audit, lost batch acknowledgement and blocked-create recovery');
 }

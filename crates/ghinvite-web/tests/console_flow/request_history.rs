@@ -281,7 +281,7 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
         }
         let path = format!("/console/accounts/octocat/requests/{}", request.request_id);
         let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
-        assert!(html.contains("No projected delivery outcome yet"));
+        assert!(html.contains("Current delivery status unavailable"));
         let receipt = CreateReceipt {
             command: CreateCommand {
                 invitation_id: ghinvite_core::GithubInvitationId::new(),
@@ -302,11 +302,14 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
             outcome,
             revision: 1,
         };
-        storage.project_delivery(&receipt).await.unwrap();
+        storage
+            .project_delivery(&receipt.clone().into())
+            .await
+            .unwrap();
         let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
         assert!(html.contains(label), "missing {label}");
         if matches!(receipt.outcome, CreateOutcome::Created { .. }) {
-            assert!(!html.contains("Current delivery status unavailable"));
+            assert!(html.contains("Current delivery status unavailable"));
         }
         assert!(!html.contains("private infrastructure diagnostic"));
     }

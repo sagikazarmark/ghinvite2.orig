@@ -180,43 +180,36 @@ CREATE TABLE delivery_outcomes (
 CREATE INDEX delivery_outcomes_request ON delivery_outcomes(request_id);
 
 CREATE TRIGGER delivery_outcome_identity BEFORE UPDATE ON delivery_outcomes
-WHEN json_extract(OLD.receipt, '$.command') != json_extract(NEW.receipt, '$.command')
+WHEN json_extract(OLD.receipt, '$.create.command') != json_extract(NEW.receipt, '$.create.command')
   OR (json_extract(OLD.receipt, '$.revision') = json_extract(NEW.receipt, '$.revision') AND OLD.receipt != NEW.receipt)
 BEGIN SELECT RAISE(ABORT, 'delivery outcome conflict'); END;
 
 -- Apply only the initial create lifecycle. Concurrent webhook/cancel updates
 -- cannot be overwritten by a delayed create projection.
 CREATE TRIGGER delivery_created AFTER UPDATE ON delivery_outcomes
-WHEN json_extract(NEW.receipt, '$.outcome.kind') IN ('created', 'already_collaborator', 'failed')
+WHEN json_extract(NEW.receipt, '$.create.outcome.kind') IN ('created', 'already_collaborator', 'failed')
 BEGIN
   UPDATE github_invitations SET
-    state = CASE json_extract(NEW.receipt, '$.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
-    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id'),
-    updated_at = json_extract(NEW.receipt, '$.confirmed_at')
+    state = CASE json_extract(NEW.receipt, '$.create.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
+    github_invitation_id = json_extract(NEW.receipt, '$.create.outcome.upstream_id'),
+    updated_at = json_extract(NEW.receipt, '$.create.confirmed_at')
   WHERE id = NEW.invitation_id AND state = 'sending';
 END;
 
 CREATE TRIGGER delivery_created_initial AFTER INSERT ON delivery_outcomes
-WHEN json_extract(NEW.receipt, '$.outcome.kind') IN ('created', 'already_collaborator', 'failed')
+WHEN json_extract(NEW.receipt, '$.create.outcome.kind') IN ('created', 'already_collaborator', 'failed')
 BEGIN
   UPDATE github_invitations SET
-    state = CASE json_extract(NEW.receipt, '$.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
-    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id'),
-    updated_at = json_extract(NEW.receipt, '$.confirmed_at')
+    state = CASE json_extract(NEW.receipt, '$.create.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
+    github_invitation_id = json_extract(NEW.receipt, '$.create.outcome.upstream_id'),
+    updated_at = json_extract(NEW.receipt, '$.create.confirmed_at')
   WHERE id = NEW.invitation_id AND state = 'sending';
 END;
 
--- One immutable winning settlement per GitHub invitation. State and audit are
--- committed with this receipt in a SQLx transaction / D1 batch.
-CREATE TABLE github_invitation_settlements (
-  invitation_id  TEXT PRIMARY KEY REFERENCES github_invitations(id),
-  content        TEXT NOT NULL
-);
-
 -- Defense in depth against an old invocation's delayed SQL write.
 CREATE TRIGGER github_invitation_settlement_fence BEFORE UPDATE ON github_invitations
-WHEN EXISTS (SELECT 1 FROM github_invitation_settlements s WHERE s.invitation_id = OLD.id)
- AND (NEW.state IS NOT (SELECT json_extract(content, '$.state') FROM github_invitation_settlements WHERE invitation_id = OLD.id)
+WHEN OLD.state NOT IN ('sending', 'sent') AND EXISTS (SELECT 1 FROM delivery_outcomes s WHERE s.invitation_id = OLD.id AND json_type(s.receipt, '$.settlement') = 'object')
+ AND (NEW.state IS NOT (SELECT json_extract(receipt, '$.settlement.state') FROM delivery_outcomes WHERE invitation_id = OLD.id)
    OR NEW.github_invitation_id IS NOT OLD.github_invitation_id
    OR NEW.invitation_request_id IS NOT OLD.invitation_request_id
    OR NEW.repo_id IS NOT OLD.repo_id)

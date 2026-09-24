@@ -79,7 +79,7 @@ pub fn RequestHistoryPage(
 pub struct RepositoryDelivery {
     pub repo_id: u64,
     pub presentation: DeliveryPresentation,
-    pub receipts: Vec<ghinvite_core::delivery::CreateReceipt>,
+    pub receipts: Vec<ghinvite_core::delivery::DeliverySnapshot>,
     pub invitations: Vec<ghinvite_core::GithubInvitation>,
 }
 
@@ -156,9 +156,9 @@ pub fn RequestDetailPage(
                                     p { "Current delivery status unavailable. Any known outcome shown is retained history; the invitation may have changed since. Missing status does not mean delivery failed." }
                                 }
                                 for receipt in row.receipts {
-                                    p { class: "text-sm break-words", "Delivery ID: {receipt.command.invitation_id}" }
-                                    p { class: "text-sm", "Create outcome recorded: {time(receipt.confirmed_at)}" }
-                                    if let ghinvite_core::delivery::CreateOutcome::Created { upstream_id } = receipt.outcome {
+                                    p { class: "text-sm break-words", "Delivery ID: {receipt.create.command.invitation_id}" }
+                                    p { class: "text-sm", "Create outcome recorded: {time(receipt.create.confirmed_at)}" }
+                                    if let ghinvite_core::delivery::CreateOutcome::Created { upstream_id } = receipt.create.outcome {
                                         p { class: "text-sm", "GitHub invitation ID: {upstream_id}" }
                                     }
                                 }

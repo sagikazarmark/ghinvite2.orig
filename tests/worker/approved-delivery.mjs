@@ -15,9 +15,9 @@ export async function approvedDelivery({ ingress, githubUrl, http, db, creation,
   assert.equal(admitted.result.state, 'approved');
   const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   const command = plan.commands[0];
-  const receiver = (handler, body) => http(`${ingress}/GithubCreate/${command.invitation_id}/${handler}`, body);
-  const unknown = await eventually(() => receiver('status'), row => row?.outcome.kind === 'outcome_unknown');
-  assert.deepEqual(unknown.command, command);
+  const receiver = (handler, body) => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/${handler}`, body);
+  const unknown = await eventually(() => receiver('status'), row => row?.create.outcome.kind === 'outcome_unknown');
+  assert.deepEqual(unknown.create.command, command);
   for (const table of ['installations', 'users', 'invitation_links', 'invitation_requests']) {
     assert.equal((await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).count, 0, table);
   }
@@ -26,11 +26,17 @@ export async function approvedDelivery({ ingress, githubUrl, http, db, creation,
   assert.equal(confirmed.outcome.kind, 'created');
   assert.deepEqual(confirmed.command, command);
   assert.equal(await puts(), 1, 'unknown reconciliation only reads');
+  await receiver('on_webhook', { invitation_id: command.invitation_id, action: 'accepted', at: '2026-09-24T12:00:00Z' });
+  const settled = await receiver('status');
+  assert.deepEqual(settled.create, confirmed);
+  assert.equal(settled.settlement.state, 'accepted');
+  await receiver('on_webhook', { invitation_id: command.invitation_id, action: 'declined', at: '2026-09-24T13:00:00Z' });
+  assert.deepEqual(await receiver('status'), settled, 'first valid terminal winner is immutable');
   await db.prepare('DROP TRIGGER hold_installation').run();
   for (const user of [7, 91]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
-  await eventually(() => db.prepare('SELECT state FROM github_invitations WHERE id=?').bind(command.invitation_id).first(), row => row?.state === 'sent');
+  await eventually(() => db.prepare('SELECT state FROM github_invitations WHERE id=?').bind(command.invitation_id).first(), row => row?.state === 'accepted');
   const events = await db.prepare('SELECT * FROM audit_events WHERE target_id=?').bind(command.invitation_id).all();
-  assert.equal(events.results.length, 1);
+  assert.equal(events.results.length, 2);
   assert.deepEqual(await receiver('create', command), confirmed);
   assert.equal(await puts(), 1);
   console.log('PASS Worker/D1 approved delivery with all projected parents withheld, applied PUT/result loss, read-only recovery and independent convergence');

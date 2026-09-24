@@ -3,16 +3,17 @@ use ghinvite_core::storage::{
 };
 use ghinvite_core::{
     audit::*,
-    storage::{AuditPosition, projection::ProjectionStorage, settlement::Settlement},
+    delivery::{DeliverySnapshot, Settlement},
+    storage::{AuditPosition, projection::ProjectionStorage},
     *,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 
-async fn fixture() -> (SqlxStorage, GithubInvitation) {
+async fn fixture() -> (SqlxStorage, DeliverySnapshot) {
     fixture_with(SqlxStorage::in_memory().await.unwrap()).await
 }
 
-async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, GithubInvitation) {
+async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, DeliverySnapshot) {
     let at = "2026-09-17T12:00:00Z".parse().unwrap();
     s.insert_installation(&Account {
         installation_id: 9,
@@ -82,13 +83,16 @@ async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, GithubInvitation) {
         created_at: at,
         updated_at: at,
     };
-    s.insert_github_invitation(&row).await.unwrap();
-    (s, row)
+    let snapshot = storage::test_suite::delivery_fixture(&link, &request, &row);
+    s.project_delivery(&snapshot).await.unwrap();
+    (s, snapshot)
 }
 
-fn transition(row: &GithubInvitation, state: InvitationState) -> Settlement {
-    Settlement {
-        expected: row.clone(),
+fn transition(snapshot: &DeliverySnapshot, state: InvitationState) -> DeliverySnapshot {
+    let row = snapshot.invitation();
+    let mut snapshot = snapshot.clone();
+    snapshot.revision += 1;
+    snapshot.settlement = Some(Settlement {
         state,
         event: AuditEvent {
             id: AuditEventId::new(),
@@ -106,38 +110,47 @@ fn transition(row: &GithubInvitation, state: InvitationState) -> Settlement {
             metadata: serde_json::json!({"reconciled": true}),
             request_id: None,
         },
-    }
+    });
+    snapshot
 }
 
 #[tokio::test]
 async fn accepted_settlement_survives_stale_sweep_and_acknowledgement_replay() {
     let (s, row) = fixture().await;
     let accepted = transition(&row, InvitationState::Accepted);
-    s.settle_github_invitation(&accepted).await.unwrap();
-    s.settle_github_invitation(&transition(&row, InvitationState::Cancelled))
+    s.project_delivery(&accepted).await.unwrap();
+    assert!(
+        s.project_delivery(&transition(&row, InvitationState::Cancelled))
+            .await
+            .is_err()
+    );
+    s.project_delivery(&row).await.unwrap();
+    s.project_delivery(&accepted).await.unwrap();
+    let result = s
+        .get_github_invitation(row.invitation().id)
         .await
+        .unwrap()
         .unwrap();
-    s.settle_github_invitation(&accepted).await.unwrap();
-    let result = s.get_github_invitation(row.id).await.unwrap().unwrap();
     assert_eq!(result.state, InvitationState::Accepted);
     assert_eq!(result.github_invitation_id, Some(9988));
     let audit = s
         .list_audit_events(100, None, AuditPosition::Latest)
         .await
         .unwrap();
-    assert_eq!(audit.events, vec![accepted.event]);
+    assert_eq!(audit.events.len(), 2);
+    assert!(audit.events.contains(&accepted.settlement.unwrap().event));
 }
 
 #[tokio::test]
 async fn conflicting_audit_cannot_silently_omit_settlement_event() {
     let (s, row) = fixture().await;
     let accepted = transition(&row, InvitationState::Accepted);
-    let mut conflict = accepted.event.clone();
+    let mut conflict = accepted.settlement.as_ref().unwrap().event.clone();
     conflict.target_id = "different-invitation".into();
     s.audit(&conflict).await.unwrap();
-    assert!(s.settle_github_invitation(&accepted).await.is_err());
+    assert!(s.project_delivery(&accepted).await.is_err());
     assert_eq!(
-        s.get_github_invitation(row.id)
+        s.get_github_invitation(row.invitation().id)
             .await
             .unwrap()
             .unwrap()
@@ -150,7 +163,7 @@ async fn conflicting_audit_cannot_silently_omit_settlement_event() {
 async fn late_writer_cannot_overwrite_committed_settlement() {
     let path = std::env::temp_dir().join(format!("settlement-fence-{}.sqlite", RequestId::new()));
     let (s, row) = fixture_with(SqlxStorage::at_path(&path).await.unwrap()).await;
-    s.settle_github_invitation(&transition(&row, InvitationState::Accepted))
+    s.project_delivery(&transition(&row, InvitationState::Accepted))
         .await
         .unwrap();
     // A delayed write from an older invocation, outside the settlement API.
@@ -160,14 +173,14 @@ async fn late_writer_cannot_overwrite_committed_settlement() {
             .unwrap();
     assert!(
         sqlx::query("UPDATE github_invitations SET state = 'cancelled' WHERE id = ?1")
-            .bind(row.id.to_string())
+            .bind(row.invitation().id.to_string())
             .execute(&db)
             .await
             .is_err()
     );
     db.close().await;
     assert_eq!(
-        s.get_github_invitation(row.id)
+        s.get_github_invitation(row.invitation().id)
             .await
             .unwrap()
             .unwrap()
@@ -184,16 +197,22 @@ async fn audit_failure_rolls_back_state_and_retry_publishes_once() {
     let (s, row) = fixture().await;
     let accepted = transition(&row, InvitationState::Accepted);
     s.debug_set_audit_failure(true).await.unwrap();
-    assert!(s.settle_github_invitation(&accepted).await.is_err());
-    assert_eq!(s.get_github_invitation(row.id).await.unwrap().unwrap(), row);
-    s.debug_set_audit_failure(false).await.unwrap();
-    s.settle_github_invitation(&accepted).await.unwrap();
-    s.settle_github_invitation(&accepted).await.unwrap();
+    assert!(s.project_delivery(&accepted).await.is_err());
     assert_eq!(
+        s.get_github_invitation(row.invitation().id)
+            .await
+            .unwrap()
+            .unwrap(),
+        row.invitation()
+    );
+    s.debug_set_audit_failure(false).await.unwrap();
+    s.project_delivery(&accepted).await.unwrap();
+    s.project_delivery(&accepted).await.unwrap();
+    assert!(
         s.list_audit_events(100, None, AuditPosition::Latest)
             .await
             .unwrap()
-            .events,
-        vec![accepted.event]
+            .events
+            .contains(&accepted.settlement.unwrap().event)
     );
 }

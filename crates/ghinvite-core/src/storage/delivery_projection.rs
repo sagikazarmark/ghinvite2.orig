@@ -2,12 +2,30 @@
 //! independent of receipt freshness and of the current invitation lifecycle.
 use crate::{
     audit::{ActorKind, EventType},
-    delivery::{CreateOutcome, CreateReceipt},
+    delivery::{CreateOutcome, DeliverySnapshot},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
-pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
+pub fn encode(snapshot: &DeliverySnapshot) -> super::Result<String> {
+    let receipt = &snapshot.create;
+    if snapshot.revision < receipt.revision {
+        return Err(super::Error::ProjectionInvariant(
+            "invalid delivery revision".into(),
+        ));
+    }
+    if let Some(settlement) = &snapshot.settlement
+        && (!matches!(receipt.outcome, CreateOutcome::Created { .. })
+            || snapshot.revision <= receipt.revision
+            || settlement.event.event_type != super::settlement::event_type(settlement.state)?
+            || settlement.event.account_id != receipt.command.account_id
+            || settlement.event.target_id != receipt.command.invitation_id.to_string()
+            || settlement.event.target_kind != crate::audit::TargetKind::GithubInvitation)
+    {
+        return Err(super::Error::ProjectionInvariant(
+            "invalid retained settlement".into(),
+        ));
+    }
     if receipt.revision == 0 || receipt.outcome.confirmed() != receipt.confirmed_at.is_some() {
         return Err(super::Error::ProjectionInvariant(
             "invalid delivery receipt".into(),
@@ -49,18 +67,22 @@ pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
     // comparison is textual.
     let receipt =
         serde_json::to_string(receipt).map_err(|e| super::Error::Corrupt(e.to_string()))?;
-    Ok(format!("{{\"receipt\":{receipt},\"event\":{event}}}"))
+    let snapshot =
+        serde_json::to_string(snapshot).map_err(|e| super::Error::Corrupt(e.to_string()))?;
+    Ok(format!(
+        "{{\"receipt\":{receipt},\"snapshot\":{snapshot},\"event\":{event}}}"
+    ))
 }
 
 pub const RECEIPT: &str = r#"INSERT INTO delivery_outcomes(invitation_id, request_id, receipt)
-    VALUES (json_extract(?1,'$.receipt.command.invitation_id'), json_extract(?1,'$.receipt.command.request_id'), json_extract(?1,'$.receipt'))
+    VALUES (json_extract(?1,'$.receipt.command.invitation_id'), json_extract(?1,'$.receipt.command.request_id'), json_extract(?1,'$.snapshot'))
     ON CONFLICT(invitation_id) DO UPDATE SET receipt = excluded.receipt
     WHERE json_extract(excluded.receipt,'$.revision') >= json_extract(delivery_outcomes.receipt,'$.revision')"#;
 
 pub const IDENTITY: &str = r#"INSERT INTO projection_assertions(invariant)
     SELECT NOT EXISTS(SELECT 1 FROM delivery_outcomes WHERE invitation_id = json_extract(?1,'$.receipt.command.invitation_id')
-    AND (json_extract(receipt,'$.command') != json_extract(?1,'$.receipt.command')
-    OR (json_extract(receipt,'$.revision') = json_extract(?1,'$.receipt.revision') AND receipt != json_extract(?1,'$.receipt'))))"#;
+    AND (json_extract(receipt,'$.create.command') != json_extract(?1,'$.receipt.command')
+    OR (json_extract(receipt,'$.revision') = json_extract(?1,'$.snapshot.revision') AND receipt != json_extract(?1,'$.snapshot'))))"#;
 
 const PARENTS: &str = r#"INSERT INTO projection_assertions(dependency)
     SELECT EXISTS(SELECT 1 FROM invitation_requests WHERE id = json_extract(?1,'$.receipt.command.request_id'))"#;
@@ -101,9 +123,32 @@ pub fn statements() -> Vec<String> {
         INITIAL.into(),
         RECEIPT.into(),
         audit_statement(),
+        settlement_audit_statement(),
+        SETTLED.into(),
         "DELETE FROM projection_assertions WHERE ?1 IS NOT NULL".into(),
     ]
 }
+
+fn settlement_audit_statement() -> String {
+    format!(
+        r#"INSERT INTO audit_events(id, account_id, occurred_at, event_type, actor_kind, actor_id, target_kind, target_id, metadata, request_id)
+    SELECT json_extract(?1,'$.snapshot.settlement.event.id'), json_extract(?1,'$.snapshot.settlement.event.account_id'),
+      json_extract(?1,'$.snapshot.settlement.event.occurred_at'), json_extract(?1,'$.snapshot.settlement.event.event_type'),
+      json_extract(?1,'$.snapshot.settlement.event.actor_kind'), json_extract(?1,'$.snapshot.settlement.event.actor_id'),
+      json_extract(?1,'$.snapshot.settlement.event.target_kind'), json_extract(?1,'$.snapshot.settlement.event.target_id'),
+      json_extract(?1,'$.snapshot.settlement.event.metadata'), json_extract(?1,'$.snapshot.settlement.event.request_id')
+    WHERE json_type(?1,'$.snapshot.settlement') = 'object' {}"#,
+        super::audit_write::INSTALLATION_REPLAY
+    )
+}
+
+const SETTLED: &str = r#"UPDATE github_invitations SET
+    state = json_extract(?1,'$.snapshot.settlement.state'),
+    updated_at = json_extract(?1,'$.snapshot.settlement.event.occurred_at'), error_message = NULL
+    WHERE id = json_extract(?1,'$.receipt.command.invitation_id')
+    AND json_type(?1,'$.snapshot.settlement') = 'object'
+    AND EXISTS(SELECT 1 FROM delivery_outcomes WHERE invitation_id = github_invitations.id
+      AND json_extract(receipt,'$.revision') = json_extract(?1,'$.snapshot.revision'))"#;
 
 pub fn audit_statement() -> String {
     format!(
@@ -126,7 +171,7 @@ pub struct ReceiptRow {
 }
 
 impl ReceiptRow {
-    pub fn decode(self) -> super::Result<CreateReceipt> {
+    pub fn decode(self) -> super::Result<DeliverySnapshot> {
         serde_json::from_str(&self.receipt).map_err(|e| super::Error::Corrupt(e.to_string()))
     }
 }

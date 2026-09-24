@@ -1,7 +1,7 @@
 //! Receiving-side create receipts. Private ingress; ADR 0004.
 use crate::AppState;
 use crate::repository_access::{RepositoryAccess, Unavailable, verify_repository_access};
-use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
+use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt, DeliverySnapshot};
 use ghinvite_github::{CollaboratorAddition, RateLimit};
 use restate_sdk::{
     context::{
@@ -13,7 +13,7 @@ use restate_sdk::{
     serde::Json,
 };
 
-pub struct GithubCreate {
+pub struct RepositoryDelivery {
     state: AppState,
     #[cfg(feature = "integration")]
     faults: Option<std::sync::Arc<DeliveryFaults>>,
@@ -42,21 +42,26 @@ pub struct DeliveryFaults {
     pub lose_http_result: std::sync::atomic::AtomicBool,
     pub lose_projection_ack: std::sync::atomic::AtomicBool,
     pub http_result_losses: std::sync::atomic::AtomicUsize,
+    pub lose_release_ack: std::sync::atomic::AtomicBool,
+    pub release_ack_losses: std::sync::atomic::AtomicUsize,
 }
 
 pub fn bind(builder: Builder, state: AppState) -> Builder {
     builder
-        .bind(GithubCreate {
+        .bind(RepositoryDelivery {
             state: state.clone(),
             #[cfg(feature = "integration")]
             faults: None,
         })
         .bind(DeliveryProjection {
-            state,
+            state: state.clone(),
             #[cfg(feature = "integration")]
             faults: None,
         })
         .bind(DeliveryRecovery)
+        .bind(crate::settlement::DeliveryObservation {
+            state: state.clone(),
+        })
 }
 
 #[cfg(feature = "integration")]
@@ -66,15 +71,16 @@ pub fn bind_with_faults(
     faults: std::sync::Arc<DeliveryFaults>,
 ) -> Builder {
     builder
-        .bind(GithubCreate {
+        .bind(RepositoryDelivery {
             state: state.clone(),
             faults: Some(faults.clone()),
         })
         .bind(DeliveryProjection {
-            state,
+            state: state.clone(),
             faults: Some(faults),
         })
         .bind(DeliveryRecovery)
+        .bind(crate::settlement::DeliveryObservation { state })
 }
 
 pub struct DeliveryRecovery;
@@ -99,12 +105,12 @@ impl DeliveryRecovery {
             &plan,
             move |command| async move {
                 let Json(receipt) = ctx
-                    .object_client::<GithubCreateClient>(command.invitation_id.to_string())
+                    .object_client::<RepositoryDeliveryClient>(command.delivery_key())
                     .status()
                     .call()
                     .await?;
                 if let Some(receipt) = receipt
-                    && receipt.command != command
+                    && receipt.create.command != command
                 {
                     return Err(TerminalError::new_with_code(
                         409,
@@ -138,7 +144,7 @@ where
 {
     for command in &plan.commands {
         before_send(command.clone()).await?;
-        let receiver = ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string());
+        let receiver = ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key());
         let invocation_id = receiver
             .create(Json(command.clone()))
             .send()
@@ -157,7 +163,42 @@ where
 }
 
 #[restate_sdk::object]
-impl GithubCreate {
+impl RepositoryDelivery {
+    #[handler]
+    async fn on_webhook(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::github_invitation::OnWebhookInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement::webhook(ctx, input).await
+    }
+
+    #[handler]
+    async fn reconcile(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::settlement::ReconcileEvidence>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement::reconcile(ctx, input).await
+    }
+
+    #[handler]
+    async fn cancel(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::github_invitation::CancelInvitationInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement::cancel(&self.state, ctx, input).await
+    }
+
+    #[handler]
+    async fn tick_expire(
+        &self,
+        ctx: ObjectContext<'_>,
+        input: Json<crate::github_invitation::TickExpireInput>,
+    ) -> Result<(), TerminalError> {
+        crate::settlement::expire(&self.state, ctx, input).await
+    }
     #[handler]
     async fn recheck(
         &self,
@@ -166,7 +207,7 @@ impl GithubCreate {
     ) -> Result<(), TerminalError> {
         let command = wake.command;
         let previous = ctx.get::<Json<CreateCommand>>("input").await?.map(|c| c.0);
-        if ctx.key() != command.invitation_id.to_string() || previous.as_ref() != Some(&command) {
+        if ctx.key() != command.delivery_key() || previous.as_ref() != Some(&command) {
             return Err(TerminalError::new_with_code(
                 409,
                 "recheck identity conflict",
@@ -185,9 +226,9 @@ impl GithubCreate {
     async fn status(
         &self,
         ctx: SharedObjectContext<'_>,
-    ) -> Result<Json<Option<CreateReceipt>>, TerminalError> {
+    ) -> Result<Json<Option<DeliverySnapshot>>, TerminalError> {
         Ok(Json(
-            ctx.get::<Json<CreateReceipt>>("receipt")
+            ctx.get::<Json<DeliverySnapshot>>("snapshot")
                 .await?
                 .map(|r| r.0),
         ))
@@ -199,7 +240,7 @@ impl GithubCreate {
         ctx: ObjectContext<'_>,
         Json(command): Json<CreateCommand>,
     ) -> Result<Json<CreateReceipt>, TerminalError> {
-        if ctx.key() != command.invitation_id.to_string() || command.requester_id == 0 {
+        if ctx.key() != command.delivery_key() || command.requester_id == 0 {
             return Err(TerminalError::new_with_code(400, "invalid create command"));
         }
         match ctx.get::<Json<CreateCommand>>("input").await? {
@@ -224,7 +265,11 @@ impl GithubCreate {
         if let Some(receipt) = &previous
             && receipt.outcome.confirmed()
         {
-            send_projection(&ctx, receipt).await?;
+            let snapshot = ctx
+                .get::<Json<DeliverySnapshot>>("snapshot")
+                .await?
+                .ok_or_else(|| TerminalError::new_with_code(500, "missing delivery snapshot"))?;
+            send_projection(&ctx, &snapshot.0).await?;
             return Ok(Json(receipt.clone()));
         }
         let Json(account) = ctx
@@ -238,9 +283,48 @@ impl GithubCreate {
             previous.as_ref().map(|r| &r.outcome),
             Some(CreateOutcome::OutcomeUnknown)
         );
+        let release = ctx.get::<u64>("rejected_generation").await?;
+        let released = if let Some(generation) = release {
+            ctx.run(|| async {
+                Ok::<_, HandlerError>(
+                    self.state
+                        .storage
+                        .reject_delivery_attempt(command.invitation_id, generation)
+                        .await
+                        .is_ok(),
+                )
+            })
+            .name("release_rejected_generation")
+            .await?
+        } else {
+            true
+        };
+        if released {
+            ctx.clear("rejected_generation");
+        }
         let Json(attempted) = ctx
             .run(|| async {
-                let attempted = attempt(&self.state, &command, account.as_ref(), read_only).await?;
+                if !released {
+                    return Ok::<_, HandlerError>(Json(Attempt::from(
+                        previous.clone().expect("rejected attempt retains receipt"),
+                    )));
+                }
+                let attempted =
+                    match attempt(&self.state, &command, account.as_ref(), read_only).await {
+                        Ok(attempted) => attempted,
+                        // A failed fence acknowledgement may follow an applied PUT.
+                        // Retain uncertainty and move the retry outside exclusivity.
+                        Err(_) => Attempt {
+                            receipt: CreateReceipt {
+                                command: command.clone(),
+                                outcome: CreateOutcome::OutcomeUnknown,
+                                revision: 1,
+                                confirmed_at: None,
+                            },
+                            throttled_for_secs: Some(BLOCKED_RECHECK_INTERVAL.as_secs()),
+                            rejected_generation: None,
+                        },
+                    };
                 #[cfg(feature = "integration")]
                 if let Some(faults) = &self.faults {
                     use std::sync::atomic::Ordering;
@@ -258,13 +342,47 @@ impl GithubCreate {
             })
             .name("guarded_github_create")
             .await?;
+        // Positive non-application evidence is journaled before release. Lost
+        // release acknowledgements never turn a refused PUT into uncertainty.
+        if let Some(generation) = attempted.rejected_generation {
+            ctx.set("rejected_generation", generation);
+            let released = ctx
+                .run(|| async {
+                    let released = self
+                        .state
+                        .storage
+                        .reject_delivery_attempt(command.invitation_id, generation)
+                        .await
+                        .is_ok();
+                    #[cfg(feature = "integration")]
+                    if let Some(faults) = &self.faults
+                        && released
+                        && faults
+                            .lose_release_ack
+                            .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        faults
+                            .release_ack_losses
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return Ok::<_, HandlerError>(false);
+                    }
+                    Ok::<_, HandlerError>(released)
+                })
+                .name("release_refused_put")
+                .await?;
+            if released {
+                ctx.clear("rejected_generation");
+            }
+        }
         let NextReceipt {
             receipt,
             recheck_after,
         } = next_receipt(previous.as_ref(), attempted);
         ctx.set("receipt", Json(receipt.clone()));
+        let snapshot = DeliverySnapshot::from(receipt.clone());
+        ctx.set("snapshot", Json(snapshot.clone()));
         self.checkpoint(&ctx, "after-receipt").await?;
-        send_projection(&ctx, &receipt).await?;
+        send_projection(&ctx, &snapshot).await?;
         self.checkpoint(&ctx, "after-projection-send").await?;
         // The object lock is released before the recheck — the wait is a
         // continuation, not a held retry. Exactly one recheck stands per
@@ -274,7 +392,7 @@ impl GithubCreate {
             && ctx.get::<u64>("recheck_scheduled").await?.is_none()
         {
             ctx.set("recheck_scheduled", receipt.revision);
-            ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
+            ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key())
                 .recheck(Json(DeliveryRecheck {
                     command,
                     generation: receipt.revision,
@@ -287,7 +405,7 @@ impl GithubCreate {
     }
 }
 
-impl GithubCreate {
+impl RepositoryDelivery {
     async fn checkpoint(
         &self,
         ctx: &ObjectContext<'_>,
@@ -319,11 +437,11 @@ impl GithubCreate {
     }
 }
 
-async fn send_projection(
+pub(crate) async fn send_projection(
     ctx: &ObjectContext<'_>,
-    receipt: &CreateReceipt,
+    receipt: &DeliverySnapshot,
 ) -> Result<(), TerminalError> {
-    ctx.object_client::<DeliveryProjectionClient>(receipt.command.invitation_id.to_string())
+    ctx.object_client::<DeliveryProjectionClient>(receipt.create.command.delivery_key())
         .apply(Json(receipt.clone()))
         .send()
         .await?;
@@ -336,9 +454,9 @@ impl DeliveryProjection {
     async fn apply(
         &self,
         ctx: ObjectContext<'_>,
-        Json(receipt): Json<CreateReceipt>,
+        Json(receipt): Json<DeliverySnapshot>,
     ) -> Result<(), TerminalError> {
-        if ctx.key() != receipt.command.invitation_id.to_string() {
+        if ctx.key() != receipt.create.command.delivery_key() {
             return Err(TerminalError::new_with_code(400, "projection key mismatch"));
         }
         ctx.run(|| async {
@@ -381,6 +499,8 @@ struct Attempt {
     receipt: CreateReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     throttled_for_secs: Option<u64>,
+    #[serde(default)]
+    rejected_generation: Option<u64>,
 }
 
 impl From<CreateReceipt> for Attempt {
@@ -388,6 +508,7 @@ impl From<CreateReceipt> for Attempt {
         Self {
             receipt,
             throttled_for_secs: None,
+            rejected_generation: None,
         }
     }
 }
@@ -402,6 +523,7 @@ impl Attempt {
             throttled_for_secs: (!receipt.outcome.confirmed())
                 .then(|| crate::throttle::backoff(retry_after).as_secs()),
             receipt,
+            rejected_generation: None,
         }
     }
 }
@@ -434,6 +556,7 @@ fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextRecei
     let Attempt {
         mut receipt,
         throttled_for_secs,
+        ..
     } = attempt;
     receipt.revision = previous.map_or(1, |r| r.revision + 1);
     if matches!(
@@ -465,11 +588,28 @@ async fn attempt(
     // already retained, so the row never knows more than `receipt`. Every
     // PUT is preceded by a durable claim on the fence below, which is what
     // keeps a retry — even one without a retained receipt — from writing twice.
-    let attempted = read_only
-        || state
+    let attempted = if read_only {
+        true
+    } else {
+        match state
             .storage
             .delivery_attempt_exists(command.invitation_id)
-            .await?;
+            .await
+        {
+            Ok(attempted) => attempted,
+            Err(_) => {
+                return Ok(CreateReceipt {
+                    command: command.clone(),
+                    outcome: CreateOutcome::Blocked {
+                        reason: "delivery fence unavailable".into(),
+                    },
+                    revision: 1,
+                    confirmed_at: None,
+                }
+                .into());
+            }
+        }
+    };
     let blocked = |reason: &str| CreateReceipt {
         command: command.clone(),
         outcome: if attempted {
@@ -549,6 +689,7 @@ async fn attempt(
     let generation = state.storage.claim_delivery_attempt(command).await?;
     let generation = if read_only { None } else { generation };
     let mut throttled_by = None;
+    let mut rejected_generation = None;
     let outcome = if let Some(generation) = generation {
         match state
             .github
@@ -571,10 +712,7 @@ async fn attempt(
             // is throttled — a transport failure is unanswered and keeps the
             // fence, so throttling can never release an ambiguous PUT.
             CollaboratorAddition::Throttled(limit) => {
-                state
-                    .storage
-                    .reject_delivery_attempt(command.invitation_id, generation)
-                    .await?;
+                rejected_generation = Some(generation);
                 throttled_by = Some(limit);
                 CreateOutcome::Blocked {
                     reason: "GitHub throttled delivery".into(),
@@ -583,10 +721,7 @@ async fn attempt(
             // An access refusal is a prerequisite gone missing, not a verdict on
             // the invitation, so it blocks and releases the fence for a retry.
             CollaboratorAddition::AccessRefused { .. } => {
-                state
-                    .storage
-                    .reject_delivery_attempt(command.invitation_id, generation)
-                    .await?;
+                rejected_generation = Some(generation);
                 CreateOutcome::Blocked {
                     reason: "GitHub rejected access".into(),
                 }
@@ -650,10 +785,12 @@ async fn attempt(
         outcome,
         revision: 1,
     };
-    Ok(match throttled_by {
+    let mut attempt = match throttled_by {
         Some(limit) => Attempt::throttled_by(receipt, limit),
         None => receipt.into(),
-    })
+    };
+    attempt.rejected_generation = rejected_generation;
+    Ok(attempt)
 }
 
 #[cfg(test)]
@@ -674,7 +811,14 @@ mod tests {
             .storage
             .get_active_installation_by_account_id(command.account_id)
             .await?;
-        super::attempt(state, command, account.as_ref(), false).await
+        let attempted = super::attempt(state, command, account.as_ref(), false).await?;
+        if let Some(generation) = attempted.rejected_generation {
+            state
+                .storage
+                .reject_delivery_attempt(command.invitation_id, generation)
+                .await?;
+        }
+        Ok(attempted)
     }
 
     fn installation_identity() -> Expectation {
@@ -1077,6 +1221,7 @@ mod tests {
         Attempt {
             receipt: receipt(outcome, 1),
             throttled_for_secs,
+            rejected_generation: None,
         }
     }
 
