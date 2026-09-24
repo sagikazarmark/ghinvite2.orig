@@ -31,7 +31,6 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
                 != Ok(metadata)
         })
         || creation.repos.iter().any(|repo| !valid_id(repo.repo_id))
-        || envelope.requests.len() > 2
         || envelope.events.len() > 8
     {
         return Err(invalid());
@@ -39,26 +38,6 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
     let mut value = serde_json::to_value(envelope).map_err(|_| invalid())?;
     value["link"]["current_description"] = json!(link.description());
     value["link"]["current_internal_note"] = json!(link.internal_note());
-    let mut requests = std::collections::BTreeSet::new();
-    for request in &envelope.requests {
-        if request.link_id != link.link_id
-            || request.account_id != creation.account_id
-            || !valid_id(request.requester_id)
-            || !valid_id(request.revision)
-            || !requests.insert(request.request_id.to_string())
-            || request
-                .justification
-                .as_ref()
-                .is_some_and(|s| s.len() > crate::admission::MAX_JUSTIFICATION_BYTES)
-            || (request.state == RequestState::Pending && request.decision_deadline.is_none())
-            || request.decision.as_ref().is_some_and(|d| {
-                d.decided_by.is_some_and(|id| !valid_id(id))
-                    || d.decline_reason.as_ref().is_some_and(|s| s.len() > 16_384)
-            })
-        {
-            return Err(invalid());
-        }
-    }
     let mut events = std::collections::BTreeMap::new();
     for (event, encoded) in envelope
         .events
@@ -81,17 +60,6 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
             {
                 "invitation_link"
             }
-            EventType::RequestCreated
-            | EventType::RequestApproved
-            | EventType::RequestDeclined
-            | EventType::RequestExpired
-                if envelope
-                    .requests
-                    .iter()
-                    .any(|r| r.request_id.to_string() == event.target_id) =>
-            {
-                "invitation_request"
-            }
             _ => return Err(invalid()),
         };
         if event.event_id.is_empty()
@@ -110,8 +78,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         encoded["content"] = json!([creation.account_id, event]);
     }
     let encoded = serde_json::to_string(&value).map_err(|_| invalid())?;
-    // Includes up to three copies of bounded input and worst-case JSON escaping
-    // (six bytes per control character), including two touched requests.
+    // Bound worst-case JSON escaping of link metadata and repository scope.
     if encoded.len() > 2 * 1024 * 1024 {
         return Err(invalid());
     }
@@ -137,8 +104,6 @@ pub const STATEMENTS: &[&str] = &[
       AND NOT EXISTS(SELECT 1 FROM (
         SELECT json_extract(?1,'$.link.creation.admin.user_id') AS id
         UNION SELECT json_extract(?1,'$.link.revoked_by')
-        UNION SELECT json_extract(value,'$.requester_id') FROM json_each(?1,'$.requests')
-        UNION SELECT json_extract(value,'$.decision.decided_by') FROM json_each(?1,'$.requests')
         UNION SELECT json_extract(value,'$.actor_id') FROM json_each(?1,'$.events')
       ) WHERE id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM users WHERE user_id = id)),
       NOT EXISTS(SELECT 1 FROM installations WHERE installation_id = json_extract(?1,'$.link.creation.installation_id')
@@ -156,12 +121,6 @@ pub const STATEMENTS: &[&str] = &[
     AND NOT EXISTS(SELECT 1 FROM invitation_link_repos r WHERE r.invitation_link_id = json_extract(?1,'$.link.link_id')
       AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.link.creation.repos') j
         WHERE r.repo_id = json_extract(j.value,'$.repo_id') AND r.repo_full_name = json_extract(j.value,'$.repo_full_name')))
-    AND NOT EXISTS(SELECT 1 FROM invitation_requests r JOIN json_each(?1,'$.requests') j ON r.id = json_extract(j.value,'$.request_id') WHERE
-      r.invitation_link_id IS NOT json_extract(j.value,'$.link_id') OR
-      r.requester_id IS NOT json_extract(j.value,'$.requester_id') OR
-      r.justification IS NOT json_extract(j.value,'$.justification') OR
-      r.created_at IS NOT json_extract(j.value,'$.admitted_at') OR
-      r.decision_deadline IS NOT json_extract(j.value,'$.decision_deadline'))
     AND NOT EXISTS(SELECT 1 FROM audit_events a JOIN json_each(?1,'$.events') j
       ON a.id = json_extract(j.value,'$.id') OR a.projection_event_id = json_extract(j.value,'$.event_id')
       WHERE a.projection_content IS NOT json_extract(j.value,'$.content') OR
@@ -195,17 +154,6 @@ pub const STATEMENTS: &[&str] = &[
     SELECT json_extract(?1,'$.link.link_id'), json_extract(value,'$.repo_id'), json_extract(value,'$.repo_full_name')
     FROM json_each(?1,'$.link.creation.repos') WHERE true
     ON CONFLICT(invitation_link_id, repo_id) DO NOTHING"#,
-    r#"INSERT INTO invitation_requests(id, invitation_link_id, requester_id, justification, state, created_at,
-      decision_deadline, projection_revision, decided_by, decided_at, decline_reason)
-    SELECT json_extract(value,'$.request_id'), json_extract(value,'$.link_id'), json_extract(value,'$.requester_id'),
-      json_extract(value,'$.justification'), json_extract(value,'$.state'), json_extract(value,'$.admitted_at'),
-      json_extract(value,'$.decision_deadline'), json_extract(value,'$.revision'),
-      json_extract(value,'$.decision.decided_by'), json_extract(value,'$.decision.effective_at'),
-      json_extract(value,'$.decision.decline_reason') FROM json_each(?1,'$.requests') WHERE true
-    ON CONFLICT(id) DO UPDATE SET state=excluded.state, projection_revision=excluded.projection_revision,
-      decided_by=excluded.decided_by,
-      decided_at=excluded.decided_at, decline_reason=excluded.decline_reason
-    WHERE excluded.projection_revision > invitation_requests.projection_revision"#,
     r#"INSERT INTO audit_events(id, account_id, occurred_at, event_type, actor_kind, actor_id,
       target_kind, target_id, metadata, projection_event_id, projection_content, evaluated_at)
     SELECT json_extract(value,'$.id'), json_extract(?1,'$.link.creation.account_id'),
@@ -240,7 +188,6 @@ mod tests {
                     ]
                 }
             },
-            "requests": [],
             "events": []
         }))
         .unwrap()

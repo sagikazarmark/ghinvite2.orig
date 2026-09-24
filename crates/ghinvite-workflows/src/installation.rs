@@ -5,8 +5,8 @@
 //! facts and their projections live.
 //!
 //! `onboard` and `uninstall` pass their input on. `repos_changed` does not: a
-//! repository-change payload keeps its old wire shape for compatibility, but
-//! its selection is ignored and the handler asks for a refresh instead, so the
+//! repository-change payload is only a refresh hint. Its selection is ignored,
+//! and the handler asks for a refresh instead, so the
 //! stored scope comes from what GitHub currently shows rather than from what an
 //! event claimed (docs/installation-availability.md).
 

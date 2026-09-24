@@ -22,7 +22,7 @@ use tower::ServiceExt;
 mod common;
 mod requester_delivery;
 
-use common::link_authority::FakeLinkAuthority;
+use common::authority_http_fixture::FakeLinkAuthority;
 use common::sign_in::{GithubUser, oauth_expectations, sign_in};
 
 #[tokio::test]

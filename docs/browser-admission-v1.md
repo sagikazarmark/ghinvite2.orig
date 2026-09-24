@@ -1,10 +1,10 @@
 # Recoverable browser admission (#57)
 
-The web `AppState::new` always routes admission, creation, metadata, revocation
-and decisions through v1 admission. `build_endpoint` binds `admission::bind`,
-the projector, lifecycle and delivery
-consumers on private Restate ingress. Missing authority is never reconstructed
-from SQL.
+The web `AppState::new` routes creation/admission/metadata/revocation to
+`InvitationLink`, and decisions/progress to `InvitationRequest`. `build_endpoint`
+binds these owners and independent projectors and repository delivery services on
+private Restate ingress, per [ADR 0009](adr/0009-unified-repository-delivery.md).
+Missing authority is never reconstructed from SQL.
 
 ## Browser protocol
 
@@ -18,7 +18,7 @@ are never admission input.
 Submission first calls `prepare_attempt`, binding normalized input to that ID in
 the link object, then calls `admit`. Preparation is **not acceptance**. It stores
 `attempt/<id>` and a per-requester `latest-attempt/<user>` recovery pointer.
-There is no automatic expiry and no request-history UI. Two tabs can have distinct
+Prepared attempts have no automatic expiry. Two tabs can have distinct
 IDs. Each can recover by its URL; opening the base invitation link recovers the
 latest prepared/decided attempt. Older URLs remain valid after the pointer moves.
 Preparation and admission both compare retained input; editing an ID's input

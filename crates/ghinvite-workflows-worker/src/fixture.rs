@@ -62,6 +62,10 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .apply_transition(&serde_json::from_value(input).map_err(super::worker_err)?)
             .await
             .map(|_| serde_json::Value::Null),
+        "/__fixture/apply-request" => storage
+            .apply_request(&serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|_| serde_json::Value::Null),
         "/__fixture/link" => storage
             .get_invitation_link_by_id(serde_json::from_value(input).map_err(super::worker_err)?)
             .await

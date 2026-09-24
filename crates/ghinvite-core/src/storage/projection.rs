@@ -137,10 +137,10 @@ impl LinkSnapshot {
 pub use crate::request_lifecycle::RequestSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectionEnvelope {
     pub transition_id: String,
     pub link: LinkSnapshot,
-    pub requests: Vec<RequestSnapshot>,
     pub events: Vec<AuditIntent>,
 }
 

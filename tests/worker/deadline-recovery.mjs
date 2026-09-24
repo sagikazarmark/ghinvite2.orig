@@ -40,7 +40,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       await http(`${ingress}/${link}/create`, input);
       const receipt = await http(`${ingress}/${link}/admit`, { link_id: input.link_id, operation_id: id(), requester_id: 91 });
       const query = { link_id: input.link_id, request_id: receipt.result.request_id, requester_id: 91 };
-      const plan = await http(`${ingress}/${link}/prepare_dispatch`, query);
+      const plan = await http(`${ingress}/InvitationRequest/${receipt.result.request_id}/approved_plan`, query);
       const command = plan.commands[0];
       await eventually(() => storage('request', receipt.result.request_id), Boolean);
       // A separate pending admission must report infrastructure uncertainty,

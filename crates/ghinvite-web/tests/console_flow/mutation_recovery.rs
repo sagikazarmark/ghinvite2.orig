@@ -1,5 +1,5 @@
 use super::*;
-use common::link_authority::snapshot;
+use common::authority_http_fixture::snapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
 use ghinvite_core::storage::projection::{CreateLink, RequestSnapshot};
 use ghinvite_core::storage::{ContinuationStorage, InstallationStorage, RecordStorage};
@@ -738,11 +738,21 @@ async fn mutation_recovery_browser_server() {
         .apply_transition(&ProjectionEnvelope {
             transition_id: format!("link/{}/1", link.link_id),
             link,
-            requests,
             events: vec![],
         })
         .await
         .unwrap();
+    for request in requests {
+        storage
+            .apply_request(
+                &ghinvite_core::storage::projection::RequestProjectionEnvelope {
+                    request,
+                    events: vec![],
+                },
+            )
+            .await
+            .unwrap();
+    }
     let app = build_app(
         AppState::new(
             storage,

@@ -63,7 +63,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   const link = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   await link('create', input);
   const admitted = await link('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
-  const plan = await link('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+  const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
   await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'access_lost_once' });
   const command = plan.commands[0];
   const create = () => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/create`, command);
@@ -87,7 +87,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   await historical('create', historicalInput);
   const admittedHistorical = await historical('admit', { link_id: historicalInput.link_id, operation_id: id(), requester_id: 91 });
   const query = { link_id: historicalInput.link_id, request_id: admittedHistorical.result.request_id, requester_id: 91 };
-  const historicalPlan = await historical('prepare_dispatch', query);
+  const historicalPlan = await http(`${ingress}/InvitationRequest/${query.request_id}/approved_plan`, query);
   await eventually(() => storage('request', query.request_id), row => row?.state === 'approved');
   const originalLink = await storage('link', historicalInput.link_id);
   const originalRequest = await storage('request', query.request_id);
@@ -111,7 +111,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
   assert.equal(settled.github_invitation_id, delivered.outcome.upstream_id);
   assert.deepEqual(await storage('link', historicalInput.link_id), originalLink);
   assert.deepEqual(await storage('request', query.request_id), originalRequest);
-  assert.deepEqual(await historical('prepare_dispatch', query), historicalPlan);
+  assert.deepEqual(await http(`${ingress}/InvitationRequest/${query.request_id}/approved_plan`, query), historicalPlan);
   assert.deepEqual((await http(`${deliveryUrl}/status`)).create, delivered);
   const accepted = (await storage('audit', 100)).events.filter(event => event.target_id === settled.id && event.event_type === 'invitation.accepted');
   assert.equal(accepted.length, 1);
@@ -122,7 +122,7 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
     const input = { ...creation(), installation_id: 19, approval_required: false };
     await http(`${ingress}/InvitationLink/${input.link_id}/create`, input);
     const admitted = await http(`${ingress}/InvitationLink/${input.link_id}/admit`, { link_id: input.link_id, operation_id: id(), requester_id: 91 });
-    const plan = await http(`${ingress}/InvitationLink/${input.link_id}/prepare_dispatch`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+    const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
     const command = plan.commands[0];
     const url = `${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}`;
     const creating = http(`${url}/create`, command);

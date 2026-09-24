@@ -1,5 +1,5 @@
 use super::*;
-use common::link_authority::FakeLinkAuthority;
+use common::authority_http_fixture::FakeLinkAuthority;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
 use ghinvite_core::request_lifecycle::TerminalDecision;

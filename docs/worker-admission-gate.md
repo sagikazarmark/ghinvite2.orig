@@ -18,6 +18,7 @@ From the repository root:
 ```sh
 npm ci --prefix tests/worker
 npm run test:admission --prefix tests/worker
+npm run test:journey --prefix tests/worker
 ```
 
 Requires local Docker/Compose with host-gateway networking, Node
@@ -86,9 +87,8 @@ host failure may need manual cleanup of the printed unique Compose project.
 - Lazy-read interruption before decision: resumption samples the later clock and
   rejects expiration, rather than reusing an early receipt-time sample.
 - Exact deadline equality, overdue expiry/readmission, original replay and no use
-  refund, direct notification before startup, late startup, and real durable timer.
-  Timer evidence requires an observed sleep/suspension for that workflow and a
-  still-pending authoritative read before expiry.
+  refund, request initialization and delayed expiry messages, and a still-pending
+  authoritative read before expiry.
 - Auto/manual approval, retained dispatch and receiving create outcomes using real
   Worker outbound HTTP to the controlled GitHub stub.
 - Real web Worker OAuth/session and authorized invitation status while D1 has no
@@ -99,6 +99,10 @@ host failure may need manual cleanup of the printed unique Compose project.
 - `npm run test:delivery --prefix tests/worker` separately verifies approved
   delivery with installation/link/request/user rows withheld, an applied PUT with
   lost result, read-only reconciliation, and independent projection convergence.
+- `npm run test:journey --prefix tests/worker` composes authenticated web Wasm,
+  real Restate owners, production GitHub HTTP and shared D1: creation, admission,
+  approval, signed member settlement and status/audit convergence, with delayed
+  projection and lost command responses. See [ownership](invitation-ownership.md).
 
 On 2026-09-14 the local lazy-history experiment retained fourteen 16-KiB
 rejected operations. A fresh rejection before and after unrelated history used

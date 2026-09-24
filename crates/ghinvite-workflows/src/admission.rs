@@ -178,7 +178,6 @@ async fn project(
         .apply_transition(Json(ProjectionEnvelope {
             transition_id: format!("link/{}/{}", link.link_id, link.revision),
             link: link.clone(),
-            requests: vec![],
             events,
         }))
         .send()

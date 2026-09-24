@@ -1,4 +1,4 @@
-pub mod link_authority;
+pub mod authority_http_fixture;
 pub mod restate_recorder;
 pub mod sign_in;
 

@@ -159,6 +159,8 @@ From the repository root, run the same targets as CI:
 
 ```bash
 bash scripts/test-restate.sh authoritative_admission   # also the default target
+bash scripts/test-restate.sh request_owner
+bash scripts/test-restate.sh canonical_link
 bash scripts/test-restate.sh retained_delivery
 bash scripts/test-restate.sh approved_delivery
 bash scripts/test-restate.sh installation_availability
@@ -254,6 +256,14 @@ direct Cargo execution requires `RESTATE_ADMIN_URL`, `RESTATE_INGRESS_URL`, and
 `RESTATE_ENDPOINT_HOST` from an isolated runtime. Prefer the script, which owns
 those values and runtime cleanup.
 
+### Assembled invitation journey (#122)
+
+`canonical_link` drives authenticated native web routes through real Restate
+owners and production GitHub HTTP to signed settlement and recovery. The actual
+Worker/D1 equivalent is `npm run test:journey --prefix tests/worker`.
+See [ownership and evidence](invitation-ownership.md#reproducible-evidence) for
+the exact proof surface and [fresh setup](invitation-ownership.md#clean-prelaunch-replacement).
+
 ### Admission protocol proof (#48, retired)
 
 The throwaway #48 protocol proof
@@ -268,18 +278,14 @@ keeps its recorded results.
 
 The production suites now cover each proof scenario:
 
-- `authoritative_admission`: journaled decision followed by coherent state
-  writes and projection/workflow sends, SDK task aborts at every recovery
-  checkpoint with exclusive status reads waiting for recovery, final-use
-  concurrency, replay/payload conflicts, expiry before versus after a durable
-  decision, projection outage during admission/revocation, terminal release and
-  stale-pointer protection, deadline arbitration and timer races, lazy state
-  without eager history transfer, and workflow notification replay, interrupted
-  resolution, and the 409 for a conflicting terminal signal.
+- `authoritative_admission` and `request_owner`: initialization and journaled
+  decision recovery, final-use concurrency, replay/input conflicts, deadline
+  arbitration, retained eligibility verdicts, expiry/readmission, projection
+  outage, completed-execution cleanup and lazy retained history.
 - `durable_projection`: commit acknowledgement loss and ordered projection
   convergence.
-- `retained_delivery`: late notification after workflow completion does not
-  recreate promise state.
+- `retained_delivery`: original manifests and explicit recovery survive execution
+  cleanup; confirmed/uncertain GitHub writes are not repeated.
 - The `ghinvite-core` storage test suite: stale snapshots cannot regress a
   revoked link.
 

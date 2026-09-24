@@ -89,6 +89,50 @@ async fn html(response: Response) -> String {
     )
     .unwrap()
 }
+async fn sign_in(app: &axum::Router) -> String {
+    let login = request(app, "", "/login", None).await;
+    let state = login.headers()["location"]
+        .to_str()
+        .unwrap()
+        .split("state=")
+        .nth(1)
+        .unwrap()
+        .split('&')
+        .next()
+        .unwrap();
+    let callback = request(
+        app,
+        &cookie(&login),
+        &format!("/oauth/callback?code=fixture&state={state}"),
+        None,
+    )
+    .await;
+    assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+    cookie(&callback)
+}
+
+async fn owner(
+    client: &reqwest::Client,
+    ingress: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    let request = client
+        .post(format!("{ingress}/{path}"))
+        .header("accept", "application/json");
+    let request = if body.is_null() {
+        request
+    } else {
+        request.json(&body)
+    };
+    let response = request.send().await.unwrap();
+    assert!(
+        response.status().is_success(),
+        "{path}: {}",
+        response.text().await.unwrap()
+    );
+    response.json().await.unwrap()
+}
 fn cookie(response: &Response) -> String {
     response.headers()["set-cookie"]
         .to_str()
@@ -112,7 +156,7 @@ fn field(html: &str, name: &str) -> String {
 }
 
 #[tokio::test]
-async fn confirmed_link_opens_and_accepts_replay_before_projection() {
+async fn authenticated_journey_settles_and_recovers_across_projection_and_response_loss() {
     let ingress =
         std::env::var("RESTATE_INGRESS_URL").expect("bash scripts/test-restate.sh canonical_link");
     let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
@@ -122,11 +166,13 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
         .timeout(Duration::from_secs(25))
         .build()
         .unwrap();
+    let requester_login = Arc::new(AtomicBool::new(false));
+    let login_identity = requester_login.clone();
     let stub = ghinvite_github::stub::router()
         .route("/login/oauth/access_token", axum::routing::post(|| async { axum::Json(json!({"access_token":"fixture", "token_type":"bearer", "scope":""})) }))
-        .route("/user", axum::routing::get(|| async { axum::Json(json!({"id":7,"login":"creator"})) }))
+        .route("/user", axum::routing::get(move || { let requester = login_identity.load(Ordering::SeqCst); async move { axum::Json(if requester { json!({"id":8,"login":"alice"}) } else { json!({"id":7,"login":"creator"}) }) } }))
         .route("/user/memberships/orgs/acme", axum::routing::get(|| async { axum::Json(json!({"role":"admin","state":"active","organization":{"id":100}})) }))
-        .route("/user/installations/1/repositories", axum::routing::get(|| async { axum::Json(json!({"total_count":1,"repositories":[{"id":10,"full_name":"acme/api","private":true}]})) }));
+        .route("/user/installations/1/repositories", axum::routing::get(|| async { axum::Json(json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]})) }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let stub_task = tokio::spawn(async move {
@@ -176,6 +222,17 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
         "{}",
         deployment.text().await.unwrap()
     );
+    // Only this disposable runtime: original executions must actually expire.
+    for service in ["InvitationLink", "InvitationRequest", "RepositoryDelivery"] {
+        client
+            .patch(format!("{admin}/services/{service}"))
+            .json(&json!({"journal_retention":"2s","idempotency_retention":"2s"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
     let onboard = client.post(format!("{ingress}/Installation/1/onboard"))
         .json(&json!({"installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme",
             "account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
@@ -190,36 +247,87 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     .unwrap();
     // Forward actual ingress HTTP, but lose the first successful creation
     // acknowledgement. Recovery must use the browser's retained exact input.
-    let lost = Arc::new(AtomicBool::new(false));
+    let lost = Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new()));
     let receipts = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let executions = Arc::new(std::sync::Mutex::new(Vec::<(
+        String,
+        serde_json::Value,
+        serde_json::Value,
+        String,
+    )>::new()));
     let proxy = {
         let client = client.clone();
         let ingress = ingress.clone();
         let lost = lost.clone();
         let receipts = receipts.clone();
+        let executions = executions.clone();
         axum::Router::new().fallback(move |request: axum::extract::Request| {
             let client = client.clone();
             let ingress = ingress.clone();
             let lost = lost.clone();
             let receipts = receipts.clone();
+            let executions = executions.clone();
             async move {
                 let path = request.uri().path().to_owned();
                 let body = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
-                let upstream = client
-                    .post(format!("{ingress}{path}"))
-                    .header("content-type", "application/json")
-                    .body(body)
-                    .send()
-                    .await
-                    .unwrap();
+                let mutation = ["/create", "/admit", "/decide"]
+                    .iter()
+                    .any(|method| path.ends_with(method));
+                let input: serde_json::Value = if body.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_slice(&body).unwrap()
+                };
+                let upstream = client.post(format!(
+                    "{ingress}{path}{}",
+                    if mutation { "/send" } else { "" }
+                ));
+                let upstream = if body.is_empty() {
+                    upstream
+                } else {
+                    upstream
+                        .header("content-type", "application/json")
+                        .body(body)
+                };
+                let upstream = upstream.send().await.unwrap();
+                let (upstream, invocation) = if mutation && upstream.status().is_success() {
+                    let ack: serde_json::Value = upstream.json().await.unwrap();
+                    let invocation = ack["invocationId"].as_str().unwrap().to_owned();
+                    (
+                        client
+                            .get(format!("{ingress}/restate/invocation/{invocation}/attach"))
+                            .send()
+                            .await
+                            .unwrap(),
+                        Some(invocation),
+                    )
+                } else {
+                    (upstream, None)
+                };
                 let status = upstream.status();
                 let body = upstream.bytes().await.unwrap();
-                if path.ends_with("/create") && status.is_success() {
-                    receipts
+                if ["/create", "/admit", "/decide"]
+                    .iter()
+                    .any(|method| path.ends_with(method))
+                    && status.is_success()
+                {
+                    executions.lock().unwrap().push((
+                        path.clone(),
+                        input,
+                        serde_json::from_slice(&body).unwrap(),
+                        invocation.unwrap(),
+                    ));
+                    if path.ends_with("/create") {
+                        receipts
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_slice(&body).unwrap());
+                    }
+                    if lost
                         .lock()
                         .unwrap()
-                        .push(serde_json::from_slice(&body).unwrap());
-                    if !lost.swap(true, Ordering::SeqCst) {
+                        .insert(path.rsplit('/').next().unwrap().to_owned())
+                    {
                         return Response::builder().status(502).body(Body::empty()).unwrap();
                     }
                 }
@@ -243,28 +351,13 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
             transport: ReqwestTransport::with_client(client.clone()),
         }),
         Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()),
-        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]),
+        ghinvite_web::WebConfig {
+            webhook_secret: b"journey-secret".to_vec(),
+            ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
+        },
     );
     let app = ghinvite_web::build_app(state, tower_sessions::MemoryStore::default());
-    let login = request(&app, "", "/login", None).await;
-    let state = login.headers()["location"]
-        .to_str()
-        .unwrap()
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
-        .unwrap();
-    let signed_in = request(
-        &app,
-        &cookie(&login),
-        &format!("/oauth/callback?code=fixture&state={state}"),
-        None,
-    )
-    .await;
-    assert_eq!(signed_in.status(), StatusCode::SEE_OTHER);
-    let cookie = cookie(&signed_in);
+    let cookie = sign_in(&app).await;
     let form = html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
     let action = form
         .split("action=\"/console/accounts/acme/links?")
@@ -384,12 +477,24 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
         StatusCode::CONFLICT
     );
     let public = format!("/i/{id}");
-    let page = html(request(&app, &cookie, &public.to_lowercase(), None).await).await;
+    requester_login.store(true, Ordering::SeqCst);
+    let requester_cookie = sign_in(&app).await;
+    let page = html(request(&app, &requester_cookie, &public.to_lowercase(), None).await).await;
     assert!(page.contains("acme/api"));
     let operation = field(&page, "operation_id");
-    let submit = format!("csrf_token={csrf}&operation_id={operation}&justification=++Original++");
+    let requester_csrf = field(&page, "csrf_token");
+    let submit =
+        format!("csrf_token={requester_csrf}&operation_id={operation}&justification=++Original++");
+    let unknown = request(&app, &requester_cookie, &public, Some(&submit)).await;
+    assert_eq!(unknown.status(), StatusCode::BAD_GATEWAY);
+    let unknown = html(unknown).await;
+    assert!(
+        unknown.contains("Outcome unknown")
+            && unknown.contains(&operation)
+            && unknown.contains("Original")
+    );
     for path in [&public.to_lowercase(), &public] {
-        let admitted = request(&app, &cookie, path, Some(&submit)).await;
+        let admitted = request(&app, &requester_cookie, path, Some(&submit)).await;
         assert_eq!(
             admitted.status(),
             StatusCode::SEE_OTHER,
@@ -400,7 +505,7 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     let status = html(
         request(
             &app,
-            &cookie,
+            &requester_cookie,
             &format!("{public}?operation_id={operation}"),
             None,
         )
@@ -411,7 +516,7 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     assert!(status.contains("Awaiting review"));
     let page: serde_json::Value = client
         .post(format!("{ingress}/InvitationLink/{id}/requester_page"))
-        .json(&json!({"link_id":id,"requester_id":7,"operation_id":operation}))
+        .json(&json!({"link_id":id,"requester_id":8,"operation_id":operation}))
         .send()
         .await
         .unwrap()
@@ -422,13 +527,9 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
     let decision_operation = ghinvite_core::RequestId::new();
     let decision_body = format!("csrf_token={csrf}&link_id={id}&operation_id={decision_operation}");
-    // Current requester identity differs from the stub's default numeric identity.
-    client
-        .post(format!("{base}/identity"))
-        .json(&json!({"login":"creator","addressed_id":7}))
-        .send()
-        .await
-        .unwrap();
+    let unknown = request(&app, &cookie, &approve, Some(&decision_body)).await;
+    assert_eq!(unknown.status(), StatusCode::BAD_GATEWAY);
+    assert!(html(unknown).await.contains("Outcome unknown"));
     let approved = request(&app, &cookie, &approve, Some(&decision_body)).await;
     assert_eq!(approved.status(), StatusCode::SEE_OTHER);
     let approved_page =
@@ -449,7 +550,7 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
     let status = html(
         request(
             &app,
-            &cookie,
+            &requester_cookie,
             &format!("{public}?operation_id={operation}"),
             None,
         )
@@ -518,6 +619,425 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
             .count(),
         1
     );
+    let query = json!({"link_id":id,"request_id":request_id,"requester_id":8});
+    let plan = owner(
+        &client,
+        &ingress,
+        &format!("InvitationRequest/{request_id}/approved_plan"),
+        query.clone(),
+    )
+    .await;
+    let command = &plan["commands"][0];
+    let delivery_path = format!("RepositoryDelivery/{request_id}:10/status");
+    let delivered = owner(&client, &ingress, &delivery_path, json!(null)).await;
+    assert_eq!(delivered["create"]["outcome"]["kind"], "created");
+    // Supported member evidence: GitHub reports current numeric identity/access,
+    // and the complete pending list no longer contains the known invitation.
+    let upstream = delivered["create"]["outcome"]["upstream_id"]
+        .as_u64()
+        .unwrap();
+    client
+        .delete(format!("{base}/repos/acme/api/invitations/{upstream}"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"alice","addressed_id":8,"role_name":"read"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            if storage
+                .get_github_invitation(command["invitation_id"].as_str().unwrap().parse().unwrap())
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let payload = json!({"action":"added","installation":{"id":1},"repository":{"id":10,"owner":{"id":100}},"member":{"id":8}}).to_string();
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"journey-secret").unwrap();
+    mac.update(payload.as_bytes());
+    let signature: String = mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhooks/github")
+                    .header("content-type", "application/json")
+                    .header("x-github-event", "member")
+                    .header("x-github-delivery", "journey-member")
+                    .header("x-hub-signature-256", format!("sha256={signature}"))
+                    .body(Body::from(payload.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let page = html(
+                request(
+                    &app,
+                    &requester_cookie,
+                    &format!("{public}?operation_id={operation}"),
+                    None,
+                )
+                .await,
+            )
+            .await;
+            let audit =
+                html(request(&app, &cookie, "/console/accounts/acme/audit", None).await).await;
+            if page.contains("Repository access accepted")
+                && audit.contains("GitHub invitation accepted")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("requester status and admin audit converge after signed evidence");
+    let settled = owner(&client, &ingress, &delivery_path, json!(null)).await;
+    assert_eq!(settled["settlement"]["state"], "accepted");
+    assert_eq!(settled["create"], delivered["create"]);
+
+    let original_executions = executions.lock().unwrap().clone();
+    assert!(
+        original_executions
+            .iter()
+            .any(|(path, _, _, _)| path.ends_with("/admit"))
+    );
+    assert!(
+        original_executions
+            .iter()
+            .any(|(path, _, _, _)| path.ends_with("/decide"))
+    );
+    let dispatch = owner(
+        &client,
+        &ingress,
+        &format!("InvitationRequest/{request_id}/delivery_status"),
+        query.clone(),
+    )
+    .await;
+    let mut invocation_ids: Vec<_> = original_executions
+        .iter()
+        .map(|(_, _, _, id)| id.clone())
+        .collect();
+    invocation_ids.extend(
+        dispatch["submitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["invocation_id"].as_str().unwrap().to_owned()),
+    );
+    let ids = invocation_ids
+        .iter()
+        .map(|id| format!("'{id}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let rows = owner(
+                &client,
+                &admin,
+                "query",
+                json!({"query":format!("SELECT id FROM sys_invocation WHERE id IN ({ids})")}),
+            )
+            .await;
+            if rows["rows"].as_array().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("completed execution is cleaned without restarting authority");
+    let before = storage
+        .list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    for (path, input, receipt, _) in &original_executions {
+        assert_eq!(
+            owner(
+                &client,
+                &ingress,
+                path.trim_start_matches('/'),
+                input.clone()
+            )
+            .await,
+            *receipt
+        );
+    }
+    assert_eq!(
+        request(&app, &requester_cookie, &public, Some(&submit))
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        request(&app, &cookie, &approve, Some(&decision_body))
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    let recovery = owner(&client, &ingress, "DeliveryRecovery/recover", query.clone()).await;
+    for submitted in recovery["submitted"].as_array().unwrap() {
+        let invocation = submitted["invocation_id"].as_str().unwrap();
+        client
+            .get(format!("{ingress}/restate/invocation/{invocation}/attach"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+    }
+    // All recovery sends completed. Drain the independently queued projections
+    // before asserting absence of duplicate history/effects.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let rows = owner(&client, &admin, "query", json!({"query":format!("SELECT id FROM sys_invocation WHERE target_service_name = 'DeliveryProjection' AND target_service_key = '{request_id}:10' AND status != 'completed'")})).await;
+            if rows["rows"].as_array().unwrap().is_empty() { break; }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(
+        owner(&client, &ingress, &delivery_path, json!(null)).await,
+        settled
+    );
+    assert_eq!(
+        owner(
+            &client,
+            &ingress,
+            &format!("InvitationRequest/{request_id}/approved_plan"),
+            query
+        )
+        .await,
+        plan
+    );
+    assert_eq!(
+        storage
+            .list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events,
+        before
+    );
+    let calls: serde_json::Value = client
+        .get(format!("{base}/calls"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        calls["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|call| call["method"] == "PUT")
+            .count(),
+        1
+    );
+    client
+        .post(format!("{base}/identity"))
+        .json(&json!({"login":"alice","addressed_id":8}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // The same authenticated routes cover fresh admission after decline and
+    // admission-time auto approval. Keep the deadline/race matrix in request_owner.
+    for auto in [false, true] {
+        let form =
+            html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
+        let action = form
+            .split("action=\"/console/accounts/acme/links?")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&")
+            .replace("&#38;", "&");
+        let action = format!("/console/accounts/acme/links?{action}");
+        let link_id = url_query(&action)["link_id"].clone();
+        let body = format!(
+            "csrf_token={csrf}&description=Two+repositories&permission=pull&repo_ids=10&repo_ids=11{}",
+            if auto { "" } else { "&approval_required=on" }
+        );
+        assert_eq!(
+            request(&app, &cookie, &action, Some(&body)).await.status(),
+            StatusCode::SEE_OTHER
+        );
+        let public = format!("/i/{link_id}");
+        let page = html(request(&app, &requester_cookie, &public, None).await).await;
+        let mut operation = field(&page, "operation_id");
+        let submission = |op: &str| {
+            format!("csrf_token={requester_csrf}&operation_id={op}&justification=Fresh+request")
+        };
+        assert_eq!(
+            request(
+                &app,
+                &requester_cookie,
+                &public,
+                Some(&submission(&operation))
+            )
+            .await
+            .status(),
+            StatusCode::SEE_OTHER
+        );
+        let page = owner(
+            &client,
+            &ingress,
+            &format!("InvitationLink/{link_id}/requester_page"),
+            json!({"link_id":link_id,"requester_id":8,"operation_id":operation}),
+        )
+        .await;
+        let mut request_id = page["request"]["request_id"].as_str().unwrap().to_owned();
+        if !auto {
+            let decline = format!("/console/accounts/acme/requests/{request_id}/decline");
+            let body = format!(
+                "csrf_token={csrf}&link_id={link_id}&operation_id={}&reason=Try+again",
+                ghinvite_core::RequestId::new()
+            );
+            assert_eq!(
+                request(&app, &cookie, &decline, Some(&body)).await.status(),
+                StatusCode::SEE_OTHER
+            );
+            let page = html(
+                request(
+                    &app,
+                    &requester_cookie,
+                    &format!("{public}?fresh=true"),
+                    None,
+                )
+                .await,
+            )
+            .await;
+            operation = field(&page, "operation_id");
+            assert_eq!(
+                request(
+                    &app,
+                    &requester_cookie,
+                    &public,
+                    Some(&submission(&operation))
+                )
+                .await
+                .status(),
+                StatusCode::SEE_OTHER
+            );
+            let page = owner(
+                &client,
+                &ingress,
+                &format!("InvitationLink/{link_id}/requester_page"),
+                json!({"link_id":link_id,"requester_id":8,"operation_id":operation}),
+            )
+            .await;
+            let fresh = page["request"]["request_id"].as_str().unwrap();
+            assert_ne!(fresh, request_id);
+            request_id = fresh.to_owned();
+            client.post(format!("{base}/outcomes")).json(&json!({"owner":"acme","repo":"web","user":"alice","outcome":"access_lost_once"})).send().await.unwrap().error_for_status().unwrap();
+            let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
+            let body = format!(
+                "csrf_token={csrf}&link_id={link_id}&operation_id={}",
+                ghinvite_core::RequestId::new()
+            );
+            assert_eq!(
+                request(&app, &cookie, &approve, Some(&body)).await.status(),
+                StatusCode::SEE_OTHER
+            );
+        } else {
+            assert_eq!(page["request"]["state"], "approved");
+            assert!(page["request"]["decision_deadline"].is_null());
+        }
+        let query = json!({"link_id":link_id,"request_id":request_id,"requester_id":8});
+        let plan = owner(
+            &client,
+            &ingress,
+            &format!("InvitationRequest/{request_id}/approved_plan"),
+            query.clone(),
+        )
+        .await;
+        assert_eq!(plan["commands"].as_array().unwrap().len(), 2);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let api = owner(
+                    &client,
+                    &ingress,
+                    &format!("RepositoryDelivery/{request_id}:10/status"),
+                    json!(null),
+                )
+                .await;
+                let web = owner(
+                    &client,
+                    &ingress,
+                    &format!("RepositoryDelivery/{request_id}:11/status"),
+                    json!(null),
+                )
+                .await;
+                if api["create"]["outcome"]["kind"] == "created"
+                    && web["create"]["outcome"]["kind"] == if auto { "created" } else { "blocked" }
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("repositories progress independently");
+        let link = owner(
+            &client,
+            &ingress,
+            &format!("InvitationLink/{link_id}/link_status"),
+            json!({"link_id":link_id,"admin":{"account_id":100,"user_id":7}}),
+        )
+        .await;
+        assert_eq!(link["uses"], if auto { 1 } else { 2 });
+        if !auto {
+            owner(&client, &ingress, "DeliveryRecovery/recover", query).await;
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let web = owner(
+                        &client,
+                        &ingress,
+                        &format!("RepositoryDelivery/{request_id}:11/status"),
+                        json!(null),
+                    )
+                    .await;
+                    if web["create"]["outcome"]["kind"] == "created" {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("explicit recovery resumes refused repository");
+        }
+    }
     endpoint_task.abort();
     proxy_task.abort();
     stub_task.abort();

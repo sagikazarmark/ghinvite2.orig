@@ -1,4 +1,9 @@
-//! An in-process stand-in for the Restate invitation link authority.
+//! HTTP response fixture for the web's concrete link and request clients.
+//!
+//! This is not a Restate implementation or evidence of owner correctness. Its
+//! in-memory response model supports web rendering/recovery tests only; it has
+//! no durable execution, projection queue, GitHub effects or retention behavior.
+//! `ghinvite-workflows/tests/canonical_link.rs` proves assembled composition.
 //!
 //! It answers the ingress paths the web calls for invitation links
 //! (`/{LINK_SERVICE}/{link_id}/{method}`) with the same status codes the real
@@ -80,7 +85,7 @@ struct Inner {
     /// answers even after later mutations.
     creations: BTreeMap<String, LinkSnapshot>,
     requests: BTreeMap<String, RequestSnapshot>,
-    /// Retained decisions by link and operation.
+    /// Scripted decisions by request and operation.
     decisions: BTreeMap<(String, String), (DecideRequest, DecisionReceipt)>,
     /// Prepared attempts by link and operation.
     attempts: BTreeMap<(String, String), Admit>,
@@ -387,6 +392,13 @@ async fn handle(
 
 fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Value) -> Response {
     if service != LINK_SERVICE && service != "InvitationRequest" {
+        return status(404);
+    }
+    let request_method = matches!(
+        method,
+        "decide" | "decision_status" | "request_status" | "delivery_progress"
+    );
+    if request_method != (service == "InvitationRequest") {
         return status(404);
     }
     let key = if service == "InvitationRequest" {
@@ -914,7 +926,7 @@ fn local_rejection(
     }
 }
 
-/// The real `accept`: consume one use of `link` and create the admitted
+/// Script an accepted response: consume one use of `link` and create the admitted
 /// request, pending until its deadline or approved at once when the link
 /// needs no approval.
 fn accept(link: &mut LinkSnapshot, command: &Admit, now: DateTime<Utc>) -> RequestSnapshot {

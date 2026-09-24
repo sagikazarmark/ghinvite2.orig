@@ -1,5 +1,13 @@
 # Browser Regression Tests
 
+The default config selects only `link-form.spec.mjs`; other suites use their own
+configs and router servers. The in-memory `authority_http_fixture.rs` serves web
+response/rendering tests, not Restate conformance. For authenticated assembled
+native and Worker journeys through real owners, see
+[invitation acceptance](../../docs/invitation-ownership.md#reproducible-evidence).
+Renaming/narrowing this fixture does not complete the fake/real conformance work
+tracked in #114.
+
 ## Invitation-link revocation confirmation
 
 Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/revocation.config.mjs`

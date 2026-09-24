@@ -1,5 +1,12 @@
 # Worker Runtime Smoke Test
 
+Run `npm run test:journey --prefix tests/worker` for the authenticated assembled
+web → real Restate owners → production GitHub HTTP client journey. Both actual
+Wasm Workers share one in-memory D1 binding. It covers delayed projection, lost
+creation/admission/decision responses, signed member settlement, status/audit
+convergence and actual request-batch commit acknowledgement loss. It uses the
+same disposable runtime and build prerequisites as `test:admission`.
+
 For the installation failure/replacement matrix on real Restate and Worker/D1,
 run `npm run test:installation --prefix tests/worker`. For the independent release
 packaging gate, install worker-build **0.8.1** and run

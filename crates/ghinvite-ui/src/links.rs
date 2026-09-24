@@ -591,7 +591,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                         h1 { class: "text-2xl font-bold", "{description}" }
                         p { class: "text-sm text-base-content/70", "Invitation code: ", span { class: "font-mono", "{id_str}" } }
                     }
-                    div { class: "flex items-center gap-3",
+                    div { class: "flex flex-wrap items-center gap-3",
                         span { class: "{badge_class}", "{badge_label}" }
                         a { class: "btn btn-outline btn-sm", href: "/console/accounts/{login}/links/{id_str}/requests", "Request history" }
                         a { class: "btn btn-outline btn-sm", href: "/console/accounts/{login}/links/{id_str}/edit", "Edit details" }

@@ -12,6 +12,7 @@ import { frames, fields } from './protocol.mjs';
 import { deadlineRecovery, stalledResponse } from './deadline-recovery.mjs';
 import { installationRecovery } from './installation.mjs';
 import { approvedDelivery } from './approved-delivery.mjs';
+import { invitationJourney, journeyWorker } from './invitation-journey.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { cwd: root, encoding: 'utf8', timeout: 120_000 }));
@@ -98,12 +99,6 @@ const creation = () => ({ link_id: id(), admin: { account_id: 100, user_id: 7 },
   expires_at: null, max_uses: 1, permission: 'pull', approval_required: true,
   repos: [{ repo_id: 10, repo_full_name: 'acme/api' }] });
 const http = async (url, body, method = 'POST') => {
-  // Lifecycle calls are request-scoped; fixture call sites still group a journey
-  // by link, but the wire always addresses the concrete current owner.
-  if (url.includes('/InvitationLink/') && ['decide', 'request_status', 'delivery_progress', 'prepare_dispatch'].includes(url.split('/').at(-1))) {
-    const handler = url.split('/').at(-1);
-    url = `${new URL(url).origin}/InvitationRequest/${body.request_id}/${handler === 'prepare_dispatch' ? 'approved_plan' : handler}`;
-  }
   const response = await fetch(url, { method, headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), accept: 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25_000) });
   const text = await response.text();
@@ -111,7 +106,8 @@ const http = async (url, body, method = 'POST') => {
   return text ? JSON.parse(text) : null;
 };
 
-const mf = new Miniflare({
+const workflowOptions = {
+  name: 'journey-workflows',
   log: new Log(LogLevel.ERROR),
   handleRuntimeStdio(stdout, stderr) {
     // Keep bounded diagnostics, including panic text, without per-suspension noise.
@@ -124,7 +120,7 @@ const mf = new Miniflare({
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   compatibilityDate: '2024-09-23',
   compatibilityFlags: ['nodejs_compat'],
-  d1Databases: ['DB'],
+  d1Databases: { DB: 'journey-shared' },
   bindings: {
     GHINVITE_GITHUB_APP_ID: '123',
     GHINVITE_GITHUB_APP_PRIVATE_KEY: readFileSync(new URL('../../crates/ghinvite-github/src/jwt_test_key.pem', import.meta.url)).toString('base64'),
@@ -147,7 +143,8 @@ const mf = new Miniflare({
     });
     return new Response([204, 205, 304].includes(response.status) ? null : await response.arrayBuffer(), { status: response.status, headers: response.headers });
   },
-});
+};
+const mf = new Miniflare(workflowOptions);
 
 const storage = async (operation, input, expected = 200, headers = {}) => {
   const response = await mf.dispatchFetch(`http://worker.test/__fixture/${operation}`, {
@@ -176,6 +173,10 @@ try {
   compose('up', '-d', 'restate-smoke');
   const admin = `http://${compose('port', 'restate-smoke', '9070').trim()}`;
   const ingress = `http://${compose('port', 'restate-smoke', '8080').trim()}`;
+  if (process.env.JOURNEY_ONLY === '1') {
+    const { log, handleRuntimeStdio, ...worker } = workflowOptions;
+    await mf.setOptions({ log, handleRuntimeStdio, workers: [worker, journeyWorker(ingress)] });
+  }
   for (let attempt = 0; ; attempt++) {
     try { await http(`${admin}/health`, undefined, 'GET'); break; }
     catch (error) { if (attempt === 50) throw error; await new Promise(resolve => setTimeout(resolve, 100)); }
@@ -238,7 +239,10 @@ try {
     const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
     await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
   }
-  if (process.env.APPROVED_DELIVERY_ONLY === '1') {
+  if (process.env.JOURNEY_ONLY === '1') {
+    await invitationJourney({ mf, adminUrl: admin, ingress, githubUrl, http, storage, db, eventually, id });
+    assert.equal(unexpectedOutbound, 0);
+  } else if (process.env.APPROVED_DELIVERY_ONLY === '1') {
     await approvedDelivery({ ingress, githubUrl, http, db, creation, id, eventually });
     assert.equal(unexpectedOutbound, 0);
   } else if (process.env.INSTALLATION_ONLY === '1') {
@@ -292,7 +296,7 @@ try {
     created_at: '2026-01-01T00:00:00Z', uses: 0, revision: 1, revoked_at: null, revoked_by: null };
   const event = { event_id: `fixture/${projection.link_id}`, kind: 'invitation_link.created', actor_id: 7,
     target_id: projection.link_id, effective_at: snapshot.created_at, evaluated_at: snapshot.created_at };
-  const old = { transition_id: 'fixture/old', link: snapshot, requests: [], events: [event] };
+   const old = { transition_id: 'fixture/old', link: snapshot, events: [event] };
   const newer = { ...old, transition_id: 'fixture/new', events: [], link: { ...snapshot, revision: 2,
     revoked_at: '2026-01-02T00:00:00Z', revoked_by: 7 } };
   await storage('apply', newer);
@@ -358,7 +362,7 @@ try {
   assert.equal(first.decided_at, '2026-01-01T00:00:00Z');
   assert.equal(first.result.decision_deadline, '2026-01-08T00:00:00Z');
   clock = Date.parse(first.result.decision_deadline);
-  const late = await timed('decide', { link_id: timedInput.link_id, request_id: first.result.request_id,
+  const late = await http(`${ingress}/InvitationRequest/${first.result.request_id}/decide`, { link_id: timedInput.link_id, request_id: first.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'approve' } });
   assert.equal(late.request.state, 'expired', 'deadline equality expires');
   const second = await timed('admit', { ...timedAttempt, operation_id: id() });
@@ -366,11 +370,11 @@ try {
   clock = Date.parse(second.result.decision_deadline) + 1;
   const thirdReceipt = await timed('admit', { ...timedAttempt, operation_id: id() });
   assert.equal(thirdReceipt.result.kind, 'accepted');
-  assert.equal((await timed('request_status', { link_id: timedInput.link_id, request_id: second.result.request_id, requester_id: 91 })).state, 'expired');
+  assert.equal((await http(`${ingress}/InvitationRequest/${second.result.request_id}/request_status`, { link_id: timedInput.link_id, request_id: second.result.request_id, requester_id: 91 })).state, 'expired');
   assert.equal((await timed('link_status', { link_id: timedInput.link_id, admin: timedInput.admin })).uses, 3);
   assert.deepEqual(await timed('admit', timedAttempt), first);
   // Notify before startup; late startup must consume authority, never re-decide.
-  const declined = await timed('decide', { link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
+  const declined = await http(`${ingress}/InvitationRequest/${thirdReceipt.result.request_id}/decide`, { link_id: timedInput.link_id, request_id: thirdReceipt.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'decline', reason: 'fixture' } });
   assert.equal(declined.request.state, 'declined');
   clock = undefined;
@@ -387,7 +391,7 @@ try {
   clock = undefined;
   pauseWorkflows = false;
   assert.ok(Date.now() < Date.parse(timerReceipt.result.decision_deadline), 'timer scheduled before deadline');
-  const waiting = await timerCall('request_status', { link_id: timerInput.link_id, request_id: timerReceipt.result.request_id, requester_id: 92 });
+  const waiting = await http(`${ingress}/InvitationRequest/${timerReceipt.result.request_id}/request_status`, { link_id: timerInput.link_id, request_id: timerReceipt.result.request_id, requester_id: 92 });
   assert.equal(waiting.state, 'pending');
    const timerResult = await eventually(() => db.prepare('SELECT state FROM invitation_requests WHERE id=?').bind(timerReceipt.result.request_id).first(), row => row?.state === 'expired');
   assert.equal(timerResult.state, 'expired');
@@ -425,8 +429,8 @@ try {
   assert.equal(approved.result.state, 'approved');
   assert.equal(approved.result.decision_deadline, null);
   const progressQuery = { link_id: autoInput.link_id, request_id: approved.result.request_id, requester_id: 91 };
-  const progress = await eventually(() => auto('delivery_progress', progressQuery), rows => rows.some(row => row.stage === 'submitted'));
-  const plan = await auto('prepare_dispatch', progressQuery);
+  const progress = await eventually(() => http(`${ingress}/InvitationRequest/${approved.result.request_id}/delivery_progress`, progressQuery), rows => rows.some(row => row.stage === 'submitted'));
+  const plan = await http(`${ingress}/InvitationRequest/${approved.result.request_id}/approved_plan`, progressQuery);
   const delivery = (command, handler, body) => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}/${handler}`, body);
   const receiving = (await eventually(() => delivery(plan.commands[0], 'status'), value => value?.create.outcome.kind === 'created')).create;
   assert.ok(receiving.outcome.upstream_id > 0);
@@ -466,7 +470,7 @@ try {
   const calls = await http(`${githubUrl}/calls`, undefined, 'GET');
   assert.equal(calls.requests.filter(call => call.method === 'PUT').length, 1);
   assert.deepEqual(await auto('admit', autoAttempt), approved);
-  assert.deepEqual(await auto('delivery_progress', progressQuery), progress);
+  assert.deepEqual(await http(`${ingress}/InvitationRequest/${approved.result.request_id}/delivery_progress`, progressQuery), progress);
   assert.equal((await http(`${githubUrl}/calls`, undefined, 'GET')).requests.filter(call => call.method === 'PUT').length, 1);
   assert.equal(unexpectedOutbound, 0);
   console.log('PASS auto-approval, actual Worker GitHub stub delivery and confirmed-create replay');
@@ -479,7 +483,7 @@ try {
     const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
     await call('create', input);
     const admitted = await call('admit', { link_id: input.link_id, operation_id: id(), requester_id: 91 });
-    const plan = await call('prepare_dispatch', { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
+    const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
     const receipt = await delivery(plan.commands[0], 'create', plan.commands[0]);
     assert.equal(receipt.outcome.kind, kind);
     const events = await createEvents(receipt);
@@ -497,10 +501,10 @@ try {
   const manual = (handler, body) => http(`${ingress}/InvitationLink/${manualInput.link_id}/${handler}`, body);
   await manual('create', manualInput);
   const manualReceipt = await manual('admit', { link_id: manualInput.link_id, operation_id: id(), requester_id: 91 });
-  const manualDecision = await manual('decide', { link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
+  const manualDecision = await http(`${ingress}/InvitationRequest/${manualReceipt.result.request_id}/decide`, { link_id: manualInput.link_id, request_id: manualReceipt.result.request_id,
     operation_id: id(), admin: manualInput.admin, action: { kind: 'approve' } });
   assert.equal(manualDecision.request.state, 'approved');
-   const manualPlan = await manual('prepare_dispatch', {link_id: manualInput.link_id, request_id: manualReceipt.result.request_id, requester_id:91});
+   const manualPlan = await http(`${ingress}/InvitationRequest/${manualReceipt.result.request_id}/approved_plan`, {link_id: manualInput.link_id, request_id: manualReceipt.result.request_id, requester_id:91});
    await eventually(() => delivery(manualPlan.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
    console.log('PASS manual approval and request-owned Worker dispatch');
   await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,

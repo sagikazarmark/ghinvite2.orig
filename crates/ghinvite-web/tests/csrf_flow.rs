@@ -6,7 +6,7 @@ use axum::{
     response::Response,
 };
 use chrono::{Duration, Utc};
-use common::link_authority::FakeLinkAuthority;
+use common::authority_http_fixture::FakeLinkAuthority;
 use common::sign_in::{OCTOCAT, oauth_expectations, sign_in};
 use ghinvite_core::admission::Admit;
 use ghinvite_core::request_lifecycle::DecideRequest;

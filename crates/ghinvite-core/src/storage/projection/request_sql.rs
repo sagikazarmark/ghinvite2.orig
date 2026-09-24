@@ -75,7 +75,18 @@ pub const STATEMENTS: &[&str] = &[
           decline_reason IS NOT json_extract(?1,'$.request.decision.decline_reason')))))
       AND NOT EXISTS(SELECT 1 FROM audit_events a JOIN json_each(?1,'$.events') j
         ON a.id=json_extract(j.value,'$.id') OR a.projection_event_id=json_extract(j.value,'$.event_id')
-        WHERE a.projection_content IS NOT json_extract(j.value,'$.content'))"#,
+         WHERE a.projection_content IS NOT json_extract(j.value,'$.content') OR
+           a.account_id IS NOT json_extract(?1,'$.request.account_id') OR
+           a.projection_event_id IS NOT json_extract(j.value,'$.event_id') OR
+           a.id IS NOT json_extract(j.value,'$.id') OR
+           a.event_type IS NOT json_extract(j.value,'$.kind') OR
+           a.actor_id IS NOT json_extract(j.value,'$.actor_id') OR
+           a.actor_kind IS NOT CASE WHEN json_extract(j.value,'$.actor_id') IS NULL THEN 'system' ELSE 'user' END OR
+           a.target_kind IS NOT 'invitation_request' OR
+           a.target_id IS NOT json_extract(j.value,'$.target_id') OR
+           a.occurred_at IS NOT json_extract(j.value,'$.effective_at') OR
+           a.evaluated_at IS NOT json_extract(j.value,'$.evaluated_at') OR
+           a.metadata IS NOT NULL OR a.request_id IS NOT NULL)"#,
     r#"INSERT INTO invitation_requests(id, invitation_link_id, requester_id, justification, state, created_at,
       decision_deadline, projection_revision, decided_by, decided_at, decline_reason, projection_content)
       SELECT json_extract(?1,'$.request.request_id'),json_extract(?1,'$.request.link_id'),

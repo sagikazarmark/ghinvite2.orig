@@ -5,6 +5,12 @@ date: 2026-09-14
 
 # Restate-authoritative admission with asynchronous database projections
 
+**Superseded ownership (2026-09-24):** [ADR 0009](0009-unified-repository-delivery.md)
+replaces the link-owned lifecycle and request Workflow protocol below with a
+persistent request Virtual Object. This ADR preserves the historical decision and
+proof record; use the [current ownership overview](../invitation-ownership.md)
+and [admission guide](../admission-v1.md) for operational instructions.
+
 For [#48](https://github.com/sagikazarmark/ghinvite2.orig/issues/48), we chose a link-ID-keyed Restate Virtual Object as the authority for invitation request admission and SQLx/D1 as asynchronously updated records and projections. Keeping admission state with its durable execution simplifies concurrency and recovery, and lets admission and revocation proceed while database writes are unavailable. We accept projection lag and the operational responsibility of retaining authoritative business state in Restate.
 
 **The architectural direction and product rules are accepted; the production protocol retains explicit proof obligations and open questions.** A bounded state-and-dispatch sequence passed the native runtime proof below on 2026-09-14; this is not an assertion that production admission or the D1/Worker integration is implemented. The [maintainer-approved refinement](https://github.com/sagikazarmark/ghinvite2.orig/issues/48#issuecomment-5666916141) supersedes earlier database-authoritative and all-effects-in-one-database-transaction proposals in that issue. Keep #48 open until the remaining protocol decisions, verification, and implementation-ticket breakdown are recorded.

@@ -290,30 +290,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     let link = ghinvite_core::InvitationLinkId::new();
     let call = |service: &str, key: String, handler: &str, input: Value| {
-        let request_route = service == "InvitationLink"
-            && matches!(
-                handler,
-                "prepare_dispatch"
-                    | "delivery_status"
-                    | "delivery_progress"
-                    | "decide"
-                    | "request_status"
-            );
-        let service = if request_route {
-            "InvitationRequest"
-        } else {
-            service
-        };
-        let key = if request_route {
-            input["request_id"].as_str().unwrap().to_owned()
-        } else {
-            key
-        };
-        let handler = if handler == "prepare_dispatch" {
-            "approved_plan"
-        } else {
-            handler
-        };
         let key = if service == "RepositoryDelivery" {
             if handler == "create" || handler == "recheck" {
                 let command = if handler == "recheck" {
@@ -375,9 +351,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let request = receipt["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":link,"request_id":request,"requester_id":8});
     let plan: Value = call(
-        "InvitationLink",
-        link.to_string(),
-        "prepare_dispatch",
+        "InvitationRequest",
+        request.to_owned(),
+        "approved_plan",
         query,
     )
     .send()
@@ -395,8 +371,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     assert!(completed.status().is_success());
     let checkpoint: Value = call(
-        "InvitationLink",
-        link.to_string(),
+        "InvitationRequest",
+        request.to_owned(),
         "delivery_status",
         json!({"link_id":link,"request_id":request,"requester_id":8}),
     )
@@ -496,9 +472,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
         let request = admitted["result"]["request_id"].as_str().unwrap();
         let plan: Value = call(
-            "InvitationLink",
-            link.to_string(),
-            "prepare_dispatch",
+            "InvitationRequest",
+            request.to_owned(),
+            "approved_plan",
             json!({"link_id":link,"request_id":request,"requester_id":8}),
         )
         .send()
@@ -684,9 +660,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     let partial_plan: Value = call(
-        "InvitationLink",
-        partial_link.to_string(),
-        "prepare_dispatch",
+        "InvitationRequest",
+        partial_request.to_owned(),
+        "approved_plan",
         query.clone(),
     )
     .send()
@@ -719,8 +695,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .is_success()
     );
     let checkpoint: Value = call(
-        "InvitationLink",
-        partial_link.to_string(),
+        "InvitationRequest",
+        partial_request.to_owned(),
         "delivery_status",
         query.clone(),
     )
@@ -866,8 +842,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .any(|c| c["method"] == "PUT" && c["path"] == "/repos/acme/web/collaborators/renamed")
     );
     let checkpoint: Value = call(
-        "InvitationLink",
-        partial_link.to_string(),
+        "InvitationRequest",
+        partial_request.to_owned(),
         "delivery_status",
         query,
     )
@@ -880,8 +856,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert_eq!(checkpoint["submitted"].as_array().unwrap().len(), 2);
     assert_eq!(checkpoint["plan"], partial_plan);
     let progress: Value = call(
-        "InvitationLink",
-        partial_link.to_string(),
+        "InvitationRequest",
+        partial_request.to_owned(),
         "delivery_progress",
         json!({"link_id":partial_link,"request_id":partial_request,"requester_id":8}),
     )
@@ -939,8 +915,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let rejected_request = admitted["result"]["request_id"].as_str().unwrap();
     let query = json!({"link_id":rejected_link,"request_id":rejected_request,"requester_id":84});
     let progress: Value = call(
-        "InvitationLink",
-        rejected_link.to_string(),
+        "InvitationRequest",
+        rejected_request.to_owned(),
         "delivery_progress",
         query.clone(),
     )
@@ -952,9 +928,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert_eq!(progress, json!([{"repo_id":10,"stage":"planned"}]));
     let plan: Value = call(
-        "InvitationLink",
-        rejected_link.to_string(),
-        "prepare_dispatch",
+        "InvitationRequest",
+        rejected_request.to_owned(),
+        "approved_plan",
         query.clone(),
     )
     .send()
@@ -964,8 +940,8 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     let progress: Value = call(
-        "InvitationLink",
-        rejected_link.to_string(),
+        "InvitationRequest",
+        rejected_request.to_owned(),
         "delivery_progress",
         query,
     )
@@ -1267,9 +1243,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
         let plan: Value = call(
-            "InvitationLink",
-            link.to_string(),
-            "prepare_dispatch",
+            "InvitationRequest",
+            admitted["result"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            "approved_plan",
             json!({"link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8}),
         )
         .send()
@@ -1345,9 +1324,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     let query = json!({"link_id":historical_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
     let plan: Value = call(
-        "InvitationLink",
-        historical_link.to_string(),
-        "prepare_dispatch",
+        "InvitationRequest",
+        query["request_id"].as_str().unwrap().to_owned(),
+        "approved_plan",
         query.clone(),
     )
     .send()
@@ -1527,9 +1506,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .collect::<Vec<_>>()
     );
     let retained_plan: Value = call(
-        "InvitationLink",
-        historical_link.to_string(),
-        "prepare_dispatch",
+        "InvitationRequest",
+        query["request_id"].as_str().unwrap().to_owned(),
+        "approved_plan",
         query,
     )
     .send()
@@ -1573,7 +1552,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let admitted = call("InvitationLink", key.clone(), "admit", admit);
     let admitted: Value = admitted.send().await.unwrap().json().await.unwrap();
     let query = json!({"link_id":throttled_link,"request_id":admitted["result"]["request_id"],"requester_id":8});
-    let plan = call("InvitationLink", key, "prepare_dispatch", query);
+    let plan = call(
+        "InvitationRequest",
+        query["request_id"].as_str().unwrap().to_owned(),
+        "approved_plan",
+        query,
+    );
     let plan: Value = plan.send().await.unwrap().json().await.unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
@@ -1790,9 +1774,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
         let plan: Value = call(
-            "InvitationLink",
-            link.to_string(),
-            "prepare_dispatch",
+            "InvitationRequest",
+            admitted["result"]["request_id"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            "approved_plan",
             json!({
                 "link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8
             }),

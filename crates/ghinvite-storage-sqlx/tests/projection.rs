@@ -1,4 +1,6 @@
-use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
+use ghinvite_core::storage::projection::{
+    ProjectionEnvelope, ProjectionStorage, RequestProjectionEnvelope,
+};
 use ghinvite_core::storage::{
     AuditPosition, ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage,
 };
@@ -22,12 +24,19 @@ fn envelope() -> ProjectionEnvelope {
                 "repos": [{"repo_id": 10, "repo_full_name": "acme/api"}]
             }
         },
-        "requests": [{
+        "events": []
+    }))
+    .unwrap()
+}
+
+fn request_envelope() -> RequestProjectionEnvelope {
+    serde_json::from_value(json!({
+        "request": {
             "request_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW", "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "account_id": 100, "requester_id": 8, "justification": "Access please",
             "state": "pending", "admitted_at": "2026-09-14T01:00:00Z",
             "decision_deadline": "2026-09-21T01:00:00Z", "revision": 1
-        }],
+        },
         "events": [{"event_id": "request.created/01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "kind": "request.created", "actor_id": 8, "target_id": "01ARZ3NDEKTSV4RRFFQ69G5FAW",
             "effective_at": "2026-09-14T01:00:00Z", "evaluated_at": "2026-09-14T01:00:00Z"}]
@@ -72,6 +81,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
     parents(&storage).await;
     let envelope = envelope();
     storage.apply_transition(&envelope).await.unwrap();
+    storage.apply_request(&request_envelope()).await.unwrap();
     let fault = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
@@ -94,7 +104,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
     ] {
         let id = ghinvite_core::GithubInvitationId::new();
         let receipt: ghinvite_core::delivery::CreateReceipt = serde_json::from_value(json!({
-            "command":{"invitation_id":id,"link_id":envelope.link.link_id,"request_id":envelope.requests[0].request_id,
+            "command":{"invitation_id":id,"link_id":envelope.link.link_id,"request_id":request_envelope().request.request_id,
                 "approval_id":"approval","account_id":100,"installation_id":1,"requester_id":8,"repo_id":10,
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
@@ -197,6 +207,7 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
     parents(&storage).await;
     let envelope = envelope();
     storage.apply_transition(&envelope).await.unwrap();
+    storage.apply_request(&request_envelope()).await.unwrap();
     let link = storage
         .get_invitation_link_by_id(envelope.link.link_id)
         .await
@@ -260,14 +271,16 @@ async fn maximum_escaped_command_payload_remains_projectable() {
     parents(&storage).await;
     let mut input = envelope();
     input.link.creation.internal_note = Some("\u{0001}".repeat(16_384));
-    input.requests[0].justification = Some("\u{0001}".repeat(16_384));
     storage.apply_transition(&input).await.unwrap();
+    let mut input = request_envelope();
+    input.request.justification = Some("\u{0001}".repeat(16_384));
+    storage.apply_request(&input).await.unwrap();
     let request = storage
-        .get_invitation_request(input.requests[0].request_id)
+        .get_invitation_request(input.request.request_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(request.justification, input.requests[0].justification);
+    assert_eq!(request.justification, input.request.justification);
 }
 
 #[tokio::test]
@@ -283,6 +296,7 @@ async fn restored_relational_identity_conflicts_are_not_hidden_by_snapshot_json(
     parents(&storage).await;
     let input = envelope();
     storage.apply_transition(&input).await.unwrap();
+    storage.apply_request(&request_envelope()).await.unwrap();
     let pool = sqlx::SqlitePool::connect(&format!("sqlite:{}", path.display()))
         .await
         .unwrap();
@@ -305,9 +319,15 @@ async fn restored_relational_identity_conflicts_are_not_hidden_by_snapshot_json(
         ),
     ] {
         sqlx::query(corrupt).execute(&pool).await.unwrap();
+        let result = if corrupt.contains("invitation_requests") || corrupt.contains("audit_events")
+        {
+            storage.apply_request(&request_envelope()).await
+        } else {
+            storage.apply_transition(&input).await
+        };
         assert!(
             matches!(
-                storage.apply_transition(&input).await,
+                result,
                 Err(ghinvite_core::storage::Error::ProjectionInvariant(_))
             ),
             "{corrupt}"
@@ -341,21 +361,15 @@ async fn restored_relational_identity_conflicts_are_not_hidden_by_snapshot_json(
 async fn conflicting_duplicate_events_roll_back_the_entire_envelope() {
     let storage = SqlxStorage::in_memory().await.unwrap();
     parents(&storage).await;
-    let mut input = envelope();
+    storage.apply_transition(&envelope()).await.unwrap();
+    let mut input = request_envelope();
     let mut conflicting = input.events[0].clone();
     conflicting.evaluated_at += chrono::Duration::seconds(1);
     input.events.push(conflicting);
     assert!(matches!(
-        storage.apply_transition(&input).await,
+        storage.apply_request(&input).await,
         Err(ghinvite_core::storage::Error::ProjectionInvariant(_))
     ));
-    assert!(
-        storage
-            .list_invitation_links_for_account(100)
-            .await
-            .unwrap()
-            .is_empty()
-    );
     assert_eq!(
         storage
             .count_pending_requests_for_account(100)
@@ -382,17 +396,16 @@ async fn reordered_snapshots_keep_independent_revisions_and_historical_events() 
     revoked.link.revision = 3;
     revoked.link.revoked_at = Some("2026-09-14T02:00:00Z".parse().unwrap());
     revoked.link.revoked_by = Some(7);
-    revoked.requests.clear();
     revoked.events.clear();
     storage.apply_transition(&revoked).await.unwrap();
     // A stale link must not suppress a missing request or historical event.
     storage.apply_transition(&old).await.unwrap();
     storage.apply_transition(&old).await.unwrap();
-    let mut terminal = old.clone();
-    terminal.requests[0].revision = 2;
-    terminal.requests[0].state = ghinvite_core::RequestState::Expired;
-    storage.apply_transition(&terminal).await.unwrap();
-    storage.apply_transition(&old).await.unwrap();
+    let initial = request_envelope();
+    let mut terminal = initial.clone();
+    expire(&mut terminal);
+    storage.apply_request(&terminal).await.unwrap();
+    storage.apply_request(&initial).await.unwrap();
     let link = storage
         .get_invitation_link_by_id(old.link.link_id)
         .await
@@ -443,6 +456,7 @@ async fn parent_repair_retries_without_overwriting_owned_facts() {
         .await
         .unwrap();
     storage.apply_transition(&input).await.unwrap();
+    storage.apply_request(&request_envelope()).await.unwrap();
     assert_eq!(storage.get_user(8).await.unwrap().unwrap().login, "renamed");
     assert_eq!(
         storage
@@ -470,26 +484,27 @@ async fn invariant_conflicts_are_observable_and_redrive_is_atomic() {
     parents(&storage).await;
     let input = envelope();
     storage.apply_transition(&input).await.unwrap();
-    let mut conflicts = vec![];
+    storage.apply_request(&request_envelope()).await.unwrap();
     let mut changed = input.clone();
     changed.link.revision = 1; // stale immutable identity still conflicts
     changed.link.creation.account_id = 101;
     changed.link.creation.admin.account_id = 101;
-    changed.requests.clear();
     changed.events.clear();
+    assert!(matches!(
+        storage.apply_transition(&changed).await,
+        Err(ghinvite_core::storage::Error::ProjectionInvariant(_))
+    ));
+    let mut conflicts = vec![];
+    let mut changed = request_envelope();
+    changed.request.revision = 2;
+    changed.request.requester_id = 7;
     conflicts.push(changed);
-    let mut changed = input.clone();
-    changed.link.revision = 3;
-    changed.requests[0].revision = 2;
-    changed.requests[0].requester_id = 7;
-    conflicts.push(changed);
-    let mut changed = input.clone();
-    changed.link.revision = 3;
+    let mut changed = request_envelope();
     changed.events[0].actor_id = Some(7);
     conflicts.push(changed);
     for changed in conflicts {
         assert!(matches!(
-            storage.apply_transition(&changed).await,
+            storage.apply_request(&changed).await,
             Err(ghinvite_core::storage::Error::ProjectionInvariant(_))
         ));
         assert_eq!(
@@ -529,17 +544,19 @@ async fn reordered_readmission_does_not_require_old_request_projection_first() {
     let mut fresh = old.clone();
     fresh.link.revision = 4;
     fresh.link.uses = 2;
-    fresh.requests[0].request_id = ghinvite_core::RequestId::new();
     fresh.events.clear();
     storage.apply_transition(&fresh).await.unwrap();
     storage.apply_transition(&old).await.unwrap();
-    let mut expired = old.clone();
-    expired.requests[0].state = ghinvite_core::RequestState::Expired;
-    expired.requests[0].revision = 2;
-    storage.apply_transition(&expired).await.unwrap();
+    let mut fresh = request_envelope();
+    fresh.request.request_id = ghinvite_core::RequestId::new();
+    fresh.events.clear();
+    storage.apply_request(&fresh).await.unwrap();
+    let mut expired = request_envelope();
+    expire(&mut expired);
+    storage.apply_request(&expired).await.unwrap();
     let pending = storage.pending_request_page(100, None).await.unwrap().rows;
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].request_id, fresh.requests[0].request_id);
+    assert_eq!(pending[0].request_id, fresh.request.request_id);
     assert_eq!(
         storage
             .count_pending_requests_for_account(100)
@@ -556,4 +573,17 @@ async fn reordered_readmission_does_not_require_old_request_projection_first() {
             .uses_count,
         2
     );
+}
+
+fn expire(envelope: &mut RequestProjectionEnvelope) {
+    envelope.request.revision = 2;
+    envelope.request.state = ghinvite_core::RequestState::Expired;
+    let at = envelope.request.decision_deadline.unwrap();
+    envelope.request.decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
+        decision_id: format!("request.expired/{}", envelope.request.request_id),
+        decided_by: None,
+        effective_at: at,
+        evaluated_at: at,
+        decline_reason: None,
+    });
 }

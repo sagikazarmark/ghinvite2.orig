@@ -1,5 +1,5 @@
 use ghinvite_core::storage::pending_queue::PendingBoundary;
-use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
+use ghinvite_core::storage::projection::fixture;
 use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, Permission,
@@ -86,8 +86,7 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
             created_at: now,
             decision_deadline: Some(now),
         };
-        storage
-            .apply_transition(&fixture::envelope(&link, std::slice::from_ref(&request), 1))
+        fixture::seed(&storage, &link, std::slice::from_ref(&request), 1)
             .await
             .unwrap();
         requests.push(request);
@@ -140,10 +139,7 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
         request.state = RequestState::Declined;
         request.decided_by = Some(1);
         request.decided_at = Some(now);
-        storage
-            .apply_transition(&fixture::envelope(&link, &[request], 2))
-            .await
-            .unwrap();
+        fixture::seed(&storage, &link, &[request], 2).await.unwrap();
     }
     let second = storage.pending_request_page(42, first.next).await.unwrap();
     assert_eq!(

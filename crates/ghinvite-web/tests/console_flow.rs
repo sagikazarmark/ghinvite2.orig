@@ -16,7 +16,7 @@ use tower::ServiceExt;
 
 mod common;
 
-use common::link_authority::FakeLinkAuthority;
+use common::authority_http_fixture::FakeLinkAuthority;
 use common::sign_in::{
     ACME_ADMIN, GithubUser, OCTOCAT, acme_installation, oauth_expectations, session_cookie,
     sign_in, sign_in_with_cookie, signed_in_app, unreachable_restate,
@@ -31,15 +31,45 @@ mod mutation_recovery;
 #[path = "console_flow/request_history.rs"]
 mod request_history;
 
+#[derive(Clone, serde::Deserialize)]
+struct QueueFixture {
+    transition_id: String,
+    link: ghinvite_core::storage::projection::LinkSnapshot,
+    requests: Vec<ghinvite_core::request_lifecycle::RequestSnapshot>,
+}
+impl QueueFixture {
+    async fn project(&self, storage: &ghinvite_storage_sqlx::SqlxStorage) {
+        use ghinvite_core::storage::projection::{
+            ProjectionEnvelope, ProjectionStorage, RequestProjectionEnvelope,
+        };
+        storage
+            .apply_transition(&ProjectionEnvelope {
+                transition_id: self.transition_id.clone(),
+                link: self.link.clone(),
+                events: vec![],
+            })
+            .await
+            .unwrap();
+        for request in &self.requests {
+            storage
+                .apply_request(&RequestProjectionEnvelope {
+                    request: request.clone(),
+                    events: vec![],
+                })
+                .await
+                .unwrap();
+        }
+    }
+}
+
 async fn deadline_queue_app(
     expires_at: Option<&str>,
 ) -> (
     axum::Router,
     String,
     Arc<ghinvite_storage_sqlx::SqlxStorage>,
-    ghinvite_core::storage::projection::ProjectionEnvelope,
+    QueueFixture,
 ) {
-    use ghinvite_core::storage::projection::ProjectionStorage;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -63,7 +93,7 @@ async fn deadline_queue_app(
     let link = ghinvite_core::InvitationLinkId::new();
     let request = ghinvite_core::RequestId::new();
     // A historical/custom deadline, deliberately not today's seven-day policy.
-    let envelope = serde_json::from_value(serde_json::json!({
+    let envelope: QueueFixture = serde_json::from_value(serde_json::json!({
         "transition_id":format!("link/{link}/2"),
         "link":{"link_id":link,"revision":2,"uses":1,
             "created_at":"2026-01-01T00:00:00Z", "revoked_at":null,"revoked_by":null,
@@ -76,7 +106,7 @@ async fn deadline_queue_app(
             "decision_deadline":"2026-01-03T12:34:56Z","revision":1}],"events":[]
     }))
     .unwrap();
-    storage.apply_transition(&envelope).await.unwrap();
+    envelope.project(&storage).await;
     // The authority holds the link the projection was written from.
     let authority = FakeLinkAuthority::start().await;
     authority.seed(envelope.link.clone());
@@ -93,7 +123,6 @@ async fn deadline_queue_app(
 
 #[tokio::test]
 async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
-    use ghinvite_core::storage::projection::ProjectionStorage;
     let (app, cookie, storage, mut envelope) = deadline_queue_app(None).await;
     let template = envelope.requests[0].clone();
     envelope.link.revision += 1;
@@ -110,7 +139,7 @@ async fn queue_pages_navigate_without_offset_drift_and_use_description_first() {
     for request in &envelope.requests {
         let mut transition = envelope.clone();
         transition.requests = vec![request.clone()];
-        storage.apply_transition(&transition).await.unwrap();
+        transition.project(&storage).await;
     }
     let path = "/console/accounts/octocat/requests";
     let html = response_html(identity_request(&app, &cookie, "GET", path).await).await;
@@ -192,7 +221,6 @@ async fn queue_keeps_historical_deadline_independent_of_earlier_or_later_link_ex
 
 #[tokio::test]
 async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
-    use ghinvite_core::storage::projection::ProjectionStorage;
     let (app, cookie, storage, mut envelope) = deadline_queue_app(None).await;
     let link = ghinvite_core::InvitationLinkId::new();
     envelope.link.link_id = link;
@@ -204,7 +232,14 @@ async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
     envelope.requests[0].state = ghinvite_core::RequestState::Approved;
     envelope.requests[0].decision_deadline = None;
     envelope.requests[0].justification = Some("Auto-approved request fixture".into());
-    storage.apply_transition(&envelope).await.unwrap();
+    envelope.requests[0].decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
+        decision_id: "fixture-auto".into(),
+        decided_by: None,
+        effective_at: envelope.requests[0].admitted_at,
+        evaluated_at: envelope.requests[0].admitted_at,
+        decline_reason: None,
+    });
+    envelope.project(&storage).await;
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/requests").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -286,7 +321,7 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let authority = FakeLinkAuthority::start().await;
     let link = octocat_link();
     let id = link.id;
-    let mut authoritative = common::link_authority::snapshot(&link);
+    let mut authoritative = common::authority_http_fixture::snapshot(&link);
     authoritative.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
         description: "Authoritative details".into(),
         internal_note: None,

@@ -25,8 +25,8 @@ pub struct InvitationRequest {
     faults: Option<std::sync::Arc<Faults>>,
 }
 
-/// A link-side proof of the acyclic handoff, bound only by protocol tests until
-/// the production cutover passes interruption verification.
+/// A link-side caller for the focused initialization/eligibility fault matrix.
+/// Only protocol tests bind it; assembled journeys use the real link owner.
 #[cfg(feature = "integration")]
 pub struct AdmissionProtocol;
 

@@ -13,7 +13,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
-use common::link_authority::FakeLinkAuthority;
+use common::authority_http_fixture::FakeLinkAuthority;
 use common::sign_in::sign_in;
 use ghinvite_core::admission::RequesterPage;
 use ghinvite_core::storage::projection::RequestSnapshot;

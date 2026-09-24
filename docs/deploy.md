@@ -2,6 +2,12 @@
 
 ## Rollout status and order
 
+The simplified owners require the coordinated
+[clean prelaunch replacement](invitation-ownership.md#clean-prelaunch-replacement):
+fresh Restate and SQL/D1 state, matching web/workflow artifacts, new sessions, and
+retirement of old registrations and writers. Applying migrations to discarded
+prelaunch state is not a supported import path.
+
 **Production rollout remains blocked under [#61](https://github.com/sagikazarmark/ghinvite2.orig/issues/61).**
 This procedure describes the target deployment and disposable remote rehearsal;
 documentation, passing local tests, and provisioning alone do not authorize rollout.

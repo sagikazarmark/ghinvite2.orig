@@ -4,7 +4,7 @@ use ghinvite_core::storage::{
 use ghinvite_core::{
     audit::*,
     delivery::{DeliverySnapshot, Settlement},
-    storage::{AuditPosition, projection::ProjectionStorage},
+    storage::AuditPosition,
     *,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
@@ -66,13 +66,9 @@ async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, DeliverySnapshot) {
         decision_deadline: None,
         created_at: at,
     };
-    s.apply_transition(&storage::projection::fixture::envelope(
-        &link,
-        std::slice::from_ref(&request),
-        1,
-    ))
-    .await
-    .unwrap();
+    storage::projection::fixture::seed(&s, &link, std::slice::from_ref(&request), 1)
+        .await
+        .unwrap();
     let row = GithubInvitation {
         id: GithubInvitationId::new(),
         invitation_request_id: request.id,

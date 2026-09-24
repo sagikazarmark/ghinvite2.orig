@@ -84,9 +84,7 @@ async fn seed<S: ProjectionStorage>(
     requests: &[InvitationRequest],
     revision: u64,
 ) {
-    s.apply_transition(&fixture::envelope(link, requests, revision))
-        .await
-        .unwrap();
+    fixture::seed(s, link, requests, revision).await.unwrap();
 }
 
 /// Declares every scenario once: the name list adapters iterate and the
@@ -182,12 +180,25 @@ pub async fn scenario_request_owner_projection<S: Storage + ProjectionStorage>(s
         request: terminal.clone(),
         events: vec![expired],
     };
+    let mut old_link_envelope = serde_json::to_value(fixture::envelope(&link, 1)).unwrap();
+    old_link_envelope["requests"] = serde_json::json!([terminal]);
+    assert!(
+        serde_json::from_value::<super::projection::ProjectionEnvelope>(old_link_envelope).is_err(),
+        "the retired link-owned request writer must not be an accepted protocol"
+    );
     assert!(matches!(
         s.apply_request(&envelope).await,
         Err(super::Error::ProjectionDependency)
     ));
     seed(&s, &link, &[], 1).await;
-    s.apply_request(&envelope).await.unwrap();
+    let lost_ack: Result<(), super::Error> = async {
+        s.apply_request(&envelope).await?;
+        Err(super::Error::Database(
+            "fixture: committed request acknowledgement lost".into(),
+        ))
+    }
+    .await;
+    assert!(lost_ack.is_err());
     assert_eq!(
         s.get_invitation_request(id).await.unwrap().unwrap().state,
         RequestState::Expired

@@ -835,10 +835,8 @@ mod tests {
         requests: &[InvitationRequest],
         revision: u64,
     ) {
-        use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
-        s.apply_transition(&fixture::envelope(link, requests, revision))
-            .await
-            .unwrap();
+        use ghinvite_core::storage::projection::fixture;
+        fixture::seed(s, link, requests, revision).await.unwrap();
     }
 
     #[tokio::test]

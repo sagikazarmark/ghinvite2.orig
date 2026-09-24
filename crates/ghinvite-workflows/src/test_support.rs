@@ -127,7 +127,6 @@ pub(crate) async fn seed_request_chain(
     storage: &ghinvite_storage_sqlx::SqlxStorage,
     repos: Vec<ghinvite_core::InvitationLinkRepo>,
 ) -> SeededRequest {
-    use ghinvite_core::storage::projection::ProjectionStorage;
     use ghinvite_core::{
         AccountType, InvitationLink, InvitationLinkId, Permission, RequestId, RequestState,
         SelectedRepos,
@@ -186,12 +185,7 @@ pub(crate) async fn seed_request_chain(
         decision_deadline: None,
         created_at: dt("2026-05-04T12:30:00Z"),
     };
-    storage
-        .apply_transition(&ghinvite_core::storage::projection::fixture::envelope(
-            &link,
-            &[request],
-            1,
-        ))
+    ghinvite_core::storage::projection::fixture::seed(storage, &link, &[request], 1)
         .await
         .unwrap();
     SeededRequest {

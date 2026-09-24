@@ -127,7 +127,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     let link = ghinvite_core::InvitationLinkId::new();
     let call = |handler: &str, input: Value| {
-        let route = if handler == "prepare_dispatch" {
+        let route = if handler == "approved_plan" {
             format!(
                 "InvitationRequest/{}/approved_plan",
                 input["request_id"].as_str().unwrap()
@@ -150,7 +150,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .await
     .unwrap();
     let plan: Value = call(
-        "prepare_dispatch",
+        "approved_plan",
         json!({"link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8}),
     )
     .send()

@@ -99,6 +99,8 @@ jobs:
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker
+      - name: Authenticated assembled journey on actual Workers and D1
+        run: npm run test:journey --prefix tests/worker
       - name: Verify approved delivery without projected parents on Worker/D1
         run: npm run test:delivery --prefix tests/worker
 
@@ -220,7 +222,9 @@ jobs:
       # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
       - name: Verify authoritative admission and recovery
         run: bash scripts/test-restate.sh authoritative_admission
-      - name: Authenticated single-ID creation before projection
+      - name: Verify request initialization and deadline verdict recovery
+        run: bash scripts/test-restate.sh request_owner
+      - name: Authenticated invitation journey, settlement and retained recovery
         run: bash scripts/test-restate.sh canonical_link
       - name: Verify retained delivery and uncertain HTTP recovery
         run: bash scripts/test-restate.sh retained_delivery

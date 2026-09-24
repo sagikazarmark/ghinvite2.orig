@@ -92,7 +92,7 @@ confirmation time for `updated_at`. Later settlement is never overwritten.
 Audit insertion runs even for stale receipts or a lifecycle already
 beyond Sending; identical event content replays, conflicting content fails the
 whole projection. Ordinary retry and `DeliveryRecovery/recover` repair missing
-history without another GitHub write, including after workflow retention cleanup.
+history without another GitHub write, including after completed-execution cleanup.
 
 The fence must be backed up alongside Restate and must never be reset or expired.
 Independent database restore requires closing writes and reconciling all
@@ -102,11 +102,11 @@ unjournaled HTTP effects. Missing state is never permission to generate new IDs.
 ## Ordinary and explicit recovery
 
 Ordinary Restate replay finishes interrupted sends and checkpoints. For deliberate
-repair after workflow retention, call the private ordinary service
+repair after completed-execution retention, call the private ordinary service
 `DeliveryRecovery/recover` with `{link_id, request_id, requester_id}` from a trusted
 operator/caller. It obtains the retained plan, checks receiving receipts for input
 conflicts, durably resubmits original commands, and records submission checkpoints.
-It never starts `InvitationRequest/run`. Its response describes submission only;
+Its response describes submission only;
 read `RepositoryDelivery/<request>:<repository>/status` or the current request page for delivery outcomes.
 
 Blocked creates schedule a one-hour dependency recheck, or the throttling wait

@@ -125,12 +125,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let link = ghinvite_core::InvitationLinkId::new().to_string();
     let call = |handler: &str, input: Value| {
-        let route = if matches!(handler, "request_status" | "decide" | "prepare_dispatch") {
-            let handler = if handler == "prepare_dispatch" {
-                "approved_plan"
-            } else {
-                handler
-            };
+        let route = if matches!(handler, "request_status" | "decide" | "approved_plan") {
             format!(
                 "InvitationRequest/{}/{handler}",
                 input["request_id"].as_str().unwrap()
@@ -303,7 +298,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         approved["request"]["decision_deadline"],
         pending["decision_deadline"]
     );
-    let plan: Value = call("prepare_dispatch", query.clone())
+    let plan: Value = call("approved_plan", query.clone())
         .send()
         .await
         .unwrap()
@@ -797,7 +792,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "approved"
     );
     assert_eq!(
-        call("prepare_dispatch", query)
+        call("approved_plan", query)
             .send()
             .await
             .unwrap()

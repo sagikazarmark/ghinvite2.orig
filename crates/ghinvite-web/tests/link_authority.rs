@@ -11,7 +11,7 @@
 //! tests. A test name here that claimed a rule would hold whether or not the
 //! rule did.
 
-#[path = "common/link_authority.rs"]
+#[path = "common/authority_http_fixture.rs"]
 mod fake;
 
 use chrono::{Duration, Utc};
@@ -34,6 +34,22 @@ const ADMIN: AccountAdmin = AccountAdmin {
     account_id: 42,
     user_id: 42,
 };
+
+#[tokio::test]
+async fn http_fixture_rejects_request_commands_addressed_to_the_link() {
+    let fake = FakeLinkAuthority::start().await;
+    let link = link();
+    fake.seed_link(&link);
+    let request = pending(&link, Utc::now() + Duration::days(1));
+    fake.seed_request(request.clone());
+    let response = reqwest::Client::new()
+        .post(format!("{}/InvitationLink/{}/decide", fake.url(), link.id))
+        .json(&decide(&request, DecisionAction::Approve))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+}
 
 fn link() -> InvitationLink {
     InvitationLink {

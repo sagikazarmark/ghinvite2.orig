@@ -4,6 +4,10 @@ GitHub invitation management via invitation links. Organisation owners create in
 
 ## Architecture
 
+See [invitation ownership and recovery](docs/invitation-ownership.md) for the
+current owners, retained safety/history records, acceptance gates and coordinated
+clean prelaunch replacement, following ADR 0009.
+
 Two Cloudflare Workers sharing one D1 database:
 
 - **ghinvite-web** (`crates/ghinvite-web-worker`) — HTTP, SSR, OAuth, webhooks
