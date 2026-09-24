@@ -2,11 +2,43 @@
 #![cfg(feature = "integration")]
 use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{RequestId, storage::Storage};
-use restate_sdk::{endpoint::Endpoint, http_server::HttpServer};
+use restate_sdk::endpoint::{Endpoint, HandleOptions, ProtocolMode};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
 const MEMBER_WEBHOOK_SECRET: &[u8] = b"member-webhook-runtime-fixture";
+
+/// Own SDK tasks so the acceptance test can interrupt actual endpoint execution
+/// after a journal boundary, then let Restate replay the original invocation.
+async fn serve(
+    axum::extract::State((endpoint, tasks)): axum::extract::State<(
+        Endpoint,
+        Arc<std::sync::Mutex<Vec<tokio::task::AbortHandle>>>,
+    )>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::body::{Body, to_bytes};
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+    let task = tokio::spawn(async move {
+        let response = endpoint.handle_with_options(
+            axum::extract::Request::from_parts(parts, Body::from(bytes)),
+            HandleOptions {
+                protocol_mode: ProtocolMode::RequestResponse,
+            },
+        );
+        let (parts, body) = response.into_parts();
+        let bytes = to_bytes(Body::new(body), 1024 * 1024).await.unwrap();
+        axum::response::Response::from_parts(parts, Body::from(bytes))
+    });
+    tasks.lock().unwrap().push(task.abort_handle());
+    task.await.unwrap_or_else(|_| {
+        axum::response::Response::builder()
+            .status(503)
+            .body(Body::from("fixture: endpoint interrupted"))
+            .unwrap()
+    })
+}
 
 async fn send_signed_member(
     client: &reqwest::Client,
@@ -224,10 +256,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         ghinvite_workflows::delivery::bind_with_faults(builder, state, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = axum::Router::new()
+        .fallback(serve)
+        .with_state((endpoint, tasks.clone()));
     let server = tokio::spawn(async move {
-        HttpServer::new(endpoint)
-            .serve_with_cancel(listener, std::future::pending::<()>())
-            .await;
+        axum::serve(listener, app).await.unwrap();
     });
     let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
     let ingress = std::env::var("RESTATE_INGRESS_URL").unwrap();
@@ -456,6 +490,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             1,
             "{stub_outcome}"
         );
+        assert_create_audit(&*storage, &replay).await;
         let rows = storage
             .list_delivery_for_request(request.parse().unwrap())
             .await
@@ -464,7 +499,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             serde_json::to_value(&rows[0]).unwrap()["outcome"],
             replay["outcome"]
         );
-        assert_create_audit(&*storage, &replay).await;
     }
     tokio::time::timeout(Duration::from_secs(15), async { loop {
         let response: Value = client.post(format!("{admin}/query")).header("accept","application/json")
@@ -1382,6 +1416,10 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // the invitation, and its recheck follows GitHub's own retry guidance rather
     // than the slow dependency cadence. The object lock is released for that
     // wait, so the status reads below do not queue behind the retry.
+    faults
+        .projection_unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    client.delete(format!("{base}/reset")).send().await.unwrap();
     let throttled_link = ghinvite_core::InvitationLinkId::new();
     call("InvitationLink", throttled_link.to_string(), "create", json!({
         "link_id":throttled_link,"account_id":100,"installation_id":19,
@@ -1418,11 +1456,44 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .get_github_invitation(id.parse().unwrap())
         .await
         .unwrap();
+    assert!(sending.is_none(), "receipt projection remains unavailable");
+    // Explicit recovery is an exclusive command too. It returns while SQL is
+    // stalled and keeps the original pending timer instead of adding an hour.
+    credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    let redriven: Value = call("GithubCreate", id.into(), "create", command.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(redriven["outcome"]["kind"], "blocked");
+    assert_eq!(redriven["revision"], 2);
+    for _ in 0..2 {
+        let stale = call(
+            "GithubCreate",
+            id.into(),
+            "recheck",
+            json!({"command":command,"generation":0}),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert!(stale.status().is_success());
+    }
+    let retained: Value = client
+        .post(format!("{ingress}/GithubCreate/{id}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(
-        sending.unwrap().state,
-        ghinvite_core::InvitationState::Sending,
-        "a rate limit never settles an invitation"
+        retained, redriven,
+        "stale wakes cannot consume the scheduled generation"
     );
+    credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
     // The stub asked for one second; the recheck that wait scheduled delivers
     // without any further command from us.
     let mut recovered = Value::Null;
@@ -1435,6 +1506,48 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         }
     }
     assert_eq!(recovered["outcome"]["kind"], "created", "{recovered}");
+    assert!(
+        faults
+            .projection_failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    );
+    let replay: Value = call("GithubCreate", id.into(), "create", command.clone())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        replay, recovered,
+        "confirmed replay must finish during projection outage"
+    );
+    assert!(
+        storage
+            .get_github_invitation(id.parse().unwrap())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    faults
+        .projection_unavailable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if storage
+                .get_github_invitation(id.parse().unwrap())
+                .await
+                .unwrap()
+                .is_some_and(|row| row.state == ghinvite_core::InvitationState::Sent)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("receipt projection converges after repair");
     let delivered = storage
         .get_github_invitation(id.parse().unwrap())
         .await
@@ -1442,6 +1555,183 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let upstream = delivered.unwrap().github_invitation_id;
     assert_eq!(upstream, recovered["outcome"]["upstream_id"].as_u64());
     assert_create_audit(&*storage, &recovered).await.unwrap();
+    // Replayed/stale wakes cannot reopen confirmed delivery or perform a PUT.
+    for generation in [1, 1, 0] {
+        let response = call(
+            "GithubCreate",
+            id.into(),
+            "recheck",
+            json!({"command":command,"generation":generation}),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert!(response.status().is_success());
+    }
+    let status: Value = client
+        .post(format!("{ingress}/GithubCreate/{id}/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status, recovered);
+    assert_eq!(
+        status["revision"], 3,
+        "only the original timer advances the redriven delivery"
+    );
+    let calls: Value = client
+        .get(format!("{base}/calls"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let writes: Vec<_> = calls["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["method"] == "PUT")
+        .collect();
+    assert_eq!(
+        writes.len(),
+        2,
+        "one throttled PUT and one successful PUT across outage, repair and stale wakes"
+    );
+    assert_eq!(writes.iter().filter(|c| c["status"] == 201).count(), 1);
+
+    for stage in [
+        "after-receipt",
+        "after-projection-send",
+        "after-recheck-send",
+    ] {
+        client.delete(format!("{base}/reset")).send().await.unwrap();
+        let link = ghinvite_core::InvitationLinkId::new();
+        call("InvitationLink", link.to_string(), "create", json!({
+            "link_id":link,"account_id":100,"installation_id":19,
+            "admin":{"account_id":100,"user_id":7},"description":"Interrupted delivery",
+            "approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]
+        })).send().await.unwrap();
+        let admitted: Value = call(
+            "InvitationLink",
+            link.to_string(),
+            "admit",
+            json!({
+                "link_id":link,"requester_id":8,"operation_id":RequestId::new()
+            }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let plan: Value = call(
+            "InvitationLink",
+            link.to_string(),
+            "prepare_dispatch",
+            json!({
+                "link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8
+            }),
+        )
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        let command = plan["commands"][0].clone();
+        let id = command["invitation_id"].as_str().unwrap();
+        if stage == "after-recheck-send" {
+            client
+                .post(format!("{base}/outcomes"))
+                .json(
+                    &json!({"owner":"acme","repo":"api","user":"alice","outcome":"throttled_once"}),
+                )
+                .send()
+                .await
+                .unwrap();
+        }
+        *faults.stage.lock().unwrap() = Some(stage.into());
+        faults
+            .interruptions
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        let request = call("GithubCreate", id.into(), "create", command.clone());
+        let response = tokio::spawn(async move { request.send().await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while faults
+                .interruptions
+                .load(std::sync::atomic::Ordering::SeqCst)
+                < 2
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("delivery paused at journal boundary");
+        let retained: Value = client
+            .post(format!("{ingress}/GithubCreate/{id}/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        *faults.stage.lock().unwrap() = None;
+        let mut aborted = 0;
+        for task in tasks.lock().unwrap().drain(..) {
+            if !task.is_finished() {
+                task.abort();
+                aborted += 1;
+            }
+        }
+        assert!(aborted > 0, "interrupt live SDK execution");
+        let result: Value = response.await.unwrap().json().await.unwrap();
+        assert_eq!(
+            result, retained,
+            "replay keeps outcome, identity and timestamp at {stage}"
+        );
+        let recovered = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let status: Value = client
+                    .post(format!("{ingress}/GithubCreate/{id}/status"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if status["outcome"]["kind"] == "created" {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("interrupted continuation completes");
+        assert_create_audit(&*storage, &recovered).await.unwrap();
+        let calls: Value = client
+            .get(format!("{base}/calls"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let writes: Vec<_> = calls["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["method"] == "PUT")
+            .collect();
+        assert_eq!(
+            writes.len(),
+            if stage == "after-recheck-send" { 2 } else { 1 }
+        );
+        assert_eq!(writes.iter().filter(|c| c["status"] == 201).count(), 1);
+    }
     server.abort();
     stub_task.abort();
 }
@@ -1468,6 +1758,30 @@ async fn assert_create_audit(
         audit::{ActorKind, EventType, TargetKind},
         storage::AuditPosition,
     };
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let rows = storage
+                .list_delivery_for_request(
+                    receipt["command"]["request_id"]
+                        .as_str()
+                        .unwrap()
+                        .parse()
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if rows.iter().any(|row| {
+                row.command.invitation_id.to_string()
+                    == receipt["command"]["invitation_id"].as_str().unwrap()
+                    && row.revision >= receipt["revision"].as_u64().unwrap()
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("delivery read projection catches up");
     let events = storage
         .list_audit_events(100, None, AuditPosition::Latest)
         .await

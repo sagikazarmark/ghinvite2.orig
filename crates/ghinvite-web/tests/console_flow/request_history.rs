@@ -244,46 +244,11 @@ async fn request_history_pages_and_terminal_details_conceal_foreign_resources() 
 #[tokio::test]
 async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery() {
     use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
-    let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
-    let request = &envelope.requests[0];
-    {
-        let mut decided = storage
-            .get_invitation_request(request.request_id)
-            .await
-            .unwrap()
-            .unwrap();
-        decided.state = ghinvite_core::RequestState::Approved;
-        decided.decided_by = Some(42);
-        decided.decided_at = Some("2026-01-02T12:00:00Z".parse().unwrap());
-        decided.decline_reason = None;
-        storage.seed_decision(&decided).await.unwrap();
-    }
-    let path = format!("/console/accounts/octocat/requests/{}", request.request_id);
-    let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
-    assert!(html.contains("No projected delivery outcome yet"));
-    let mut receipt = CreateReceipt {
-        command: CreateCommand {
-            invitation_id: ghinvite_core::GithubInvitationId::new(),
-            link_id: request.link_id,
-            request_id: request.request_id,
-            approval_id: "approval".into(),
-            account_id: 42,
-            installation_id: 77,
-            requester_id: 99,
-            repo_id: 10,
-            repo_full_name: "octocat/api".into(),
-            permission: ghinvite_core::Permission::Pull,
-            approved_at: "2026-01-02T12:00:00Z".parse().unwrap(),
-        },
-        outcome: CreateOutcome::Blocked {
-            reason: "private infrastructure diagnostic".into(),
-        },
-        revision: 1,
-        confirmed_at: None,
-    };
     for (outcome, label) in [
         (
-            receipt.outcome.clone(),
+            CreateOutcome::Blocked {
+                reason: "private infrastructure diagnostic".into(),
+            },
             "Blocked — waiting for availability or identity verification",
         ),
         (
@@ -300,14 +265,48 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
             "GitHub rejected delivery",
         ),
     ] {
-        receipt.outcome = outcome;
-        receipt.revision += 1;
+        let (app, cookie, storage, envelope) = deadline_queue_app(None).await;
+        let request = &envelope.requests[0];
+        {
+            let mut decided = storage
+                .get_invitation_request(request.request_id)
+                .await
+                .unwrap()
+                .unwrap();
+            decided.state = ghinvite_core::RequestState::Approved;
+            decided.decided_by = Some(42);
+            decided.decided_at = Some("2026-01-02T12:00:00Z".parse().unwrap());
+            decided.decline_reason = None;
+            storage.seed_decision(&decided).await.unwrap();
+        }
+        let path = format!("/console/accounts/octocat/requests/{}", request.request_id);
+        let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
+        assert!(html.contains("No projected delivery outcome yet"));
+        let receipt = CreateReceipt {
+            command: CreateCommand {
+                invitation_id: ghinvite_core::GithubInvitationId::new(),
+                link_id: request.link_id,
+                request_id: request.request_id,
+                approval_id: "approval".into(),
+                account_id: 42,
+                installation_id: 77,
+                requester_id: 99,
+                repo_id: 10,
+                repo_full_name: "octocat/api".into(),
+                permission: ghinvite_core::Permission::Pull,
+                approved_at: "2026-01-02T12:00:00Z".parse().unwrap(),
+            },
+            confirmed_at: outcome
+                .confirmed()
+                .then(|| "2026-01-02T12:01:00Z".parse().unwrap()),
+            outcome,
+            revision: 1,
+        };
         storage.project_delivery(&receipt).await.unwrap();
         let html = response_html(identity_request(&app, &cookie, "GET", &path).await).await;
         assert!(html.contains(label), "missing {label}");
         if matches!(receipt.outcome, CreateOutcome::Created { .. }) {
-            assert!(html.contains("Current delivery status unavailable"));
-            assert!(html.contains("retained history"));
+            assert!(!html.contains("Current delivery status unavailable"));
         }
         assert!(!html.contains("private infrastructure diagnostic"));
     }

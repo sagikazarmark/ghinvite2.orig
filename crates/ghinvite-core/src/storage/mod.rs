@@ -386,11 +386,15 @@ pub trait DeliveryStorage: Send + Sync + 'static {
     async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()>;
     async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool>;
 
-    /// Query projection of the receiving object's receipt, separate from lifecycle.
+    /// Atomically establish/validate invitation identity, create the initial row,
+    /// project the receipt and permitted Sending advance, and publish immutable
+    /// audit facts. Missing parents are ProjectionDependency; conflicting input
+    /// or equal-revision content is ProjectionInvariant. Stale receipts cannot
+    /// regress lifecycle but still publish their audit; identical replay is safe.
     async fn project_delivery(&self, receipt: &crate::delivery::CreateReceipt) -> Result<()>;
 
-    /// Insert a new github_invitations row in `Sending` state. Caller is the
-    /// Restate handler that's about to call GitHub.
+    /// Insert a GitHub invitation fixture/import row. Create delivery uses the
+    /// complete atomic `project_delivery` operation instead.
     ///
     /// **Errors:**
     /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] on `id` collision.

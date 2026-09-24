@@ -191,7 +191,8 @@ WHEN json_extract(NEW.receipt, '$.outcome.kind') IN ('created', 'already_collabo
 BEGIN
   UPDATE github_invitations SET
     state = CASE json_extract(NEW.receipt, '$.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
-    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id')
+    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id'),
+    updated_at = json_extract(NEW.receipt, '$.confirmed_at')
   WHERE id = NEW.invitation_id AND state = 'sending';
 END;
 
@@ -200,7 +201,8 @@ WHEN json_extract(NEW.receipt, '$.outcome.kind') IN ('created', 'already_collabo
 BEGIN
   UPDATE github_invitations SET
     state = CASE json_extract(NEW.receipt, '$.outcome.kind') WHEN 'created' THEN 'sent' WHEN 'already_collaborator' THEN 'accepted' ELSE 'failed' END,
-    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id')
+    github_invitation_id = json_extract(NEW.receipt, '$.outcome.upstream_id'),
+    updated_at = json_extract(NEW.receipt, '$.confirmed_at')
   WHERE id = NEW.invitation_id AND state = 'sending';
 END;
 

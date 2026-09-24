@@ -2,7 +2,6 @@
 use crate::AppState;
 use crate::repository_access::{RepositoryAccess, Unavailable, verify_repository_access};
 use ghinvite_core::{
-    InvitationState,
     delivery::{CreateCommand, CreateOutcome, CreateReceipt},
     storage::Error,
 };
@@ -23,9 +22,26 @@ pub struct GithubCreate {
     faults: Option<std::sync::Arc<DeliveryFaults>>,
 }
 
+/// Separate per-delivery queue: SQL retries never hold the create owner's lock.
+pub struct DeliveryProjection {
+    state: AppState,
+    #[cfg(feature = "integration")]
+    faults: Option<std::sync::Arc<DeliveryFaults>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeliveryRecheck {
+    pub command: CreateCommand,
+    pub generation: u64,
+}
+
 #[cfg(feature = "integration")]
 #[derive(Default)]
 pub struct DeliveryFaults {
+    pub stage: std::sync::Mutex<Option<String>>,
+    pub interruptions: std::sync::atomic::AtomicUsize,
+    pub projection_unavailable: std::sync::atomic::AtomicBool,
+    pub projection_failures: std::sync::atomic::AtomicUsize,
     pub lose_http_result: std::sync::atomic::AtomicBool,
     pub lose_projection_ack: std::sync::atomic::AtomicBool,
     pub http_result_losses: std::sync::atomic::AtomicUsize,
@@ -34,6 +50,11 @@ pub struct DeliveryFaults {
 pub fn bind(builder: Builder, state: AppState) -> Builder {
     builder
         .bind(GithubCreate {
+            state: state.clone(),
+            #[cfg(feature = "integration")]
+            faults: None,
+        })
+        .bind(DeliveryProjection {
             state,
             #[cfg(feature = "integration")]
             faults: None,
@@ -49,6 +70,10 @@ pub fn bind_with_faults(
 ) -> Builder {
     builder
         .bind(GithubCreate {
+            state: state.clone(),
+            faults: Some(faults.clone()),
+        })
+        .bind(DeliveryProjection {
             state,
             faults: Some(faults),
         })
@@ -140,8 +165,9 @@ impl GithubCreate {
     async fn recheck(
         &self,
         ctx: ObjectContext<'_>,
-        Json(command): Json<CreateCommand>,
+        Json(wake): Json<DeliveryRecheck>,
     ) -> Result<(), TerminalError> {
+        let command = wake.command;
         let previous = ctx.get::<Json<CreateCommand>>("input").await?.map(|c| c.0);
         if ctx.key() != command.invitation_id.to_string() || previous.as_ref() != Some(&command) {
             return Err(TerminalError::new_with_code(
@@ -149,11 +175,13 @@ impl GithubCreate {
                 "recheck identity conflict",
             ));
         }
+        if ctx.get::<u64>("recheck_scheduled").await? != Some(wake.generation) {
+            return Ok(());
+        }
         ctx.clear("recheck_scheduled");
-        ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
-            .create(Json(command))
-            .send()
-            .await?;
+        // Advance under this invocation: there is no queued create that an old
+        // duplicate wake could race with to open a second scheduling stream.
+        self.create(ctx, Json(command)).await?;
         Ok(())
     }
     #[handler]
@@ -189,9 +217,7 @@ impl GithubCreate {
         if let Some(receipt) = &previous
             && receipt.outcome.confirmed()
         {
-            ctx.run(|| async { project(&self.state, receipt).await })
-                .name("repair_create_projection")
-                .await?;
+            send_projection(&ctx, receipt).await?;
             return Ok(Json(receipt.clone()));
         }
         let Json(plan) = ctx
@@ -235,8 +261,99 @@ impl GithubCreate {
             recheck_after,
         } = next_receipt(previous.as_ref(), attempted);
         ctx.set("receipt", Json(receipt.clone()));
+        self.checkpoint(&ctx, "after-receipt").await?;
+        send_projection(&ctx, &receipt).await?;
+        self.checkpoint(&ctx, "after-projection-send").await?;
+        // The object lock is released before the recheck — the wait is a
+        // continuation, not a held retry. Exactly one recheck stands per
+        // invitation. Explicit recovery keeps an existing timer, even if its
+        // new guidance is sooner. Its generation rejects duplicate/stale wakes.
+        if let Some(wait) = recheck_after
+            && ctx.get::<u64>("recheck_scheduled").await?.is_none()
+        {
+            ctx.set("recheck_scheduled", receipt.revision);
+            ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
+                .recheck(Json(DeliveryRecheck {
+                    command,
+                    generation: receipt.revision,
+                }))
+                .send_after(wait)
+                .await?;
+            self.checkpoint(&ctx, "after-recheck-send").await?;
+        }
+        Ok(Json(receipt))
+    }
+}
+
+impl GithubCreate {
+    async fn checkpoint(
+        &self,
+        ctx: &ObjectContext<'_>,
+        stage: &'static str,
+    ) -> Result<(), TerminalError> {
+        #[cfg(feature = "integration")]
+        if let Some(faults) = &self.faults {
+            ctx.run(|| async {
+                if faults.stage.lock().unwrap().as_deref() == Some(stage) {
+                    if faults
+                        .interruptions
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                    {
+                        return Err(std::io::Error::other(
+                            "fixture: interrupt delivery journal boundary",
+                        )
+                        .into());
+                    }
+                    std::future::pending::<()>().await;
+                }
+                Ok::<_, HandlerError>(())
+            })
+            .name(stage)
+            .await?;
+        }
+        let _ = (ctx, stage);
+        Ok(())
+    }
+}
+
+async fn send_projection(
+    ctx: &ObjectContext<'_>,
+    receipt: &CreateReceipt,
+) -> Result<(), TerminalError> {
+    ctx.object_client::<DeliveryProjectionClient>(receipt.command.invitation_id.to_string())
+        .apply(Json(receipt.clone()))
+        .send()
+        .await?;
+    Ok(())
+}
+
+#[restate_sdk::object]
+impl DeliveryProjection {
+    #[handler]
+    async fn apply(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(receipt): Json<CreateReceipt>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != receipt.command.invitation_id.to_string() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
         ctx.run(|| async {
-            project(&self.state, &receipt).await?;
+            #[cfg(feature = "integration")]
+            if let Some(faults) = &self.faults
+                && faults
+                    .projection_unavailable
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                faults
+                    .projection_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(
+                    std::io::Error::other("fixture: receipt/audit projection unavailable").into(),
+                );
+            }
+            self.state.storage.project_delivery(&receipt).await?;
             #[cfg(feature = "integration")]
             if let Some(faults) = &self.faults
                 && faults
@@ -251,25 +368,7 @@ impl GithubCreate {
             Ok::<_, HandlerError>(())
         })
         .name("project_create_receipt")
-        .await?;
-        // The object lock is released before the recheck — the wait is a
-        // continuation, not a held retry. Exactly one recheck stands per
-        // invitation. A sooner one does not
-        // supersede a pending later one: a timer already sent cannot be
-        // withdrawn, so superseding means two timers, and telling which is
-        // stale needs a due time and a token on `recheck` — retained protocol,
-        // for a case only explicit recovery during a blocked window reaches.
-        // It costs that recovery the pending hour; it settles nothing wrongly.
-        if let Some(wait) = recheck_after
-            && ctx.get::<bool>("recheck_scheduled").await?.is_none()
-        {
-            ctx.set("recheck_scheduled", true);
-            ctx.object_client::<GithubCreateClient>(command.invitation_id.to_string())
-                .recheck(Json(command))
-                .send_after(wait)
-                .await?;
-        }
-        Ok(Json(receipt))
+        .await
     }
 }
 
@@ -567,37 +666,6 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         Some(limit) => Attempt::throttled_by(receipt, limit),
         None => receipt.into(),
     })
-}
-
-async fn project(state: &AppState, receipt: &CreateReceipt) -> Result<(), HandlerError> {
-    let command = &receipt.command;
-    if let Some(existing) = state
-        .storage
-        .get_github_invitation(command.invitation_id)
-        .await?
-    {
-        if existing.invitation_request_id != command.request_id
-            || existing.repo_id != command.repo_id
-        {
-            return Err(Error::ProjectionInvariant("invitation identity conflict".into()).into());
-        }
-    } else {
-        state
-            .storage
-            .insert_github_invitation(&ghinvite_core::GithubInvitation {
-                id: command.invitation_id,
-                invitation_request_id: command.request_id,
-                repo_id: command.repo_id,
-                github_invitation_id: None,
-                state: InvitationState::Sending,
-                error_message: None,
-                created_at: command.approved_at,
-                updated_at: command.approved_at,
-            })
-            .await?;
-    }
-    state.storage.project_delivery(receipt).await?;
-    Ok(())
 }
 
 #[cfg(test)]

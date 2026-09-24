@@ -27,6 +27,16 @@ service has not been registered.
   release the fence.
 - `delivery_outcomes` is a revisioned SQL read projection. A confirmed receipt
   can repair it by replay without external writes; lower revisions are ignored.
+- `DeliveryProjection/<invitation>/apply` is an independent durable queue, bound
+  by `delivery::bind`. Create retains its input-bound receipt (including stable
+  audit facts), durably sends projection and any continuation, then returns.
+  SQL dependency, invariant, or availability failures retry in that queue and
+  never prevent the create owner from handling recovery commands. Confirmed
+  replay sends the same receipt for repair without contacting GitHub.
+
+Retained `GithubCreate/status` reports the actual delivery result during a
+projection outage. SQL-backed views may show the last projected observation or
+updates unavailable; projection failure is not a definitive GitHub failure.
 
 ## Create-outcome audit history
 
@@ -46,7 +56,15 @@ outcome reason. Audit browsing renders allowlisted summaries, never raw metadata
 request justification, internal notes, or GitHub diagnostics.
 
 SQLx transactions and D1 batches apply receipt/lifecycle and audit insertion
-atomically. Audit insertion runs even for stale receipts or a lifecycle already
+atomically, including establishing the initial invitation row and validating its
+request/repository identity. Callers have no read/check/insert ordering obligation.
+Missing parents return `ProjectionDependency`. Immutable identity conflicts,
+equal-revision differing receipts, and differing immutable audit content return
+`ProjectionInvariant`; both retry outside the delivery owner. Duplicate receipts
+converge, including after commit acknowledgement loss. Creation time is the
+retained approval time; an initial confirmed lifecycle advance uses the retained
+confirmation time for `updated_at`. Later settlement is never overwritten.
+Audit insertion runs even for stale receipts or a lifecycle already
 beyond Sending; identical event content replays, conflicting content fails the
 whole projection. Ordinary retry and `DeliveryRecovery/recover` repair missing
 history without another GitHub write, including after workflow retention cleanup.
@@ -115,11 +133,15 @@ Delivery records a `blocked` receipt reading `GitHub throttled delivery` and rec
 the same wait instead of the hourly dependency cadence; a throttled *read* during
 reconciliation earns that recheck too, because rereading is safe and is the only
 way a delivery GitHub would not let us observe resolves on its own. Exactly one
-recheck stands per invitation: a timer already sent cannot be withdrawn, so a
-sooner one would mean two, and telling which is stale needs a due time and a
-token on `recheck` — retained protocol, for a case only explicit recovery during
-a blocked window reaches. A throttle observed then waits the pending hour out;
-nothing is settled wrongly by it.
+recheck stands per invitation. The retained `recheck_scheduled` generation is the
+receipt revision that arranged the timer; `recheck` carries `{command, generation}`.
+Only that generation may consume the timer and advance delivery. Duplicate or
+stale wakes are no-ops; confirmed/terminal receipts only arrange projection repair.
+Explicit recovery keeps an existing timer, even if new guidance would be sooner.
+A throttle observed then can wait the pending hour out. Restate journals the state
+and delayed send, so interruption resumes the same scheduling obligation without
+holding the create lock during the wait. This is a coordinated fresh-environment
+protocol change; register the matching create and projection handlers together.
 
 The settlement sweep waits a limit out once per account, not once per row or
 once per sweep: a quota belongs to the installation, so one wait covers that
@@ -167,6 +189,11 @@ HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
 numeric identity/rename validation, throttled delivery resuming on its own
 scheduled recheck, and recovery after actual workflow cleanup.
+It also holds receipt/audit projection unavailable through blocked delivery,
+exclusive recovery, scheduled resumption, and confirmed replay; then verifies
+convergence. SDK-task interruption after receipt retention, projection send, and
+continuation send preserves outcomes/timestamps and one effective external write.
+Duplicate/stale wakes preserve the retained result.
 `authoritative_admission` additionally checks missing delivery projection
 prerequisites do not block link commands or workflow submission.
 

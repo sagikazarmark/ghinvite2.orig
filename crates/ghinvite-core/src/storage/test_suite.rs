@@ -119,6 +119,7 @@ scenarios![
     scenario_audit_pages,
     scenario_timestamp_precision,
     scenario_delivery_audit,
+    scenario_delivery_projection_recovery,
     scenario_attempt_continuations,
     scenario_delivery_attempt_fence,
     scenario_member_webhook_binding,
@@ -269,18 +270,6 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
     let request = sample_request(link.id, 8);
     seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let id = GithubInvitationId::new();
-    s.insert_github_invitation(&GithubInvitation {
-        id,
-        invitation_request_id: request.id,
-        repo_id: 10,
-        github_invitation_id: None,
-        state: InvitationState::Sending,
-        error_message: None,
-        created_at: request.created_at,
-        updated_at: request.created_at,
-    })
-    .await
-    .unwrap();
     let receipt: crate::delivery::CreateReceipt = serde_json::from_value(serde_json::json!({
         "command": {"invitation_id":id,"link_id":link.id,"request_id":request.id,
             "approval_id":"approval-64","account_id":100,"installation_id":1,"requester_id":8,
@@ -289,6 +278,13 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         "confirmed_at":"2026-05-04T13:00:00.123456789Z"
     })).unwrap();
     s.project_delivery(&receipt).await.unwrap();
+    let invitation = s.get_github_invitation(id).await.unwrap().unwrap();
+    assert_eq!(invitation.invitation_request_id, request.id);
+    assert_eq!(invitation.repo_id, 10);
+    assert_eq!(invitation.state, InvitationState::Sent);
+    assert_eq!(invitation.github_invitation_id, Some(99123));
+    assert_eq!(invitation.created_at, request.created_at);
+    assert_eq!(invitation.updated_at, dt("2026-05-04T13:00:00.123456789Z"));
     let events = s
         .list_audit_events(100, None, AuditPosition::Latest)
         .await
@@ -464,6 +460,135 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
             .unwrap()
             .events
             .is_empty()
+    );
+}
+
+/// Complete receipt application, including interrupted acknowledgement and
+/// atomic conflicts, through the same port on SQLx and actual D1.
+pub async fn scenario_delivery_projection_recovery<S: Storage + ProjectionStorage>(s: S) {
+    use super::{AuditPosition, Error};
+    use crate::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
+    s.insert_installation(&sample_account(1, 100, "acme"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(7, "admin")).await.unwrap();
+    s.upsert_user(&sample_user(8, "requester")).await.unwrap();
+    let link = sample_link(100, 1, 7);
+    let request = sample_request(link.id, 8);
+    let receipt = CreateReceipt {
+        command: CreateCommand {
+            invitation_id: GithubInvitationId::new(),
+            link_id: link.id,
+            request_id: request.id,
+            approval_id: "approval".into(),
+            account_id: 100,
+            installation_id: 1,
+            requester_id: 8,
+            repo_id: 10,
+            repo_full_name: "acme/api".into(),
+            permission: Permission::Pull,
+            approved_at: dt("2026-05-04T12:45:00Z"),
+        },
+        outcome: CreateOutcome::Created { upstream_id: 99123 },
+        revision: 2,
+        confirmed_at: Some(dt("2026-05-04T13:00:00.123456789Z")),
+    };
+    let id = receipt.command.invitation_id;
+    assert!(matches!(
+        s.project_delivery(&receipt).await,
+        Err(Error::ProjectionDependency)
+    ));
+    assert!(s.get_github_invitation(id).await.unwrap().is_none());
+    assert!(
+        s.list_delivery_for_request(request.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        s.list_audit_events(100, None, AuditPosition::Latest)
+            .await
+            .unwrap()
+            .events
+            .is_empty()
+    );
+    seed(&s, &link, std::slice::from_ref(&request), 1).await;
+
+    // The adapter commits, but its caller loses the acknowledgement. A retry
+    // is the only available action; it must return exactly the committed facts.
+    let lost_ack: Result<(), Error> = async {
+        s.project_delivery(&receipt).await?;
+        Err(Error::Database(
+            "fixture: commit acknowledgement lost".into(),
+        ))
+    }
+    .await;
+    assert!(lost_ack.is_err());
+    let invitation = s.get_github_invitation(id).await.unwrap().unwrap();
+    let events = s
+        .list_audit_events(100, None, AuditPosition::Latest)
+        .await
+        .unwrap()
+        .events;
+    s.project_delivery(&receipt).await.unwrap();
+    assert_eq!(
+        s.get_github_invitation(id).await.unwrap(),
+        Some(invitation.clone())
+    );
+    assert_eq!(invitation.created_at, dt("2026-05-04T12:45:00Z"));
+    assert_eq!(invitation.updated_at, dt("2026-05-04T13:00:00.123456789Z"));
+    assert_eq!(events.len(), 1);
+
+    let mut stale = receipt.clone();
+    stale.revision = 1;
+    stale.confirmed_at = None;
+    stale.outcome = CreateOutcome::Blocked {
+        reason: "installation unavailable".into(),
+    };
+    s.project_delivery(&stale).await.unwrap();
+    let mut equal_conflict = stale.clone();
+    equal_conflict.revision = 2;
+    let mut identity_conflict = stale;
+    identity_conflict.command.approval_id = "different approval".into();
+    let mut audit_conflict = receipt.clone();
+    audit_conflict.revision = 3;
+    audit_conflict.confirmed_at = Some(dt("2026-05-04T14:00:00Z"));
+    for conflict in [equal_conflict, identity_conflict, audit_conflict] {
+        assert!(matches!(
+            s.project_delivery(&conflict).await,
+            Err(Error::ProjectionInvariant(_))
+        ));
+        assert_eq!(
+            s.list_delivery_for_request(request.id).await.unwrap(),
+            vec![receipt.clone()]
+        );
+        assert_eq!(
+            s.get_github_invitation(id).await.unwrap(),
+            Some(invitation.clone())
+        );
+        assert_eq!(
+            s.list_audit_events(100, None, AuditPosition::Latest)
+                .await
+                .unwrap()
+                .events,
+            events
+        );
+    }
+
+    // A pre-existing relational row must be checked even without a receipt.
+    let mut wrong_row = invitation.clone();
+    wrong_row.id = GithubInvitationId::new();
+    wrong_row.repo_id = 99;
+    s.insert_github_invitation(&wrong_row).await.unwrap();
+    let mut conflict = receipt;
+    conflict.command.invitation_id = wrong_row.id;
+    assert!(matches!(
+        s.project_delivery(&conflict).await,
+        Err(Error::ProjectionInvariant(_))
+    ));
+    assert_eq!(
+        s.get_github_invitation(wrong_row.id).await.unwrap(),
+        Some(wrong_row)
     );
 }
 

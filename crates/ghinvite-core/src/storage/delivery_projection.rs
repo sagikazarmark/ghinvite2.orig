@@ -8,6 +8,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 pub fn encode(receipt: &CreateReceipt) -> super::Result<String> {
+    if receipt.revision == 0 || receipt.outcome.confirmed() != receipt.confirmed_at.is_some() {
+        return Err(super::Error::ProjectionInvariant(
+            "invalid delivery receipt".into(),
+        ));
+    }
     let command = &receipt.command;
     let event = if let Some(at) = receipt.confirmed_at {
         let mut metadata =
@@ -57,9 +62,43 @@ pub const IDENTITY: &str = r#"INSERT INTO projection_assertions(invariant)
     AND (json_extract(receipt,'$.command') != json_extract(?1,'$.receipt.command')
     OR (json_extract(receipt,'$.revision') = json_extract(?1,'$.receipt.revision') AND receipt != json_extract(?1,'$.receipt'))))"#;
 
+const PARENTS: &str = r#"INSERT INTO projection_assertions(dependency)
+    SELECT EXISTS(SELECT 1 FROM invitation_requests WHERE id = json_extract(?1,'$.receipt.command.request_id'))"#;
+
+const INVITATION_IDENTITY: &str = r#"INSERT INTO projection_assertions(invariant)
+    SELECT NOT EXISTS(SELECT 1 FROM github_invitations WHERE id = json_extract(?1,'$.receipt.command.invitation_id')
+        AND (invitation_request_id != json_extract(?1,'$.receipt.command.request_id')
+            OR repo_id != json_extract(?1,'$.receipt.command.repo_id')))
+    AND EXISTS(SELECT 1 FROM invitation_requests r JOIN invitation_links l ON l.id = r.invitation_link_id
+        WHERE r.id = json_extract(?1,'$.receipt.command.request_id')
+        AND r.invitation_link_id = json_extract(?1,'$.receipt.command.link_id')
+        AND r.requester_id = json_extract(?1,'$.receipt.command.requester_id')
+        AND l.account_id = json_extract(?1,'$.receipt.command.account_id'))"#;
+
+const INITIAL: &str = r#"INSERT INTO github_invitations(id, invitation_request_id, repo_id, state, created_at, updated_at)
+    VALUES(json_extract(?1,'$.receipt.command.invitation_id'), json_extract(?1,'$.receipt.command.request_id'),
+        json_extract(?1,'$.receipt.command.repo_id'), 'sending', json_extract(?1,'$.receipt.command.approved_at'),
+        json_extract(?1,'$.receipt.command.approved_at')) ON CONFLICT(id) DO NOTHING"#;
+
+/// Both adapters classify the named atomic assertions identically.
+pub fn classify(message: String) -> super::Error {
+    if message.contains("projection_dependency") {
+        super::Error::ProjectionDependency
+    } else if message.contains("projection_invariant")
+        || message.contains("audit_events.account_id")
+    {
+        super::Error::ProjectionInvariant(message)
+    } else {
+        super::Error::Database(message)
+    }
+}
+
 pub fn statements() -> Vec<String> {
     vec![
+        PARENTS.into(),
+        INVITATION_IDENTITY.into(),
         IDENTITY.into(),
+        INITIAL.into(),
         RECEIPT.into(),
         audit_statement(),
         "DELETE FROM projection_assertions WHERE ?1 IS NOT NULL".into(),

@@ -557,7 +557,7 @@ impl DeliveryStorage for SqlxStorage {
         self.transaction(
             &delivery_projection::statements(),
             &encoded,
-            Error::Database,
+            delivery_projection::classify,
         )
         .await
     }

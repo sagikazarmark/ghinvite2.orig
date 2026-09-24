@@ -600,7 +600,7 @@ impl DeliveryStorage for D1Storage {
     async fn project_delivery(&self, receipt: &CreateReceipt) -> Result<()> {
         let encoded = delivery_projection::encode(receipt)?;
         let statements = delivery_projection::statements();
-        wasm_send(self.batch(&statements, &encoded, Error::Database)).await
+        wasm_send(self.batch(&statements, &encoded, delivery_projection::classify)).await
     }
 
     async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {

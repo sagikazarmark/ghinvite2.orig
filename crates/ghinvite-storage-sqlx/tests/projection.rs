@@ -99,6 +99,22 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
         })).unwrap();
+        // An audit failure must also roll back initial row creation.
+        sqlx::query("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").execute(&fault).await.unwrap();
+        assert!(storage.project_delivery(&receipt).await.is_err());
+        assert!(storage.get_github_invitation(id).await.unwrap().is_none());
+        assert!(
+            !storage
+                .list_delivery_for_request(receipt.command.request_id)
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.command.invitation_id == id)
+        );
+        sqlx::query("DROP TRIGGER fail_delivery_audit")
+            .execute(&fault)
+            .await
+            .unwrap();
         // An earlier unconfirmed observation is already projected.
         let unknown = ghinvite_core::delivery::CreateReceipt {
             outcome: ghinvite_core::delivery::CreateOutcome::OutcomeUnknown,
@@ -112,6 +128,9 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
         };
         sqlx::query("CREATE TRIGGER fail_delivery_audit BEFORE INSERT ON audit_events WHEN NEW.target_kind='github_invitation' BEGIN SELECT RAISE(ABORT, 'fixture audit unavailable'); END").execute(&fault).await.unwrap();
         assert!(storage.project_delivery(&receipt).await.is_err());
+        let initial = storage.get_github_invitation(id).await.unwrap().unwrap();
+        assert_eq!(initial.state, ghinvite_core::InvitationState::Sending);
+        assert_eq!(initial.updated_at, receipt.command.approved_at);
         assert!(
             storage
                 .list_delivery_for_request(receipt.command.request_id)
