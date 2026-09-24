@@ -211,7 +211,7 @@ mod tests {
     use ghinvite_core::{
         Account, AccountType, GithubInvitation, GithubInvitationId, InvitationLink,
         InvitationLinkId, InvitationLinkRepo, InvitationRequest, Permission, RequestId,
-        RequestState, SelectedRepos, Slug, User,
+        RequestState, SelectedRepos, User,
     };
 
     fn dt(s: &str) -> DateTime<Utc> {
@@ -239,10 +239,9 @@ mod tests {
         }
     }
 
-    fn link(account_id: u64, installation_id: u64, code: &str) -> InvitationLink {
+    fn link(account_id: u64, installation_id: u64) -> InvitationLink {
         InvitationLink {
             id: InvitationLinkId::new(),
-            slug: Slug::from_string(code.to_string()).unwrap(),
             installation_id,
             account_id,
             created_by: 701,
@@ -297,8 +296,8 @@ mod tests {
     #[tokio::test]
     async fn owned_link_returns_the_accounts_link_and_conceals_others() {
         let storage = storage().await;
-        let own = link(9001, 1, "QueueSlug0000001");
-        let foreign = link(9002, 2, "QueueSlug0000002");
+        let own = link(9001, 1);
+        let foreign = link(9002, 2);
         storage.seed_link(&own).await.unwrap();
         storage.seed_link(&foreign).await.unwrap();
 
@@ -312,8 +311,8 @@ mod tests {
     #[tokio::test]
     async fn owned_request_returns_request_and_link_and_conceals_others() {
         let storage = storage().await;
-        let own = link(9001, 1, "QueueSlug0000003");
-        let foreign = link(9002, 2, "QueueSlug0000004");
+        let own = link(9001, 1);
+        let foreign = link(9002, 2);
         storage.seed_link(&own).await.unwrap();
         storage.seed_link(&foreign).await.unwrap();
         let own_request = request(own.id);

@@ -17,8 +17,8 @@ const SIGNED_IN_PAGES = [
   ['console audit log', '/console/accounts/octocat/audit'],
   ['console settings', '/console/accounts/octocat/settings'],
   ['console not found', '/console/accounts/octocat/nowhere'],
-  ['invitation request form', '/i/abcdEFGH01234567'],
-  ['invitation request status', '/i/bcdeFGHI12345678'],
+  ['invitation request form', '/i/01JQRFRM000000000000000000'],
+  ['invitation request status', '/i/01JQSTAT000000000000000000'],
   ['invitation request not found', '/i/not-a-code'],
 ];
 
@@ -82,10 +82,10 @@ test('every signed-in page is a standards-mode document at the device width', as
 test('the invitation request form and its status are two different documents', async ({ page }) => {
   await page.goto('/fixture-login');
 
-  await page.goto('/i/abcdEFGH01234567');
+  await page.goto('/i/01JQRFRM000000000000000000');
   await expect(page.getByRole('button', { name: 'Submit request' })).toBeVisible();
 
-  await page.goto('/i/bcdeFGHI12345678');
+  await page.goto('/i/01JQSTAT000000000000000000');
   await expect(page.getByRole('heading', { name: 'Awaiting review' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Submit request' })).toHaveCount(0);
   // The one document here that reloads itself; the shared head must keep it.

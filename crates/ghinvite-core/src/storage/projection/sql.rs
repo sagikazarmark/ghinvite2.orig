@@ -24,7 +24,6 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         || link.uses > u32::MAX as u64
         || link.revoked_by.is_some_and(|id| !valid_id(id))
         || link.revoked_at.is_some() != link.revoked_by.is_some()
-        || crate::Slug::from_string(link.invitation_code.clone()).is_err()
         // The authority only writes values its own rules leave unchanged.
         || creation.clone().normalized().as_ref() != Ok(creation)
         || link.metadata.as_ref().is_some_and(|metadata| {
@@ -146,7 +145,6 @@ pub const STATEMENTS: &[&str] = &[
         AND account_id != json_extract(?1,'$.link.creation.account_id'))"#,
     r#"INSERT INTO projection_assertions(invariant)
     SELECT NOT EXISTS(SELECT 1 FROM invitation_links WHERE id = json_extract(?1,'$.link.link_id') AND (
-      slug IS NOT json_extract(?1,'$.link.invitation_code') OR
       installation_id IS NOT json_extract(?1,'$.link.creation.installation_id') OR
       account_id IS NOT json_extract(?1,'$.link.creation.account_id') OR
       created_by IS NOT json_extract(?1,'$.link.creation.admin.user_id') OR
@@ -178,10 +176,10 @@ pub const STATEMENTS: &[&str] = &[
         a.occurred_at IS NOT json_extract(j.value,'$.effective_at') OR
         a.evaluated_at IS NOT json_extract(j.value,'$.evaluated_at') OR
         a.metadata IS NOT NULL OR a.request_id IS NOT NULL)"#,
-    r#"INSERT INTO invitation_links(id, slug, installation_id, account_id, created_by, created_at,
+    r#"INSERT INTO invitation_links(id, installation_id, account_id, created_by, created_at,
       expires_at, max_uses, uses_count, permission, approval_required, description, internal_note,
       revoked_at, revoked_by, projection_revision)
-    SELECT json_extract(?1,'$.link.link_id'), json_extract(?1,'$.link.invitation_code'),
+    SELECT json_extract(?1,'$.link.link_id'),
       json_extract(?1,'$.link.creation.installation_id'), json_extract(?1,'$.link.creation.account_id'),
       json_extract(?1,'$.link.creation.admin.user_id'), json_extract(?1,'$.link.created_at'),
       json_extract(?1,'$.link.creation.expires_at'), json_extract(?1,'$.link.creation.max_uses'),
@@ -228,7 +226,7 @@ mod tests {
             "transition_id": "link/01ARZ3NDEKTSV4RRFFQ69G5FAV/1",
             "link": {
                 "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 1, "uses": 0,
-                "invitation_code": "abcdefghijklmnop", "created_at": "2026-09-14T00:00:00Z",
+                "created_at": "2026-09-14T00:00:00Z",
                 "revoked_at": null, "revoked_by": null,
                 "creation": {
                     "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",

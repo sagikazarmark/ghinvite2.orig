@@ -12,6 +12,12 @@ compatibility or container networking.
 
 ### Restate ingress authentication
 
+Public invitation links use `/i/<26-character-ULID>`; the Console displays this
+same value as the Invitation Code. Test authenticated creation, opening and
+submission before projection with `bash scripts/test-restate.sh canonical_link`.
+The authoritative-admission gate also verifies creation interruption, concurrent
+replay and retained receipts after actual invocation cleanup.
+
 ```bash
 cargo test -p ghinvite-web --test restate_ingress --locked
 cargo test -p ghinvite-web --test invitation_resolution --locked
@@ -124,7 +130,7 @@ Protected POST inventory:
 - `/console/accounts/{login}/links/{link_id}/edit` — edit metadata
 - `/console/accounts/{login}/links/{link_id}/revoke` — revoke
 - `/console/accounts/{login}/requests/{request_id}/approve` and `/decline`
-- `/i/{slug}` — submit request (the request ID is only an idempotency key)
+- `/i/{code}` — submit request (the code is the canonical link ULID; the operation ID identifies the attempt)
 - `/logout` — sign out; GET returns 405
 
 GitHub redirect and webhook contracts are independent of form tokens:

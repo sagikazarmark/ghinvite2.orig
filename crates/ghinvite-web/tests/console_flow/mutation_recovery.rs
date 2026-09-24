@@ -49,7 +49,6 @@ async fn post(
 fn recovery_link(id: ghinvite_core::InvitationLinkId) -> ghinvite_core::InvitationLink {
     ghinvite_core::InvitationLink {
         id,
-        slug: ghinvite_core::Slug::from_string("RecoveryCode0001".into()).unwrap(),
         installation_id: 77,
         account_id: 42,
         created_by: 42,
@@ -362,7 +361,9 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     confirmed.creation.repos.sort_by_key(|repo| repo.repo_id);
     authority.seed(confirmed);
     assert_eq!(
-        identity_request(&app, &cookie, "GET", &url).await.status(),
+        identity_request(&app, &cookie, "GET", &url.to_lowercase())
+            .await
+            .status(),
         StatusCode::OK
     );
     let response = post(
@@ -377,9 +378,14 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     assert_eq!(authority.calls().len(), 3);
     authority.recover("create");
     assert_eq!(
-        post(&app, &cookie, &url, &format!("csrf_token={csrf}"))
-            .await
-            .status(),
+        post(
+            &app,
+            &cookie,
+            &url.to_lowercase(),
+            &format!("csrf_token={csrf}")
+        )
+        .await
+        .status(),
         StatusCode::SEE_OTHER
     );
     assert_eq!(authority.calls()[3..], ["create"]);

@@ -7,7 +7,7 @@ use ulid::Ulid;
 
 macro_rules! ulid_newtype {
     ($name:ident) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
         #[serde(transparent)]
         pub struct $name(pub Ulid);
 
@@ -40,7 +40,19 @@ macro_rules! ulid_newtype {
         impl FromStr for $name {
             type Err = ulid::DecodeError;
             fn from_str(s: &str) -> Result<Self, Self::Err> {
-                Ulid::from_str(s).map(Self)
+                let id = Ulid::from_str(s)?;
+                // ulid's decoder discards overflowing high bits. Reject those
+                // inputs rather than letting malformed IDs alias an owner.
+                if !s.as_bytes().first().is_some_and(|byte| (b'0'..=b'7').contains(byte)) {
+                    return Err(ulid::DecodeError::InvalidChar);
+                }
+                Ok(Self(id))
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                String::deserialize(deserializer)?.parse().map_err(serde::de::Error::custom)
             }
         }
 

@@ -7,7 +7,6 @@ use ghinvite_core::{
     *,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
-use rand::SeedableRng;
 
 async fn fixture() -> (SqlxStorage, GithubInvitation) {
     fixture_with(SqlxStorage::in_memory().await.unwrap()).await
@@ -36,7 +35,6 @@ async fn fixture_with(s: SqlxStorage) -> (SqlxStorage, GithubInvitation) {
     .unwrap();
     let link = InvitationLink {
         id: InvitationLinkId::new(),
-        slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(1)),
         installation_id: 9,
         account_id: 100,
         created_by: 7,

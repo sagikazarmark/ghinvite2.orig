@@ -271,9 +271,13 @@ async fn later_lifecycle_supersedes_retained_create_receipts_on_requester_routes
     assert!(!html.contains("private "));
     assert!(!html.contains("AI coding workshop"));
     assert!(!html.contains("Submit request"));
-    assert!(fixture.authority.calls().iter().all(|method| {
-        ["resolve", "requester_page", "delivery_progress"].contains(&method.as_str())
-    }));
+    assert!(
+        fixture
+            .authority
+            .calls()
+            .iter()
+            .all(|method| { ["requester_page", "delivery_progress"].contains(&method.as_str()) })
+    );
 }
 
 #[tokio::test]

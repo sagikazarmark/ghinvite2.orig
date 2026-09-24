@@ -7,7 +7,7 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const API_KEY: &str = "test-ingress-key-do-not-expose";
-const CODE: &str = "abcdefgh12345678";
+const CODE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
 fn authority(client: &RestateClient) -> LinkAuthority {
     LinkAuthority::new(Arc::new(client.clone()))
@@ -105,7 +105,7 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .await
             .unwrap_err(),
         authority(&client)
-            .resolve(CODE)
+            .requester_page(CODE, 2, None)
             .await
             .map_err(WebError::from)
             .unwrap_err(),
@@ -125,7 +125,7 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .await
             .unwrap_err(),
         authority(&client)
-            .resolve(CODE)
+            .requester_page(CODE, 2, None)
             .await
             .map_err(WebError::from)
             .unwrap_err(),
@@ -158,7 +158,7 @@ async fn rejected_credentials_and_upstream_errors_never_expose_response_content(
                     .await
                     .unwrap_err(),
                 authority(&client)
-                    .resolve(CODE)
+                    .requester_page(CODE, 2, None)
                     .await
                     .map_err(WebError::from)
                     .unwrap_err(),
@@ -237,11 +237,10 @@ async fn authenticated_ingress_accepts_calls_link_authority_calls_and_sends() {
             .mount(&ingress)
             .await;
     }
-    let link = ghinvite_core::InvitationLinkId::new();
     Mock::given(method("POST"))
-        .and(path(format!("/InvitationCode/{CODE}/resolve")))
+        .and(path(format!("/InvitationLink/{CODE}/requester_page")))
         .and(header("authorization", format!("Bearer {API_KEY}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(link))
+        .respond_with(ResponseTemplate::new(404))
         .expect(1)
         .mount(&ingress)
         .await;
@@ -252,7 +251,10 @@ async fn authenticated_ingress_accepts_calls_link_authority_calls_and_sends() {
         .await
         .unwrap();
     assert_eq!(result, json!({"ok": true}));
-    assert_eq!(authority(&client).resolve(CODE).await.unwrap(), link);
+    assert!(matches!(
+        authority(&client).requester_page(CODE, 2, None).await,
+        Err(ghinvite_web::AuthorityError::Missing)
+    ));
     client
         .send("Installation", "42", "sync", &())
         .await

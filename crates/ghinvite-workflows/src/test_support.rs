@@ -130,9 +130,8 @@ pub(crate) async fn seed_request_chain(
     use ghinvite_core::storage::projection::ProjectionStorage;
     use ghinvite_core::{
         AccountType, InvitationLink, InvitationLinkId, Permission, RequestId, RequestState,
-        SelectedRepos, Slug,
+        SelectedRepos,
     };
-    use rand::SeedableRng;
 
     storage
         .insert_installation(&ghinvite_core::Account {
@@ -159,7 +158,6 @@ pub(crate) async fn seed_request_chain(
     }
     let link = InvitationLink {
         id: InvitationLinkId::new(),
-        slug: Slug::generate(&mut rand_chacha::ChaCha8Rng::seed_from_u64(7)),
         installation_id: 9,
         account_id: 100,
         created_by: 7,

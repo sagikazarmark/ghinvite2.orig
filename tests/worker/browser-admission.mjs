@@ -75,7 +75,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     if (recovery) for (const phase of ['headers', 'body']) {
       const input = recovery.creation();
       const created = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/create`, input);
-      const path = `https://browser.test/i/${created.invitation_code}`;
+       const path = `https://browser.test/i/${created.link_id}`;
       const form = await mf.dispatchFetch(path, { headers: { cookie } });
       assert.equal(form.status, 200);
       const html = await form.text();

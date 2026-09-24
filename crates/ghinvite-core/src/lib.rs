@@ -14,7 +14,6 @@ pub mod invitation_request;
 pub mod permission;
 pub mod repository_identity;
 pub mod request_lifecycle;
-pub mod slug;
 pub mod storage;
 pub mod user;
 
@@ -29,5 +28,4 @@ pub use invitation_link::{
 pub use invitation_request::{InvitationRequest, RequestState};
 pub use permission::Permission;
 pub use repository_identity::{RepositoryIdentity, RepositoryIdentityError};
-pub use slug::Slug;
 pub use user::User;

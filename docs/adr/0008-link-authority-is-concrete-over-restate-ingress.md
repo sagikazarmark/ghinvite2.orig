@@ -6,8 +6,8 @@ date: 2026-09-22
 # The web's LinkAuthority stays concrete, tested at the Restate ingress seam
 
 `crates/ghinvite-web/src/link_authority.rs` is the web's only path to the
-invitation link authority, the `InvitationLink` and `InvitationCode` Restate
-objects ([ADR 0003](0003-restate-authoritative-admission.md)). It is a concrete
+invitation link authority, the `InvitationLink` Restate object
+([ADR 0003](0003-restate-authoritative-admission.md)). It is a concrete
 module over Restate ingress. It maps the authority's documented terminal
 statuses to a typed `AuthorityError`: 400 to `Invalid`, 404 to `Missing`, 409 to
 `Conflict`, and every other failure to `Unknown`, which leaves the command's
@@ -48,3 +48,9 @@ modules over ingress, with no trait and no in-memory adapter. Tests run the
 real module against an in-process server that answers the ingress paths and
 records the calls it received. `AppState` builds the link authority and the
 commands from one `RestateClient`, as production already did.
+
+## Amendment (2026-09-24): single link identity (#117)
+
+The Invitation Code is now the canonical link ULID. Local parsing replaces the
+`InvitationCode` registration/resolution protocol. The concrete HTTP seam and
+error mapping remain; public lookup calls `InvitationLink` directly.

@@ -47,3 +47,5 @@ restate-sdk = { workspace = true, features = ["http_server"] }
 serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
+tower.workspace = true
+tower-sessions = { workspace = true, features = ["memory-store"] }

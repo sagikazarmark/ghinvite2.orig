@@ -477,7 +477,6 @@ mod tests {
                     repo_full_name: "acme/widgets".into(),
                 }],
             },
-            invitation_code: "abcd-efgh".into(),
             created_at: now() - Duration::days(30),
             uses: 0,
             revision: 3,

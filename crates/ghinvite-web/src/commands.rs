@@ -557,7 +557,6 @@ mod tests {
         storage
             .seed_link(&ghinvite_core::InvitationLink {
                 id: link_id,
-                slug: ghinvite_core::Slug::from_string("0123456789ABCDEF".into()).unwrap(),
                 installation_id: 1,
                 account_id: 9001,
                 created_by: 42,
@@ -1011,7 +1010,6 @@ mod tests {
             .unwrap()
             .unwrap();
         link.id = ghinvite_core::InvitationLinkId::new();
-        link.slug = ghinvite_core::Slug::from_string("FEDCBA9876543210".into()).unwrap();
         storage.seed_link(&link).await.unwrap();
         request.id = ghinvite_core::RequestId::new();
         request.invitation_link_id = link.id;

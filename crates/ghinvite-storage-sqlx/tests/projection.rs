@@ -11,7 +11,7 @@ fn envelope() -> ProjectionEnvelope {
         "transition_id": "link/01ARZ3NDEKTSV4RRFFQ69G5FAV/2",
         "link": {
             "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 2, "uses": 1,
-            "invitation_code": "abcdefghijklmnop", "created_at": "2026-09-14T00:00:00Z",
+            "created_at": "2026-09-14T00:00:00Z",
             "revoked_at": null, "revoked_by": null,
             "creation": {
                 "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",

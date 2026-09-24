@@ -218,6 +218,8 @@ jobs:
       # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
       - name: Verify authoritative admission and recovery
         run: bash scripts/test-restate.sh authoritative_admission
+      - name: Authenticated single-ID creation before projection
+        run: bash scripts/test-restate.sh canonical_link
       - name: Verify retained delivery and uncertain HTTP recovery
         run: bash scripts/test-restate.sh retained_delivery
       - name: Verify installation convergence and admission availability

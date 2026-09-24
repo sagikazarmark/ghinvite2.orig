@@ -15,9 +15,7 @@ use crate::request_lifecycle::InvitationRequestClient;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::EventType;
 use ghinvite_core::storage::projection::LinkMetadata;
-use ghinvite_core::{
-    InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState, Slug,
-};
+use ghinvite_core::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
     RunFuture,
@@ -87,38 +85,6 @@ async fn send_projection(
 
 /// Application-wide policy; every pending request snapshots its own deadline.
 pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
-
-/// Private, immutable routing registry; never consults SQL or calls a link.
-struct InvitationCode;
-
-#[restate_sdk::object]
-impl InvitationCode {
-    #[handler]
-    async fn register(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(id): Json<InvitationLinkId>,
-    ) -> Result<(), TerminalError> {
-        Slug::from_string(ctx.key().into()).map_err(|_| invalid())?;
-        if let Some(Json(old)) = ctx.get::<Json<InvitationLinkId>>("link").await? {
-            if old != id {
-                return Err(conflict());
-            }
-        } else {
-            ctx.set("link", Json(id));
-        }
-        Ok(())
-    }
-    #[handler]
-    async fn resolve(
-        &self,
-        ctx: ObjectContext<'_>,
-        _: Json<()>,
-    ) -> Result<Json<InvitationLinkId>, TerminalError> {
-        Slug::from_string(ctx.key().into()).map_err(|_| missing())?;
-        ctx.get("link").await?.ok_or_else(missing)
-    }
-}
 
 #[derive(Default)]
 pub struct InvitationLink {
@@ -364,9 +330,7 @@ pub fn bind_protocol_fixture(builder: Builder) -> Builder {
 }
 
 fn bind_objects(builder: Builder, link: InvitationLink, options: ServiceOptions) -> Builder {
-    builder
-        .bind(InvitationCode)
-        .bind(link.into_service_definition().options(options))
+    builder.bind(link.into_service_definition().options(options))
 }
 
 fn invalid() -> TerminalError {
@@ -630,7 +594,6 @@ impl InvitationLink {
         }
         Ok(Json(RequesterPage {
             link_id: link.link_id,
-            invitation_code: link.invitation_code,
             repos: link.creation.repos,
             permission: link.creation.permission,
             approval_required: link.creation.approval_required,
@@ -1015,6 +978,7 @@ impl InvitationLink {
             // Return the original creation receipt even after later mutations.
             return ctx.get(keys::CREATION).await?.ok_or_else(missing);
         }
+        self.checkpoint(&ctx, "creation-before-decision").await?;
         let Json(link) = ctx
             .run(|| async {
                 let now = self.now();
@@ -1025,7 +989,6 @@ impl InvitationLink {
                     metadata: None,
                     link_id: input.link_id,
                     creation: input.clone(),
-                    invitation_code: Slug::generate(&mut rand::rngs::OsRng).as_str().into(),
                     created_at: now,
                     uses: 0,
                     revision: 1,
@@ -1035,14 +998,11 @@ impl InvitationLink {
             })
             .name("decide_creation")
             .await?;
+        self.checkpoint(&ctx, "creation-after-decision").await?;
         ctx.set(keys::LINK, Json(link.clone()));
+        self.checkpoint(&ctx, "creation-after-link").await?;
         ctx.set(keys::CREATION, Json(link.clone()));
-        // Complete routing before acknowledging creation; this registry never
-        // calls the link, avoiding an exclusive-object cycle.
-        ctx.object_client::<InvitationCodeClient>(&link.invitation_code)
-            .register(Json(link.link_id))
-            .call()
-            .await?;
+        self.checkpoint(&ctx, "creation-after-receipt").await?;
         send_projection(
             &ctx,
             projection(
@@ -1057,6 +1017,8 @@ impl InvitationLink {
             ),
         )
         .await?;
+        self.checkpoint(&ctx, "creation-after-projection-send")
+            .await?;
         Ok(Json(link))
     }
 }

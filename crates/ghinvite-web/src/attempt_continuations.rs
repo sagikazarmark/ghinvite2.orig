@@ -46,7 +46,8 @@ impl Scope {
         user: u64,
         code: &str,
     ) -> crate::Result<Self> {
-        Self::of(tower, "invitation", &[&user, &code])
+        let link: ghinvite_core::InvitationLinkId = code.parse().map_err(|_| WebError::NotFound)?;
+        Self::of(tower, "invitation", &[&user, &link])
     }
 
     fn of(

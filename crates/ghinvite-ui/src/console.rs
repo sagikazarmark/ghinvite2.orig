@@ -101,12 +101,11 @@ pub struct OverviewProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghinvite_core::{AccountType, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+    use ghinvite_core::{AccountType, InvitationLinkId, InvitationLinkRepo, Permission};
 
     fn sample_link() -> InvitationLink {
         InvitationLink {
             id: InvitationLinkId::new(),
-            slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
             installation_id: 77,
             account_id: 9001,
             created_by: 42,
@@ -223,7 +222,9 @@ mod tests {
 
     #[test]
     fn overview_recent_links_show_description_before_code() {
-        let html = crate::testing::render(|| {
+        let link = sample_link();
+        let code = link.id.to_string();
+        let html = crate::testing::render(move || {
             rsx! {
                 OverviewPage {
                     signed_in_login: Some("admin".to_string()),
@@ -232,7 +233,7 @@ mod tests {
                     account_type: AccountType::Organization,
                     pending_requests: 0,
                     active_links: 1,
-                    recent_links: vec![sample_link()],
+                    recent_links: vec![link.clone()],
                     now: Utc::now(),
                 }
             }
@@ -242,8 +243,10 @@ mod tests {
         assert!(!html.contains("<th>Code</th>"));
         assert!(!html.contains("<th>Slug</th>"));
         assert!(html.contains("AI coding workshop"));
-        assert!(html.contains("abcdEFGH01234567"));
-        assert!(html.find("AI coding workshop").unwrap() < html.find("abcdEFGH01234567").unwrap());
+        assert!(html.contains(&format!(">{code}</p>")));
+        assert!(
+            html.find("AI coding workshop").unwrap() < html.find(&format!(">{code}</p>")).unwrap()
+        );
     }
 
     #[test]
@@ -319,7 +322,6 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
         };
         let label = if active { "active" } else { "inactive" };
         let id_str = link.id.to_string();
-        let slug_str = link.slug.as_str().to_string();
         rsx! {
             tr { class: "hover:bg-base-200/70",
                 td {
@@ -328,7 +330,7 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                         href: "/console/accounts/{login}/links/{id_str}",
                         "{link.description}"
                     }
-                    p { class: "mt-0.5 font-mono text-xs text-muted", "{slug_str}" }
+                    p { class: "mt-0.5 font-mono text-xs text-muted", "{id_str}" }
                 }
                 td { span { class: "{badge} badge-sm", "{label}" } }
                 td { class: "text-right tabular-nums", "{link.uses_count}" }

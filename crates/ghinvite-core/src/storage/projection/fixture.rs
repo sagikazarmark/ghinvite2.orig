@@ -47,7 +47,6 @@ pub fn link_snapshot(link: &InvitationLink, revision: u64) -> LinkSnapshot {
             approval_required: link.approval_required,
             repos: link.repos.clone(),
         },
-        invitation_code: link.slug.as_str().to_owned(),
         created_at: link.created_at,
         uses: link.uses_count.into(),
         revision,

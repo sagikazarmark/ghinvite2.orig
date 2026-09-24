@@ -10,7 +10,7 @@ use ghinvite_core::storage::projection::{AccountAdmin, RequestSnapshot};
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
-    Permission, RequestId, RequestState, SelectedRepos, Slug, User,
+    Permission, RequestId, RequestState, SelectedRepos, User,
 };
 use ghinvite_github::mocks::MockTransport;
 use ghinvite_web::{AppState, LinkAuthority, WebConfig, build_app};
@@ -493,6 +493,7 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
     assert!(html.contains("Outcome unknown"));
     for uri in [
         format!("/i/{ACTIVE_SLUG}"),
+        format!("/i/{}", ACTIVE_SLUG.to_lowercase()),
         format!("/i/{ACTIVE_SLUG}?operation_id={id}"),
     ] {
         let response = app
@@ -735,14 +736,17 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     // Preparation itself was unavailable: recover from the explicitly saved
     // session continuation after navigating away from the failed POST, while
     // the whole authority is unavailable.
-    for method in ["resolve", "requester_page", "admit"] {
+    for method in ["requester_page", "admit"] {
         authority.fail(method, 503);
     }
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={operation}"))
+                .uri(format!(
+                    "/i/{}?operation_id={operation}",
+                    ACTIVE_SLUG.to_lowercase()
+                ))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -918,8 +922,8 @@ async fn submission_rejected_for_an_existing_request_is_final() {
     assert_eq!(authority.link(link.id).unwrap().uses, 0);
 }
 
-const ACTIVE_SLUG: &str = "abcdEFGH01234567";
-const UNKNOWN_SLUG: &str = "ZZZZZZZZZZZZZZZZ";
+const ACTIVE_SLUG: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+const UNKNOWN_SLUG: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const CREATOR_ID: u64 = 701;
 const REQUESTER_ID: u64 = 802;
 
@@ -954,8 +958,7 @@ fn sample_user(user_id: u64, login: &str) -> User {
 
 fn active_link(slug: &str) -> InvitationLink {
     InvitationLink {
-        id: InvitationLinkId::new(),
-        slug: Slug::from_string(slug.to_string()).unwrap(),
+        id: slug.parse().unwrap(),
         installation_id: 1,
         account_id: 9001,
         created_by: CREATOR_ID,

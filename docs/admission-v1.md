@@ -25,10 +25,10 @@ Bind with endpoint identity verification when deployed.
 
 Allocate `InvitationLinkId::new()` **once before the first create submission**
 and retain the entire `CreateLink` command across uncertain transport failures.
-The canonical link ID is both object key and creation identity. Reuse with
+The canonical 26-character link ULID is the Invitation Code, object key and creation identity. Reuse with
 different normalized creation input conflicts. Successful creation replay returns
-the original creation snapshot, including its invitation code, even after revoke.
-Invitation-code routing is implemented in the [browser path](browser-admission-v1.md); projection uniqueness conflicts remain
+the original creation snapshot even after revoke, expiration or metadata edits.
+The [browser path](browser-admission-v1.md) parses the public code and routes directly to that ID; projection conflicts remain
 inspectable pending repair rather than changing the authoritative creation;
 new commands currently address immutable link IDs directly.
 
@@ -131,7 +131,7 @@ of every bounded input. No accumulated history is sent.
 
 SQLx uses a transaction; D1 uses the same fixed seven-statement batch. Named CHECK
 assertions validate missing parents and immutable-identity conflicts (a link's
-code, account, installation, creator, guardrails and repositories; a request's
+ID, account, installation, creator, guardrails and repositories; a request's
 link, requester, justification, admission time and deadline) inside the atomic
 application. Link and repository records precede requests. Newer snapshots
 replace older ones; equal or lower revisions are no-ops, so replays are harmless

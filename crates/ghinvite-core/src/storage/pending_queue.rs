@@ -26,7 +26,6 @@ impl PendingBoundary {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct PendingRow {
     pub request_id: RequestId,
-    pub link_slug: String,
     pub link_description: Option<String>,
     pub link_id: Option<InvitationLinkId>,
     pub requester_login: String,
@@ -108,13 +107,13 @@ pub fn query(after: bool) -> String {
       WHERE r.queue_account_id = ?1 AND r.state = 'pending' {seek}
       ORDER BY {SEEK_KEY} LIMIT {limit}
     ), links AS MATERIALIZED (
-      SELECT l.id, l.slug, l.description, l.permission, l.expires_at,
+      SELECT l.id, l.description, l.permission, l.expires_at,
         l.approval_required, COALESCE((SELECT json_group_array(repo_full_name) FROM
         (SELECT repo_full_name FROM invitation_link_repos WHERE invitation_link_id = l.id ORDER BY repo_id)), '[]') AS repos
       FROM invitation_links l WHERE l.id IN (SELECT invitation_link_id FROM page)
     )
     SELECT json_object(
-      'request_id', p.id, 'link_id', l.id, 'link_slug', COALESCE(l.slug, '(deleted link)'),
+      'request_id', p.id, 'link_id', l.id,
       'link_description', l.description, 'requester_login', COALESCE(u.login, 'user-' || p.requester_id),
       'justification', p.justification, 'created_at', p.created_at, 'decision_deadline', p.decision_deadline,
       'permission', l.permission, 'repos', json(COALESCE(l.repos, '[]')), 'expires_at', l.expires_at,

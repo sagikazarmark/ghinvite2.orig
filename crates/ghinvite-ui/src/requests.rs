@@ -8,7 +8,6 @@ use dioxus::prelude::*;
 #[derive(Clone, PartialEq)]
 pub struct PendingRequestRow {
     pub request_id: String,
-    pub link_slug: String,
     pub link_description: Option<String>,
     pub link_id: String,
     pub requester_login: String,
@@ -41,7 +40,6 @@ mod tests {
                     now: dt("2026-05-04T13:00:00Z"),
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
-                        link_slug: "QueueSlug0000006".into(),
                         link_description: Some("Workshop".into()),
                         link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA".into(),
                         requester_login: "octocat".into(),
@@ -85,7 +83,6 @@ mod tests {
                     now: dt("2026-05-04T13:00:00Z"),
                     rows: vec![PendingRequestRow {
                         request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
-                        link_slug: "(deleted link)".into(),
                         link_description: None,
                         link_id: "".into(),
                         requester_login: "octocat".into(),
@@ -164,14 +161,14 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let decline_operation = ghinvite_core::RequestId::new().to_string();
                                 let just = r.justification.clone();
                                 let link_id = r.link_id.clone();
-                                let link_slug = r.link_slug.clone();
-                                let description = r.link_description.clone().unwrap_or_else(|| link_slug.clone());
+                                let invitation_code = if r.link_id.is_empty() { "(deleted link)".into() } else { r.link_id.clone() };
+                                let description = r.link_description.clone().unwrap_or_else(|| invitation_code.clone());
                                 let link_label = if link_id.is_empty() {
-                                    rsx! { span { "{link_slug}" } }
+                                    rsx! { span { "{invitation_code}" } }
                                 } else {
                                     rsx! {
                                         a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{description}" }
-                                        span { class: "ml-2 text-xs text-muted", "Code: {link_slug}" }
+                                        span { class: "ml-2 text-xs text-muted", "Code: {invitation_code}" }
                                     }
                                 };
                                 let requester = r.requester_login.clone();

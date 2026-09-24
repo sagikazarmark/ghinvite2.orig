@@ -111,7 +111,6 @@ pub struct Attempt {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RequesterPage {
     pub link_id: InvitationLinkId,
-    pub invitation_code: String,
     pub repos: Vec<InvitationLinkRepo>,
     pub permission: Permission,
     pub approval_required: bool,

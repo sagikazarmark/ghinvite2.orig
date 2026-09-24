@@ -4,7 +4,7 @@ test('native submission survives acknowledgement loss, revocation, two tabs and 
   await page.goto('/fixture-login');
   const original = await page.locator('[name="operation_id"]').inputValue();
   const second = await context.newPage();
-  await second.goto('/i/abcdEFGH01234567');
+  await second.goto('/i/01ARZ3NDEKTSV4RRFFQ69G5FAV');
   expect(await second.locator('[name="operation_id"]').inputValue()).not.toBe(original);
   await page.getByLabel('Justification').fill('  original context  ');
   await page.getByRole('button', { name: 'Submit request' }).click();
@@ -17,13 +17,13 @@ test('native submission survives acknowledgement loss, revocation, two tabs and 
   await page.reload();
   await expect(page.getByRole('status')).toContainText('Request accepted at');
   await page.goto('/');
-  await page.goto('/i/abcdEFGH01234567');
+  await page.goto('/i/01ARZ3NDEKTSV4RRFFQ69G5FAV');
   await expect(page.getByRole('status')).toContainText('Request accepted at');
   await expect(page.getByRole('link', { name: 'Start a fresh attempt with edited input' })).toHaveCount(0);
   await expect(page.locator('meta[http-equiv="refresh"]')).toHaveAttribute('content', '20');
   await request.post('/fixture-state?revoked=true');
   // Replaying the original native POST recovers acceptance despite revocation.
-  const replay = await page.request.post(`/i/abcdEFGH01234567?operation_id=${original}`, {
+  const replay = await page.request.post(`/i/01ARZ3NDEKTSV4RRFFQ69G5FAV?operation_id=${original}`, {
     form: { csrf_token: await page.locator('[name="csrf_token"]').first().inputValue(), operation_id: original, justification: 'original context' },
   });
   expect(await replay.text()).toContain('Request accepted at');
@@ -38,7 +38,7 @@ test('native submission survives acknowledgement loss, revocation, two tabs and 
   expect(await page.locator('[name="operation_id"]').inputValue()).not.toBe(original);
   await page.getByLabel('Justification').fill('edited context');
   await expect(page.getByRole('link', { name: 'Recover original attempt / Check again' }))
-    .toHaveAttribute('href', `/i/abcdEFGH01234567?operation_id=${original}`);
+    .toHaveAttribute('href', `/i/01ARZ3NDEKTSV4RRFFQ69G5FAV?operation_id=${original}`);
   await page.getByRole('link', { name: 'Recover original attempt / Check again' }).click();
   await expect(page.getByRole('status')).toContainText('Request accepted at');
 });
@@ -91,16 +91,16 @@ test('wrong-account escape signs out and OAuth returns to the intended invitatio
   await page.route('**/logout', async route => {
     const response = await route.fetch({ maxRedirects: 0 });
     expect(response.status()).toBe(303);
-    expect(response.headers().location).toBe('/i/abcdEFGH01234567');
+    expect(response.headers().location).toBe('/i/01ARZ3NDEKTSV4RRFFQ69G5FAV');
     const invitation = await page.request.get(response.headers().location, { maxRedirects: 0 });
-    expect(invitation.headers().location).toBe('/login?return_to=%2Fi%2FabcdEFGH01234567');
+    expect(invitation.headers().location).toBe('/login?return_to=%2Fi%2F01ARZ3NDEKTSV4RRFFQ69G5FAV');
     const login = await page.request.get(invitation.headers().location, { maxRedirects: 0 });
     const state = new URL(login.headers().location).searchParams.get('state');
     await route.fulfill({ status: 200, contentType: 'text/html', body: `<a href="/oauth/callback?code=other-code&state=${state}">Continue as othercat</a>` });
   });
   await page.getByRole('button', { name: 'Sign out and sign in again.' }).click();
   await page.getByRole('link', { name: 'Continue as othercat' }).click();
-  await expect(page).toHaveURL('/i/abcdEFGH01234567');
+  await expect(page).toHaveURL('/i/01ARZ3NDEKTSV4RRFFQ69G5FAV');
   await expect(page.getByText('Signed in as', { exact: false })).toContainText('@othercat');
   await page.getByRole('button', { name: 'Submit request' }).click();
   await expect(page.getByRole('status')).toContainText('Outcome unknown');

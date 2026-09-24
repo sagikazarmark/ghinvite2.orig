@@ -267,7 +267,7 @@ try {
   assert.equal(conflict.status, 409);
   assert.equal((await command('link_status', { link_id: input.link_id, admin: input.admin })).uses, 1);
   console.log('PASS final-use concurrency, seven-day deadline, revoke/replay/conflict while D1 unavailable');
-  await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id);
+   await browserAdmission(ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id);
   for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   console.log('PASS compatible D1 migrations and restored identity parents');
   await eventually(() => storage('link', input.link_id), link => link?.uses_count === 1 && link.revoked_at);
@@ -275,7 +275,7 @@ try {
   await eventually(() => storage('audit', 100), page => page.events.length === 4);
   console.log('PASS real asynchronous D1 adapter converges after missing parent recovery');
   const projection = creation();
-  const snapshot = { link_id: projection.link_id, creation: projection, invitation_code: 'projection123456',
+   const snapshot = { link_id: projection.link_id, creation: projection,
     created_at: '2026-01-01T00:00:00Z', uses: 0, revision: 1, revoked_at: null, revoked_by: null };
   const event = { event_id: `fixture/${projection.link_id}`, kind: 'invitation_link.created', actor_id: 7,
     target_id: projection.link_id, effective_at: snapshot.created_at, evaluated_at: snapshot.created_at };
@@ -289,7 +289,7 @@ try {
   const audit = await storage('audit', 100);
   assert.equal(audit.events.filter(row => row.target_id === projection.link_id).length, 1);
   await storage('apply', { ...newer, events: [{ ...event, event_id: 'must-rollback' }],
-    link: { ...newer.link, invitation_code: 'projection654321' } }, 409);
+     link: { ...newer.link, created_at: '2026-01-01T00:00:01Z' } }, 409);
   assert.equal((await storage('link', projection.link_id)).uses_count, 0);
   assert.deepEqual(await storage('audit', 100), audit, 'conflicting batch must roll back events too');
   await storage('apply', { ...old, events: [{ ...event, actor_id: 91 }] }, 409);
@@ -498,7 +498,7 @@ try {
   if (process.env.SETTLEMENT_ONLY !== '1') {
   await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
     pause: value => { pauseWorkflows = value; } });
-  await browserAdmission(ingress, created.invitation_code, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
+   await browserAdmission(ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
   // #66 on actual D1 bindings: installation 40 is the shape adoption exists for.
   // Its command already retains the numeric account binding, while account 300
   // has never been observed and must adopt the existing row.

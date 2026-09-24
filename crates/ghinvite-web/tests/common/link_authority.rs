@@ -1,8 +1,7 @@
 //! An in-process stand-in for the Restate invitation link authority.
 //!
 //! It answers the ingress paths the web calls for invitation links
-//! (`/{LINK_SERVICE}/{link_id}/{method}`) and codes
-//! (`/{CODE_SERVICE}/{code}/resolve`) with the same status codes the real
+//! (`/{LINK_SERVICE}/{link_id}/{method}`) with the same status codes the real
 //! virtual object uses: 404 for an unknown link or request or a foreign
 //! account, 409 for a command identity reused with different input, 400 for
 //! invalid input. Like the real object, a replayed creation, decision or
@@ -49,8 +48,6 @@ use std::sync::{Arc, Mutex};
 
 /// The Restate virtual object that owns invitation links.
 pub const LINK_SERVICE: &str = "InvitationLink";
-/// The Restate virtual object that resolves invitation codes to links.
-pub const CODE_SERVICE: &str = "InvitationCode";
 
 /// How long an admitted request awaits review, as the real object sets it.
 const PENDING_LIFETIME: Duration = Duration::days(7);
@@ -317,7 +314,6 @@ pub fn snapshot(link: &InvitationLink) -> LinkSnapshot {
             approval_required: link.approval_required,
             repos,
         },
-        invitation_code: link.slug.as_str().into(),
         created_at: link.created_at,
         uses: link.uses_count.into(),
         revision: 1,
@@ -390,12 +386,6 @@ async fn handle(
 }
 
 fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Value) -> Response {
-    if service == CODE_SERVICE && method == "resolve" {
-        return match inner.links.values().find(|l| l.invitation_code == key) {
-            Some(link) => json(&link.link_id),
-            None => status(404),
-        };
-    }
     if service != LINK_SERVICE {
         return status(404);
     }
@@ -431,7 +421,6 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
                 metadata: None,
                 link_id,
                 creation,
-                invitation_code: key[key.len() - 16..].into(),
                 created_at: now,
                 uses: 0,
                 revision: 1,
@@ -779,7 +768,6 @@ fn answer(inner: &mut Inner, service: &str, key: String, method: &str, body: Val
             }
             json(&RequesterPage {
                 link_id,
-                invitation_code: link.invitation_code,
                 repos: link.creation.repos,
                 permission: link.creation.permission,
                 approval_required: link.creation.approval_required,

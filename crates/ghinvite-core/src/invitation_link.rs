@@ -1,7 +1,6 @@
 use crate::ids::InvitationLinkId;
 use crate::permission::Permission;
 use crate::repository_identity::RepositoryIdentity;
-use crate::slug::Slug;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitationLink {
     pub id: InvitationLinkId,
-    pub slug: Slug,
     pub installation_id: u64,
     pub account_id: u64,
     pub created_by: u64, // user_id
@@ -212,18 +210,14 @@ impl From<RepositoryScope> for Vec<InvitationLinkRepo> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha8Rng;
 
     fn at(y: i32, mo: u32, d: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, mo, d, 0, 0, 0).unwrap()
     }
 
     fn base_link() -> InvitationLink {
-        let mut rng = ChaCha8Rng::seed_from_u64(20_260_504);
         InvitationLink {
             id: InvitationLinkId::new(),
-            slug: Slug::generate(&mut rng),
             installation_id: 1,
             account_id: 2,
             created_by: 3,

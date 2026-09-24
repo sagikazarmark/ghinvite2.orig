@@ -3,7 +3,7 @@ use ghinvite_core::storage::projection::{ProjectionStorage, fixture};
 use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, Permission,
-    RequestId, RequestState, SelectedRepos, Slug, User,
+    RequestId, RequestState, SelectedRepos, User,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 
@@ -42,7 +42,6 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
         .unwrap();
     let link = InvitationLink {
         id: InvitationLinkId::new(),
-        slug: Slug::from_string("QueuePage0000001".into()).unwrap(),
         installation_id: 1,
         account_id: 42,
         created_by: 1,
@@ -188,8 +187,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
     // missing rows cannot be written through the domain's validated interface.
     sqlx::raw_sql("PRAGMA foreign_keys=OFF;
         INSERT INTO installations VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
-        INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
-        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1);")
+        INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
+        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1);")
         .execute(&db).await.unwrap();
     for (id, time) in [
         ("001", "2026-01-01T00:00:00.000000001Z"),
@@ -324,7 +323,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO invitation_links(id,slug,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','QueuePage0000001',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1)").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1)").execute(&db).await.unwrap();
     assert_eq!(
         storage
             .pending_request_page(43, None)

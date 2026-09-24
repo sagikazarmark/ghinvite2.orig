@@ -114,6 +114,16 @@ Restate gate with `bash scripts/test-restate.sh`; see
 
 Two options: native Rust binaries (faster iteration) or Wrangler dev (closer to production).
 
+Invitation links use `/i/<26-character-ULID>` (for example,
+`/i/01ARZ3NDEKTSV4RRFFQ69G5FAV`). This is the same ID shown as the Invitation Code
+in the Console. Confirmed links open immediately even while SQL projection lags.
+
+The single-ID model is a clean prelaunch replacement. Start native SQLite or D1
+from the current migrations and pair it with a fresh Restate environment running
+the matching handlers and web build. Existing 16-character codes have no aliases.
+Resetting an existing local environment is a separate, explicitly chosen operator
+action; updating or building this checkout does not reset it.
+
 ### Option A — Native binaries (recommended for development)
 
 First-time only — build the CSS:

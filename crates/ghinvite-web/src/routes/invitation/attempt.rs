@@ -36,7 +36,7 @@ impl From<InvalidInput> for WebError {
 }
 
 /// Submitted input retained as a continuation before ingress. The requester
-/// is implied by the continuation scope; the link is resolved later.
+/// and canonical link identity are implied by the continuation scope.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AttemptInput {
     operation_id: AdmissionOperationId,
@@ -52,9 +52,9 @@ impl From<&Admit> for AttemptInput {
     }
 }
 
-/// Parse and normalize submitted input before any network call. The link is
-/// resolved later, so `link_id` is a placeholder.
+/// Parse and normalize submitted input before any network call.
 fn admit_command(
+    link_id: ghinvite_core::InvitationLinkId,
     operation_id: &str,
     requester_id: u64,
     justification: Option<String>,
@@ -62,7 +62,7 @@ fn admit_command(
     let operation_id = AdmissionOperationId::try_from(operation_id.to_owned())
         .map_err(|_| InvalidInput::OperationId)?;
     let mut command = Admit {
-        link_id: ghinvite_core::InvitationLinkId::new(),
+        link_id,
         operation_id,
         requester_id,
         justification,
@@ -81,6 +81,11 @@ pub async fn page(
     operation: Option<&str>,
     fresh: bool,
 ) -> Response {
+    let Ok(link_id) = code.parse::<ghinvite_core::InvitationLinkId>() else {
+        return super::invitation_not_found_response(session);
+    };
+    let canonical = link_id.to_string();
+    let code = canonical.as_str();
     let authority = &state.link_authority;
     let operation_id = match operation
         .map(|id| AdmissionOperationId::try_from(id.to_owned()))
@@ -229,15 +234,17 @@ pub async fn submit(
     justification: Option<String>,
 ) -> Response {
     let authority = &state.link_authority;
-    if ghinvite_core::Slug::from_string(code.to_owned()).is_err() {
+    let Ok(link_id) = code.parse::<ghinvite_core::InvitationLinkId>() else {
         return WebError::NotFound.into_response();
-    }
+    };
+    let canonical = link_id.to_string();
+    let code = canonical.as_str();
     // Validate identity and normalize input before any network call.
     let invalid_justification = ghinvite_ui::request_form::justification_error(
         justification.as_deref().unwrap_or_default(),
     )
     .is_some();
-    let mut command = match admit_command(operation, session.user_id, justification.clone()) {
+    let command = match admit_command(link_id, operation, session.user_id, justification.clone()) {
         Ok(command) => command,
         Err(InvalidInput::Justification) if invalid_justification => {
             let page = match authority.requester_page(code, session.user_id, None).await {
@@ -275,10 +282,6 @@ pub async fn submit(
         Ok(Retention::Conflict(_) | Retention::Bound(_)) => return conflict(session, code, &input),
         Err(error) => return safe_error(code, error),
     }
-    command.link_id = match authority.resolve(code).await {
-        Ok(id) => id,
-        Err(error) => return failed(session, code, &command, error),
-    };
     // Persist recovery input before admission. If the response is lost, the
     // link's per-user pointer and bookmark URL both recover this attempt.
     let outcome = match authority.prepare(command.clone()).await {

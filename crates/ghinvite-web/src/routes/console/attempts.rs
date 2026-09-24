@@ -132,6 +132,17 @@ async fn load(
     admin: &RequireConsoleAdminOf,
     id: &str,
 ) -> crate::Result<Option<Command>> {
+    // Recovery URLs carry the creation identity too. Canonicalize before
+    // looking up its browser continuation, just as the form and VO routing do.
+    let canonical;
+    let id = if let Some(link) = id.strip_prefix("create-") {
+        let link: ghinvite_core::InvitationLinkId =
+            link.parse().map_err(|_| crate::WebError::NotFound)?;
+        canonical = create_id(link);
+        canonical.as_str()
+    } else {
+        id
+    };
     AttemptContinuations::new(state)
         .load(&scope(admin)?, id)
         .await

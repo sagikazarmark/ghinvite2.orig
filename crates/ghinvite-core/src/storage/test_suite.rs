@@ -11,18 +11,12 @@ use crate::audit::{ActorKind, AuditEvent, EventType, TargetKind};
 use crate::{
     Account, AccountType, AuditEventId, GithubInvitation, GithubInvitationId, InvitationLink,
     InvitationLinkId, InvitationLinkRepo, InvitationRequest, InvitationState, Permission,
-    RequestId, RequestState, SelectedRepos, Slug, User,
+    RequestId, RequestState, SelectedRepos, User,
 };
 use chrono::{DateTime, Utc};
 
 fn dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-}
-
-fn slug_with_seed(seed: u64) -> Slug {
-    use rand::SeedableRng;
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-    Slug::generate(&mut rng)
 }
 
 fn sample_account(installation_id: u64, account_id: u64, login: &str) -> Account {
@@ -46,15 +40,9 @@ fn sample_user(user_id: u64, login: &str) -> User {
     }
 }
 
-fn sample_link(
-    account_id: u64,
-    installation_id: u64,
-    created_by: u64,
-    slug_seed: u64,
-) -> InvitationLink {
+fn sample_link(account_id: u64, installation_id: u64, created_by: u64) -> InvitationLink {
     InvitationLink {
         id: InvitationLinkId::new(),
-        slug: slug_with_seed(slug_seed),
         installation_id,
         account_id,
         created_by,
@@ -163,7 +151,7 @@ pub async fn scenario_request_history<S: Storage + ProjectionStorage>(s: S) {
         .await
         .unwrap();
     s.upsert_user(&sample_user(701, "admin")).await.unwrap();
-    let link = sample_link(9001, 1, 701, 900);
+    let link = sample_link(9001, 1, 701);
     seed(&s, &link, &[], 1).await;
     assert!(
         s.request_history(9001, link.id, None)
@@ -247,7 +235,7 @@ pub async fn scenario_recorded_request_deadlines<S: Storage + ProjectionStorage>
         .await
         .unwrap();
     s.upsert_user(&sample_user(708, "admin")).await.unwrap();
-    let link = sample_link(9008, 1, 708, 800);
+    let link = sample_link(9008, 1, 708);
     let deadline = Some(dt("2026-05-06T14:15:16.123456789Z"));
     let mut request = sample_request(link.id, 708);
     request.decision_deadline = deadline;
@@ -277,7 +265,7 @@ pub async fn scenario_delivery_audit<S: Storage + ProjectionStorage>(s: S) {
         .unwrap();
     s.upsert_user(&sample_user(7, "admin")).await.unwrap();
     s.upsert_user(&sample_user(8, "requester")).await.unwrap();
-    let link = sample_link(100, 1, 7, 64);
+    let link = sample_link(100, 1, 7);
     let request = sample_request(link.id, 8);
     seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let id = GithubInvitationId::new();
@@ -617,7 +605,7 @@ async fn scenario_invitation_link_lifecycle<S: Storage + ProjectionStorage>(s: S
         .unwrap();
     s.upsert_user(&sample_user(701, "creator")).await.unwrap();
 
-    let mut link = sample_link(9002, 1, 701, 100);
+    let mut link = sample_link(9002, 1, 701);
     seed(&s, &link, &[], 1).await;
     assert_eq!(
         s.get_invitation_link_by_id(link.id).await.unwrap(),
@@ -648,7 +636,7 @@ async fn scenario_github_invitation_lifecycle<S: Storage + ProjectionStorage>(s:
     s.upsert_user(&sample_user(704, "creator")).await.unwrap();
     s.upsert_user(&sample_user(804, "asker")).await.unwrap();
 
-    let link = sample_link(9005, 1, 704, 400);
+    let link = sample_link(9005, 1, 704);
     let req = sample_request(link.id, 804);
     seed(&s, &link, std::slice::from_ref(&req), 1).await;
 
@@ -741,7 +729,7 @@ async fn scenario_timestamp_precision<S: Storage + ProjectionStorage>(s: S) {
         .await
         .unwrap();
     s.upsert_user(&sample_user(707, "creator")).await.unwrap();
-    let mut link = sample_link(9007, 1, 707, 700);
+    let mut link = sample_link(9007, 1, 707);
     // 123_456 microseconds added to a zero-second base
     link.created_at = Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap()
         + chrono::Duration::microseconds(123_456);
@@ -872,7 +860,7 @@ async fn scenario_member_webhook_binding<S: Storage + ProjectionStorage>(s: S) {
         .unwrap();
     s.upsert_user(&sample_user(710, "creator")).await.unwrap();
     s.upsert_user(&sample_user(810, "asker")).await.unwrap();
-    let link = sample_link(9010, 1, 710, 1000);
+    let link = sample_link(9010, 1, 710);
     let request = sample_request(link.id, 810);
     seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let invitation = GithubInvitation {
@@ -916,7 +904,7 @@ async fn scenario_settlement_audit_conflict<S: Storage + ProjectionStorage>(s: S
         .unwrap();
     s.upsert_user(&sample_user(711, "creator")).await.unwrap();
     s.upsert_user(&sample_user(811, "asker")).await.unwrap();
-    let link = sample_link(9011, 1, 711, 1100);
+    let link = sample_link(9011, 1, 711);
     let request = sample_request(link.id, 811);
     seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let sent = GithubInvitation {
@@ -1028,7 +1016,7 @@ async fn scenario_insert_conflict_kinds<S: Storage + ProjectionStorage>(s: S) {
 
     s.upsert_user(&sample_user(713, "creator")).await.unwrap();
     s.upsert_user(&sample_user(813, "asker")).await.unwrap();
-    let link = sample_link(9013, 1, 713, 1300);
+    let link = sample_link(9013, 1, 713);
     let request = sample_request(link.id, 813);
     seed(&s, &link, std::slice::from_ref(&request), 1).await;
     let invitation = GithubInvitation {

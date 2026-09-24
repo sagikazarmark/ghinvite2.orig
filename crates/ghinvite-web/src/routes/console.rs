@@ -766,7 +766,7 @@ async fn link_detail(
     let signed_in_login = Some(admin.session.login.clone());
     let account_login = admin.account.account_login.clone();
     let now = Utc::now();
-    let invitation_url = format!("{}/i/{}", state.config.base_url, link.slug.as_str());
+    let invitation_url = format!("{}/i/{}", state.config.base_url, link.id);
 
     let html = render(admin.session.csrf_token.clone(), move || {
         rsx! {
@@ -844,7 +844,6 @@ async fn requests_queue(
         .into_iter()
         .map(|row| ghinvite_ui::requests::PendingRequestRow {
             request_id: row.request_id.to_string(),
-            link_slug: row.link_slug,
             link_description: row.link_description,
             link_id: row.link_id.map(|id| id.to_string()).unwrap_or_default(),
             requester_login: row.requester_login,

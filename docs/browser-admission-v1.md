@@ -1,8 +1,8 @@
 # Recoverable browser admission (#57)
 
 The web `AppState::new` always routes admission, creation, metadata, revocation
-and decisions through v1 admission. `build_endpoint` binds `admission::bind`
-(which also binds `InvitationCode`), the projector, lifecycle and delivery
+and decisions through v1 admission. `build_endpoint` binds `admission::bind`,
+the projector, lifecycle and delivery
 consumers on private Restate ingress. Missing authority is never reconstructed
 from SQL.
 
@@ -41,7 +41,7 @@ current-page lookup restores the fresh action once authority is available again.
 The fresh form explicitly allocates a
 new ID and retains a link to the exact original, including across tabs. Before
 contacting ingress, the web caller retains normalized input as a sealed attempt
-continuation in SQL, scoped to session, user and code and identified by operation.
+continuation in SQL, scoped to session, user and canonical link ID and identified by operation.
 Continuations expire with the browser session, are not login sessions and cannot
 confer authentication. One immutable record per operation prevents concurrent
 tabs or session saves from erasing each other's input. The most recently retained
@@ -82,11 +82,18 @@ page-time hints.
 
 ## Link routing and account admins
 
-Creation allocates a random invitation code in the journaled creation decision.
-Before acknowledgement, the link registers its immutable code-to-ID mapping in
-`InvitationCode`. The registry never calls a link, preventing a synchronous
-exclusive-object cycle. Resolution needs no SQL and always routes commands to the
-canonical link ID. Registry state is retained alongside link authority.
+The application allocates a ULID before first creation submission. Its canonical
+26-character representation is the Invitation Code, public `/i/<code>` locator,
+creation identity and `InvitationLink` object key. Public lookup parses that code
+locally and calls the link directly; there is no code registry or SQL dependency.
+Accepted textual variants canonicalize before routing and browser-continuation
+lookup. Malformed and overflowing IDs are rejected. A valid uninitialized ID is
+missing; requester reads and submissions never initialize or reserve it.
+
+Creation retains its normalized input and original receipt independently of
+invocation cleanup. Same-input replay returns that receipt even after expiration,
+revocation or metadata edits; changed input conflicts. Acknowledgement follows
+authoritative state writes and durable projection/audit dispatch, not SQL application.
 
 The existing creation form carries a stable link ID and validation-time anchor
 in its native action URL, including in island props. This preserves the absolute
@@ -104,14 +111,18 @@ The shared SQLx/D1 projection updates metadata using monotonic link revisions.
 cargo test -p ghinvite-web --test invitation_resolution
 cargo test -p ghinvite-web --test console_flow
 bash scripts/test-restate.sh authoritative_admission
+bash scripts/test-restate.sh canonical_link
 # From tests/browser:
 npx playwright test --config admission.config.mjs
 ```
 
 HTTP tests use the production router and fake Restate transport to lose a committed
 acknowledgement. Playwright drives that router with JavaScript disabled through
-two tabs, retry, reload, navigation and explicit editing. Real-Restate facade cases
-cover normalization, fresh-code resolution, projection outage, retained attempts,
+two tabs, retry, reload, navigation and explicit editing. The `canonical_link`
+runtime test drives authenticated web creation and requester submission through
+real Restate and the production GitHub HTTP clients against a stub, with delayed
+projection. Real-Restate facade cases cover normalization, direct lookup,
+creation interruption/cleanup, projection outage, retained attempts,
 retry after revoke and requester confidentiality; the existing runtime cases cover
 deadlines, terminal replay, races and interrupted writes/sends. Both Worker targets
 are typechecked; actual local Worker/D1 acceptance is covered by the

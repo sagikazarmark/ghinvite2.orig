@@ -110,8 +110,12 @@ async function expectUsableForm(page) {
   await expect(form(page)).toHaveCount(1);
   await expect(submit(page)).toBeVisible();
   await expect(form(page)).toHaveAttribute('method', 'post');
-  await expect(form(page)).toHaveAttribute('action', action);
   const props = JSON.parse(await page.locator('#link-form-props').textContent());
+  await expect(form(page)).toHaveAttribute('action', props.action);
+  const target = new URL(props.action, page.url());
+  expect(target.pathname).toBe(action);
+  expect(target.searchParams.get('link_id')).toBe('01ARZ3NDEKTSV4RRFFQ69G5FAV');
+  expect(Number(target.searchParams.get('anchor'))).toBe(Math.floor(Date.parse(props.now) / 1000));
   expect(props.csrf_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
   await expect(form(page).locator('input[name="csrf_token"]')).toHaveValue(props.csrf_token);
 }
@@ -129,6 +133,7 @@ async function open(page, path = '/', mounted = true) {
 }
 
 async function post(page) {
+  const target = new URL(await form(page).getAttribute('action'), page.url()).href;
   const csrfToken = await form(page).locator('input[name="csrf_token"]').inputValue();
   const responsePromise = page.waitForResponse((response) =>
     new URL(response.url()).pathname === action && response.request().method() === 'POST');
@@ -138,7 +143,8 @@ async function post(page) {
   expect(response.request().resourceType()).toBe('document');
   expect(response.request().headers()['content-type']).toContain('application/x-www-form-urlencoded');
   expect(response.status()).toBe(200);
-  await expect(page).toHaveURL(new RegExp(`${action}$`));
+  await expect(page).toHaveURL(target);
+  expect(response.url()).toBe(target);
   const entries = new URLSearchParams((await response.json()).entries);
   expect(entries.getAll('csrf_token')).toEqual([csrfToken]);
   entries.delete('csrf_token'); // Remaining assertions describe domain form values.

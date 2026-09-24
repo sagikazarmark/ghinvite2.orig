@@ -223,7 +223,6 @@ async fn request_history_pages_and_terminal_details_conceal_foreign_resources() 
         })
         .await
         .unwrap();
-    foreign.slug = ghinvite_core::Slug::from_string("ForeignHistory01".into()).unwrap();
     foreign.description = "Foreign private link".into();
     storage.seed_link(&foreign).await.unwrap();
     template.id = ghinvite_core::RequestId::new();

@@ -27,7 +27,6 @@ CREATE TABLE users (
 -- the snapshot revision it last applied, so a stale snapshot cannot regress a row.
 CREATE TABLE invitation_links (
   id                   TEXT    PRIMARY KEY,
-  slug                 TEXT    NOT NULL UNIQUE,
   installation_id      INTEGER NOT NULL REFERENCES installations(installation_id),
   account_id           INTEGER NOT NULL,
   created_by           INTEGER NOT NULL REFERENCES users(user_id),

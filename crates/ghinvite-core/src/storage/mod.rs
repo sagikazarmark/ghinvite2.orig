@@ -159,7 +159,7 @@ pub trait RecordStorage: Send + Sync + 'static {
     /// Read an invitation link plus its repo set by primary key.
     ///
     /// **Errors:**
-    /// - [`Error::Corrupt`] if the row contains an unparseable enum/slug/ulid.
+    /// - [`Error::Corrupt`] if the row contains an unparseable enum/ULID.
     /// - [`Error::Database`] otherwise.
     async fn get_invitation_link_by_id(
         &self,

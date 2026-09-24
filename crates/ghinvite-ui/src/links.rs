@@ -542,7 +542,6 @@ pub struct LinkDetailProps {
 pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
     let login = props.account_login.clone();
     let id_str = props.link.id.to_string();
-    let slug = props.link.slug.as_str().to_string();
     let description = props.link.description.clone();
     let active = props.link.is_active(props.now);
     let badge_class = if active {
@@ -590,7 +589,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
                 header { class: "mb-6 flex flex-col gap-3 md:flex-row md:items-center md:justify-between",
                     div {
                         h1 { class: "text-2xl font-bold", "{description}" }
-                        p { class: "text-sm text-base-content/70", "Invitation code: ", span { class: "font-mono", "{slug}" } }
+                        p { class: "text-sm text-base-content/70", "Invitation code: ", span { class: "font-mono", "{id_str}" } }
                     }
                     div { class: "flex items-center gap-3",
                         span { class: "{badge_class}", "{badge_label}" }
@@ -695,7 +694,7 @@ pub fn LinkDetailPage(props: LinkDetailProps) -> Element {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+    use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission};
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -703,8 +702,9 @@ mod tests {
 
     fn sample_link() -> InvitationLink {
         InvitationLink {
-            id: InvitationLinkId::new(),
-            slug: Slug::from_string("abcdEFGH01234567".to_string()).unwrap(),
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+                .parse::<InvitationLinkId>()
+                .unwrap(),
             installation_id: 1,
             account_id: 9001,
             created_by: 701,
@@ -754,7 +754,7 @@ mod tests {
                         account_login: "acme",
                         link: link.clone(),
                         now,
-                        invitation_url: "https://ghinvite.test/i/abcdEFGH01234567",
+                        invitation_url: "https://ghinvite.test/i/01ARZ3NDEKTSV4RRFFQ69G5FAV",
                     }
                 }
             });
@@ -1859,7 +1859,7 @@ mod tests {
                     account_login: String::from("acme"),
                     link: link.clone(),
                     now: dt("2026-05-05T12:00:00Z"),
-                    invitation_url: String::from("http://127.0.0.1:8787/i/abcdEFGH01234567"),
+                    invitation_url: String::from("http://127.0.0.1:8787/i/01ARZ3NDEKTSV4RRFFQ69G5FAV"),
                 }
             }
         });
@@ -1871,7 +1871,7 @@ mod tests {
         assert!(html.contains("<title>AI coding workshop · acme</title>"));
         assert!(html.contains("<h1 class=\"text-2xl font-bold\">AI coding workshop</h1>"));
         assert!(html.contains("Invitation code"));
-        assert!(html.contains("abcdEFGH01234567"));
+        assert!(html.contains("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
         assert!(!html.contains("{props.account_login}"));
         assert!(html.contains("Stop accepting new invitation requests"));
         assert!(html.contains("Existing invitation requests and GitHub invitations continue"));

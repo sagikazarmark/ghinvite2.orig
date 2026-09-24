@@ -55,7 +55,7 @@ Admin-facing invitation-link lists should use the description as the primary ide
 Optional freeform admin-only context attached to an invitation link. An internal note is not visible in the invitation request flow and may change after the invitation link is created.
 
 ### Invitation Code
-The short code from an invitation link that a GitHub user can enter to open the invitation request flow. An invitation code is the code segment only, not the full invitation link URL. UI may use `code` alone when nearby context clearly establishes `invitation code`. Do not use `slug` in domain or UI language for this value.
+The identifier from an invitation link that a GitHub user can enter to open the invitation request flow. An invitation code identifies the same invitation link in the Console and the public flow. It is the code segment only, not the full invitation link URL. UI may use `code` alone when nearby context clearly establishes `invitation code`. Do not use `slug` in domain or UI language for this value.
 
 `Invitation` is not a standalone canonical noun in ghinvite. Use precise terms such as `Invitation Link`, `Invitation Code`, `Invitation Request`, `Invitation Request Flow`, or `GitHub Invitation`.
 

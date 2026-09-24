@@ -661,7 +661,7 @@ async fn authoritative_admission_contract() {
         let browser = LinkAuthority::new(Arc::new(
             ghinvite_web::RestateClient::new(&runtime.ingress).unwrap(),
         ));
-        let code = created["invitation_code"].as_str().unwrap();
+        let code = created["link_id"].as_str().unwrap();
         let page = browser.requester_page(code, 501, None).await.unwrap();
         assert_eq!(page.link_id.to_string(), id);
         assert!(page.attempt.is_none());
@@ -712,7 +712,7 @@ async fn authoritative_admission_contract() {
         let accepted = browser.admit(retry.clone()).await.unwrap();
         assert!(
             !browser
-                .requester_page(&retry_link.invitation_code, 601, None)
+                .requester_page(&retry_link.link_id.to_string(), 601, None)
                 .await
                 .unwrap()
                 .can_start_fresh
@@ -728,14 +728,14 @@ async fn authoritative_admission_contract() {
         normalized_retry.justification = Some(" \t\n ".into());
         assert_eq!(browser.admit(normalized_retry).await.unwrap(), accepted);
         let recovered = browser
-            .requester_page(&retry_link.invitation_code, 601, None)
+            .requester_page(&retry_link.link_id.to_string(), 601, None)
             .await
             .unwrap();
         assert!(!recovered.can_start_fresh);
         assert_eq!(recovered.attempt.unwrap().receipt.unwrap(), accepted);
         assert!(matches!(
             browser
-                .requester_page(&retry_link.invitation_code, 602, None)
+                .requester_page(&retry_link.link_id.to_string(), 602, None)
                 .await,
             Err(AuthorityError::Missing)
         ));
@@ -942,7 +942,146 @@ async fn authoritative_admission_contract() {
     })
     .await
     .expect("authoritative admission acceptance exceeded 120 seconds");
+    creation_contract(&Runtime::start().await).await;
     authoritative_workflow_contract().await;
+}
+
+/// Creation remains input-bound independently of invocation journals and mutable
+/// link state. Reads and requester submissions cannot reserve an allocated ID.
+async fn creation_contract(runtime: &Runtime) {
+    let input = creation();
+    let id = input["link_id"].as_str().unwrap();
+    for (handler, body) in [
+        ("requester_page", json!({"link_id": id, "requester_id": 91})),
+        (
+            "prepare_attempt",
+            json!({"link_id": id, "requester_id": 91, "operation_id": ghinvite_core::RequestId::new()}),
+        ),
+        (
+            "admit",
+            json!({"link_id": id, "requester_id": 91, "operation_id": ghinvite_core::RequestId::new()}),
+        ),
+    ] {
+        assert_eq!(runtime.command(id, handler, &body).await.status(), 404);
+    }
+    assert_eq!(
+        runtime.command("invalid", "create", &input).await.status(),
+        404
+    );
+    assert_eq!(
+        runtime
+            .command(&InvitationLinkId::new().to_string(), "create", &input)
+            .await
+            .status(),
+        404
+    );
+    let mut malformed = input.clone();
+    malformed["link_id"] = json!(format!("8{}", &id[1..]));
+    assert_eq!(
+        runtime.command(id, "create", &malformed).await.status(),
+        400
+    );
+    let (first, concurrent) = tokio::join!(
+        runtime.ok(id, "create", &input),
+        runtime.ok(id, "create", &input)
+    );
+    assert_eq!(first, concurrent);
+    assert_eq!(first["link_id"], id);
+    let mut changed = input.clone();
+    changed["description"] = json!("Different audience");
+    assert_eq!(runtime.command(id, "create", &changed).await.status(), 409);
+    runtime.ok(id, "update_metadata", &json!({"link_id": id, "admin": input["admin"], "description": "Edited", "internal_note": null})).await;
+    runtime
+        .ok(
+            id,
+            "revoke",
+            &json!({"link_id": id, "admin": input["admin"]}),
+        )
+        .await;
+    assert_eq!(runtime.ok(id, "create", &input).await, first);
+    timeout(Duration::from_secs(15), async {
+        while !runtime.invocations(id).await.is_empty() {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("creation invocation cleanup");
+    assert_eq!(runtime.ok(id, "create", &input).await, first);
+    let current = runtime
+        .ok(
+            id,
+            "link_status",
+            &json!({"link_id": id, "admin": input["admin"]}),
+        )
+        .await;
+    assert_eq!(current["metadata"]["description"], "Edited");
+    assert!(current["revoked_at"].is_string());
+
+    for stage in [
+        "creation-before-decision",
+        "creation-after-decision",
+        "creation-after-link",
+        "creation-after-receipt",
+        "creation-after-projection-send",
+    ] {
+        let mut input = creation();
+        let now = chrono::Utc::now();
+        let expiry = now + chrono::Duration::days(1);
+        input["expires_at"] = json!(expiry);
+        let id = input["link_id"].as_str().unwrap();
+        runtime.faults.set_clock(Some(now));
+        runtime.faults.arm(stage);
+        let call = runtime.ok(id, "create", &input);
+        tokio::pin!(call);
+        tokio::select! {
+            _ = &mut call => panic!("creation acknowledged before checkpoint release: {stage}"),
+            _ = async {
+                timeout(Duration::from_secs(15), async {
+                    while runtime.faults.attempts() < 2 { sleep(Duration::from_millis(20)).await; }
+                }).await.expect("creation checkpoint readiness");
+            } => {}
+        }
+        // After the decision, expiration passing cannot invalidate or retime it.
+        if stage != "creation-before-decision" {
+            runtime.faults.set_clock(Some(expiry));
+        }
+        runtime.faults.release();
+        for task in runtime.transport.tasks.lock().unwrap().drain(..) {
+            if !task.is_finished() {
+                task.abort();
+            }
+        }
+        let receipt = call.await;
+        assert_eq!(receipt["created_at"], json!(now), "{stage}");
+        assert_eq!(receipt["creation"], input, "{stage}");
+        runtime.faults.set_clock(Some(expiry));
+        assert_eq!(runtime.ok(id, "create", &input).await, receipt);
+        runtime.faults.set_clock(None);
+    }
+    runtime.offline.store(false, Ordering::SeqCst);
+    timeout(Duration::from_secs(15), async {
+        loop {
+            let events = runtime
+                .received
+                .lock()
+                .unwrap()
+                .projections
+                .iter()
+                .flat_map(|p| &p.events)
+                .filter(|event| {
+                    event.target_id == id && event.kind.as_str() == "invitation_link.created"
+                })
+                .count();
+            if events > 0 {
+                assert_eq!(events, 1);
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("durably dispatched creation audit");
+    runtime.offline.store(true, Ordering::SeqCst);
 }
 
 async fn lifecycle_boundaries(runtime: &Runtime) {

@@ -1,13 +1,13 @@
 //! Invitation links with their repository scope, shared by SQLite and D1. One
 //! LEFT JOIN row per repository (or one repo-less row), folded by [`fold`].
-use crate::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, Slug};
+use crate::{InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 macro_rules! select {
     ($filter:literal) => {
         concat!(
-            "SELECT l.id, l.slug, l.installation_id, l.account_id, l.created_by, l.created_at,
+            "SELECT l.id, l.installation_id, l.account_id, l.created_by, l.created_at,
             l.expires_at, l.max_uses, l.uses_count, l.permission, l.approval_required,
             l.description, l.internal_note, l.revoked_at, l.revoked_by, r.repo_id, r.repo_full_name
             FROM invitation_links l LEFT JOIN invitation_link_repos r ON r.invitation_link_id = l.id ",
@@ -27,7 +27,6 @@ pub const BELONGS_TO_ACCOUNT: &str =
 #[derive(Debug, Deserialize)]
 pub struct LinkRepoRow {
     pub id: InvitationLinkId,
-    pub slug: String,
     pub installation_id: u64,
     pub account_id: u64,
     pub created_by: u64,
@@ -60,8 +59,6 @@ pub fn fold(rows: Vec<LinkRepoRow>) -> super::Result<Vec<InvitationLink>> {
         if links.last().is_none_or(|link| link.id != row.id) {
             links.push(InvitationLink {
                 id: row.id,
-                slug: Slug::from_string(row.slug)
-                    .map_err(|e| super::Error::Corrupt(format!("slug: {e}")))?,
                 installation_id: row.installation_id,
                 account_id: row.account_id,
                 created_by: row.created_by,

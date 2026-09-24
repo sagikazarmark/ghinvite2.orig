@@ -4,10 +4,14 @@ test('create, revoke, approve and decline recover their original attempts across
   await page.goto('/fixture-login');
   await page.getByLabel('Description', { exact: true }).fill('Browser recovery');
   await page.getByLabel('acme/api', { exact: true }).check();
+  const action = new URL(await page.locator('form').filter({ has: page.getByRole('button', { name: 'Create invitation link' }) }).getAttribute('action'), page.url());
+  const linkId = action.searchParams.get('link_id');
+  expect(linkId).toMatch(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
   await page.getByRole('button', { name: 'Create invitation link' }).click();
   await expect(page.getByRole('status')).toContainText('Outcome unknown');
   const creation = await page.getByRole('link', { name: 'Check original attempt status' }).getAttribute('href');
   const detail = await page.getByRole('link', { name: 'View invitation link details' }).getAttribute('href');
+  expect(detail).toBe(`/console/accounts/octocat/links/${linkId}`);
   await page.goto('/console/accounts/octocat/links');
   await page.getByRole('link', { name: 'Recover attempts' }).click();
   await expect(page.getByRole('link', { name: 'Check original attempt status' })).toHaveAttribute('href', creation);
@@ -15,6 +19,7 @@ test('create, revoke, approve and decline recover their original attempts across
   await expect(page).toHaveURL(detail);
   await expect(page.getByText('Browser recovery', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('Invitation link created.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open invitation request flow' })).toHaveAttribute('href', new RegExp(`/i/${linkId}$`));
   await page.getByRole('link', { name: 'Stop accepting new requests' }).click();
   await page.getByRole('button', { name: 'Confirm stop' }).press('Enter');
   await expect(page.getByRole('status')).toContainText('Outcome unknown');

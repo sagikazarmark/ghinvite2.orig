@@ -59,7 +59,6 @@ pub struct LinkSnapshot {
     pub metadata: Option<LinkMetadata>,
     pub link_id: InvitationLinkId,
     pub creation: CreateLink,
-    pub invitation_code: String,
     pub created_at: DateTime<Utc>,
     pub uses: u64,
     pub revision: u64,
@@ -117,8 +116,6 @@ impl LinkSnapshot {
     pub fn as_link(&self) -> crate::InvitationLink {
         crate::InvitationLink {
             id: self.link_id,
-            slug: crate::Slug::from_string(self.invitation_code.clone())
-                .expect("validated authoritative code"),
             installation_id: self.creation.installation_id,
             account_id: self.creation.account_id,
             created_by: self.creation.admin.user_id,

@@ -800,22 +800,14 @@ mod tests {
         }
     }
 
-    pub(crate) fn slug_with_seed(seed: u64) -> ghinvite_core::Slug {
-        use rand::SeedableRng;
-        let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
-        ghinvite_core::Slug::generate(&mut rng)
-    }
-
     pub(crate) fn sample_link(
         account_id: u64,
         installation_id: u64,
         created_by: u64,
-        slug_seed: u64,
     ) -> InvitationLink {
         use ghinvite_core::{InvitationLinkRepo, Permission};
         InvitationLink {
             id: InvitationLinkId::new(),
-            slug: slug_with_seed(slug_seed),
             installation_id,
             account_id,
             created_by,
@@ -863,7 +855,7 @@ mod tests {
             .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
-        let link = sample_link(100, 1, 7, 1);
+        let link = sample_link(100, 1, 7);
         seed(&s, &link, &[], 1).await;
 
         let got = s.get_invitation_link_by_id(link.id).await.unwrap().unwrap();
@@ -878,10 +870,10 @@ mod tests {
             .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
-        let mut older = sample_link(100, 1, 7, 3);
+        let mut older = sample_link(100, 1, 7);
         older.created_at = dt("2026-05-01T00:00:00Z");
 
-        let mut newer = sample_link(100, 1, 7, 4);
+        let mut newer = sample_link(100, 1, 7);
         newer.created_at = dt("2026-05-04T00:00:00Z");
 
         seed(&s, &older, &[], 1).await;
@@ -921,8 +913,8 @@ mod tests {
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
 
-        let link_a = sample_link(100, 1, 7, 14);
-        let link_b = sample_link(200, 2, 7, 15);
+        let link_a = sample_link(100, 1, 7);
+        let link_b = sample_link(200, 2, 7);
         let r_a = sample_request(link_a.id, 8);
         let r_b = sample_request(link_b.id, 8);
         seed(&s, &link_a, std::slice::from_ref(&r_a), 1).await;
@@ -965,7 +957,7 @@ mod tests {
             .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
-        let link = sample_link(100, 1, 7, 20);
+        let link = sample_link(100, 1, 7);
         let req = sample_request(link.id, 8);
         seed(&s, &link, std::slice::from_ref(&req), 1).await;
 
@@ -1147,7 +1139,7 @@ mod tests {
             .await
             .unwrap();
         s.upsert_user(&sample_user(7, "requester")).await.unwrap();
-        let link = sample_link(42, 1, 7, 1);
+        let link = sample_link(42, 1, 7);
         seed(&s, &link, &[], 1).await;
         // A large imported history can share one admission timestamp. The deep
         // cursor must seek past that prefix, not examine it row by row.

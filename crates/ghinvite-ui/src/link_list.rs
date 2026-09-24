@@ -218,7 +218,7 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
                                                 tr {
                                                     td {
                                                         a { class: "link link-primary font-medium", href: "{base}/{link.id}", "{link.description}" }
-                                                        p { class: "mt-0.5 text-xs text-muted", "Invitation code: ", span { class: "font-mono", "{link.slug}" } }
+                                                        p { class: "mt-0.5 text-xs text-muted", "Invitation code: ", span { class: "font-mono", "{link.id}" } }
                                                     }
                                                     td { span { class: "{badge}", "{status}" } }
                                                     td { class: "whitespace-nowrap tabular-nums", "{link.uses_count} / {max}" }
@@ -253,7 +253,7 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use ghinvite_core::{InvitationLink, Permission, Slug};
+    use ghinvite_core::{InvitationLink, Permission};
 
     fn now() -> DateTime<Utc> {
         "2026-05-04T12:00:00Z".parse().unwrap()
@@ -262,7 +262,6 @@ mod tests {
     fn link(n: u32) -> InvitationLink {
         InvitationLink {
             id: format!("{n:026}").parse().unwrap(),
-            slug: Slug::from_string(format!("code{n:012}")).unwrap(),
             installation_id: 1,
             account_id: 2,
             created_by: 3,
@@ -326,7 +325,10 @@ mod tests {
         assert!(html.contains(
             "href=\"/console/accounts/acme/links/00000000000000000000000001\">Workshop 001</a>"
         ));
-        assert!(html.find("Workshop 001").unwrap() < html.find("code000000000001").unwrap());
+        assert!(
+            html.find("Workshop 001").unwrap()
+                < html.find("font-mono\">00000000000000000000000001").unwrap()
+        );
         for text in [
             "Invitation code:",
             "active</span>",

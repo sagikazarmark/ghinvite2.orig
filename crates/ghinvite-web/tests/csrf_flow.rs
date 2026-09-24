@@ -15,7 +15,7 @@ use ghinvite_core::storage::projection::{CreateLink, RequestSnapshot};
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
-    Permission, RequestId, RequestState, SelectedRepos, Slug,
+    Permission, RequestId, RequestState, SelectedRepos,
 };
 use ghinvite_github::{
     mocks::{Expectation, MockTransport},
@@ -69,7 +69,6 @@ impl Browser {
         }
         let link = InvitationLink {
             id: InvitationLinkId::new(),
-            slug: Slug::from_string("abcdEFGH01234567".into()).unwrap(),
             installation_id: 77,
             account_id: 42,
             created_by: 42,
@@ -266,7 +265,7 @@ async fn requester_service_failure_preserves_justification_operation_id_and_toke
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let id = RequestId::new();
     let body = format!("csrf_token={token}&operation_id={id}&justification=Keep+my+context");
-    let code = browser.link.slug.as_str();
+    let code = &browser.link.id.to_string();
     let path_ = format!("/i/{code}");
     let response = browser.post(&path_, body.clone()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -305,7 +304,7 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let base = "/console/accounts/octocat";
     let detail = format!("{base}/links/{}", browser.link.id);
-    let request = format!("/i/{}", browser.link.slug.as_str());
+    let request = format!("/i/{}", browser.link.id);
     for path in [
         format!("{base}/links/new"),
         format!("{detail}/edit"),

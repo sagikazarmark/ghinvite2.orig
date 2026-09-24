@@ -98,7 +98,7 @@ fn main() {
         move || {
             rsx! {
                 LinkCreateFormPage {
-                    action: "/console/accounts/acme/links".to_string(),
+                    action: format!("/console/accounts/acme/links?link_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&anchor={}", now.timestamp()),
                     signed_in_login: Some("admin".to_string()),
                     flash: None,
                     account_login: "acme".to_string(),

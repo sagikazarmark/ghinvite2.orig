@@ -25,7 +25,7 @@ use ghinvite_core::request_lifecycle::{
 };
 use ghinvite_core::storage::projection::{AccountAdmin, RequestSnapshot};
 use ghinvite_core::{
-    InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState, Slug,
+    InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState,
 };
 use ghinvite_web::LinkAuthority;
 use ghinvite_web::link_authority::AuthorityError;
@@ -38,7 +38,6 @@ const ADMIN: AccountAdmin = AccountAdmin {
 fn link() -> InvitationLink {
     InvitationLink {
         id: InvitationLinkId::new(),
-        slug: Slug::from_string("FakeAuthority001".into()).unwrap(),
         installation_id: 77,
         account_id: ADMIN.account_id,
         created_by: ADMIN.user_id,
@@ -395,7 +394,7 @@ async fn the_requester_page_recovers_the_latest_attempt_and_conceals_the_rest() 
     let mut link = link();
     link.approval_required = false;
     let (_fake, authority) = authority_with(&link).await;
-    let code = link.slug.as_str();
+    let code = &link.id.to_string();
 
     let page = authority.requester_page(code, 99, None).await.unwrap();
     assert!(page.can_start_fresh);
@@ -456,7 +455,7 @@ async fn a_declined_request_reaches_the_requester_page_without_a_reason() {
         .unwrap();
 
     let page = authority
-        .requester_page(link.slug.as_str(), 99, None)
+        .requester_page(&link.id.to_string(), 99, None)
         .await
         .unwrap();
     let request = page.request.unwrap();

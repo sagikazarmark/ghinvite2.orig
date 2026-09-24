@@ -65,7 +65,7 @@ async fn deadline_queue_app(
     // A historical/custom deadline, deliberately not today's seven-day policy.
     let envelope = serde_json::from_value(serde_json::json!({
         "transition_id":format!("link/{link}/2"),
-        "link":{"link_id":link,"revision":2,"uses":1,"invitation_code":"DeadlineQueue001",
+        "link":{"link_id":link,"revision":2,"uses":1,
             "created_at":"2026-01-01T00:00:00Z", "revoked_at":null,"revoked_by":null,
             "creation":{"link_id":link,"admin":{"account_id":42,"user_id":42},
                 "account_id":42,"installation_id":77,"description":"Deadline fixture",
@@ -198,7 +198,6 @@ async fn queue_excludes_auto_approved_requests_without_a_decision_deadline() {
     envelope.link.link_id = link;
     envelope.link.creation.link_id = link;
     envelope.link.creation.approval_required = false;
-    envelope.link.invitation_code = "AutoDeadline0001".into();
     envelope.transition_id = format!("link/{link}/2");
     envelope.requests[0].link_id = link;
     envelope.requests[0].request_id = ghinvite_core::RequestId::new();
@@ -1019,7 +1018,6 @@ async fn links_collection_renders_account_scoped_rows_and_native_controls() {
     let mut link = list_link(1);
     storage.seed_link(&link).await.unwrap();
     link.id = ghinvite_core::InvitationLinkId::new();
-    link.slug = ghinvite_core::Slug::from_string("foreigncode00001".into()).unwrap();
     link.account_id = 9002;
     link.installation_id = 78;
     link.description = "Other account secret".into();
@@ -1555,7 +1553,6 @@ fn assert_links_navigation_current(html: &str) {
 fn list_link(n: u32) -> ghinvite_core::InvitationLink {
     ghinvite_core::InvitationLink {
         id: ghinvite_core::InvitationLinkId::new(),
-        slug: ghinvite_core::Slug::from_string(format!("code{n:012}")).unwrap(),
         installation_id: 77,
         account_id: 9001,
         created_by: 42,
@@ -2296,8 +2293,6 @@ async fn audit_rows_allowlist_details_and_never_expose_private_payloads() {
         "secret-key",
         "arbitrary-array",
         "owner",
-        link.slug.as_str(),
-        foreign_link.slug.as_str(),
         &link.description,
     ] {
         assert!(!html.contains(secret), "leaked {secret}");

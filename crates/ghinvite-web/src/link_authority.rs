@@ -1,5 +1,5 @@
-//! The web's only path to the invitation link authority (the `InvitationLink`
-//! and `InvitationCode` Restate objects). Never reads SQL eligibility.
+//! The web's only path to the `InvitationLink` Restate authority.
+//! Never reads SQL eligibility.
 //!
 //! Every call waits for the authority's answer, because that answer is the
 //! decision itself. The authority's documented terminal statuses become
@@ -22,7 +22,6 @@ use std::sync::Arc;
 use thiserror::Error;
 
 const LINK: &str = "InvitationLink";
-const CODE: &str = "InvitationCode";
 
 /// Why the authority did not answer with a result.
 #[derive(Debug, Error)]
@@ -98,12 +97,6 @@ impl LinkAuthority {
             .await
     }
 
-    /// The link an invitation code names. A malformed code names none.
-    pub async fn resolve(&self, code: &str) -> Result<InvitationLinkId> {
-        ghinvite_core::Slug::from_string(code.to_owned()).map_err(|_| AuthorityError::Missing)?;
-        self.call(CODE, code, "resolve", &()).await
-    }
-
     /// What the requester may see of the link `code` names, including the
     /// attempt `operation_id` identifies when given.
     pub async fn requester_page(
@@ -112,7 +105,7 @@ impl LinkAuthority {
         requester_id: u64,
         operation_id: Option<AdmissionOperationId>,
     ) -> Result<RequesterPage> {
-        let link_id = self.resolve(code).await?;
+        let link_id = code.parse().map_err(|_| AuthorityError::Missing)?;
         let query = AttemptQuery {
             link_id,
             requester_id,
@@ -175,7 +168,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const CODE_VALUE: &str = "abcdefgh12345678";
+    const CODE_VALUE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 
     async fn authority_answering(response: ResponseTemplate) -> (MockServer, LinkAuthority) {
         let ingress = MockServer::start().await;
@@ -194,7 +187,10 @@ mod tests {
                 ResponseTemplate::new(status).set_body_string("upstream diagnostics"),
             )
             .await;
-            let error = authority.resolve(CODE_VALUE).await.unwrap_err();
+            let error = authority
+                .requester_page(CODE_VALUE, 2, None)
+                .await
+                .unwrap_err();
             let actual = match error {
                 AuthorityError::Invalid => "Invalid",
                 AuthorityError::Missing => "Missing",
@@ -212,7 +208,10 @@ mod tests {
                 ResponseTemplate::new(status).set_body_string("upstream diagnostics"),
             )
             .await;
-            let error = authority.resolve(CODE_VALUE).await.unwrap_err();
+            let error = authority
+                .requester_page(CODE_VALUE, 2, None)
+                .await
+                .unwrap_err();
             let AuthorityError::Unknown(failure) = &error else {
                 panic!("HTTP {status}: expected an unknown outcome, got {error:?}")
             };
@@ -229,7 +228,10 @@ mod tests {
     async fn an_undecodable_answer_leaves_the_outcome_unknown() {
         let (_ingress, authority) =
             authority_answering(ResponseTemplate::new(200).set_body_string("not json")).await;
-        let error = authority.resolve(CODE_VALUE).await.unwrap_err();
+        let error = authority
+            .requester_page(CODE_VALUE, 2, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 error,
@@ -248,7 +250,10 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         drop(listener);
         let authority = LinkAuthority::new(Arc::new(RestateClient::new(url).unwrap()));
-        let error = authority.resolve(CODE_VALUE).await.unwrap_err();
+        let error = authority
+            .requester_page(CODE_VALUE, 2, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(
                 error,
@@ -261,19 +266,21 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_code_is_missing_without_asking_the_authority() {
         let (ingress, authority) = authority_answering(ResponseTemplate::new(200)).await;
-        assert!(matches!(
-            authority.resolve("not a code").await,
-            Err(AuthorityError::Missing)
-        ));
+        for code in ["not a code", "81ARZ3NDEKTSV4RRFFQ69G5FAV"] {
+            assert!(matches!(
+                authority.requester_page(code, 2, None).await,
+                Err(AuthorityError::Missing)
+            ));
+        }
         assert!(ingress.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn answers_decode_from_the_code_and_link_paths() {
+    async fn public_lookup_routes_textual_variants_directly_to_the_canonical_link() {
         let ingress = MockServer::start().await;
-        let link = InvitationLinkId::new();
-        Mock::given(path(format!("/{CODE}/{CODE_VALUE}/resolve")))
-            .respond_with(ResponseTemplate::new(200).set_body_json(link))
+        let link: InvitationLinkId = CODE_VALUE.parse().unwrap();
+        Mock::given(path(format!("/{LINK}/{link}/requester_page")))
+            .respond_with(ResponseTemplate::new(404))
             .expect(1)
             .mount(&ingress)
             .await;
@@ -283,7 +290,12 @@ mod tests {
             .mount(&ingress)
             .await;
         let authority = LinkAuthority::new(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
-        assert_eq!(authority.resolve(CODE_VALUE).await.unwrap(), link);
+        assert!(matches!(
+            authority
+                .requester_page(&CODE_VALUE.to_lowercase(), 2, None)
+                .await,
+            Err(AuthorityError::Missing)
+        ));
         let command: DecideRequest = serde_json::from_value(serde_json::json!({
             "link_id": link, "request_id": ghinvite_core::RequestId::new(),
             "operation_id": ghinvite_core::RequestId::new(),

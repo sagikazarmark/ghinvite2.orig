@@ -21,7 +21,7 @@ use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
-    Permission, RequestId, RequestState, SelectedRepos, Slug, User,
+    Permission, RequestId, RequestState, SelectedRepos, User,
 };
 use ghinvite_github::transport::{HttpTransport, Method, Request as GithubRequest, Response};
 use ghinvite_web::{AppState, WebConfig, build_app};
@@ -42,10 +42,10 @@ const ORG_LOGIN: &str = "acme";
 
 /// An active invitation link with no invitation request from the signed-in
 /// user, so `/i/{code}` renders the invitation request form.
-const FORM_CODE: &str = "abcdEFGH01234567";
+const FORM_CODE: &str = FORM_LINK_ID;
 /// An active invitation link the signed-in user already has a pending
 /// invitation request on, so `/i/{code}` renders its status, not the form.
-const STATUS_CODE: &str = "bcdeFGHI12345678";
+const STATUS_CODE: &str = STATUS_LINK_ID;
 /// Fixed link IDs, so the Console detail and edit paths are the same here and
 /// in `tests/browser/document.spec.mjs`.
 const FORM_LINK_ID: &str = "01JQRFRM000000000000000000";
@@ -302,7 +302,7 @@ async fn document_fixture() -> (axum::Router, String) {
     // projection the Console lists.
     let authority = FakeLinkAuthority::start().await;
     for (code, link_id) in [(FORM_CODE, FORM_LINK_ID), (STATUS_CODE, STATUS_LINK_ID)] {
-        let link = active_link(code, link_id);
+        let link = active_link(link_id);
         storage.seed_link(&link).await.unwrap();
         authority.seed_link(&link);
         if code == STATUS_CODE {
@@ -339,10 +339,9 @@ async fn document_fixture() -> (axum::Router, String) {
     (app, cookie)
 }
 
-fn active_link(code: &str, link_id: &str) -> InvitationLink {
+fn active_link(link_id: &str) -> InvitationLink {
     InvitationLink {
         id: link_id.parse::<InvitationLinkId>().unwrap(),
-        slug: Slug::from_string(code.to_string()).unwrap(),
         installation_id: 77,
         account_id: USER_ID,
         created_by: USER_ID,
@@ -368,7 +367,6 @@ fn active_link(code: &str, link_id: &str) -> InvitationLink {
 fn pending_page(link: &InvitationLink, request: RequestId) -> RequesterPage {
     RequesterPage {
         link_id: link.id,
-        invitation_code: link.slug.as_str().into(),
         repos: link.repos.clone(),
         permission: link.permission,
         approval_required: link.approval_required,
