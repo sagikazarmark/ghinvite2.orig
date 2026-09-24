@@ -99,6 +99,8 @@ jobs:
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
       - run: npm run test:admission --prefix tests/worker
+      - name: Verify approved delivery without projected parents on Worker/D1
+        run: npm run test:delivery --prefix tests/worker
 
   worker-production:
     name: Production-feature Worker packaging
@@ -222,6 +224,8 @@ jobs:
         run: bash scripts/test-restate.sh canonical_link
       - name: Verify retained delivery and uncertain HTTP recovery
         run: bash scripts/test-restate.sh retained_delivery
+      - name: Verify approved delivery without projected parents
+        run: bash scripts/test-restate.sh approved_delivery
       - name: Verify installation convergence and admission availability
         run: bash scripts/test-restate.sh installation_availability
       - name: Verify one audit event survives a retried installation projection

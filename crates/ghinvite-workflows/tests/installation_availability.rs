@@ -1,7 +1,7 @@
 //! #60: availability through public commands and a real GitHub HTTP boundary.
 #![cfg(feature = "integration")]
 use ghinvite_core::RequestId;
-use ghinvite_core::storage::{AuditStorage, ConsoleStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{AuditStorage, ConsoleStorage, RecordStorage};
 use restate_sdk::http_server::HttpServer;
 use serde_json::{Value, json};
 use std::{
@@ -139,19 +139,17 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .status()
             .is_success()
     );
-    let result: Value = call(
+    let result = call(
         "admit",
         json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
     )
     .send()
     .await
-    .unwrap()
-    .json()
-    .await
     .unwrap();
     assert_eq!(
-        result["result"],
-        json!({"kind":"rejected","reason":"installation_unavailable"})
+        result.status(),
+        503,
+        "missing retained authority is uncertain"
     );
     let onboard = json!({"installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()});
     let installation = |id: u64, handler: &str, input: Value| {
@@ -346,28 +344,15 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .await
     .unwrap();
     observed.lock().unwrap()["failed"] = json!(false);
-    // #66: a repository webhook is acknowledged by its durable send, so the
-    // account object's first storage adoption failure must retain recovery
-    // instead of dropping acknowledged work. Installation 40 is the shape
-    // adoption exists for: its command already retains the numeric account
-    // binding, while account 300 has never been observed and must adopt the
-    // existing row.
+    // Fresh onboarding, refresh and admission use retained context while the
+    // entire installation projection is unreadable. No SQL adoption is needed.
     observed.lock().unwrap()["repos"] = json!([10, 11]);
-    storage
-        .insert_installation(&ghinvite_core::Account {
-            installation_id: 40,
-            account_id: 300,
-            account_login: "adopted".into(),
-            account_type: ghinvite_core::AccountType::Organization,
-            installed_at: chrono::Utc::now(),
-            uninstalled_at: None,
-            selected_repos: ghinvite_core::SelectedRepos::Subset(vec![]),
-        })
+    sqlx::query("ALTER TABLE installations RENAME TO installations_offline")
+        .execute(&failures)
         .await
         .unwrap();
-    let seeded = client
-        .post(format!("{admin}/services/Installation/state"))
-        .json(&json!({"object_key":"40","new_state":{"account_id":serde_json::to_vec(&300u64).unwrap()}}))
+    let seeded = installation(40, "onboard", json!({"installation_id":40,"actor_user_id":7,"account_id":300,
+        "account_login":"adopted","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
         .send()
         .await
         .unwrap();
@@ -410,10 +395,6 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     // Installation reads fail while GitHub stays reachable.
-    sqlx::query("ALTER TABLE installations RENAME TO installations_offline")
-        .execute(&failures)
-        .await
-        .unwrap();
     let repos_changed = json!({"installation_id":40,"selected_repos":"all"});
     // The webhook acknowledges the event with a durable send, exactly as the
     // repository-change command does.
@@ -427,9 +408,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .status()
             .is_success()
     );
-    // The command also completes rather than holding its own exclusivity
-    // through indefinite retries, and a duplicate event joins the retained
-    // continuation instead of competing with it.
+    // Duplicate refreshes complete without waiting for projection.
     for _ in 0..2 {
         assert!(
             installation(40, "repos_changed", repos_changed.clone())
@@ -440,8 +419,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
                 .is_success()
         );
     }
-    // A delayed event for an identity this account never adopts is retained
-    // just as safely.
+    // A delayed event for an identity this account never onboarded is harmless.
     assert!(
         client
             .post(format!("{ingress}/AccountInstallation/300/refresh"))
@@ -452,8 +430,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .status()
             .is_success()
     );
-    // Admission's synchronous observation still fails promptly with an
-    // infrastructure result, holding no exclusivity and recording no rejection.
+    // Retained authority remains usable during the projection outage.
     let started = std::time::Instant::now();
     let adopted_attempt =
         json!({"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
@@ -465,7 +442,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .await
             .unwrap()
             .status(),
-        503
+        200
     );
     assert_eq!(
         client
@@ -474,11 +451,10 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .await
             .unwrap()
             .status(),
-        503
+        200
     );
     assert!(started.elapsed() < Duration::from_secs(15));
-    // A redelivered uninstall during the outage joins the continuation already
-    // retained for its identity instead of starting a parallel retry chain.
+    // An unrelated uninstall retains a tombstone without affecting this account.
     let uninstall_41 = json!({"installation_id":41,"uninstalled_at":chrono::Utc::now()});
     for _ in 0..2 {
         assert!(
@@ -502,7 +478,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .json()
         .await
         .unwrap();
-    assert_eq!(retries["rows"].as_array().unwrap().len(), 1, "{retries}");
+    assert_eq!(retries["rows"].as_array().unwrap().len(), 0, "{retries}");
     // An unusable account key is refused, not retried as if it were an outage.
     assert_eq!(
         client
@@ -546,8 +522,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap();
     assert_eq!(adopted["account"]["installation_id"], 40);
     assert_eq!(adopted["observation"]["repo_ids"], json!([10, 11]));
-    // The attempt that met the outage was never decided, so the same operation
-    // still admits once the observation is available.
+    // Admission replay retains the successful result after projection repair.
     assert_eq!(
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/admit"))

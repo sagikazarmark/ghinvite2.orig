@@ -11,6 +11,7 @@ import { settlement } from './settlement.mjs';
 import { frames, fields } from './protocol.mjs';
 import { deadlineRecovery, stalledResponse } from './deadline-recovery.mjs';
 import { installationRecovery } from './installation.mjs';
+import { approvedDelivery } from './approved-delivery.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { cwd: root, encoding: 'utf8', timeout: 120_000 }));
@@ -230,7 +231,10 @@ try {
     const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
     await db.exec(sql.replace(/^--.*$/gm, '').replaceAll('\n', ' '));
   }
-  if (process.env.INSTALLATION_ONLY === '1') {
+  if (process.env.APPROVED_DELIVERY_ONLY === '1') {
+    await approvedDelivery({ ingress, githubUrl, http, db, creation, id, eventually });
+    assert.equal(unexpectedOutbound, 0);
+  } else if (process.env.INSTALLATION_ONLY === '1') {
     for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
     await installationRecovery({ ingress, http, storage, id, creation, eventually,
       observe: value => { installationObservation = value; },
@@ -242,8 +246,9 @@ try {
     });
     assert.equal(unexpectedOutbound, 0);
   } else {
-  await db.prepare("INSERT INTO installations VALUES (1,100,'acme','Organization','2026-01-01T00:00:00Z',NULL,'[10,11]')").run();
-  // Adopt existing installation facts before exercising projection failure.
+   await http(`${ingress}/Installation/1/onboard`, { installation_id: 1, actor_user_id: 7, account_id: 100,
+     account_login: 'acme', account_type: 'Organization', selected_repos: 'all', installed_at: '2026-01-01T00:00:00Z' });
+   // Establish retained installation facts before exercising projection failure.
   // Missing user parents keep link/request projection unavailable.
   const input = creation();
   const command = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
@@ -272,7 +277,8 @@ try {
   console.log('PASS compatible D1 migrations and restored identity parents');
   await eventually(() => storage('link', input.link_id), link => link?.uses_count === 1 && link.revoked_at);
   await eventually(() => storage('request', receipt.result.request_id), request => request?.state === 'pending');
-  await eventually(() => storage('audit', 100), page => page.events.length === 4);
+  await eventually(() => storage('audit', 100), page => page.events.filter(event =>
+    [input.link_id, receipt.result.request_id].includes(event.target_id)).length === 4);
   console.log('PASS real asynchronous D1 adapter converges after missing parent recovery');
   const projection = creation();
    const snapshot = { link_id: projection.link_id, creation: projection,
@@ -499,17 +505,12 @@ try {
   await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
     pause: value => { pauseWorkflows = value; } });
    await browserAdmission(ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
-  // #66 on actual D1 bindings: installation 40 is the shape adoption exists for.
-  // Its command already retains the numeric account binding, while account 300
-  // has never been observed and must adopt the existing row.
-  await http(`${githubUrl}/installation-identity`, { id: 300, login: 'adopted', type: 'Organization' });
-  await db.prepare("INSERT INTO installations VALUES (40,300,'adopted','Organization','2026-01-01T00:00:00Z',NULL,'[]')").run();
-  await fetch(`${admin}/services/Installation/state`, { method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ object_key: '40', new_state: { account_id: [...Buffer.from('300')] } }), signal: AbortSignal.timeout(25_000) });
-  await eventually(() => http(`${admin}/query`, { query: "SELECT key FROM state WHERE service_name = 'Installation' AND service_key = '40'" }),
-    state => state.rows.length > 0);
-  // Installation reads fail on the real binding while GitHub stays reachable.
-  await db.prepare('ALTER TABLE installations RENAME TO installations_offline').run();
+   // Fresh onboarding and refresh require no installation read projection.
+   await http(`${githubUrl}/installation-identity`, { id: 300, login: 'adopted', type: 'Organization' });
+   // Installation reads fail on the real binding while GitHub stays reachable.
+   await db.prepare('ALTER TABLE installations RENAME TO installations_offline').run();
+   await http(`${ingress}/Installation/40/onboard`, { installation_id: 40, actor_user_id: 7, account_id: 300,
+     account_login: 'adopted', account_type: 'Organization', selected_repos: 'all', installed_at: '2026-01-01T00:00:00Z' });
   const reposChanged = { installation_id: 40, selected_repos: 'all' };
   const acknowledged = await http(`${ingress}/Installation/40/repos_changed/send`, reposChanged);
   assert.ok(acknowledged.invocationId, 'repository webhook is acknowledged by its durable send');
@@ -519,7 +520,7 @@ try {
   await http(`${ingress}/AccountInstallation/300/refresh`, 41);
   const held = Date.now();
   const offline = await fetch(`${ingress}/AccountInstallation/300/status`, { method: 'POST', signal: AbortSignal.timeout(25_000) });
-  assert.equal(offline.status, 503, 'synchronous observation fails promptly instead of holding exclusivity');
+   assert.equal(offline.status, 200, 'retained context remains readable without SQL');
   assert.ok(Date.now() - held < 15_000);
   await db.prepare('ALTER TABLE installations_offline RENAME TO installations').run();
   // Restoration alone converges: no further webhook and no user action.
@@ -529,7 +530,7 @@ try {
   assert.equal(adopted.account.installation_id, 40);
   assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
   await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
-  console.log('PASS #66 acknowledged webhook survives first D1 adoption outage and converges without another event');
+   console.log('PASS onboarding and refresh during D1 projection outage converge without another event');
   }
   }
 } catch (error) {

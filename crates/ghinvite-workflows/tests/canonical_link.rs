@@ -8,7 +8,7 @@ use axum::{
     response::Response,
 };
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{ConsoleStorage, RecordStorage};
 use ghinvite_github::transport::{HttpTransport, ReqwestTransport};
 use serde_json::json;
 use std::sync::{
@@ -128,18 +128,6 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
             .await
             .unwrap(),
     );
-    storage
-        .insert_installation(&ghinvite_core::Account {
-            installation_id: 1,
-            account_id: 100,
-            account_login: "acme".into(),
-            account_type: ghinvite_core::AccountType::Organization,
-            installed_at: chrono::Utc::now(),
-            uninstalled_at: None,
-            selected_repos: ghinvite_core::SelectedRepos::All,
-        })
-        .await
-        .unwrap();
     let github = Arc::new(
         ghinvite_github::InstallationClient::new(
             Arc::new(ReqwestTransport::with_client(client.clone())),
@@ -179,6 +167,18 @@ async fn confirmed_link_opens_and_accepts_replay_before_projection() {
         "{}",
         deployment.text().await.unwrap()
     );
+    let onboard = client.post(format!("{ingress}/Installation/1/onboard"))
+        .json(&json!({"installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme",
+            "account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
+        .send().await.unwrap();
+    assert!(onboard.status().is_success());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while storage.get_installation(1).await.unwrap().is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
     // Forward actual ingress HTTP, but lose the first successful creation
     // acknowledgement. Recovery must use the browser's retained exact input.
     let lost = Arc::new(AtomicBool::new(false));

@@ -14,6 +14,11 @@ service has not been registered.
 - Link `consumed/<request>` records lifecycle consumption after fan-out (or
   after observing a non-approved terminal decision).
 - `GithubCreate/<invitation>` retains `input` and `receipt` without TTL.
+  First use validates exact command membership through the private link owner's
+  `authorize_delivery` issuance check before binding input or attempting effects.
+  Bound retries use that authorization without fetching the approved plan again.
+  The command contains immutable numeric account/requester/repository identities,
+  repository address, permission, approval ID/time and installation provenance.
   The receipt is independent of the database invitation lifecycle.
 - `delivery_attempts` is an input-bound database **write fence**, not the receipt
   authority. Claiming an attempt generation permits one PUT. If its own
@@ -37,6 +42,28 @@ service has not been registered.
 Retained `GithubCreate/status` reports the actual delivery result during a
 projection outage. SQL-backed views may show the last projected observation or
 updates unavailable; projection failure is not a definitive GitHub failure.
+
+Delivery reads `AccountInstallation/current_installation`, a shared retained-only
+read, for the current installation of the command's numeric account. Fresh
+onboarding establishes this context without SQL adoption. Missing retained
+authority returns recovery uncertainty (503); known uninstall blocks execution.
+The original installation ID is provenance, so same-account reinstall uses the
+replacement credentials with the original command and delivery ID. Before an
+effect or reconciliation, GitHub must confirm the current numeric installation
+and account, repository ID, and requester ID at its freshly resolved login.
+
+**Read-projection independence is not safety-fence database independence.**
+Delivery does not read projected requests, links, users, installation rows, or a
+SQL `Approved` flag. It still needs SQL/D1's input-bound `delivery_attempts` fence
+before a new PUT. Fence unavailability produces zero PUTs. Fresh claim and the
+conditional PUT remain in one re-executable effect step; a lost claim or HTTP
+acknowledgement remains conservative unknown. A retained unknown receipt itself
+also prohibits writes, even if read projections or a fence row disappear.
+
+This is a clean prelaunch protocol replacement, not live-state migration. Deploy
+matching native/Worker account, link, create and projector registrations together
+in a fresh environment and onboard accounts through the verified setup path.
+Pre-seeding SQL installations is not onboarding or authority reconstruction.
 
 ## Create-outcome audit history
 
@@ -97,8 +124,8 @@ exactly-once HTTP transaction is claimed.
 
 A `github_invitations` row is never create evidence: only the receiving object's
 own projection writes it, after the receipt it projects is retained, so it never
-knows more than `receipt`. Without a confirmed receipt, the write fence alone
-decides between one PUT and read-only reconciliation. Never infer a successful
+knows more than `receipt`. Without a confirmed receipt, a retained unknown outcome
+or existing write fence requires read-only reconciliation. Never infer a successful
 original create from decline/expiry alone.
 
 ## GitHub throttling
@@ -182,6 +209,15 @@ invitation-object state, never restart the workflow to clean a promise, and neve
 interpret an absent promise as loss of the authoritative decision.
 
 ## Verification
+
+`bash scripts/test-restate.sh approved_delivery` checks delivery with all four
+projected parent records withheld, independent projection convergence, partial
+two-repository progress, exact first-use/replay identity checks, same-account
+reinstall, current requester login, account/requester mismatches, stale SQL Pending
+alongside retained approval, fence outage, applied PUT with lost result and no
+remaining invitation, and read-only unknown replay with missing projections/fence.
+`npm run test:delivery --prefix tests/worker` verifies withheld parents, real HTTP
+delivery, applied PUT/result loss, read-only recovery and convergence on Worker/D1.
 
 `bash scripts/test-restate.sh retained_delivery` exercises real Restate 1.7.9,
 native SQLx, and the GitHub HTTP stub: stable plans, 201/204/422, ambiguous 502,

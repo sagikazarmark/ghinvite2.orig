@@ -10,6 +10,7 @@
     "test:deadlines": "node build.mjs && node deadlines.mjs && STALL_PHASE=body node deadlines.mjs",
     "test:admission": "node build.mjs && node build.mjs workflows && cargo build --locked -p ghinvite-github --features test-stub --example stub && node admission.mjs",
     "test:settlement": "SETTLEMENT_ONLY=1 npm run test:admission",
+    "test:delivery": "APPROVED_DELIVERY_ONLY=1 npm run test:admission",
     "test:installation": "timeout --kill-after=35s 1200s sh -ec 'node build.mjs workflows && cargo build --locked -p ghinvite-github --features test-stub --example stub && INSTALLATION_ONLY=1 node admission.mjs'",
     "test:storage": "node build.mjs workflows && node storage-suite.mjs",
     "test:production": "node build-production.mjs && timeout --kill-after=5s 90s node production.mjs"

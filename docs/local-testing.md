@@ -160,6 +160,7 @@ From the repository root, run the same targets as CI:
 ```bash
 bash scripts/test-restate.sh authoritative_admission   # also the default target
 bash scripts/test-restate.sh retained_delivery
+bash scripts/test-restate.sh approved_delivery
 bash scripts/test-restate.sh installation_availability
 bash scripts/test-restate.sh installation_audit_replay
 bash scripts/test-restate.sh durable_projection
@@ -290,6 +291,7 @@ smoke/dev runs retain the default hourly scan.
 
 ```bash
 npm run test:storage --prefix tests/worker
+npm run test:delivery --prefix tests/worker
 ```
 
 This builds the actual workflows Worker with `runtime-tests` and runs every

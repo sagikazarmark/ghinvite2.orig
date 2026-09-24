@@ -75,7 +75,7 @@ host failure may need manual cleanup of the printed unique Compose project.
   suspension; real clock sampling and seven-day deadline.
 - Final-use competitors, revoke, original-receipt replay, changed-input conflict,
   and authoritative completion while D1 user parents are missing. Installation
-  facts are adopted separately for #60's account availability integration.
+  authority is established through real onboarding before admission.
 - D1 identity-parent restoration followed by durable projection convergence,
   with verification through the Rust Storage read interfaces.
 - Fixed-batch reordered/duplicate snapshots, stale snapshot with missing historical
@@ -93,10 +93,12 @@ host failure may need manual cleanup of the printed unique Compose project.
   Worker outbound HTTP to the controlled GitHub stub.
 - Real web Worker OAuth/session and authorized invitation status while D1 has no
   link/request projections; admin-only note remains private.
-- #66 acknowledged repository webhook across a real D1 installation-read outage:
-  duplicate and never-adopted events are retained, synchronous observation still
-  fails promptly, and restoration alone converges the projected scope. The
-  pre-existing command state is seeded through Restate's admin state API.
+- Fresh onboarding and acknowledged repository webhooks across a real D1
+  installation projection outage: retained reads remain usable, duplicate and
+  unknown events are harmless, and restoration alone converges projected scope.
+- `npm run test:delivery --prefix tests/worker` separately verifies approved
+  delivery with installation/link/request/user rows withheld, an applied PUT with
+  lost result, read-only reconciliation, and independent projection convergence.
 
 On 2026-09-14 the local lazy-history experiment retained fourteen 16-KiB
 rejected operations. A fresh rejection before and after unrelated history used

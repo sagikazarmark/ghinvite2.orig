@@ -10,8 +10,10 @@ ignored: webhooks and setup returns request a refresh.
 
 `AccountInstallation/<numeric account ID>` serializes onboarding, repository
 refresh, uninstall, status, and admission observations across replacement
-installations. It adopts an existing active installation row once, then retains
-current identity and observations in Restate. `InstallationProjection` receives
+installations. Fresh onboarding retains current identity and observations in
+Restate without adopting SQL rows. The shared `current_installation` read returns
+only the retained account context for delivery; missing authority returns 503.
+`InstallationProjection` receives
 ordered durable sends for SQL/audit writes on a separate account-keyed object,
 so persistence retries cannot hold availability, approval, or replay hostage.
 Deploy these services together.
@@ -26,22 +28,19 @@ Repository refresh runs inside account serialization, follows all pages, and
 retains exact numeric repository IDs even for an installation configured for all
 repositories. Inconsistent/incomplete pagination is unknown. Duplicate events
 repeat the current observation rather than applying old deltas. Refreshes caused
-by installation events update the SQL/D1 selected-repository view used by existing
-delivery prerequisites; unavailable/unknown observations project an empty set.
+by installation events update retained context and the SQL/D1 selected-repository
+view; unavailable/unknown observations retain and project an empty set.
 The public account `status` distinguishes that uncertainty from known absence.
 Unavailable/unknown observations schedule a durable 60-second recheck until
 restoration or uninstall. A successful observation also projects restored scope,
 including when triggered by admission, so blocked delivery can recover.
 
-Refresh work is acknowledged by its durable send before it runs, so an account
-object whose first adoption cannot read installation storage retains that work
-as a durable continuation with bounded backoff (one second, doubling up to the
-recheck cadence) instead of failing it away (#66). This is reachable for an
-installation command that already retains its numeric account binding while the
-account object has never adopted. One continuation is retained per identity:
-duplicate events join the scheduled one and only it retires its own slot, and a
-continuation for an identity the account does not adopt — superseded or retired
-— observes nothing. The periodic recheck keeps its own slot across the outage.
+Refresh work is acknowledged by its durable send before it runs. Onboarding,
+refresh and uninstall need no SQL reads, so projection outages only hold the
+independent projector. The former SQL-adoption retry protocol is removed in the
+clean prelaunch model (#119). Installation-ID routing and uninstall tombstones
+remain retained; an unknown routing identity cannot reconstruct authority from
+SQL. Refreshes for superseded, retired, or unknown identities observe nothing.
 
 ## Admission and approval
 
@@ -58,7 +57,7 @@ answer that rejects always rests on a live read
 suspended, or identity-mismatched installations reject with
 `installation_unavailable`; any missing repository in the immutable link scope
 rejects with `repository_unavailable`. Both are retained business outcomes.
-Transient GitHub failures return 503 without recording a business rejection;
+Missing expected account authority and transient GitHub failures return 503 without recording a business rejection;
 retry the same attempt. Restoration never changes an old rejection: use a fresh
 operation for a fresh attempt.
 
@@ -67,11 +66,8 @@ including on Workers. A stalled observation becomes unknown and completes its
 exclusive handler, allowing queued status to proceed and durable recheck to run.
 
 Admission observations retain Restate state and durably arrange projection without
-waiting for SQL. Initial adoption requires installation storage to be readable;
-an adoption failure returns 503 rather than indefinitely holding exclusivity.
-Synchronous observation keeps that prompt failure — `status`, `eligibility`, and
-`onboard` never wait out an outage; only acknowledged refresh work is retained.
-Subsequent link admission and
+waiting for SQL. Onboarding verifies GitHub and establishes retained authority;
+an existing SQL row alone cannot initialize that authority. Link admission and
 receipt replay do not depend on SQL projection completion. Revocation, decisions,
 and request status do not call availability. Original deadlines, uses, revocation,
 scope, dispatch plans, and confirmed delivery history survive uninstall/reinstall.
@@ -101,13 +97,10 @@ absence, partial scope, unknown observations, replay, original pending deadlines
 approval and blocked delivery, replacement before uninstall, duplicate/late old
 events, uninstall before onboard, pagination, identity mismatch, scope/use/history
 retention, and restored eligibility without overriding exhaustion or revocation.
-It also covers #66: an acknowledged repository webhook for an installation whose
-command predates its account object, an adoption outage that admission and the
-public `status` still fail promptly through, duplicate and never-adopted events,
-convergence on restoration with no further event, and a delayed event for a
-retired identity. That scenario seeds the pre-existing command state through
-Restate's admin state API, since a first adoption is otherwise unreachable.
+It also covers fresh onboarding, acknowledged repository webhooks, admission and
+retained reads during an installation projection outage, duplicate/unknown events,
+convergence on restoration with no further event, and delayed retired events.
 The Worker gate uses the production account availability integration with actual
 D1 bindings; missing user parents keep admission projections unavailable until
-restoration, and it repeats #66's outage on those bindings. Protocol-only tests
+restoration, and it repeats the projection outage on those bindings. Protocol-only tests
 explicitly opt out of installation integration.

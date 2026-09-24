@@ -225,7 +225,7 @@ async fn add_collaborator(
     };
     let invitation = json!({
         "id": id,
-        "invitee": {"id": 8, "login": user},
+        "invitee": {"id": s.addressed_id.unwrap_or(8), "login": user},
         "repository": {"full_name": format!("{owner}/{repo}")},
         "permissions": permissions,
         "created_at": Utc::now(),

@@ -1,6 +1,6 @@
 //! Public ingress + real SQL + GitHub HTTP boundary acceptance for #56.
 #![cfg(feature = "integration")]
-use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, RecordStorage};
 use ghinvite_core::{RequestId, storage::Storage};
 use restate_sdk::endpoint::{Endpoint, HandleOptions, ProtocolMode};
 use serde_json::{Value, json};
@@ -153,18 +153,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap(),
     );
     let now = chrono::Utc::now();
-    storage
-        .insert_installation(&ghinvite_core::Account {
-            installation_id: 9,
-            account_id: 100,
-            account_login: "acme".into(),
-            account_type: ghinvite_core::AccountType::Organization,
-            installed_at: now,
-            uninstalled_at: None,
-            selected_repos: ghinvite_core::SelectedRepos::All,
-        })
-        .await
-        .unwrap();
     for (user_id, login) in [(7, "creator"), (8, "alice")] {
         storage
             .upsert_user(&ghinvite_core::User {
@@ -246,6 +234,15 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .lose_projection_ack
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let builder = builder
+        .bind(ghinvite_workflows::installation::Installation {
+            state: state.clone(),
+        })
+        .bind(ghinvite_workflows::availability::AccountInstallation {
+            state: state.clone(),
+        })
+        .bind(ghinvite_workflows::availability::InstallationProjection {
+            state: state.clone(),
+        })
         .bind(ghinvite_workflows::github_invitation::GithubInvitation {
             state: state.clone(),
         })
@@ -291,6 +288,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     };
     let creation = json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
         "description":"Delivery test","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]});
+    let response = call("Installation", "9".into(), "onboard", json!({"installation_id":9,"actor_user_id":7,"account_id":100,
+        "account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":now})).send().await.unwrap();
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
     let response = call("InvitationLink", link.to_string(), "create", creation)
         .send()
         .await
@@ -713,10 +717,20 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .await
     .unwrap();
     assert_eq!(checkpoint["submitted"], json!([]));
-    storage
-        .update_installation_repos(9, &ghinvite_core::SelectedRepos::Subset(vec![10]))
+    client
+        .post(format!("{base}/installation-repositories"))
+        .json(&json!([10]))
+        .send()
         .await
         .unwrap();
+    assert!(
+        call("AccountInstallation", "100".into(), "refresh", json!(9))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     let recovered = client
         .post(format!("{ingress}/DeliveryRecovery/recover"))
         .json(&query)
@@ -755,10 +769,20 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             }
         );
     }
-    storage
-        .update_installation_repos(9, &ghinvite_core::SelectedRepos::All)
+    client
+        .post(format!("{base}/installation-repositories"))
+        .json(&json!([10, 11]))
+        .send()
         .await
         .unwrap();
+    assert!(
+        call("AccountInstallation", "100".into(), "refresh", json!(9))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     client
         .post(format!("{base}/identity"))
         .json(&json!({"login":"renamed","addressed_id":99}))
@@ -1229,10 +1253,19 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     let command = plan["commands"][0].clone();
     let id = command["invitation_id"].as_str().unwrap();
-    storage
-        .mark_installation_uninstalled(9, chrono::Utc::now())
+    assert!(
+        call(
+            "Installation",
+            "9".into(),
+            "uninstall",
+            json!({"installation_id":9,"uninstalled_at":chrono::Utc::now()})
+        )
+        .send()
         .await
-        .unwrap();
+        .unwrap()
+        .status()
+        .is_success()
+    );
     let blocked: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await
@@ -1241,11 +1274,9 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(blocked["outcome"]["kind"], "blocked");
-    let mut replacement = storage.get_installation(9).await.unwrap().unwrap();
-    replacement.installation_id = 19;
-    replacement.installed_at = chrono::Utc::now();
-    replacement.uninstalled_at = None;
-    storage.insert_installation(&replacement).await.unwrap();
+    assert!(call("Installation", "19".into(), "onboard", json!({"installation_id":19,"actor_user_id":7,"account_id":100,
+        "account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
+        .send().await.unwrap().status().is_success());
     let delivered: Value = call("GithubCreate", id.into(), "create", command.clone())
         .send()
         .await

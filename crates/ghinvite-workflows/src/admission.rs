@@ -18,7 +18,7 @@ use ghinvite_core::storage::projection::LinkMetadata;
 use ghinvite_core::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use restate_sdk::context::{
     ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
-    RunFuture,
+    RunFuture, SharedObjectContext,
 };
 use restate_sdk::endpoint::{Builder, ServiceOptions};
 use restate_sdk::errors::{HandlerError, TerminalError};
@@ -674,6 +674,29 @@ impl InvitationLink {
                 .await?
                 .is_none(),
         ))
+    }
+
+    /// Private issuance check for a receiver's first binding. Approval and the
+    /// exact command come from retained authority, never from SQL projections.
+    #[handler]
+    async fn authorize_delivery(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(command): Json<ghinvite_core::delivery::CreateCommand>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != command.link_id.to_string() {
+            return Err(missing());
+        }
+        let Json(plan) = ctx
+            .get::<Json<crate::request_lifecycle::ApprovedDispatch>>(&keys::dispatch(
+                command.request_id,
+            ))
+            .await?
+            .ok_or_else(missing)?;
+        if !plan.commands.contains(&command) {
+            return Err(conflict());
+        }
+        Ok(())
     }
 
     #[handler]

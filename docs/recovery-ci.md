@@ -65,8 +65,8 @@ coordinated/independent restore with forward recovery. Local unsigned discovery 
 or live-GitHub proof. Static island assets retain their separate CI gate.
 
 Targeted cross-feature fixes and their regressions remain with their owning bug-fix
-tickets (for example #66's first-adoption outage regression remains in the admission
-gate). This ticket adds continuous recovery coverage and packaging verification;
+tickets (the admission gate now covers #119's retained onboarding during projection
+outages, replacing #66's obsolete SQL-adoption protocol). This ticket adds continuous recovery coverage and packaging verification;
 it does not redefine installation/admission behavior.
 
 Local verification uses the available Nix Rust **1.94.0**, rather than claiming

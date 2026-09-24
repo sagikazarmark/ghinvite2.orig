@@ -1,10 +1,7 @@
 //! Receiving-side create receipts. Private ingress; ADR 0004.
 use crate::AppState;
 use crate::repository_access::{RepositoryAccess, Unavailable, verify_repository_access};
-use ghinvite_core::{
-    delivery::{CreateCommand, CreateOutcome, CreateReceipt},
-    storage::Error,
-};
+use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
 use ghinvite_github::{CollaboratorAddition, RateLimit};
 use restate_sdk::{
     context::{
@@ -205,10 +202,20 @@ impl GithubCreate {
         if ctx.key() != command.invitation_id.to_string() || command.requester_id == 0 {
             return Err(TerminalError::new_with_code(400, "invalid create command"));
         }
-        if let Some(Json(old)) = ctx.get::<Json<CreateCommand>>("input").await?
-            && old != command
-        {
-            return Err(TerminalError::new_with_code(409, "create input conflict"));
+        match ctx.get::<Json<CreateCommand>>("input").await? {
+            Some(Json(old)) if old != command => {
+                return Err(TerminalError::new_with_code(409, "create input conflict"));
+            }
+            Some(_) => (),
+            None => {
+                ctx.object_client::<crate::admission::InvitationLinkClient>(
+                    command.link_id.to_string(),
+                )
+                .authorize_delivery(Json(command.clone()))
+                .call()
+                .await?;
+                ctx.set("input", Json(command.clone()));
+            }
         }
         let previous = ctx
             .get::<Json<CreateReceipt>>("receipt")
@@ -220,25 +227,20 @@ impl GithubCreate {
             send_projection(&ctx, receipt).await?;
             return Ok(Json(receipt.clone()));
         }
-        let Json(plan) = ctx
-            .object_client::<crate::admission::InvitationLinkClient>(command.link_id.to_string())
-            .prepare_dispatch(Json(crate::admission::RequestStatus {
-                link_id: command.link_id,
-                request_id: command.request_id,
-                requester_id: command.requester_id,
-            }))
+        let Json(account) = ctx
+            .object_client::<crate::availability::AccountInstallationClient>(
+                command.account_id.to_string(),
+            )
+            .current_installation()
             .call()
             .await?;
-        if !plan.commands.contains(&command) {
-            return Err(TerminalError::new_with_code(
-                409,
-                "command differs from approved plan",
-            ));
-        }
-        ctx.set("input", Json(command.clone()));
+        let read_only = matches!(
+            previous.as_ref().map(|r| &r.outcome),
+            Some(CreateOutcome::OutcomeUnknown)
+        );
         let Json(attempted) = ctx
             .run(|| async {
-                let attempted = attempt(&self.state, &command).await?;
+                let attempted = attempt(&self.state, &command, account.as_ref(), read_only).await?;
                 #[cfg(feature = "integration")]
                 if let Some(faults) = &self.faults {
                     use std::sync::atomic::Ordering;
@@ -452,46 +454,22 @@ fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextRecei
     }
 }
 
-async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, HandlerError> {
-    let dependency = || Error::ProjectionDependency;
-    let request = state
-        .storage
-        .get_invitation_request(command.request_id)
-        .await?
-        .ok_or_else(dependency)?;
-    let link = state
-        .storage
-        .get_invitation_link_by_id(command.link_id)
-        .await?
-        .ok_or_else(dependency)?;
-    state
-        .storage
-        .get_user(command.requester_id)
-        .await?
-        .ok_or_else(dependency)?;
-    if request.invitation_link_id != command.link_id
-        || request.requester_id != command.requester_id
-        || link.account_id != command.account_id
-        || link.permission != command.permission
-        || !link
-            .repos
-            .iter()
-            .any(|r| r.repo_id == command.repo_id && r.repo_full_name == command.repo_full_name)
-    {
-        return Err(TerminalError::new_with_code(409, "projected create identity conflict").into());
-    }
-    if request.state != ghinvite_core::RequestState::Approved {
-        return Err(Error::ProjectionDependency.into());
-    }
+async fn attempt(
+    state: &AppState,
+    command: &CreateCommand,
+    account: Option<&ghinvite_core::Account>,
+    read_only: bool,
+) -> Result<Attempt, HandlerError> {
     // An existing `github_invitations` row is not create evidence. Only this
     // object's own projection writes it, after the receipt it projects is
     // already retained, so the row never knows more than `receipt`. Every
     // PUT is preceded by a durable claim on the fence below, which is what
     // keeps a retry — even one without a retained receipt — from writing twice.
-    let attempted = state
-        .storage
-        .delivery_attempt_exists(command.invitation_id)
-        .await?;
+    let attempted = read_only
+        || state
+            .storage
+            .delivery_attempt_exists(command.invitation_id)
+            .await?;
     let blocked = |reason: &str| CreateReceipt {
         command: command.clone(),
         outcome: if attempted {
@@ -504,13 +482,12 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         revision: 1,
         confirmed_at: None,
     };
-    let Some(account) = state
-        .storage
-        .get_active_installation_by_account_id(command.account_id)
-        .await?
-    else {
+    let Some(account) = account else {
         return Ok(blocked("installation unavailable").into());
     };
+    if account.account_id != command.account_id || account.uninstalled_at.is_some() {
+        return Ok(blocked("installation identity unverified").into());
+    }
     let repo = ghinvite_core::RepositoryIdentity::parse(command.repo_full_name.clone())
         .map_err(|_| TerminalError::new_with_code(400, "invalid repository"))?;
     // A prerequisite GitHub would not answer for is not a prerequisite that went
@@ -521,7 +498,15 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
         }
         None => blocked(unavailable).into(),
     };
-    match verify_repository_access(&state.github, &account, command.repo_id, &repo).await {
+    match state.github.get_installation(account.installation_id).await {
+        Ok(Some(current))
+            if current.id == account.installation_id
+                && current.account.id == command.account_id
+                && current.suspended_at.is_none() => {}
+        Ok(_) => return Ok(blocked("installation identity unverified").into()),
+        Err(error) => return Ok(unread(&error, "installation identity unverified")),
+    }
+    match verify_repository_access(&state.github, account, command.repo_id, &repo).await {
         RepositoryAccess::Verified => (),
         RepositoryAccess::Unavailable(Unavailable::NotSelected) => {
             return Ok(blocked("repository unavailable").into());
@@ -559,7 +544,10 @@ async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, H
     }
     // A database write fence protects retries of this run closure even when
     // GitHub succeeded but Restate never journaled its response. It never expires.
+    // This also validates the exact input of an existing fence. A retained
+    // unknown receipt cannot use a fresh claim (even after a lost fence row).
     let generation = state.storage.claim_delivery_attempt(command).await?;
+    let generation = if read_only { None } else { generation };
     let mut throttled_by = None;
     let outcome = if let Some(generation) = generation {
         match state
@@ -681,6 +669,22 @@ mod tests {
     use ghinvite_github::transport::Method;
     use std::sync::Arc;
 
+    async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, HandlerError> {
+        let account = state
+            .storage
+            .get_active_installation_by_account_id(command.account_id)
+            .await?;
+        super::attempt(state, command, account.as_ref(), false).await
+    }
+
+    fn installation_identity() -> Expectation {
+        Expectation::ok_json(
+            Method::Get,
+            "https://api.github.test/app/installations/9",
+            serde_json::json!({"id":9,"account":{"id":100,"login":"acme","type":"Organization"},"suspended_at":null}),
+        )
+    }
+
     /// A pending invitation on the same repository for somebody else, so page
     /// one carries no evidence about this command's requester.
     fn other_requester_item(id: u64) -> serde_json::Value {
@@ -696,6 +700,7 @@ mod tests {
     /// listing: repository identity, then requester identity and its address.
     fn identity_expectations() -> Vec<Expectation> {
         vec![
+            installation_identity(),
             token_mint(9),
             Expectation::ok_json(
                 Method::Get,
@@ -831,6 +836,7 @@ mod tests {
     #[tokio::test]
     async fn throttled_prerequisite_blocks_before_the_fence_is_claimed() {
         let mock = MockTransport::scripted(vec![
+            installation_identity(),
             token_mint(9),
             Expectation {
                 method: Method::Get,
@@ -1013,9 +1019,9 @@ mod tests {
     async fn a_failed_token_mint_blocks_before_the_fence_is_claimed() {
         // Every read mints afresh; the mint that would authorize the PUT fails.
         let mut script = identity_expectations();
-        script[0] = stale_token_mint();
-        script.insert(2, stale_token_mint());
-        script.insert(4, stale_token_mint());
+        script[1] = stale_token_mint();
+        script.insert(3, stale_token_mint());
+        script.insert(5, stale_token_mint());
         script.push(Expectation {
             method: Method::Post,
             url: "https://api.github.test/app/installations/9/access_tokens".into(),

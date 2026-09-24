@@ -13,10 +13,7 @@
 use crate::state::AppState;
 use chrono::{DateTime, Utc};
 use ghinvite_core::{AccountType, SelectedRepos};
-use restate_sdk::context::{
-    ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
-    RunFuture,
-};
+use restate_sdk::context::{ContextClient, ContextReadState, ContextWriteState, ObjectContext};
 use restate_sdk::errors::TerminalError;
 use restate_sdk::serde::Json;
 use schemars::JsonSchema;
@@ -90,7 +87,7 @@ impl Installation {
         if ctx.get::<bool>("uninstalled").await?.is_some() {
             return Ok(());
         }
-        if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
+        if let Some(account_id) = ctx.get::<u64>("account_id").await? {
             ctx.object_client::<crate::availability::AccountInstallationClient>(
                 account_id.to_string(),
             )
@@ -115,7 +112,7 @@ impl Installation {
             return Ok(());
         }
         ctx.set("uninstalled", true);
-        if let Some(account_id) = self.account_id(&ctx, input.installation_id).await? {
+        if let Some(account_id) = ctx.get::<u64>("account_id").await? {
             ctx.object_client::<crate::availability::AccountInstallationClient>(
                 account_id.to_string(),
             )
@@ -135,30 +132,4 @@ fn validate_key(ctx: &ObjectContext<'_>, id: u64) -> std::result::Result<(), Ter
         ));
     }
     Ok(())
-}
-impl Installation {
-    async fn account_id(
-        &self,
-        ctx: &ObjectContext<'_>,
-        id: u64,
-    ) -> std::result::Result<Option<u64>, TerminalError> {
-        if let Some(id) = ctx.get("account_id").await? {
-            return Ok(Some(id));
-        }
-        let Json(account_id) = ctx
-            .run(|| async {
-                self.state
-                    .storage
-                    .get_installation(id)
-                    .await
-                    .map(|a| Json(a.map(|a| a.account_id)))
-                    .map_err(restate_sdk::errors::HandlerError::from)
-            })
-            .name("resolve_installation_account")
-            .await?;
-        if let Some(account_id) = account_id {
-            ctx.set("account_id", account_id);
-        }
-        Ok(account_id)
-    }
 }

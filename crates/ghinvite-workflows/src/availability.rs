@@ -41,8 +41,8 @@ pub enum Observation {
 pub struct InstallationStatus {
     pub account: Option<Account>,
     pub observation: Observation,
-    /// When GitHub was read for `observation`. Absent when nothing read it:
-    /// adoption of an existing installation, and retirement by uninstall.
+    /// When GitHub was read for `observation`. Absent before observation
+    /// and after retirement by uninstall.
     #[serde(default)]
     pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
@@ -52,33 +52,6 @@ pub struct InstallationStatus {
 struct Observed {
     observation: Observation,
     at: chrono::DateTime<chrono::Utc>,
-}
-
-/// What a refresh follows: the identity an event named, or the periodic
-/// observation recheck, which always follows whichever identity is current.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RefreshTarget {
-    Identity { installation_id: u64 },
-    CurrentObservation,
-}
-
-impl RefreshTarget {
-    /// The state key holding this target's single scheduled continuation.
-    fn slot(&self) -> String {
-        match self {
-            Self::Identity { installation_id } => format!("refresh_retry/{installation_id}"),
-            Self::CurrentObservation => RECHECK_SLOT.to_owned(),
-        }
-    }
-}
-
-/// One refresh and every continuation retained for it. `attempt` counts the
-/// adoption outages this refresh has already waited out, so the first is zero.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct RefreshContinuation {
-    pub target: RefreshTarget,
-    pub attempt: u32,
 }
 
 pub struct AccountInstallation {
@@ -301,25 +274,11 @@ impl AccountInstallation {
         if account_id == 0 {
             return Err(invalid());
         }
-        // One-time adoption of existing installation facts, not link projections.
-        let Json(account) = ctx
-            .run(|| async {
-                self.state
-                    .storage
-                    .get_active_installation_by_account_id(account_id)
-                    .await
-                    .map(Json)
-                    .map_err(|_| HandlerError::from(adoption_unavailable()))
-            })
-            .name("adopt_installation")
-            .await?;
-        let status = InstallationStatus {
-            account,
+        Ok(InstallationStatus {
+            account: None,
             observation: Observation::Unknown,
             observed_at: None,
-        };
-        ctx.set("installation", Json(status.clone()));
-        Ok(status)
+        })
     }
 
     async fn observe(&self, account: &Account) -> Observation {
@@ -406,105 +365,14 @@ impl AccountInstallation {
         Ok(status)
     }
 
-    /// Shared body of `refresh`, `recheck` and every continuation retained for
-    /// them. Refresh work is acknowledged by a durable send before it runs, so a
-    /// first adoption that cannot read installation storage keeps the work as a
-    /// continuation instead of failing it away.
-    async fn continue_refresh(
-        &self,
-        ctx: &ObjectContext<'_>,
-        refresh: RefreshContinuation,
-    ) -> Result<(), TerminalError> {
-        let status = match self.load(ctx).await {
-            Ok(status) => status,
-            // An unusable key is not an outage; only unreadable storage is
-            // worth waiting for.
-            Err(error) if error.code() != ADOPTION_UNAVAILABLE => return Err(error),
-            Err(_) => return self.retain_refresh(ctx, refresh).await,
-        };
-        match refresh.target {
-            RefreshTarget::Identity { installation_id } => {
-                // Only a continuation retires its own slot; a fresh event that
-                // found storage readable leaves the pending one to finish.
-                if refresh.attempt > 0 {
-                    ctx.clear(&refresh.target.slot());
-                }
-                // Duplicate, superseded, and retired identities observe nothing:
-                // only the adopted identity may refresh.
-                if status
-                    .account
-                    .as_ref()
-                    .is_none_or(|account| account.installation_id != installation_id)
-                {
-                    return Ok(());
-                }
-            }
-            // The recheck's slot is consumed by the invocation it scheduled.
-            RefreshTarget::CurrentObservation => ctx.clear(RECHECK_SLOT),
-        }
-        self.refresh_status(ctx, status).await?;
-        Ok(())
-    }
-
-    /// Retains one durable continuation per target. A fresh event joins the
-    /// continuation already scheduled for that identity rather than starting a
-    /// competing chain; the recheck's own slot is already reserved for it.
-    async fn retain_refresh(
-        &self,
-        ctx: &ObjectContext<'_>,
-        refresh: RefreshContinuation,
-    ) -> Result<(), TerminalError> {
-        let slot = refresh.target.slot();
-        if matches!(refresh.target, RefreshTarget::Identity { .. })
-            && refresh.attempt == 0
-            && ctx.get::<bool>(&slot).await?.is_some()
-        {
-            return Ok(());
-        }
-        ctx.set(&slot, true);
-        ctx.object_client::<AccountInstallationClient>(ctx.key())
-            .retry_refresh(Json(RefreshContinuation {
-                target: refresh.target,
-                attempt: refresh.attempt.saturating_add(1),
-            }))
-            .send_after(refresh_backoff(refresh.attempt))
-            .await?;
-        Ok(())
-    }
-
-    /// Shared body of `uninstall` and its retained continuation. The identity
-    /// is retired at once; an adoption outage keeps one continuation per
-    /// identity, which a redelivered event joins rather than competing with.
+    /// Retire the exact installation even if its onboarding has not arrived.
     async fn continue_uninstall(
         &self,
         ctx: &ObjectContext<'_>,
         input: UninstallInput,
-        continuation: bool,
     ) -> Result<(), TerminalError> {
+        let mut status = self.load(ctx).await?;
         ctx.set(&retired_key(input.installation_id), true);
-        let slot = uninstall_slot(input.installation_id);
-        let mut status = match self.load(ctx).await {
-            Ok(status) => status,
-            // An unusable key is not an outage; only unreadable storage is
-            // worth waiting for.
-            Err(error) if error.code() != ADOPTION_UNAVAILABLE => return Err(error),
-            Err(_) => {
-                if !continuation && ctx.get::<bool>(&slot).await?.is_some() {
-                    return Ok(());
-                }
-                ctx.set(&slot, true);
-                ctx.object_client::<AccountInstallationClient>(ctx.key())
-                    .retry_uninstall(Json(input))
-                    .send_after(UNINSTALL_RETRY)
-                    .await?;
-                return Ok(());
-            }
-        };
-        // Only the continuation retires its slot; a fresh event that found
-        // storage readable leaves the pending one to finish as a no-op.
-        if continuation {
-            ctx.clear(&slot);
-        }
         if status
             .account
             .as_ref()
@@ -521,18 +389,10 @@ impl AccountInstallation {
 }
 
 /// The state key marking an installation identity retired. A retired
-/// identity is never adopted again and observes as unavailable.
+/// identity is never onboarded again and observes as unavailable.
 fn retired_key(installation_id: u64) -> String {
     format!("retired/{installation_id}")
 }
-
-/// The state key holding an uninstall's single scheduled continuation.
-fn uninstall_slot(installation_id: u64) -> String {
-    format!("uninstall_retry/{installation_id}")
-}
-
-/// Delay before a retained uninstall continuation tries adoption again.
-const UNINSTALL_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// What a refresh does with an observation of the current installation.
 #[derive(Debug)]
@@ -601,7 +461,7 @@ fn retained_eligibility(
 }
 
 /// What admission makes of its `eligibility` call. A call fails only with the
-/// callee's terminal error: an adoption outage is transient by design, so
+/// callee's terminal error: unavailable retained authority is transient, so
 /// eligibility is unknown and the same attempt can retry. Anything else (an
 /// unusable key or an undecodable scope) means caller and callee disagree,
 /// an invariant failure admission must not present as an outage.
@@ -610,7 +470,7 @@ pub(crate) fn called_eligibility(
 ) -> Result<Eligibility, TerminalError> {
     match called {
         Ok(eligibility) => Ok(eligibility),
-        Err(error) if error.code() == ADOPTION_UNAVAILABLE => Ok(Eligibility::Unknown),
+        Err(error) if error.code() == 503 => Ok(Eligibility::Unknown),
         Err(error) => Err(TerminalError::new_with_code(
             500,
             format!("installation eligibility refused: {}", error.message()),
@@ -620,15 +480,6 @@ pub(crate) fn called_eligibility(
 
 fn invalid() -> TerminalError {
     TerminalError::new_with_code(400, "invalid installation identity")
-}
-
-/// Installation storage could not be read, so adoption is unknown rather than
-/// absent. Synchronous callers fail promptly with this; acknowledged refresh
-/// work retains a continuation instead.
-const ADOPTION_UNAVAILABLE: u16 = 503;
-
-fn adoption_unavailable() -> TerminalError {
-    TerminalError::new_with_code(ADOPTION_UNAVAILABLE, "installation adoption unavailable")
 }
 
 /// Steady-state cadence of the durable observation recheck, and the state key
@@ -641,41 +492,37 @@ const RECHECK_SLOT: &str = "refresh_scheduled";
 /// delivery, exactly as a change made after any observation does (ADR 0004).
 const RECENT_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-/// Bounded backoff for a retained refresh continuation: short first retries so a
-/// brief storage outage converges quickly, settling on the recheck cadence so a
-/// long one costs no more than the recheck it already runs.
-fn refresh_backoff(attempt: u32) -> std::time::Duration {
-    std::time::Duration::from_secs(1 << attempt.min(6)).min(RECHECK_INTERVAL)
-}
-
 #[restate_sdk::object]
 impl AccountInstallation {
+    /// Small, retained-only delivery context. Missing authority is uncertainty;
+    /// a known uninstall is a known missing prerequisite. Neither reads SQL.
     #[handler]
-    async fn retry_uninstall(
+    async fn current_installation(
         &self,
-        ctx: ObjectContext<'_>,
-        Json(input): Json<UninstallInput>,
-    ) -> Result<(), TerminalError> {
-        self.continue_uninstall(&ctx, input, true).await
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<Option<Account>>, TerminalError> {
+        let Json(status) = ctx
+            .get::<Json<InstallationStatus>>("installation")
+            .await?
+            .ok_or_else(|| {
+                TerminalError::new_with_code(503, "retained installation context unavailable")
+            })?;
+        Ok(Json(status.account))
     }
-    #[handler]
-    async fn retry_refresh(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(refresh): Json<RefreshContinuation>,
-    ) -> Result<(), TerminalError> {
-        self.continue_refresh(&ctx, refresh).await
-    }
+
     #[handler]
     async fn recheck(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
-        self.continue_refresh(
-            &ctx,
-            RefreshContinuation {
-                target: RefreshTarget::CurrentObservation,
-                attempt: 0,
-            },
-        )
-        .await
+        ctx.clear(RECHECK_SLOT);
+        if ctx
+            .get::<Json<InstallationStatus>>("installation")
+            .await?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let status = self.load(&ctx).await?;
+        self.refresh_status(&ctx, status).await?;
+        Ok(())
     }
     #[handler]
     async fn onboard(
@@ -701,31 +548,6 @@ impl AccountInstallation {
         {
             self.refresh_status(&ctx, status).await?;
             return Ok(());
-        }
-        let Json(existing) = ctx
-            .run(|| async {
-                self.state
-                    .storage
-                    .get_installation(input.installation_id)
-                    .await
-                    .map(Json)
-                    .map_err(|_| {
-                        HandlerError::from(TerminalError::new_with_code(
-                            503,
-                            "installation identity storage unavailable",
-                        ))
-                    })
-            })
-            .name("existing_installation_identity")
-            .await?;
-        if let Some(existing) = existing {
-            if existing.account_id != input.account_id {
-                return Err(invalid());
-            }
-            if existing.uninstalled_at.is_some() {
-                ctx.set(&retired_key(input.installation_id), true);
-                return Ok(());
-            }
         }
         let Json(verified) = ctx
             .run(|| async {
@@ -821,16 +643,15 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(id): Json<u64>,
     ) -> Result<(), TerminalError> {
-        self.continue_refresh(
-            &ctx,
-            RefreshContinuation {
-                target: RefreshTarget::Identity {
-                    installation_id: id,
-                },
-                attempt: 0,
-            },
-        )
-        .await
+        let status = self.load(&ctx).await?;
+        if status
+            .account
+            .as_ref()
+            .is_some_and(|account| account.installation_id == id)
+        {
+            self.refresh_status(&ctx, status).await?;
+        }
+        Ok(())
     }
     #[handler]
     async fn uninstall(
@@ -838,7 +659,7 @@ impl AccountInstallation {
         ctx: ObjectContext<'_>,
         Json(input): Json<UninstallInput>,
     ) -> Result<(), TerminalError> {
-        self.continue_uninstall(&ctx, input, false).await
+        self.continue_uninstall(&ctx, input).await
     }
     #[handler]
     async fn status(
@@ -884,6 +705,13 @@ impl AccountInstallation {
     ) -> Result<Json<Eligibility>, TerminalError> {
         if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
             return Err(invalid());
+        }
+        if ctx
+            .get::<Json<InstallationStatus>>("installation")
+            .await?
+            .is_none()
+        {
+            return Ok(Json(Eligibility::Unknown));
         }
         let status = self.load(&ctx).await?;
         let status = self.refresh_status(&ctx, status).await?;
@@ -1243,18 +1071,6 @@ mod tests {
         assert!(rendered.starts_with("Retryable error"), "{rendered}");
     }
 
-    #[test]
-    fn refresh_backoff_is_bounded_by_the_recheck_cadence() {
-        assert_eq!(refresh_backoff(0), std::time::Duration::from_secs(1));
-        assert_eq!(refresh_backoff(1), std::time::Duration::from_secs(2));
-        assert_eq!(refresh_backoff(5), std::time::Duration::from_secs(32));
-        // A long outage never waits longer than the recheck it already runs,
-        // and never overflows the shift for a continuation that outlives it.
-        for attempt in [6, 7, 64, u32::MAX] {
-            assert_eq!(refresh_backoff(attempt), RECHECK_INTERVAL);
-        }
-    }
-
     fn account_selecting(selected_repos: SelectedRepos) -> Account {
         Account {
             installation_id: 1,
@@ -1421,7 +1237,7 @@ mod tests {
 
     #[test]
     fn an_account_never_observed_is_read_live() {
-        // Adoption retains an installation without reading GitHub for it.
+        // An undated observation cannot grant admission.
         for observation in [Observation::Unknown, available(&[10, 11])] {
             let status = observed(observation.clone(), None);
 
@@ -1442,9 +1258,13 @@ mod tests {
     }
 
     #[test]
-    fn an_adoption_outage_leaves_eligibility_unknown() {
+    fn unavailable_authority_leaves_eligibility_unknown() {
         assert_eq!(
-            called_eligibility(Err(adoption_unavailable())).unwrap(),
+            called_eligibility(Err(TerminalError::new_with_code(
+                503,
+                "authority unavailable"
+            )))
+            .unwrap(),
             Eligibility::Unknown
         );
     }
@@ -1465,13 +1285,5 @@ mod tests {
     fn retired_identities_have_one_key_each() {
         assert_eq!(retired_key(1), "retired/1");
         assert_ne!(retired_key(1), retired_key(2));
-    }
-
-    #[test]
-    fn each_uninstalled_identity_has_its_own_continuation_slot() {
-        assert_eq!(uninstall_slot(1), "uninstall_retry/1");
-        assert_ne!(uninstall_slot(1), uninstall_slot(2));
-        let refresh = RefreshTarget::Identity { installation_id: 1 };
-        assert_ne!(uninstall_slot(1), refresh.slot());
     }
 }
