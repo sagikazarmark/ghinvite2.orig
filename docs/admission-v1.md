@@ -22,9 +22,9 @@ it never reconstructs authority from SQL. Deploy with endpoint identity checking
 | `create` | Bind preallocated ID and normalized input; replay original snapshot |
 | `update_metadata`, `revoke` | Change current metadata or stop new admission |
 | `link_status` | Current account-admin view |
-| `prepare_attempt`, `attempt_status` | Bind/recover original input without claiming acceptance |
+| `prepare_attempt` | Bind original input without claiming acceptance |
 | `admit` | Return an input-bound accepted or rejected business receipt |
-| `requester_page` | Original attempt plus current request-owner status and eligibility |
+| `requester_page` | Recover original input/receipt using the operation identity, plus current request-owner status and eligibility |
 
 Decisions, deadlines, approved plans and delivery progress belong to
 [`InvitationRequest/<request ULID>`](request-lifecycle-v1.md).

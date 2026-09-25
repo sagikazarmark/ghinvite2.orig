@@ -91,11 +91,19 @@ impl DeliverySnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CreateOutcome {
-    Blocked { reason: String },
+    Blocked {
+        reason: String,
+    },
+    /// GitHub positively refused an operation due to its rate limit.
+    Throttled,
     OutcomeUnknown,
-    Created { upstream_id: u64 },
+    Created {
+        upstream_id: u64,
+    },
     AlreadyCollaborator,
-    Failed { status: u16 },
+    Failed {
+        status: u16,
+    },
 }
 
 impl CreateOutcome {

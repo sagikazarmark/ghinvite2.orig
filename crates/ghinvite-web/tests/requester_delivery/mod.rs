@@ -2,8 +2,8 @@ use super::*;
 use common::authority_http_fixture::FakeLinkAuthority;
 use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::TerminalDecision;
-use ghinvite_core::storage::projection::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::storage::{ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage};
 use ghinvite_core::{GithubInvitation, GithubInvitationId, InvitationState};
@@ -50,6 +50,7 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
         "planned",
         "submitted",
         "missing",
+        "throttled",
     ]
     .iter()
     .enumerate()
@@ -68,7 +69,12 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
     request.justification = Some("private internal justification".into());
     storage.seed_request(&request).await.unwrap();
     let mut invitations = vec![];
-    for (i, repo) in link.repos.iter().take(9).enumerate() {
+    for (i, repo) in link
+        .repos
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i < 9 || *i == 13)
+    {
         let invitation = GithubInvitation {
             id: GithubInvitationId::new(),
             invitation_request_id: request.id,
@@ -91,6 +97,7 @@ async fn fixture_with_storage(storage: Arc<SqlxStorage>) -> DeliveryFixture {
                 reason: "private credential diagnostic".into(),
             },
             7 => CreateOutcome::OutcomeUnknown,
+            13 => CreateOutcome::Throttled,
             _ => CreateOutcome::Failed { status: 422 },
         };
         storage
@@ -309,6 +316,7 @@ async fn mixed_delivery_gives_outcome_specific_next_steps_without_claiming_missi
         "GitHub invitation created — awaiting acceptance",
         "Already a collaborator",
         "Blocked — waiting for availability or identity verification",
+        "Throttled — waiting for GitHub’s rate limit",
         "GitHub outcome unknown",
         "GitHub rejected delivery",
         "Approved — awaiting dispatch",

@@ -238,6 +238,34 @@ impl RepositoryDelivery {
         if released {
             ctx.clear("rejected_generation");
         }
+        // Journal a read-only preflight separately from the re-executable effect.
+        // Failure here leaves the existing receipt unchanged. A failure inside
+        // the effect step may follow an applied PUT and must retain uncertainty.
+        let fence_available = ctx
+            .run(|| async {
+                Ok::<_, HandlerError>(
+                    self.state
+                        .storage
+                        .delivery_attempt_exists(command.invitation_id)
+                        .await
+                        .is_ok(),
+                )
+            })
+            .name("delivery_fence_preflight")
+            .await?;
+        if !fence_available {
+            self.schedule_recheck(
+                &ctx,
+                command,
+                previous.as_ref().map_or(0, |r| r.revision),
+                BLOCKED_RECHECK_INTERVAL,
+            )
+            .await?;
+            return Err(TerminalError::new_with_code(
+                503,
+                "delivery fence unavailable",
+            ));
+        }
         let Json(attempted) = ctx
             .run(|| async {
                 if !released {
@@ -324,24 +352,36 @@ impl RepositoryDelivery {
         // continuation, not a held retry. Exactly one recheck stands per
         // invitation. Explicit recovery keeps an existing timer, even if its
         // new guidance is sooner. Its generation rejects duplicate/stale wakes.
-        if let Some(wait) = recheck_after
-            && ctx.get::<u64>("recheck_scheduled").await?.is_none()
-        {
-            ctx.set("recheck_scheduled", receipt.revision);
-            ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key())
-                .recheck(Json(DeliveryRecheck {
-                    command,
-                    generation: receipt.revision,
-                }))
-                .send_after(wait)
+        if let Some(wait) = recheck_after {
+            self.schedule_recheck(&ctx, command, receipt.revision, wait)
                 .await?;
-            self.checkpoint(&ctx, "after-recheck-send").await?;
         }
         Ok(Json(receipt))
     }
 }
 
 impl RepositoryDelivery {
+    async fn schedule_recheck(
+        &self,
+        ctx: &ObjectContext<'_>,
+        command: CreateCommand,
+        generation: u64,
+        wait: std::time::Duration,
+    ) -> Result<(), TerminalError> {
+        if ctx.get::<u64>("recheck_scheduled").await?.is_none() {
+            ctx.set("recheck_scheduled", generation);
+            ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key())
+                .recheck(Json(DeliveryRecheck {
+                    command,
+                    generation,
+                }))
+                .send_after(wait)
+                .await?;
+            self.checkpoint(ctx, "after-recheck-send").await?;
+        }
+        Ok(())
+    }
+
     async fn checkpoint(
         &self,
         ctx: &ObjectContext<'_>,
@@ -498,11 +538,16 @@ fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextRecei
     if matches!(
         previous.map(|r| &r.outcome),
         Some(CreateOutcome::OutcomeUnknown)
-    ) && matches!(receipt.outcome, CreateOutcome::Blocked { .. })
-    {
+    ) && matches!(
+        receipt.outcome,
+        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled
+    ) {
         receipt.outcome = CreateOutcome::OutcomeUnknown;
     }
-    let blocked = matches!(receipt.outcome, CreateOutcome::Blocked { .. });
+    let blocked = matches!(
+        receipt.outcome,
+        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled
+    );
     let recheck_after = match throttled_for_secs {
         Some(secs) => Some(std::time::Duration::from_secs(secs)),
         None => blocked.then_some(BLOCKED_RECHECK_INTERVAL),
@@ -533,17 +578,10 @@ async fn attempt(
             .await
         {
             Ok(attempted) => attempted,
-            Err(_) => {
-                return Ok(CreateReceipt {
-                    command: command.clone(),
-                    outcome: CreateOutcome::Blocked {
-                        reason: "delivery fence unavailable".into(),
-                    },
-                    revision: 1,
-                    confirmed_at: None,
-                }
-                .into());
-            }
+            // This external-effect step may be replaying an applied PUT whose
+            // result was not journaled. A failed read cannot prove non-application.
+            // The caller retains Unknown and schedules a bounded read-only retry.
+            Err(error) => return Err(error.into()),
         }
     };
     let blocked = |reason: &str| CreateReceipt {
@@ -570,7 +608,11 @@ async fn attempt(
     // away: it blocks on GitHub's wait rather than on the unavailability cadence.
     let unread = |error: &ghinvite_github::Error, unavailable: &str| match error.rate_limit() {
         Some(limit) => {
-            Attempt::throttled_by(blocked("GitHub throttled a delivery prerequisite"), limit)
+            let mut receipt = blocked("GitHub throttled a delivery prerequisite");
+            if !attempted {
+                receipt.outcome = CreateOutcome::Throttled;
+            }
+            Attempt::throttled_by(receipt, limit)
         }
         None => blocked(unavailable).into(),
     };
@@ -650,9 +692,7 @@ async fn attempt(
             CollaboratorAddition::Throttled(limit) => {
                 rejected_generation = Some(generation);
                 throttled_by = Some(limit);
-                CreateOutcome::Blocked {
-                    reason: "GitHub throttled delivery".into(),
-                }
+                CreateOutcome::Throttled
             }
             // An access refusal is a prerequisite gone missing, not a verdict on
             // the invitation, so it blocks and releases the fence for a retry.
@@ -861,12 +901,7 @@ mod tests {
 
         let attempted = attempt(&state, &command).await.unwrap();
 
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Blocked {
-                reason: "GitHub throttled delivery".into()
-            }
-        );
+        assert_eq!(attempted.receipt.outcome, CreateOutcome::Throttled);
         assert_eq!(attempted.throttled_for_secs, Some(45));
         // An explicit throttle refused the PUT outright, so this generation is
         // released and the recheck may claim it again.
@@ -930,12 +965,7 @@ mod tests {
 
         let attempted = attempt(&state, &command).await.unwrap();
 
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Blocked {
-                reason: "GitHub throttled a delivery prerequisite".into()
-            }
-        );
+        assert_eq!(attempted.receipt.outcome, CreateOutcome::Throttled);
         assert_eq!(attempted.throttled_for_secs, Some(30));
         // A prerequisite that was never read is not a repository that went away,
         // and no PUT was attempted, so the fence is untouched.

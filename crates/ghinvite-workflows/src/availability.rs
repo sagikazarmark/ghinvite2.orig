@@ -721,55 +721,6 @@ impl AccountInstallation {
     ) -> Result<Json<InstallationStatus>, TerminalError> {
         self.load(&ctx).await.map(Json)
     }
-    /// Answers an admission without taking this account's exclusivity whenever
-    /// the retained observation may accept the scope on its own. A shared
-    /// handler holds no object lock, so the reading path below is an ordinary
-    /// call: it queues behind the account's other writers, not behind this.
-    #[handler]
-    async fn eligibility(
-        &self,
-        ctx: SharedObjectContext<'_>,
-        Json(scope): Json<Scope>,
-    ) -> Result<Json<Eligibility>, TerminalError> {
-        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
-            return Err(invalid());
-        }
-        if let Some(Json(status)) = ctx.get::<Json<InstallationStatus>>("installation").await? {
-            let Json(now) = ctx
-                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
-                .name("eligibility_time")
-                .await?;
-            if let Some(answer) = retained_eligibility(&status, &scope, now) {
-                return Ok(Json(answer));
-            }
-        }
-        ctx.object_client::<AccountInstallationClient>(ctx.key())
-            .observed_eligibility(Json(scope))
-            .call()
-            .await
-    }
-    /// Reads GitHub for this account and answers from what it observed. Every
-    /// answer that can reject an admission comes from here.
-    #[handler]
-    async fn observed_eligibility(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(scope): Json<Scope>,
-    ) -> Result<Json<Eligibility>, TerminalError> {
-        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
-            return Err(invalid());
-        }
-        if ctx
-            .get::<Json<InstallationStatus>>("installation")
-            .await?
-            .is_none()
-        {
-            return Ok(Json(Eligibility::Unknown));
-        }
-        let status = self.load(&ctx).await?;
-        let status = self.refresh_status(&ctx, status).await?;
-        Ok(Json(eligibility(&status.observation, &scope)))
-    }
 }
 
 #[cfg(test)]

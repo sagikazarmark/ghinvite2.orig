@@ -27,6 +27,8 @@ pub struct AppState {
     pub commands: RestateCommands,
     pub config: WebConfig,
     pub link_authority: LinkAuthority,
+    pub request_authority: crate::request_authority::RequestAuthority,
+    pub delivery_authority: crate::delivery_authority::DeliveryAuthority,
 }
 
 impl AppState {
@@ -44,7 +46,9 @@ impl AppState {
             github_transport,
             commands: RestateCommands::new(restate.clone()),
             config,
-            link_authority: LinkAuthority::new(restate),
+            link_authority: LinkAuthority::new(restate.clone()),
+            request_authority: crate::request_authority::RequestAuthority::new(restate.clone()),
+            delivery_authority: crate::delivery_authority::DeliveryAuthority::new(restate),
         }
     }
 }

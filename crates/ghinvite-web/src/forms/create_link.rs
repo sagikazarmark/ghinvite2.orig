@@ -13,7 +13,7 @@
 
 use chrono::{DateTime, Utc};
 use dioform_core::FormCore;
-use ghinvite_core::storage::projection::{AccountAdmin, CreateLink};
+use ghinvite_core::invitation_link::{AccountAdmin, CreateLink};
 use ghinvite_core::{Description, InternalNote, InvitationLinkId, Permission, RepositoryScope};
 use ghinvite_ui::link_form::{
     self, CreateLinkForm, LinkFormErrors, RepositoryChoice, register_validators,

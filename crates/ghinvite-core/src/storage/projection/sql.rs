@@ -1,6 +1,7 @@
 //! The same fixed batch runs in SQLx and D1. One JSON parameter avoids lossy
 //! JavaScript number bindings. All validation and writes share one transaction.
 use super::*;
+use crate::invitation_link::LinkMetadata;
 use crate::storage::{Error, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -36,6 +37,7 @@ pub fn encode(envelope: &ProjectionEnvelope) -> Result<String> {
         return Err(invalid());
     }
     let mut value = serde_json::to_value(envelope).map_err(|_| invalid())?;
+    value["content"] = json!(link);
     value["link"]["current_description"] = json!(link.description());
     value["link"]["current_internal_note"] = json!(link.internal_note());
     let mut events = std::collections::BTreeMap::new();
@@ -117,7 +119,15 @@ pub const STATEMENTS: &[&str] = &[
       expires_at IS NOT json_extract(?1,'$.link.creation.expires_at') OR
       max_uses IS NOT json_extract(?1,'$.link.creation.max_uses') OR
       permission IS NOT json_extract(?1,'$.link.creation.permission') OR
-      approval_required IS NOT json_extract(?1,'$.link.creation.approval_required')))
+      approval_required IS NOT json_extract(?1,'$.link.creation.approval_required') OR
+      json_extract(projection_content,'$.creation') IS NOT json_extract(?1,'$.link.creation') OR
+      (projection_revision = json_extract(?1,'$.link.revision') AND (
+        projection_content IS NOT json_extract(?1,'$.content') OR
+        uses_count IS NOT json_extract(?1,'$.link.uses') OR
+        description IS NOT json_extract(?1,'$.link.current_description') OR
+        internal_note IS NOT json_extract(?1,'$.link.current_internal_note') OR
+        revoked_at IS NOT json_extract(?1,'$.link.revoked_at') OR
+        revoked_by IS NOT json_extract(?1,'$.link.revoked_by')))))
     AND NOT EXISTS(SELECT 1 FROM invitation_link_repos r WHERE r.invitation_link_id = json_extract(?1,'$.link.link_id')
       AND NOT EXISTS(SELECT 1 FROM json_each(?1,'$.link.creation.repos') j
         WHERE r.repo_id = json_extract(j.value,'$.repo_id') AND r.repo_full_name = json_extract(j.value,'$.repo_full_name')))
@@ -137,7 +147,7 @@ pub const STATEMENTS: &[&str] = &[
         a.metadata IS NOT NULL OR a.request_id IS NOT NULL)"#,
     r#"INSERT INTO invitation_links(id, installation_id, account_id, created_by, created_at,
       expires_at, max_uses, uses_count, permission, approval_required, description, internal_note,
-      revoked_at, revoked_by, projection_revision)
+      revoked_at, revoked_by, projection_revision, projection_content)
     SELECT json_extract(?1,'$.link.link_id'),
       json_extract(?1,'$.link.creation.installation_id'), json_extract(?1,'$.link.creation.account_id'),
       json_extract(?1,'$.link.creation.admin.user_id'), json_extract(?1,'$.link.created_at'),
@@ -145,11 +155,14 @@ pub const STATEMENTS: &[&str] = &[
       json_extract(?1,'$.link.uses'), json_extract(?1,'$.link.creation.permission'),
       json_extract(?1,'$.link.creation.approval_required'), json_extract(?1,'$.link.current_description'),
       json_extract(?1,'$.link.current_internal_note'), json_extract(?1,'$.link.revoked_at'),
-      json_extract(?1,'$.link.revoked_by'), json_extract(?1,'$.link.revision') WHERE true
+      json_extract(?1,'$.link.revoked_by'), json_extract(?1,'$.link.revision'), json_extract(?1,'$.content') WHERE true
     ON CONFLICT(id) DO UPDATE SET uses_count=excluded.uses_count, revoked_at=excluded.revoked_at,
       revoked_by=excluded.revoked_by, projection_revision=excluded.projection_revision,
-      description=excluded.description, internal_note=excluded.internal_note
+      description=excluded.description, internal_note=excluded.internal_note,
+      projection_content=excluded.projection_content
     WHERE excluded.projection_revision > invitation_links.projection_revision"#,
+    // The retained creation content proves exact scope at every revision, so
+    // replay can repair missing child rows without admitting an expanded scope.
     r#"INSERT INTO invitation_link_repos(invitation_link_id, repo_id, repo_full_name)
     SELECT json_extract(?1,'$.link.link_id'), json_extract(value,'$.repo_id'), json_extract(value,'$.repo_full_name')
     FROM json_each(?1,'$.link.creation.repos') WHERE true

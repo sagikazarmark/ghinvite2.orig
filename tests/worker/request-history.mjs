@@ -32,8 +32,8 @@ try {
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   const foreign = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
   for (const [id, account] of [[link, 42], [foreign, 999]]) {
-    await db.prepare(`INSERT INTO invitation_links (id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
-      VALUES (?,1,?,42,'2026-01-01T00:00:00Z','pull',1,'History fixture',1)`).bind(id, account).run();
+    await db.prepare(`INSERT INTO invitation_links (id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
+      VALUES (?,1,?,42,'2026-01-01T00:00:00Z','pull',1,'History fixture',1,'{}')`).bind(id, account).run();
     await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(id).run();
   }
   const login = await mf.dispatchFetch('https://history.test/login', { redirect: 'manual' });

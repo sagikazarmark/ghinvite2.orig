@@ -1,7 +1,8 @@
 use super::*;
 use common::authority_http_fixture::snapshot;
+use ghinvite_core::invitation_link::CreateLink;
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
-use ghinvite_core::storage::projection::{CreateLink, RequestSnapshot};
 use ghinvite_core::storage::{ContinuationStorage, InstallationStorage, RecordStorage};
 
 async fn recovery_app(authority: &FakeLinkAuthority) -> (axum::Router, String) {

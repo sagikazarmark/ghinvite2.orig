@@ -110,6 +110,10 @@ does not affect authoritative Restate receipts or extend live session deadlines.
 Links and requests are written only by the projector. `projection_revision` is
 the snapshot revision it last applied, so a stale snapshot cannot regress a row;
 there is no SQL uniqueness on requests, because Restate alone owns admission.
+Link `projection_content` retains the full snapshot: equal-revision content must
+match, and creation input (including exact repository scope) must match at every
+revision. Missing repository child rows may be repaired by a matching snapshot,
+including a stale one; replay cannot expand scope or regress current link values.
 Audit events keep their logical ID and content for immutability checks. The
 `projection_assertions` table is transient within each SQLx transaction/D1
 batch: named CHECK failures abort the entire application, and successful batches

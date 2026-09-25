@@ -129,7 +129,7 @@ async fn commands_continue_during_sql_outage_and_projection_recovers() {
         assert_eq!(decision["outcome"], "applied");
         let browser = ghinvite_web::LinkAuthority::new(Arc::new(ghinvite_web::RestateClient::new(&ingress).unwrap()));
         let metadata = browser.update_metadata(ghinvite_core::admission::UpdateMetadata {
-            link_id, admin: ghinvite_core::storage::projection::AccountAdmin { account_id: 100, user_id: 7 },
+            link_id, admin: ghinvite_core::invitation_link::AccountAdmin { account_id: 100, user_id: 7 },
             description: "Updated workshop".into(), internal_note: Some("Private updated note".into()),
         }).await.unwrap();
         assert_eq!(metadata.creation.description, "Workshop");

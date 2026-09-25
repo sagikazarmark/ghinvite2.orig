@@ -13,9 +13,7 @@ use ghinvite_core::admission::{
     AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, Admit, Attempt, AttemptQuery,
     RequesterPage, UpdateMetadata,
 };
-use ghinvite_core::delivery::RepositoryProgress;
-use ghinvite_core::request_lifecycle::{DecideRequest, DecisionReceipt, RequestStatus};
-use ghinvite_core::storage::projection::{CreateLink, LinkSnapshot};
+use ghinvite_core::invitation_link::{CreateLink, LinkSnapshot};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
@@ -123,40 +121,6 @@ impl LinkAuthority {
 
     pub async fn admit(&self, command: Admit) -> Result<AdmissionReceipt> {
         self.link(command.link_id, "admit", &command).await
-    }
-
-    pub async fn decide(&self, command: DecideRequest) -> Result<DecisionReceipt> {
-        crate::request_authority::RequestAuthority::new(self.client.clone())
-            .decide(command)
-            .await
-    }
-
-    /// Read the retained receipt without applying an undecided command on GET.
-    pub async fn decision_status(&self, command: DecideRequest) -> Result<Option<DecisionReceipt>> {
-        crate::request_authority::RequestAuthority::new(self.client.clone())
-            .decision_status(command)
-            .await
-    }
-
-    pub async fn delivery_progress(&self, query: RequestStatus) -> Result<Vec<RepositoryProgress>> {
-        crate::request_authority::RequestAuthority::new(self.client.clone())
-            .delivery_progress(query)
-            .await
-    }
-
-    /// Call only after the enclosing route has authorized this request/scope.
-    pub async fn delivery_snapshot(
-        &self,
-        request_id: ghinvite_core::RequestId,
-        repo_id: u64,
-    ) -> Result<Option<ghinvite_core::delivery::DeliverySnapshot>> {
-        self.call(
-            "RepositoryDelivery",
-            &ghinvite_core::delivery::delivery_key(request_id, repo_id),
-            "status",
-            &(),
-        )
-        .await
     }
 
     async fn link<I: Serialize, O: DeserializeOwned>(
@@ -319,13 +283,20 @@ mod tests {
                 .await,
             Err(AuthorityError::Missing)
         ));
-        let command: DecideRequest = serde_json::from_value(serde_json::json!({
+        let command: ghinvite_core::request_lifecycle::DecideRequest =
+            serde_json::from_value(serde_json::json!({
             "link_id": link, "request_id": request_id,
             "operation_id": ghinvite_core::RequestId::new(),
             "admin": {"account_id": 1, "user_id": 2}, "action": {"kind": "approve"}}))
-        .unwrap();
+            .unwrap();
         // An empty body is the authority's "no retained receipt".
-        assert!(authority.decision_status(command).await.unwrap().is_none());
+        assert!(
+            crate::request_authority::RequestAuthority::new(authority.client)
+                .decision_status(command)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use chrono::Utc;
 use common::authority_http_fixture::FakeLinkAuthority;
 use common::sign_in::sign_in;
 use ghinvite_core::admission::RequesterPage;
-use ghinvite_core::storage::projection::RequestSnapshot;
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::storage::projection::fixture::Seed;
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{

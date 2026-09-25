@@ -41,6 +41,10 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/storage-suite" => Ok(serde_json::json!(test_suite::SCENARIOS)),
+        "/__fixture/verify-link-repair" => {
+            test_suite::verify_link_projection_repair(storage).await;
+            Ok(serde_json::Value::Null)
+        }
         // The caller supplies a freshly migrated DB per scenario. A failed
         // assertion panics, which aborts this Wasm instance with the message.
         _ if path.starts_with("/__fixture/storage-suite/") => {

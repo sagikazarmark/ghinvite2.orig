@@ -20,10 +20,11 @@ use ghinvite_core::admission::{
     AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, Rejection,
 };
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
+use ghinvite_core::invitation_link::AccountAdmin;
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{
     DecideRequest, DecisionAction, DecisionOutcome, LifecycleOperationId, RequestStatus,
 };
-use ghinvite_core::storage::projection::{AccountAdmin, RequestSnapshot};
 use ghinvite_core::{
     InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState,
 };
@@ -116,7 +117,8 @@ async fn authority_with(link: &InvitationLink) -> (FakeLinkAuthority, LinkAuthor
 #[tokio::test]
 async fn a_decision_applies_once_and_its_operation_replays_the_receipt() {
     let link = link();
-    let (fake, authority) = authority_with(&link).await;
+    let (fake, _) = authority_with(&link).await;
+    let authority = ghinvite_web::request_authority::RequestAuthority::new(fake.client());
     let request = pending(&link, Utc::now() + Duration::days(7));
     fake.seed_request(request.clone());
     let approve = decide(&request, DecisionAction::Approve);
@@ -177,7 +179,8 @@ async fn a_decision_applies_once_and_its_operation_replays_the_receipt() {
 #[tokio::test]
 async fn a_decision_the_authority_expired_is_reported_incompatible() {
     let link = link();
-    let (fake, authority) = authority_with(&link).await;
+    let (fake, _) = authority_with(&link).await;
+    let authority = ghinvite_web::request_authority::RequestAuthority::new(fake.client());
     let request = pending(&link, Utc::now() - Duration::hours(1));
     fake.seed_request(request.clone());
     let receipt = authority
@@ -191,7 +194,8 @@ async fn a_decision_the_authority_expired_is_reported_incompatible() {
 #[tokio::test]
 async fn decisions_for_unknown_or_foreign_links_and_requests_are_missing() {
     let link = link();
-    let (fake, authority) = authority_with(&link).await;
+    let (fake, _) = authority_with(&link).await;
+    let authority = ghinvite_web::request_authority::RequestAuthority::new(fake.client());
     let request = pending(&link, Utc::now() + Duration::days(7));
     // The request was never admitted.
     assert!(matches!(
@@ -243,7 +247,8 @@ async fn a_lost_acknowledgement_leaves_the_outcome_unknown_after_applying() {
 #[tokio::test]
 async fn a_lost_decision_acknowledgement_is_readable_from_decision_status() {
     let link = link();
-    let (fake, authority) = authority_with(&link).await;
+    let (fake, _) = authority_with(&link).await;
+    let authority = ghinvite_web::request_authority::RequestAuthority::new(fake.client());
     let request = pending(&link, Utc::now() + Duration::days(7));
     fake.seed_request(request.clone());
     fake.lose_acknowledgements("decide");
@@ -460,7 +465,7 @@ async fn a_declined_request_reaches_the_requester_page_without_a_reason() {
     let command = admit(&link, 99, None);
     let request = accepted(&authority.admit(command).await.unwrap());
     let pending = fake.request(request).unwrap();
-    authority
+    ghinvite_web::request_authority::RequestAuthority::new(fake.client())
         .decide(decide(
             &pending,
             DecisionAction::Decline {
@@ -486,6 +491,7 @@ async fn delivery_progress_covers_an_approved_request_in_scope_order() {
     link.approval_required = false;
     let (fake, authority) = authority_with(&link).await;
     let request = accepted(&authority.admit(admit(&link, 99, None)).await.unwrap());
+    let authority = ghinvite_web::request_authority::RequestAuthority::new(fake.client());
     let query = |requester_id| RequestStatus {
         link_id: link.id,
         request_id: request,

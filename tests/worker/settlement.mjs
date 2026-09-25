@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 // Public command and Storage boundaries; SQL is used only for fault injection.
-export async function settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually, requestId, invitationId, pause }) {
+export async function settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually, requestId, invitationId, pause, holdPut }) {
   const at = new Date().toISOString();
   const lifecycle = async (key, handler, body) => {
     const row = await storage('invitation', key);
@@ -125,10 +125,18 @@ export async function settlement({ ingress, githubUrl, http, storage, db, id, cr
     const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
     const command = plan.commands[0];
     const url = `${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}`;
-    const creating = http(`${url}/create`, command);
-    // Queue competing terminal work while the create is completing.
-    const created = await creating;
-    await http(`${url}/${handler}`, { invitation_id: command.invitation_id, installation_id: 19, by_user: 7, at });
+    const held = holdPut();
+    let created;
+    try {
+      const creating = http(`${url}/create`, command);
+      await Promise.race([held.entered, new Promise((_, reject) => setTimeout(() => reject(new Error('PUT did not reach race barrier')), 5000))]);
+      // Durable send acknowledgement proves withdrawal queued while the real
+      // owner is still awaiting the PUT, rather than after creation completed.
+      const withdrawal = await http(`${url}/${handler}/send`, { invitation_id: command.invitation_id, installation_id: 19, by_user: 7, at });
+      held.release();
+      created = await creating;
+      await http(`${ingress}/restate/invocation/${withdrawal.invocationId}/attach`, undefined, 'GET');
+    } finally { held.release(); }
     const winner = await http(`${url}/status`);
     assert.equal(winner.settlement.state, handler === 'cancel' ? 'cancelled' : 'expired');
     assert.deepEqual(winner.create, created);

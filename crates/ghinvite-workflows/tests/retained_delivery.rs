@@ -1577,10 +1577,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .json()
         .await
         .unwrap();
-    assert_eq!(
-        throttled["outcome"],
-        json!({"kind":"blocked","reason":"GitHub throttled delivery"})
-    );
+    assert_eq!(throttled["outcome"], json!({"kind":"throttled"}));
     let sending = storage
         .get_github_invitation(id.parse().unwrap())
         .await

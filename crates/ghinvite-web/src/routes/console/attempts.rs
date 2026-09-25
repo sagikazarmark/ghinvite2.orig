@@ -5,8 +5,8 @@ use crate::attempt_continuations::{AttemptContinuations, Retention, Scope};
 use axum::http::StatusCode;
 use axum::response::{Redirect, Response};
 use ghinvite_core::admission::AdminLinkCommand;
+use ghinvite_core::invitation_link::CreateLink;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
-use ghinvite_core::storage::projection::CreateLink;
 use serde::{Deserialize, Serialize};
 
 const CREATED: &str = "Invitation link created.";
@@ -47,19 +47,34 @@ pub(super) enum CreateRecovery {
 }
 
 /// Recover the creation of `link_id` retained in this session, before
-/// anything about the submission is recomputed. `same_input` says whether
-/// the resubmitted form carries the original's business input; only then is
-/// the original replayed.
+/// current eligibility is read. Compare the resubmission against the retained
+/// scope and creation anchor; only identical business input replays the original.
 pub(super) async fn recover_create(
     state: &AppState,
     admin: &RequireConsoleAdminOf,
     link_id: ghinvite_core::InvitationLinkId,
-    same_input: impl FnOnce(&CreateLink) -> bool,
+    form: &create_link_form::CreateLinkSubmission,
+    anchor: chrono::DateTime<Utc>,
 ) -> crate::Result<CreateRecovery> {
     let Some(Command::Create(original)) = load(state, admin, &create_id(link_id)).await? else {
         return Ok(CreateRecovery::Fresh);
     };
-    let matches = same_input(&original);
+    let repos = original
+        .repos
+        .iter()
+        .map(|r| RepositoryChoice {
+            id: r.repo_id,
+            full_name: r.repo_full_name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let matches = create_link_form::validate(form, &repos, anchor).is_ok_and(|v| {
+        v.into_command(
+            original.link_id,
+            original.admin.clone(),
+            original.account_id,
+            original.installation_id,
+        ) == original
+    });
     let command = Command::Create(original);
     if !matches {
         return Ok(CreateRecovery::Answered(conflict(admin, &command)));
@@ -221,7 +236,7 @@ pub(super) async fn page(
     };
     let result = match &command {
         Command::Decision(c) => {
-            let result = state.link_authority.decision_status(c.clone()).await;
+            let result = state.request_authority.decision_status(c.clone()).await;
             return match result {
                 Ok(Some(receipt)) => decision_response(&admin, &command, &receipt),
                 Ok(None) | Err(AuthorityError::Missing) => unknown(&admin, &command),
@@ -344,7 +359,7 @@ pub(super) async fn submit(
     }
     let (result, completed) = match &command {
         Command::Decision(c) => {
-            let result = state.link_authority.decide(c.clone()).await;
+            let result = state.request_authority.decide(c.clone()).await;
             return Ok(match result {
                 Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
                     decision_response(admin, &command, &receipt)

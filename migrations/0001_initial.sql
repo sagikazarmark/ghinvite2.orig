@@ -40,7 +40,8 @@ CREATE TABLE invitation_links (
   revoked_at           TEXT,
   revoked_by           INTEGER REFERENCES users(user_id),
   description          TEXT    NOT NULL DEFAULT '',
-  projection_revision  INTEGER NOT NULL
+  projection_revision  INTEGER NOT NULL,
+  projection_content   TEXT NOT NULL
 );
 
 CREATE INDEX idx_invitation_links_account ON invitation_links(account_id);

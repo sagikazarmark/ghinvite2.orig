@@ -4,9 +4,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use ghinvite_core::admission::{
     AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, AttemptQuery,
 };
+use ghinvite_core::invitation_link::AccountAdmin;
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionAction, LifecycleOperationId};
 use ghinvite_core::storage::projection::fixture::Seed;
-use ghinvite_core::storage::projection::{AccountAdmin, RequestSnapshot};
 use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
@@ -186,7 +187,7 @@ fn seed_admitted(
 
 /// Decide `request` as an account admin would.
 async fn decide(authority: &FakeLinkAuthority, request: &RequestSnapshot, action: DecisionAction) {
-    LinkAuthority::new(authority.client())
+    ghinvite_web::request_authority::RequestAuthority::new(authority.client())
         .decide(DecideRequest {
             link_id: request.link_id,
             request_id: request.request_id,

@@ -93,7 +93,7 @@ impl From<crate::Inactive> for Rejection {
 #[serde(deny_unknown_fields)]
 pub struct AdminLinkCommand {
     pub link_id: InvitationLinkId,
-    pub admin: crate::storage::projection::AccountAdmin,
+    pub admin: crate::invitation_link::AccountAdmin,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -118,14 +118,14 @@ pub struct RequesterPage {
     /// a fresh attempt.
     pub can_start_fresh: bool,
     pub attempt: Option<Attempt>,
-    pub request: Option<crate::storage::projection::RequestSnapshot>,
+    pub request: Option<crate::request_lifecycle::RequestSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateMetadata {
     pub link_id: InvitationLinkId,
-    pub admin: crate::storage::projection::AccountAdmin,
+    pub admin: crate::invitation_link::AccountAdmin,
     pub description: String,
     pub internal_note: Option<String>,
 }

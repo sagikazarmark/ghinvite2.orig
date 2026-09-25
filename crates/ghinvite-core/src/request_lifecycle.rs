@@ -1,5 +1,5 @@
 //! Commands and retained records for the private request authority.
-use crate::storage::projection::AccountAdmin;
+use crate::invitation_link::AccountAdmin;
 use crate::{InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState};
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -80,6 +80,14 @@ pub struct RequestStatus {
     pub requester_id: u64,
 }
 
+/// Current web-verified account authority, independent of projected request rows.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminRequestStatus {
+    pub request_id: RequestId,
+    pub admin: AccountAdmin,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RequestSnapshot {
     pub request_id: RequestId,
@@ -93,6 +101,26 @@ pub struct RequestSnapshot {
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<TerminalDecision>,
+}
+
+impl RequestSnapshot {
+    pub fn as_request(&self) -> crate::InvitationRequest {
+        crate::InvitationRequest {
+            id: self.request_id,
+            invitation_link_id: self.link_id,
+            requester_id: self.requester_id,
+            justification: self.justification.clone(),
+            state: self.state,
+            created_at: self.admitted_at,
+            decision_deadline: self.decision_deadline,
+            decided_by: self.decision.as_ref().and_then(|d| d.decided_by),
+            decided_at: self.decision.as_ref().map(|d| d.effective_at),
+            decline_reason: self
+                .decision
+                .as_ref()
+                .and_then(|d| d.decline_reason.clone()),
+        }
+    }
 }
 
 /// Immutable admission-time policy and repository scope, never a mutable snapshot.

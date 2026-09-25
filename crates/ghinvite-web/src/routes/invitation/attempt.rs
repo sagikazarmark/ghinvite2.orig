@@ -224,7 +224,7 @@ pub async fn page(
         && request.state == ghinvite_core::RequestState::Approved
     {
         let progress = state
-            .link_authority
+            .request_authority
             .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
                 link_id: page.link_id,
                 request_id: request.request_id,
@@ -244,8 +244,8 @@ pub async fn page(
             .ok();
         for repo in &page.repos {
             let current = state
-                .link_authority
-                .delivery_snapshot(request.request_id, repo.repo_id)
+                .delivery_authority
+                .snapshot(request.request_id, repo.repo_id)
                 .await;
             let unavailable = current.is_err();
             let current = current.ok().flatten();

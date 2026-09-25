@@ -33,7 +33,8 @@ async fn owned_link(
 ) -> crate::Result<InvitationLink> {
     match storage.get_invitation_link_by_id(id).await? {
         Some(link) if link.account_id == account_id => Ok(link),
-        _ => Err(crate::WebError::NotFound),
+        Some(_) => Err(crate::WebError::Forbidden),
+        None => Err(crate::WebError::NotFound),
     }
 }
 
@@ -75,8 +76,18 @@ pub(super) async fn history(
         Err(not_found) => return not_found,
     };
     let link = match owned_link(state.storage.as_ref(), admin.account.account_id, id).await {
+        Ok(link) => Ok((link, true)),
+        Err(crate::WebError::NotFound) => authoritative_link(&state, &admin, id)
+            .await
+            .map(|link| (link, false))
+            .map_err(crate::WebError::from),
+        Err(error) => Err(error),
+    };
+    let (link, projected) = match link {
         Ok(link) => link,
-        Err(crate::WebError::NotFound) => return console_not_found_response(&admin),
+        Err(crate::WebError::NotFound | crate::WebError::Forbidden) => {
+            return console_not_found_response(&admin);
+        }
         Err(error) => {
             return error.into_response_with_recovery(
                 format!("/console/accounts/{}/links", admin.account.account_login),
@@ -86,12 +97,17 @@ pub(super) async fn history(
     };
     let before = cursor(&uri, id);
     let mut older_href = None;
-    let (status, rows) = match state
-        .storage
-        .request_history(admin.account.account_id, id, before)
-        .await
-    {
-        Ok(page) => {
+    let history = if projected {
+        state
+            .storage
+            .request_history(admin.account.account_id, id, before)
+            .await
+            .ok()
+    } else {
+        None
+    };
+    let (status, rows) = match history {
+        Some(page) => {
             if let Some(boundary) = page.older {
                 let token = super::cursor::encode(&Cursor {
                     v: 1,
@@ -115,7 +131,7 @@ pub(super) async fn history(
             }
             (StatusCode::OK, Some(rows))
         }
-        Err(_) => {
+        None => {
             tracing::warn!("request history read unavailable");
             (StatusCode::SERVICE_UNAVAILABLE, None)
         }
@@ -141,17 +157,42 @@ pub(super) async fn detail(
         Ok(id) => id,
         Err(not_found) => return not_found,
     };
-    let (request, link) =
-        match owned_request(state.storage.as_ref(), admin.account.account_id, id).await {
-            Ok(record) => record,
-            Err(crate::WebError::NotFound) => return console_not_found_response(&admin),
-            Err(error) => {
-                return error.into_response_with_recovery(
-                    format!("/console/accounts/{}/requests", admin.account.account_login),
-                    "Back to requests",
-                );
-            }
+    let record = {
+        let retained = async {
+            let request = match state
+                .request_authority
+                .admin_status(ghinvite_core::request_lifecycle::AdminRequestStatus {
+                    request_id: id,
+                    admin: admin_assertion(&admin),
+                })
+                .await
+            {
+                Ok(snapshot) => snapshot.as_request(),
+                Err(error) => return Err(crate::WebError::from(error)),
+            };
+            let link = authoritative_link(&state, &admin, request.invitation_link_id)
+                .await
+                .map_err(crate::WebError::from)?;
+            Ok((request, link))
         };
+        match owned_request(state.storage.as_ref(), admin.account.account_id, id).await {
+            Ok(record) => Ok(record),
+            Err(crate::WebError::NotFound) => retained.await,
+            Err(error) => Err(error),
+        }
+    };
+    let (request, link) = match record {
+        Ok(record) => record,
+        Err(crate::WebError::NotFound | crate::WebError::Forbidden) => {
+            return console_not_found_response(&admin);
+        }
+        Err(error) => {
+            return error.into_response_with_recovery(
+                format!("/console/accounts/{}/requests", admin.account.account_login),
+                "Back to requests",
+            );
+        }
+    };
     let requester = user_label(&state, request.requester_id).await;
     let decision_actor = match request.decided_by {
         Some(id) => user_label(&state, id).await,
@@ -167,11 +208,7 @@ pub(super) async fn detail(
     let mut receipts = receipts.unwrap_or_default();
     let mut invitations = invitations.unwrap_or_default();
     for repo in &link.repos {
-        match state
-            .link_authority
-            .delivery_snapshot(id, repo.repo_id)
-            .await
-        {
+        match state.delivery_authority.snapshot(id, repo.repo_id).await {
             Ok(Some(snapshot)) => {
                 receipts.retain(|r| r.create.command.repo_id != repo.repo_id);
                 invitations.retain(|r| r.repo_id != repo.repo_id);
@@ -320,7 +357,7 @@ mod tests {
         assert_eq!(owned_link(&storage, 9001, own.id).await.unwrap(), own);
         assert!(matches!(
             owned_link(&storage, 9001, foreign.id).await,
-            Err(crate::WebError::NotFound)
+            Err(crate::WebError::Forbidden)
         ));
     }
 
@@ -341,7 +378,7 @@ mod tests {
         for id in [foreign_request.id, RequestId::new()] {
             assert!(matches!(
                 owned_request(&storage, 9001, id).await,
-                Err(crate::WebError::NotFound)
+                Err(crate::WebError::NotFound | crate::WebError::Forbidden)
             ));
         }
     }

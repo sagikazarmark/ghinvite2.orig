@@ -213,6 +213,9 @@ pub async fn webhook(
     Json(input): Json<OnWebhookInput>,
 ) -> Result<(), TerminalError> {
     let snapshot = load(&ctx, input.invitation_id).await?;
+    if !eligible(&snapshot.invitation()) {
+        return Ok(());
+    }
     if input.verify {
         ctx.service_client::<DeliveryObservationClient>()
             .observe(Json(snapshot))
@@ -249,6 +252,20 @@ impl DeliveryObservation {
         ctx: restate_sdk::context::Context<'_>,
         Json(snapshot): Json<DeliverySnapshot>,
     ) -> Result<(), TerminalError> {
+        // Every delayed invocation refreshes authority. Its original snapshot
+        // identifies the delivery, but cannot keep a settled invitation polling.
+        let Json(current) = ctx
+            .object_client::<crate::delivery::RepositoryDeliveryClient>(
+                snapshot.create.command.delivery_key(),
+            )
+            .status()
+            .call()
+            .await?;
+        let Some(snapshot) = current.filter(|current| {
+            current.create.command == snapshot.create.command && eligible(&current.invitation())
+        }) else {
+            return Ok(());
+        };
         let command = &snapshot.create.command;
         let Json(account) = ctx
             .object_client::<crate::availability::AccountInstallationClient>(

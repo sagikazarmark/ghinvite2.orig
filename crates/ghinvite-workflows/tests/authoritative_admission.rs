@@ -11,10 +11,13 @@ struct Runtime {
     link_faults: Arc<ghinvite_workflows::admission::Faults>,
     request_faults: Arc<ghinvite_workflows::request_owner::Faults>,
     server: tokio::task::JoinHandle<()>,
+    github_server: tokio::task::JoinHandle<()>,
+    github_url: String,
 }
 impl Drop for Runtime {
     fn drop(&mut self) {
         self.server.abort();
+        self.github_server.abort();
     }
 }
 impl Runtime {
@@ -35,18 +38,28 @@ impl Runtime {
                 .await
                 .unwrap(),
         );
-        let github = Arc::new(ghinvite_github::InstallationClient::new(
-            Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
-                client.clone(),
-            )),
-            ghinvite_github::jwt::AppJwtSigner::from_pem(
-                123,
-                include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let github_url = format!("http://{}", listener.local_addr().unwrap());
+        let github_server = tokio::spawn(async move {
+            axum::serve(listener, ghinvite_github::stub::router())
+                .await
+                .unwrap();
+        });
+        let github = Arc::new(
+            ghinvite_github::InstallationClient::new(
+                Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
+                    client.clone(),
+                )),
+                ghinvite_github::jwt::AppJwtSigner::from_pem(
+                    123,
+                    include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
+                )
+                .unwrap(),
             )
-            .unwrap(),
-        ));
+            .with_base(&github_url),
+        );
         let state = ghinvite_workflows::AppState::new(storage.clone(), github);
-        let builder = ghinvite_workflows::admission::bind_with_faults(
+        let builder = ghinvite_workflows::admission::bind_with_availability_faults(
             restate_sdk::endpoint::Endpoint::builder(),
             link_faults.clone(),
         );
@@ -54,6 +67,9 @@ impl Runtime {
             ghinvite_workflows::request_owner::bind_with_faults(builder, request_faults.clone());
         let builder = ghinvite_workflows::projection::bind(builder, storage);
         let endpoint = ghinvite_workflows::delivery::bind(builder, state.clone())
+            .bind(ghinvite_workflows::availability::InstallationProjection {
+                state: state.clone(),
+            })
             .bind(ghinvite_workflows::availability::AccountInstallation { state })
             .build();
         let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
@@ -74,14 +90,18 @@ impl Runtime {
             "{}",
             response.text().await.unwrap()
         );
-        Self {
+        let runtime = Self {
             client,
             ingress,
             admin,
             link_faults,
             request_faults,
             server,
-        }
+            github_server,
+            github_url,
+        };
+        runtime.ok("AccountInstallation", 100, "onboard", &json!({"installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()})).await;
+        runtime
     }
     fn call(
         &self,
@@ -151,6 +171,120 @@ fn decision(id: InvitationLinkId, receipt: &Value, action: Value) -> Value {
 async fn request_authority_contract() {
     let runtime = Runtime::start().await;
     let r = &runtime;
+    // Interrupted positive evidence ages past its freshness window. It cannot
+    // consume a use; the same attempt must obtain current evidence on retry.
+    let id = r.create(None).await;
+    let a = attempt(id, 8);
+    r.link_faults.arm("after-availability-evidence");
+    let sending = r.call("InvitationLink", id, "admit", &a);
+    let pending = tokio::spawn(async move { sending.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while r.link_faults.attempts() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    r.link_faults
+        .set_clock(Some(chrono::Utc::now() + chrono::Duration::minutes(6)));
+    r.link_faults.release();
+    assert_eq!(pending.await.unwrap().status(), 503);
+    assert_eq!(r.uses(id).await, 0);
+    r.link_faults.set_clock(None);
+    r.client
+        .post(format!("{}/installation-repositories", r.github_url))
+        .json(&json!([]))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    r.ok("AccountInstallation", 100, "refresh", &json!(1)).await;
+    let rejected = r.ok("InvitationLink", id, "admit", &a).await;
+    assert_eq!(rejected["result"]["kind"], "rejected");
+    assert_eq!(r.uses(id).await, 0);
+    r.client
+        .post(format!("{}/installation-repositories", r.github_url))
+        .json(&json!([10, 11]))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    r.ok("AccountInstallation", 100, "refresh", &json!(1)).await;
+    assert_eq!(r.ok("InvitationLink", id, "admit", &a).await, rejected);
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &attempt(id, 8)).await["result"]["kind"],
+        "accepted"
+    );
+    for stage in [
+        "creation-before-decision",
+        "creation-after-decision",
+        "creation-after-link",
+        "creation-after-receipt",
+        "creation-after-projection-send",
+    ] {
+        let id = InvitationLinkId::new();
+        let now = chrono::Utc::now();
+        let command = json!({"link_id":id,"account_id":100,"installation_id":1,
+            "admin":{"account_id":100,"user_id":7},"description":"Original creation","approval_required":true,
+            "permission":"push","expires_at":now + chrono::Duration::hours(1),"repos":[{"repo_id":10,"repo_full_name":"acme/api"}]});
+        r.link_faults.arm(stage);
+        let sending = r.call("InvitationLink", id, "create", &command);
+        let first = tokio::spawn(async move { sending.send().await.unwrap() });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while r.link_faults.attempts() == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!first.is_finished(), "{stage}");
+        let sending = r.call("InvitationLink", id, "create", &command);
+        let concurrent = tokio::spawn(async move { sending.send().await.unwrap() });
+        r.link_faults.release();
+        let first: Value = first
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            concurrent
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap(),
+            first
+        );
+        let mut changed = command.clone();
+        changed["description"] = json!("Conflicting creation");
+        assert_eq!(
+            r.call("InvitationLink", id, "create", &changed)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        let admin = json!({"link_id":id,"admin":{"account_id":100,"user_id":7}});
+        let mut metadata = admin.clone();
+        metadata["description"] = json!("Current metadata");
+        r.ok("InvitationLink", id, "update_metadata", &metadata)
+            .await;
+        assert_eq!(r.ok("InvitationLink", id, "create", &command).await, first);
+        r.ok("InvitationLink", id, "revoke", &admin).await;
+        assert_eq!(r.ok("InvitationLink", id, "create", &command).await, first);
+        r.link_faults
+            .set_clock(Some(now + chrono::Duration::hours(2)));
+        assert_eq!(r.ok("InvitationLink", id, "create", &command).await, first);
+        r.link_faults.set_clock(None);
+    }
     // A failed short initialization retains handoff progress, never another use.
     let unavailable_link = r.create(None).await;
     let unavailable_attempt = attempt(unavailable_link, 8);

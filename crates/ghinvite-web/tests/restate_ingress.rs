@@ -216,7 +216,10 @@ async fn configuration_requires_credentials_unless_local_mode_is_explicit() {
         "operation_id": ghinvite_core::RequestId::new(),
         "admin": {"account_id": 1, "user_id": 2}, "action": {"kind": "approve"}}))
     .unwrap();
-    authority(&client).decision_status(decision).await.unwrap();
+    ghinvite_web::request_authority::RequestAuthority::new(Arc::new(client.clone()))
+        .decision_status(decision)
+        .await
+        .unwrap();
     client.send("Service", "", "write", &()).await.unwrap();
 }
 

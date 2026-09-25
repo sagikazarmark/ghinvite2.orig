@@ -28,11 +28,49 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .execute(&sql).await.unwrap();
     let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", stub.local_addr().unwrap());
-    let stub_server = tokio::spawn(async move {
-        axum::serve(stub, ghinvite_github::stub::router())
-            .await
-            .unwrap()
-    });
+    let lose_fence_after_put = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observation_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let fail_observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let router = {
+        let sql = sql.clone();
+        let lose_fence = lose_fence_after_put.clone();
+        let reads = observation_reads.clone();
+        let fail = fail_observations.clone();
+        ghinvite_github::stub::router().layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let sql = sql.clone();
+                let lose_fence = lose_fence.clone();
+                let reads = reads.clone();
+                let fail = fail.clone();
+                async move {
+                    let put = request.method() == axum::http::Method::PUT;
+                    if request.method() == axum::http::Method::GET
+                        && request.uri().path() == "/repos/acme/api/invitations"
+                    {
+                        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        if fail.load(std::sync::atomic::Ordering::SeqCst) {
+                            return axum::response::Response::builder()
+                                .status(429)
+                                .header("retry-after", "1")
+                                .body(axum::body::Body::from("{}"))
+                                .unwrap();
+                        }
+                    }
+                    let response = next.run(request).await;
+                    if put && lose_fence.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        sqlx::query(
+                            "ALTER TABLE delivery_attempts RENAME TO delivery_attempts_offline",
+                        )
+                        .execute(&sql)
+                        .await
+                        .unwrap();
+                    }
+                    response
+                }
+            },
+        ))
+    };
+    let stub_server = tokio::spawn(async move { axum::serve(stub, router).await.unwrap() });
     let github = Arc::new(
         ghinvite_github::InstallationClient::new(
             Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
@@ -60,7 +98,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let builder = ghinvite_workflows::admission::bind_protocol_fixture(builder);
     let builder = ghinvite_workflows::projection::bind(builder, storage.clone());
     let builder = ghinvite_workflows::request_owner::bind(builder);
-    let endpoint = ghinvite_workflows::delivery::bind(builder, state).build();
+    let faults = Arc::new(ghinvite_workflows::delivery::DeliveryFaults::default());
+    let endpoint =
+        ghinvite_workflows::delivery::bind_with_faults(builder, state, faults.clone()).build();
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let server = tokio::spawn(async move {
@@ -100,13 +140,18 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .status(),
         503
     );
-    let eligibility = post(
-        &client,
-        &format!("{ingress}/AccountInstallation/100/eligibility"),
-        json!({"account_id":100,"repo_ids":[10]}),
-    )
-    .await;
-    assert_eq!(eligibility["kind"], "unknown");
+    assert_eq!(
+        client
+            .post(format!(
+                "{ingress}/AccountInstallation/100/admission_evidence"
+            ))
+            .json(&json!({"account_id":100,"repo_ids":[10]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503
+    );
     post(
         &client,
         &format!("{base}/installation-repositories"),
@@ -488,9 +533,15 @@ async fn approved_delivery_progresses_without_projected_parents() {
         manual_command["request_id"].as_str().unwrap(),
         manual_command["repo_id"]
     );
-    let unavailable = post(&client, &manual_url, manual_command.clone()).await;
     assert_eq!(
-        unavailable["outcome"]["kind"], "blocked",
+        client
+            .post(&manual_url)
+            .json(&manual_command)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        503,
         "fence outage before claim releases owner exclusivity"
     );
     assert_eq!(puts(&client, &base).await, 0);
@@ -558,6 +609,84 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .execute(&sql)
         .await
         .unwrap();
+    // Applied GitHub PUT + lost Restate result + failed fence read on replay.
+    // The receipt must retain uncertainty even though no earlier receipt exists.
+    post(
+        &client,
+        &format!("{base}/identity"),
+        json!({"login":"recovered-user","addressed_id":8}),
+    )
+    .await;
+    let mut uncertain_command = manual_command.clone();
+    uncertain_command["request_id"] = json!(ghinvite_core::RequestId::new());
+    uncertain_command["invitation_id"] = json!(ghinvite_core::GithubInvitationId::new());
+    let owner = format!(
+        "{ingress}/RepositoryDelivery/{}:10",
+        uncertain_command["request_id"].as_str().unwrap()
+    );
+    lose_fence_after_put.store(true, std::sync::atomic::Ordering::SeqCst);
+    faults
+        .lose_http_result
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let uncertain = post(
+        &client,
+        &format!("{owner}/create"),
+        uncertain_command.clone(),
+    )
+    .await;
+    assert_eq!(uncertain["outcome"]["kind"], "outcome_unknown");
+    assert_eq!(
+        faults
+            .http_result_losses
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(puts(&client, &base).await, 2);
+    sqlx::query("ALTER TABLE delivery_attempts_offline RENAME TO delivery_attempts")
+        .execute(&sql)
+        .await
+        .unwrap();
+    let confirmed = post(
+        &client,
+        &format!("{owner}/create"),
+        uncertain_command.clone(),
+    )
+    .await;
+    assert_eq!(confirmed["outcome"]["kind"], "created");
+    assert_eq!(puts(&client, &base).await, 2);
+
+    // A real delayed observation retry wakes after another event has settled.
+    let sent = post(&client, &format!("{owner}/status"), Value::Null).await;
+    fail_observations.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = observation_reads.load(std::sync::atomic::Ordering::SeqCst);
+    post(
+        &client,
+        &format!("{ingress}/DeliveryObservation/observe"),
+        sent.clone(),
+    )
+    .await;
+    assert_eq!(
+        observation_reads.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+    post(&client, &format!("{owner}/on_webhook"), json!({"invitation_id":uncertain_command["invitation_id"],"action":"declined","at":chrono::Utc::now()})).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Also redrive the stale observation and a repeated member event explicitly.
+    post(
+        &client,
+        &format!("{ingress}/DeliveryObservation/observe"),
+        sent,
+    )
+    .await;
+    post(&client, &format!("{owner}/on_webhook"), json!({"invitation_id":uncertain_command["invitation_id"],"action":"accepted","verify":true,"at":chrono::Utc::now()})).await;
+    assert_eq!(
+        observation_reads.load(std::sync::atomic::Ordering::SeqCst),
+        before + 1
+    );
+    assert_eq!(
+        post(&client, &format!("{owner}/status"), Value::Null).await["settlement"]["state"],
+        "declined"
+    );
     server.abort();
     stub_server.abort();
 }

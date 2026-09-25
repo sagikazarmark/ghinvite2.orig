@@ -183,8 +183,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
     // missing rows cannot be written through the domain's validated interface.
     sqlx::raw_sql("PRAGMA foreign_keys=OFF;
         INSERT INTO installations VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
-        INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision)
-        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1);")
+        INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
+        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1,'{}');")
         .execute(&db).await.unwrap();
     for (id, time) in [
         ("001", "2026-01-01T00:00:00.000000001Z"),
@@ -319,7 +319,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1)").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1,'{}')").execute(&db).await.unwrap();
     assert_eq!(
         storage
             .pending_request_page(43, None)

@@ -72,6 +72,26 @@ async fn parents(storage: &SqlxStorage) {
 }
 
 #[tokio::test]
+async fn missing_repository_rows_repair_only_from_the_original_scope() {
+    let path = std::env::temp_dir().join(format!(
+        "link-repair-{}.db",
+        ghinvite_core::RequestId::new()
+    ));
+    let storage = SqlxStorage::at_path(&path).await.unwrap();
+    ghinvite_core::storage::test_suite::scenario_link_projection_conflicts(storage.clone()).await;
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM invitation_link_repos")
+        .execute(&pool)
+        .await
+        .unwrap();
+    ghinvite_core::storage::test_suite::verify_link_projection_repair(storage).await;
+    pool.close().await;
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
 async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outcome() {
     let path = std::env::temp_dir().join(format!(
         "delivery-audit-{}.db",

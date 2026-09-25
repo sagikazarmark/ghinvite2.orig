@@ -112,6 +112,7 @@ scenarios![
     scenario_invitation_link_lifecycle,
     scenario_recorded_request_deadlines,
     scenario_request_owner_projection,
+    scenario_link_projection_conflicts,
     scenario_request_history,
     scenario_github_invitation_lifecycle,
     scenario_audit_appends,
@@ -126,6 +127,100 @@ scenarios![
     scenario_insert_conflict_kinds,
     scenario_installation_update_not_found,
 ];
+
+pub async fn scenario_link_projection_conflicts<S: Storage + ProjectionStorage>(s: S) {
+    s.insert_installation(&sample_account(1, 9001, "acme"))
+        .await
+        .unwrap();
+    s.upsert_user(&sample_user(701, "admin")).await.unwrap();
+    let mut link = sample_link(9001, 1, 701);
+    link.id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+    let original = fixture::envelope(&link, 2);
+    s.apply_transition(&original).await.unwrap();
+    let mut conflicts = Vec::new();
+    let mut changed = original.clone();
+    changed.link.uses += 1;
+    conflicts.push(changed);
+    let mut changed = original.clone();
+    changed.link.metadata = Some(crate::invitation_link::LinkMetadata {
+        description: "Conflicting metadata".into(),
+        internal_note: None,
+    });
+    conflicts.push(changed);
+    for revision in [1, 2, 3] {
+        let mut changed = original.clone();
+        changed.link.revision = revision;
+        changed.link.creation.repos.push(InvitationLinkRepo {
+            repo_id: 11,
+            repo_full_name: "acme/web".into(),
+        });
+        conflicts.push(changed);
+        let mut changed = original.clone();
+        changed.link.revision = revision;
+        changed.link.creation.description = "Changed original input".into();
+        conflicts.push(changed);
+    }
+    for conflict in conflicts {
+        assert!(
+            matches!(
+                s.apply_transition(&conflict).await,
+                Err(super::Error::ProjectionInvariant(_))
+            ),
+            "{conflict:?}"
+        );
+        s.apply_transition(&original).await.unwrap();
+        assert_eq!(
+            s.get_invitation_link_by_id(link.id).await.unwrap(),
+            Some(link.clone())
+        );
+    }
+    let mut newer = original.clone();
+    newer.link.revision += 1;
+    newer.link.uses += 1;
+    s.apply_transition(&newer).await.unwrap();
+    s.apply_transition(&original).await.unwrap();
+    assert_eq!(
+        s.get_invitation_link_by_id(link.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .uses_count,
+        1
+    );
+}
+
+/// Both adapters remove the repository child rows after the conflict scenario,
+/// then run these same assertions through their production projector.
+pub async fn verify_link_projection_repair<S: Storage + ProjectionStorage>(s: S) {
+    let mut link = sample_link(9001, 1, 701);
+    link.id = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+    let original = fixture::envelope(&link, 2);
+    let mut expanded = original.clone();
+    expanded.link.creation.repos.push(InvitationLinkRepo {
+        repo_id: 11,
+        repo_full_name: "acme/web".into(),
+    });
+    assert!(matches!(
+        s.apply_transition(&expanded).await,
+        Err(super::Error::ProjectionInvariant(_))
+    ));
+    assert!(
+        s.get_invitation_link_by_id(link.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .repos
+            .is_empty()
+    );
+    // A legitimate stale snapshot repairs scope without regressing current uses.
+    s.apply_transition(&original).await.unwrap();
+    link.uses_count = 1;
+    assert_eq!(
+        s.get_invitation_link_by_id(link.id).await.unwrap(),
+        Some(link)
+    );
+    s.apply_transition(&original).await.unwrap();
+}
 
 pub async fn scenario_request_owner_projection<S: Storage + ProjectionStorage>(s: S) {
     use super::projection::{AuditIntent, RequestProjectionEnvelope};

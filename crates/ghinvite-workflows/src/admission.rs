@@ -17,13 +17,12 @@ use restate_sdk::{
 use serde::{Deserialize, Serialize};
 
 pub use ghinvite_core::admission::*;
+pub use ghinvite_core::invitation_link::{AccountAdmin, CreateLink, LinkSnapshot};
 pub use ghinvite_core::request_lifecycle::{
     DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, InitializeRequest,
     RequestSnapshot, RequestStatus, TerminalDecision,
 };
-pub use ghinvite_core::storage::projection::{
-    AccountAdmin, AuditIntent, CreateLink, LinkSnapshot, ProjectionEnvelope,
-};
+pub use ghinvite_core::storage::projection::{AuditIntent, ProjectionEnvelope};
 pub const PENDING_LIFETIME: chrono::Duration = chrono::Duration::days(7);
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -80,10 +79,22 @@ pub fn bind(builder: Builder) -> Builder {
 }
 #[cfg(feature = "integration")]
 pub fn bind_with_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Builder {
+    bind_faults(builder, faults, true)
+}
+#[cfg(feature = "integration")]
+pub fn bind_with_availability_faults(builder: Builder, faults: std::sync::Arc<Faults>) -> Builder {
+    bind_faults(builder, faults, false)
+}
+#[cfg(feature = "integration")]
+fn bind_faults(
+    builder: Builder,
+    faults: std::sync::Arc<Faults>,
+    skip_availability: bool,
+) -> Builder {
     builder.bind(
         InvitationLink {
             faults: Some(faults),
-            skip_availability: true,
+            skip_availability,
         }
         .into_service_definition()
         .options(
@@ -351,7 +362,7 @@ impl InvitationLink {
         Json(input): Json<UpdateMetadata>,
     ) -> Result<Json<LinkSnapshot>, TerminalError> {
         let mut link = admin_link(&ctx, input.link_id, &input.admin).await?;
-        let metadata = ghinvite_core::storage::projection::LinkMetadata::parse(
+        let metadata = ghinvite_core::invitation_link::LinkMetadata::parse(
             &input.description,
             input.internal_note.as_deref(),
         )
@@ -525,6 +536,7 @@ impl InvitationLink {
         } else {
             None
         };
+        self.checkpoint(&ctx, "after-availability-evidence").await?;
         let Json(decision) = ctx
             .run(|| async {
                 let now = self.now();

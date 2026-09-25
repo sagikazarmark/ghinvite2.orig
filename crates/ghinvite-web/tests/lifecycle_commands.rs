@@ -1,5 +1,5 @@
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome};
-use ghinvite_web::LinkAuthority;
+use ghinvite_web::request_authority::RequestAuthority;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -32,7 +32,7 @@ async fn lifecycle_calls_request_authority_and_preserves_truthful_result() {
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    let client = LinkAuthority::new(Arc::new(
+    let client = RequestAuthority::new(Arc::new(
         ghinvite_web::RestateClient::new(format!("http://{address}")).unwrap(),
     ));
     let command: DecideRequest = serde_json::from_value(json!({

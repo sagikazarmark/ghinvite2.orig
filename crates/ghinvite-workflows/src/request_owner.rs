@@ -183,6 +183,14 @@ async fn expire(
     mut request: RequestSnapshot,
     now: DateTime<Utc>,
 ) -> RequestSnapshot {
+    if expire_due(&mut request, now) {
+        ctx.set("request", Json(request.clone()));
+    }
+    request
+}
+
+/// One deadline transition, shared by inspection, timers and decision arbitration.
+fn expire_due(request: &mut RequestSnapshot, now: DateTime<Utc>) -> bool {
     if request.state == RequestState::Pending && request.decision_deadline.is_some_and(|d| now >= d)
     {
         request.state = RequestState::Expired;
@@ -194,9 +202,10 @@ async fn expire(
             evaluated_at: now,
             decline_reason: None,
         });
-        ctx.set("request", Json(request.clone()));
+        true
+    } else {
+        false
     }
-    request
 }
 
 fn events(request: &RequestSnapshot) -> Vec<AuditIntent> {
@@ -474,6 +483,24 @@ impl InvitationRequest {
     }
 
     #[handler]
+    async fn admin_status(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ghinvite_core::request_lifecycle::AdminRequestStatus>,
+    ) -> Result<Json<RequestSnapshot>, TerminalError> {
+        let request = request(&ctx).await?;
+        if input.request_id != request.request_id
+            || input.admin.account_id != request.account_id
+            || input.admin.user_id == 0
+        {
+            return Err(missing());
+        }
+        let request = expire(&ctx, request, self.evaluated_at(&ctx).await?).await;
+        project(&ctx, &request).await?;
+        Ok(Json(request))
+    }
+
+    #[handler]
     async fn request_status(
         &self,
         ctx: ObjectContext<'_>,
@@ -548,33 +575,23 @@ impl InvitationRequest {
                 let mut request = request.clone();
                 let now = self.now();
                 let was_pending = request.state == RequestState::Pending;
-                if was_pending {
-                    let deadline = request.decision_deadline.ok_or_else(conflict)?;
-                    let (state, kind, reason, actor, effective_at) = if now >= deadline {
-                        (
-                            RequestState::Expired,
-                            EventType::RequestExpired,
+                if was_pending && !expire_due(&mut request, now) {
+                    request.decision_deadline.ok_or_else(conflict)?;
+                    let (state, kind, reason, actor, effective_at) = match &input.action {
+                        DecisionAction::Approve => (
+                            RequestState::Approved,
+                            EventType::RequestApproved,
                             None,
-                            None,
-                            deadline,
-                        )
-                    } else {
-                        match &input.action {
-                            DecisionAction::Approve => (
-                                RequestState::Approved,
-                                EventType::RequestApproved,
-                                None,
-                                Some(input.admin.user_id),
-                                now,
-                            ),
-                            DecisionAction::Decline { reason } => (
-                                RequestState::Declined,
-                                EventType::RequestDeclined,
-                                reason.clone(),
-                                Some(input.admin.user_id),
-                                now,
-                            ),
-                        }
+                            Some(input.admin.user_id),
+                            now,
+                        ),
+                        DecisionAction::Decline { reason } => (
+                            RequestState::Declined,
+                            EventType::RequestDeclined,
+                            reason.clone(),
+                            Some(input.admin.user_id),
+                            now,
+                        ),
                     };
                     request.state = state;
                     request.revision += 1;

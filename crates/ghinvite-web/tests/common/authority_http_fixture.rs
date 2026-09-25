@@ -38,12 +38,11 @@ use ghinvite_core::admission::{
     AttemptQuery, Rejection, RequesterPage, UpdateMetadata,
 };
 use ghinvite_core::delivery::{DispatchStage, RepositoryProgress};
+use ghinvite_core::invitation_link::{AccountAdmin, CreateLink, LinkMetadata, LinkSnapshot};
+use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{
     DecideRequest, DecisionAction, DecisionOutcome, DecisionReceipt, RequestStatus,
     TerminalDecision,
-};
-use ghinvite_core::storage::projection::{
-    AccountAdmin, CreateLink, LinkMetadata, LinkSnapshot, RequestSnapshot,
 };
 use ghinvite_core::{InvitationLink, InvitationLinkId, RequestId, RequestState};
 use serde::de::DeserializeOwned;

@@ -246,6 +246,10 @@ async fn approved_request_distinguishes_projected_outcomes_from_missing_delivery
     use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt};
     for (outcome, label) in [
         (
+            CreateOutcome::Throttled,
+            "Throttled — waiting for GitHub’s rate limit",
+        ),
+        (
             CreateOutcome::Blocked {
                 reason: "private infrastructure diagnostic".into(),
             },

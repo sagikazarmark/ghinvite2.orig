@@ -81,6 +81,9 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     assert.equal((await visit(admin, action, creation)).status, 502);
     assert.equal((await visit(admin, `/console/accounts/acme/attempts/create-${link}`, { csrf_token: csrf })).status, 303);
     assert.equal(await storage('link', link), null);
+    const unavailableHistory = await visit(admin, `/console/accounts/acme/links/${link}/requests`);
+    assert.equal(unavailableHistory.status, 503);
+    assert.match(await unavailableHistory.text(), /Request history unavailable/);
     const alice = await login('alice');
     const page = await (await visit(alice, `/i/${link}`)).text();
     const operation = field(page, 'operation_id');
@@ -91,6 +94,9 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     assert.equal((await visit(alice, `/i/${link}`, submission)).status, 303);
     const result = await http(`${ingress}/InvitationLink/${link}/requester_page`, { link_id: link, requester_id: 8, operation_id: operation });
     const requestId = result.request.request_id;
+    const retainedDetail = await visit(admin, `/console/accounts/acme/requests/${requestId}`);
+    assert.equal(retainedDetail.status, 200);
+    assert.match(await retainedDetail.text(), /Original worker input/);
     const decision = { csrf_token: csrf, link_id: link, operation_id: operation };
     const approve = `/console/accounts/acme/requests/${requestId}/approve`;
     assert.equal((await visit(admin, approve, decision)).status, 502);

@@ -103,6 +103,7 @@ pub enum DeliveryStatus {
     Planned,
     Submitted,
     Blocked,
+    Throttled,
     Unknown,
     Created,
     Sent,
@@ -122,6 +123,7 @@ impl DeliveryStatus {
             Self::Planned => "Planned — awaiting dispatch",
             Self::Submitted => "Submitted — awaiting GitHub confirmation",
             Self::Blocked => "Blocked — waiting for availability or identity verification",
+            Self::Throttled => "Throttled — waiting for GitHub’s rate limit",
             Self::Unknown => "GitHub outcome unknown — awaiting reconciliation",
             Self::Created => "GitHub invitation created — awaiting acceptance",
             Self::Sent => "GitHub invitation sent — awaiting acceptance",
@@ -142,6 +144,9 @@ impl DeliveryStatus {
             }
             Self::Blocked => {
                 "Delivery is waiting for a prerequisite. Wait, then check again; if it stays blocked, contact an account admin."
+            }
+            Self::Throttled => {
+                "GitHub asked us to wait. Delivery will retry after the rate limit clears; check this page again later."
             }
             Self::Unknown => {
                 "GitHub may already have sent an invitation. Check your GitHub notifications or email, then check this page again. If the outcome stays unknown, contact an account admin; do not submit another request to resend it."
@@ -219,6 +224,7 @@ pub fn delivery_presentation(
         (Some(InvitationState::Sent), _) => S::Sent,
         (_, Some(CreateOutcome::Failed { .. })) => S::Failed,
         (_, Some(CreateOutcome::Blocked { .. })) => S::Blocked,
+        (_, Some(CreateOutcome::Throttled)) => S::Throttled,
         (_, Some(CreateOutcome::OutcomeUnknown)) => S::Unknown,
         (Some(InvitationState::Failed), None) => S::Failed,
         _ => match stage {

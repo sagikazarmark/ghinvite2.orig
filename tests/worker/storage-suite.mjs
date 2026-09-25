@@ -49,7 +49,13 @@ async function withWorker(run) {
 const scenarios = await withWorker(({ fixture }) => fixture('storage-suite'));
 assert.ok(scenarios.length >= 9, 'scenario inventory must not be empty');
 for (const scenario of scenarios) {
-  await withWorker(({ fixture }) => fixture(`storage-suite/${scenario}`));
+  await withWorker(async ({ fixture, db }) => {
+    await fixture(`storage-suite/${scenario}`);
+    if (scenario === 'scenario_link_projection_conflicts') {
+      await db.prepare('DELETE FROM invitation_link_repos').run();
+      await fixture('verify-link-repair');
+    }
+  });
   console.log(`PASS D1 storage suite ${scenario}`);
 }
 console.log(`PASS shared SQLx/D1 storage conformance: ${scenarios.length} scenarios on actual D1`);

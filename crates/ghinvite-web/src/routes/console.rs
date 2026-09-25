@@ -506,27 +506,7 @@ async fn create_link(
 
     // Recover before present repository eligibility; expiry and repository names
     // are canonical business input, not values to recompute on retry.
-    let recovery = attempts::recover_create(&state, &admin, link_id, |original| {
-        let repos = original
-            .repos
-            .iter()
-            .map(|r| RepositoryChoice {
-                id: r.repo_id,
-                full_name: r.repo_full_name.clone(),
-            })
-            .collect::<Vec<_>>();
-        // Identity is the retained command's own; only the business input
-        // re-derived from this submission can differ.
-        create_link_form::validate(&form, &repos, now).is_ok_and(|v| {
-            v.into_command(
-                original.link_id,
-                original.admin.clone(),
-                original.account_id,
-                original.installation_id,
-            ) == *original
-        })
-    })
-    .await;
+    let recovery = attempts::recover_create(&state, &admin, link_id, &form, now).await;
     match recovery {
         Ok(attempts::CreateRecovery::Fresh) => {}
         Ok(attempts::CreateRecovery::Answered(response)) => return response,
@@ -942,7 +922,7 @@ async fn authoritative_decision(
         link_id,
         request_id,
         operation_id,
-        admin: ghinvite_core::storage::projection::AccountAdmin {
+        admin: ghinvite_core::invitation_link::AccountAdmin {
             account_id: admin.account.account_id,
             user_id: admin.session.user_id,
         },
@@ -951,10 +931,8 @@ async fn authoritative_decision(
     attempts::execute(state, admin, attempts::Command::Decision(command)).await
 }
 
-fn admin_assertion(
-    admin: &RequireConsoleAdminOf,
-) -> ghinvite_core::storage::projection::AccountAdmin {
-    ghinvite_core::storage::projection::AccountAdmin {
+fn admin_assertion(admin: &RequireConsoleAdminOf) -> ghinvite_core::invitation_link::AccountAdmin {
+    ghinvite_core::invitation_link::AccountAdmin {
         account_id: admin.account.account_id,
         user_id: admin.session.user_id,
     }

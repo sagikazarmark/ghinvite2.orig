@@ -18,6 +18,21 @@ impl RequestAuthority {
         Self { client }
     }
 
+    pub async fn admin_status(
+        &self,
+        input: ghinvite_core::request_lifecycle::AdminRequestStatus,
+    ) -> Result<RequestSnapshot> {
+        self.client
+            .invoke(
+                "InvitationRequest",
+                &input.request_id.to_string(),
+                "admin_status",
+                &input,
+            )
+            .await
+            .map_err(AuthorityError::from_ingress)
+    }
+
     pub async fn decide(&self, input: DecideRequest) -> Result<DecisionReceipt> {
         self.client
             .invoke(

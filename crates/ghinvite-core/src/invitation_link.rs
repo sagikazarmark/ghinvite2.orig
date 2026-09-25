@@ -5,6 +5,130 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccountAdmin {
+    pub account_id: u64,
+    pub user_id: u64,
+}
+
+/// Allocate the link ID before first submission; reuse it on retry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLink {
+    pub link_id: InvitationLinkId,
+    pub admin: AccountAdmin,
+    pub account_id: u64,
+    pub installation_id: u64,
+    pub description: String,
+    pub internal_note: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub max_uses: Option<u32>,
+    pub permission: Permission,
+    pub approval_required: bool,
+    pub repos: Vec<InvitationLinkRepo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("invalid invitation link values")]
+pub struct InvalidLinkValues;
+
+impl CreateLink {
+    /// Bind creation identity to normalized metadata, guardrails and scope.
+    /// Admin authority is checked separately.
+    pub fn normalized(mut self) -> Result<Self, InvalidLinkValues> {
+        if self.installation_id == 0 || self.max_uses == Some(0) {
+            return Err(InvalidLinkValues);
+        }
+        let metadata = LinkMetadata::parse(&self.description, self.internal_note.as_deref())?;
+        (self.description, self.internal_note) = (metadata.description, metadata.internal_note);
+        self.repos = crate::RepositoryScope::parse(self.repos)
+            .map_err(|_| InvalidLinkValues)?
+            .into();
+        Ok(self)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LinkSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<LinkMetadata>,
+    pub link_id: InvitationLinkId,
+    pub creation: CreateLink,
+    pub created_at: DateTime<Utc>,
+    pub uses: u64,
+    pub revision: u64,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub revoked_by: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LinkMetadata {
+    pub description: String,
+    pub internal_note: Option<String>,
+}
+
+impl LinkMetadata {
+    /// Parse mutable metadata; a blank internal note means none.
+    pub fn parse(
+        description: &str,
+        internal_note: Option<&str>,
+    ) -> Result<Self, InvalidLinkValues> {
+        let description = crate::Description::parse(description).map_err(|_| InvalidLinkValues)?;
+        let internal_note = match internal_note {
+            Some(note) => crate::InternalNote::parse(note).map_err(|_| InvalidLinkValues)?,
+            None => None,
+        };
+        Ok(Self {
+            description: description.into(),
+            internal_note: internal_note.map(String::from),
+        })
+    }
+}
+
+impl LinkSnapshot {
+    pub fn description(&self) -> &str {
+        self.metadata
+            .as_ref()
+            .map(|m| m.description.as_str())
+            .unwrap_or(&self.creation.description)
+    }
+    pub fn internal_note(&self) -> Option<&str> {
+        match &self.metadata {
+            Some(m) => m.internal_note.as_deref(),
+            None => self.creation.internal_note.as_deref(),
+        }
+    }
+    pub fn inactive(&self, now: DateTime<Utc>) -> Option<Inactive> {
+        Inactive::check(
+            self.revoked_at.is_some(),
+            self.creation.expires_at,
+            self.uses,
+            self.creation.max_uses,
+            now,
+        )
+    }
+    pub fn as_link(&self) -> InvitationLink {
+        InvitationLink {
+            id: self.link_id,
+            installation_id: self.creation.installation_id,
+            account_id: self.creation.account_id,
+            created_by: self.creation.admin.user_id,
+            created_at: self.created_at,
+            expires_at: self.creation.expires_at,
+            max_uses: self.creation.max_uses,
+            uses_count: self.uses.try_into().unwrap_or(u32::MAX),
+            permission: self.creation.permission,
+            approval_required: self.creation.approval_required,
+            description: self.description().into(),
+            internal_note: self.internal_note().map(str::to_owned),
+            revoked_at: self.revoked_at,
+            revoked_by: self.revoked_by,
+            repos: self.creation.repos.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitationLink {
     pub id: InvitationLinkId,

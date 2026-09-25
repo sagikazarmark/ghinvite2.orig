@@ -34,7 +34,7 @@ mod request_history;
 #[derive(Clone, serde::Deserialize)]
 struct QueueFixture {
     transition_id: String,
-    link: ghinvite_core::storage::projection::LinkSnapshot,
+    link: ghinvite_core::invitation_link::LinkSnapshot,
     requests: Vec<ghinvite_core::request_lifecycle::RequestSnapshot>,
 }
 impl QueueFixture {
@@ -274,8 +274,8 @@ fn octocat_link() -> ghinvite_core::InvitationLink {
 fn pending_request(
     link: ghinvite_core::InvitationLinkId,
     deadline: DateTime<Utc>,
-) -> ghinvite_core::storage::projection::RequestSnapshot {
-    ghinvite_core::storage::projection::RequestSnapshot {
+) -> ghinvite_core::request_lifecycle::RequestSnapshot {
+    ghinvite_core::request_lifecycle::RequestSnapshot {
         request_id: ghinvite_core::RequestId::new(),
         link_id: link,
         account_id: 42,
@@ -322,7 +322,7 @@ async fn isolated_admin_metadata_and_revoke_use_authority_before_projection() {
     let link = octocat_link();
     let id = link.id;
     let mut authoritative = common::authority_http_fixture::snapshot(&link);
-    authoritative.metadata = Some(ghinvite_core::storage::projection::LinkMetadata {
+    authoritative.metadata = Some(ghinvite_core::invitation_link::LinkMetadata {
         description: "Authoritative details".into(),
         internal_note: None,
     });
@@ -3170,7 +3170,7 @@ impl CreatePost {
     }
 
     /// The one creation command the authority received.
-    fn command(&self) -> ghinvite_core::storage::projection::CreateLink {
+    fn command(&self) -> ghinvite_core::invitation_link::CreateLink {
         let mut created = self.authority.created();
         assert_eq!(created.len(), 1, "exactly one creation command");
         created.pop().unwrap()

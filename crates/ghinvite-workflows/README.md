@@ -81,12 +81,15 @@ Every audit event has an identity fixed before it is written, so a retry
 replays it rather than duplicating it. Which write carries it depends on what
 changed:
 
-- Invitation links and invitation requests (`admission`) attach `AuditIntent`s to the `ProjectionEnvelope` they send to `projection`,
+- Invitation links (`admission`) attach `AuditIntent`s to the `ProjectionEnvelope` they send to `projection`,
   and `ProjectionStorage::apply_transition` inserts them in the same
   transaction as the records. A metadata update journals its event
   (`link/{id}/metadata/{revision}`) before sending it; unchanged metadata
   produces no event, and the event carries no description or internal-note
   values.
+- Invitation requests (`request_owner`) send `RequestProjectionEnvelope` to
+  `RequestProjection`; `ProjectionStorage::apply_request` atomically applies
+  the request snapshot and its immutable `AuditIntent`s.
 - GitHub invitation settlement (`settlement`) retains its `AuditEvent` in the
   delivery snapshot that `DeliveryProjection` applies; the event ID derives
   from the invitation ID, so an invitation settles with one event.

@@ -432,6 +432,9 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         );
     }
     let detail = format!("/console/accounts/acme/links/{id}");
+    let history = request(&app, &cookie, &format!("{detail}/requests"), None).await;
+    assert_eq!(history.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(html(history).await.contains("Request history unavailable"));
     let page = html(request(&app, &cookie, &detail, None).await).await;
     assert!(page.contains(&format!("/i/{id}")));
     assert!(
@@ -524,6 +527,36 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         .await
         .unwrap();
     let request_id = page["request"]["request_id"].as_str().unwrap();
+    let request_detail = request(
+        &app,
+        &cookie,
+        &format!("/console/accounts/acme/requests/{request_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(request_detail.status(), StatusCode::OK);
+    assert!(html(request_detail).await.contains("Original"));
+    for (path, input) in [
+        (
+            format!("InvitationRequest/{request_id}/admin_status"),
+            json!({"request_id":request_id,"admin":{"account_id":999,"user_id":7}}),
+        ),
+        (
+            format!("InvitationLink/{id}/link_status"),
+            json!({"link_id":id,"admin":{"account_id":999,"user_id":7}}),
+        ),
+    ] {
+        assert_eq!(
+            client
+                .post(format!("{ingress}/{path}"))
+                .json(&input)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+    }
     let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
     let decision_operation = ghinvite_core::RequestId::new();
     let decision_body = format!("csrf_token={csrf}&link_id={id}&operation_id={decision_operation}");

@@ -4,6 +4,7 @@
 pub(crate) mod attempt_continuations;
 pub mod commands;
 pub mod config;
+pub mod delivery_authority;
 pub mod error;
 pub(crate) mod forms;
 pub mod link_authority;

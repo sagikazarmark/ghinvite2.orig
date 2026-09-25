@@ -43,6 +43,14 @@ let auditAckAccount;
 let lostAuditAcks = 0;
 let lostAuditInvocation;
 let faultPuts = 0;
+let heldPut;
+function holdPut() {
+  let reached, release;
+  const entered = new Promise(resolve => { reached = resolve; });
+  const resume = new Promise(resolve => { release = resolve; });
+  heldPut = { reached, resume };
+  return { entered, release: () => { heldPut = null; release(); } };
+}
 const stalledCleanup = [];
 function fault(phase, installationId) {
   if (!phase) { networkFault = null; return; }
@@ -131,6 +139,11 @@ const workflowOptions = {
       return new Response('Outbound network disabled', { status: 502 });
     }
     if (request.method === 'PUT') faultPuts++;
+    if (request.method === 'PUT' && heldPut) {
+      const held = heldPut;
+      held.reached();
+      await held.resume;
+    }
     if (installationObservation) return installationObservation(request);
     if (networkFault && (request.method === 'PUT' || (faultPuts > 0 && new URL(request.url).pathname === `/app/installations/${networkFault.installationId}`))) {
       if (request.method === 'PUT') networkFault.wrote(); else networkFault.observed();
@@ -507,7 +520,7 @@ try {
    const manualPlan = await http(`${ingress}/InvitationRequest/${manualReceipt.result.request_id}/approved_plan`, {link_id: manualInput.link_id, request_id: manualReceipt.result.request_id, requester_id:91});
    await eventually(() => delivery(manualPlan.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
    console.log('PASS manual approval and request-owned Worker dispatch');
-  await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually,
+  await settlement({ ingress, githubUrl, http, storage, db, id, creation, eventually, holdPut,
     requestId: approved.result.request_id, invitationId: plan.commands[0].invitation_id,
     pause: value => { pauseWorkflows = value; } });
   if (process.env.SETTLEMENT_ONLY !== '1') {
