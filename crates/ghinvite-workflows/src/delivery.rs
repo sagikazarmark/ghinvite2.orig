@@ -254,13 +254,8 @@ impl RepositoryDelivery {
             .name("delivery_fence_preflight")
             .await?;
         if !fence_available {
-            self.schedule_recheck(
-                &ctx,
-                command,
-                previous.as_ref().map_or(0, |r| r.revision),
-                BLOCKED_RECHECK_INTERVAL,
-            )
-            .await?;
+            self.schedule_recheck(&ctx, command, BLOCKED_RECHECK_INTERVAL)
+                .await?;
             return Err(TerminalError::new_with_code(
                 503,
                 "delivery fence unavailable",
@@ -353,8 +348,7 @@ impl RepositoryDelivery {
         // invitation. Explicit recovery keeps an existing timer, even if its
         // new guidance is sooner. Its generation rejects duplicate/stale wakes.
         if let Some(wait) = recheck_after {
-            self.schedule_recheck(&ctx, command, receipt.revision, wait)
-                .await?;
+            self.schedule_recheck(&ctx, command, wait).await?;
         }
         Ok(Json(receipt))
     }
@@ -365,10 +359,18 @@ impl RepositoryDelivery {
         &self,
         ctx: &ObjectContext<'_>,
         command: CreateCommand,
-        generation: u64,
         wait: std::time::Duration,
     ) -> Result<(), TerminalError> {
         if ctx.get::<u64>("recheck_scheduled").await?.is_none() {
+            // A wake can reschedule without producing a receipt (fence outage).
+            // Never reuse its generation, even after the scheduled slot clears.
+            let generation = ctx
+                .get::<u64>("recheck_generation")
+                .await?
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| TerminalError::new("delivery recheck generation exhausted"))?;
+            ctx.set("recheck_generation", generation);
             ctx.set("recheck_scheduled", generation);
             ctx.object_client::<RepositoryDeliveryClient>(command.delivery_key())
                 .recheck(Json(DeliveryRecheck {

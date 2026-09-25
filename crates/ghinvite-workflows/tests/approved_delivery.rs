@@ -466,7 +466,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .await
             .unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(30), async {
+    // Installation, link, request and delivery each have independent retry
+    // backoff after the outage; allow the dependency chain to catch up.
+    tokio::time::timeout(Duration::from_secs(75), async {
         loop {
             if storage
                 .list_delivery_for_request(command["request_id"].as_str().unwrap().parse().unwrap())
@@ -545,6 +547,36 @@ async fn approved_delivery_progresses_without_projected_parents() {
         "fence outage before claim releases owner exclusivity"
     );
     assert_eq!(puts(&client, &base).await, 0);
+    let recheck_url = manual_url.replace("/create", "/recheck");
+    // Each failed wake must arrange a new generation even though preflight
+    // failures publish no receipt. Redrive each old payload as a new invocation.
+    for generation in [1, 2] {
+        let wake = json!({"command":manual_command,"generation":generation});
+        assert_eq!(
+            client
+                .post(&recheck_url)
+                .json(&wake)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503,
+            "the current wake performs the unavailable preflight"
+        );
+        for _ in 0..2 {
+            post(&client, &recheck_url, wake.clone()).await;
+        }
+    }
+    assert!(
+        post(
+            &client,
+            &manual_url.replace("/create", "/status"),
+            Value::Null
+        )
+        .await
+        .is_null()
+    );
+    assert_eq!(puts(&client, &base).await, 0);
     assert_eq!(
         storage
             .get_invitation_request(request.parse().unwrap())
@@ -565,6 +597,12 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .await
         .unwrap();
     // Recovery rechecks the fence before attempting the write.
+    post(
+        &client,
+        &recheck_url,
+        json!({"command":manual_command,"generation":3}),
+    )
+    .await;
     let recovered = post(&client, &manual_url, manual_command.clone()).await;
     assert_eq!(recovered["outcome"]["kind"], "outcome_unknown");
     let unknown = tokio::time::timeout(Duration::from_secs(30), async {

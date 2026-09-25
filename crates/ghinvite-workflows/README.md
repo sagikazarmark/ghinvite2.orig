@@ -7,11 +7,12 @@ lifecycle, `RepositoryDelivery/<request>:<repository>` owns create and settlemen
 and `AccountInstallation` owns installations.
 `Reconcile` only `daily_run`.
 
-SQL is a projection written through `InvitationProjection`, a Virtual Object
-keyed by link ID, and `InstallationProjection`. The link object sends
-projections fire-and-forget, so admission never waits on SQL; the per-key queue
-applies one link's transitions in send order, and a failing transition holds
-back only that link's later ones.
+SQL projections have four independent writers: `InvitationProjection` for links,
+`RequestProjection` for requests, `DeliveryProjection` for repository deliveries,
+and `InstallationProjection` for installations. Business owners durably send
+projection work without waiting for SQL. Each writer's per-key queue applies
+snapshots in send order; a failing projection holds back only that key's later
+projections, not the business owner.
 
 Built on the upstream `restate-sdk = "0.12"` Rust SDK (patched; see the
 workspace `Cargo.toml`).
