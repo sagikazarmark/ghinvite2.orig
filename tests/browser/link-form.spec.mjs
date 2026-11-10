@@ -20,10 +20,10 @@ const numericFields = [
     overflow: 'Max use is too large. Use a smaller number, or leave it blank for unlimited invitation requests.',
   },
   {
-    id: 'expires_in_days', label: 'Expires in days', initial: '30', valid: '45',
-    help: 'Default is 30 days. Blank creates an invitation link with no expiration.',
+    id: 'expires_in_days', label: 'Expires in days', initial: '14', valid: '45',
+    help: 'Default is 14 days, including when blank. Select Never expires to remove expiration.',
     invalid: 'Expiration must be a whole number of days, 1 or more.',
-    overflow: 'Expiration is too far in the future. Use fewer days, or leave it blank for no expiration.',
+    overflow: 'Expiration is too far in the future. Use fewer days, or select Never expires.',
   },
 ];
 
@@ -96,6 +96,23 @@ async function expectPermission(page, value, invalid, message = permissionError)
     await expect(page.locator(`[id="${id}"]`)).toHaveCount(1);
   }
   await expect(page.locator('[name="permission"]')).toHaveCount(1);
+}
+
+const grantError = 'Choose exactly one supported permission for every selected repository.';
+async function expectGrant(page, value, invalid) {
+  const control = page.getByRole('combobox', {name: 'Permission for acme/api', exact: true});
+  await expect(control).toHaveValue(`10:${value}`);
+  await expect(control).toHaveAttribute('name', 'repo_grants');
+  await expect(control).toHaveAttribute('aria-labelledby', 'repo-grant-10-label');
+  await expect(control).toHaveAttribute('aria-invalid', String(invalid));
+  await expect(control.locator('option')).toHaveText(permissions);
+  if (invalid) {
+    await expect(control).toHaveAttribute('aria-errormessage', 'repo_grants-error');
+    await expect(page.locator('#repo_grants-error')).toHaveText(grantError);
+  } else {
+    await expect(control).not.toHaveAttribute('aria-errormessage');
+    await expect(page.locator('#repo_grants-error')).toHaveCount(0);
+  }
 }
 
 test.beforeEach(async ({ page }, testInfo) => {
@@ -372,7 +389,7 @@ test('dioform blocks native-valid whitespace and missing scope, then allows a na
   const data = await post(page);
   expect(Object.fromEntries(data)).toEqual({
     description: 'Workshop & onboarding', internal_note: 'Keep <literal> text',
-    permission: 'push', max_uses: '7', expires_in_days: '45', repo_ids: '10',
+    permission: 'push', max_uses: '7', expires_in_days: '45', invitation_lifetime_hours: '168', abuse_threshold_per_hour: '', budget_share_pct: '50', expiration_timestamp: '', invitation_lifetime_seconds: '', email_domains: '', repo_ids: '10', repo_grants: '12:pull',
   });
   expect(posts).toHaveLength(1);
 });
@@ -383,62 +400,62 @@ for (const [path, raw] of [['/permission-invalid', 'owner'], ['/permission-empty
     const posts = [];
     page.on('request', (request) => { if (request.method() === 'POST') posts.push(request.url()); });
     const props = JSON.parse(await page.locator('#link-form-props').textContent());
-    expect(props.values.permission).toBe(raw);
-    await expectPermission(page, 'pull', true);
+    expect(props.values.repo_grants).toEqual([`10:${raw}`]);
+    await expectGrant(page, 'pull', true);
     expect(await form(page).evaluate((element) => element.checkValidity())).toBe(true);
     await submit(page).click();
     await expect(page.locator('#link-form-errors')).toBeVisible();
-    await expectPermission(page, 'pull', true);
+    await expectGrant(page, 'pull', true);
     await expect(page).toHaveURL(path);
     expect(posts).toEqual([]);
     // An unchanged native option does not emit input/change. Focus and blur
     // must not copy the displayed fallback into the still-invalid model.
-    await page.locator('#permission-label').click();
-    await expect(page.locator('#permission')).toBeFocused();
+    await page.locator('#repo-grant-10-label').click();
+    await expect(page.locator('#repo-grant-10')).toBeFocused();
     await page.keyboard.press('Tab');
-    await expectPermission(page, 'pull', true);
+    await expectGrant(page, 'pull', true);
     await submit(page).click();
     await expect(page).toHaveURL(path);
     expect(posts).toEqual([]);
     // Choose another permitted value before pull to generate a real change.
-    await page.locator('#permission').selectOption('triage');
-    await page.locator('#permission').focus();
+    await page.locator('#repo-grant-10').selectOption('10:triage');
+    await page.locator('#repo-grant-10').focus();
     await page.keyboard.press('Tab');
-    await expectPermission(page, 'triage', false);
-    await page.locator('#permission').selectOption('pull');
-    await expectPermission(page, 'pull', false);
+    await expectGrant(page, 'triage', false);
+    await page.locator('#repo-grant-10').selectOption('10:pull');
+    await expectGrant(page, 'pull', false);
     const data = await post(page);
-    expect(data.getAll('permission')).toEqual(['pull']);
+    expect(data.getAll('repo_grants')).toContain('10:pull');
     expect(posts).toHaveLength(1);
   });
 }
 
 test('permission validates on unchanged focus exit and ignores malformed DOM input', async ({ page }) => {
   await open(page, '/permission-unvalidated');
-  await expectPermission(page, 'pull', false);
-  await page.locator('#permission-label').click();
-  await expect(page.locator('#permission')).toBeFocused();
-  await expect(page.locator('#permission-error')).toBeEmpty();
+  await expectGrant(page, 'pull', false);
+  await page.locator('#repo-grant-10-label').click();
+  await expect(page.locator('#repo-grant-10')).toBeFocused();
+  await expect(page.locator('#repo_grants-error')).toHaveCount(0);
   await page.keyboard.press('Tab');
-  await expectPermission(page, 'pull', true);
+  await expectGrant(page, 'pull', true);
   for (const raw of ['owner', '', '0']) {
     // Unknown strings cannot be represented by an option. Neither the empty
     // DOM value nor an injected input event may silently repair dioform state.
-    await page.locator('#permission').evaluate((select, raw) => {
+    await page.locator('#repo-grant-10').evaluate((select, raw) => {
       select.value = raw;
       select.dispatchEvent(new Event('input', { bubbles: true }));
       select.dispatchEvent(new Event('change', { bubbles: true }));
     }, raw);
-    await expect(page.locator('#permission-error')).toHaveText(permissionError);
+    await expect(page.locator('#repo_grants-error')).toHaveText(grantError);
     await submit(page).click();
     await expect(page).toHaveURL('/permission-unvalidated');
     await expect(page.locator('#link-form-errors')).toBeVisible();
   }
-  await page.locator('#permission').selectOption('push');
-  await page.locator('#permission').focus();
+  await page.locator('#repo-grant-10').selectOption('10:push');
+  await page.locator('#repo-grant-10').focus();
   await page.keyboard.press('Tab');
-  await expectPermission(page, 'push', false);
-  expect((await post(page)).getAll('permission')).toEqual(['push']);
+  await expectGrant(page, 'push', false);
+  expect((await post(page)).getAll('repo_grants')).toContain('10:push');
 });
 
 for (const field of numericFields) {
@@ -564,7 +581,7 @@ for (const mode of ['mounted', 'no-js', 'blocked-bundle']) {
       const data = await post(page);
       expect(Object.fromEntries(data)).toEqual({
         description: 'Transport workshop', internal_note: 'Preserved transport note',
-        permission: 'push', max_uses: '7', expires_in_days: '45', repo_ids: '10',
+        permission: 'push', max_uses: '7', expires_in_days: '45', invitation_lifetime_hours: '168', abuse_threshold_per_hour: '', budget_share_pct: '50', expiration_timestamp: '', invitation_lifetime_seconds: '', email_domains: '', repo_ids: '10', repo_grants: '12:pull',
       });
     });
 
@@ -755,11 +772,12 @@ test('delayed bundle keeps every guardrail changed before the island mounts', as
   await expect(page.locator('#link-form-errors')).toHaveCount(0);
 
   const data = await post(page);
-  expect(Object.fromEntries([...data].filter(([key]) => key !== 'repo_ids'))).toEqual({
+  expect(Object.fromEntries([...data].filter(([key]) => key !== 'repo_ids' && key !== 'repo_grants'))).toEqual({
     description: 'Cold cache workshop', internal_note: 'Typed before the bundle landed',
-    permission: 'maintain', approval_required: 'true', max_uses: '7', expires_in_days: '45',
+    permission: 'maintain', approval_required: 'true', max_uses: '7', expires_in_days: '45', invitation_lifetime_hours: '168', abuse_threshold_per_hour: '', budget_share_pct: '50', expiration_timestamp: '', invitation_lifetime_seconds: '', email_domains: '',
   });
   expect(data.getAll('repo_ids')).toEqual(['10', '12']);
+  expect(data.getAll('repo_grants')).toEqual(['10:pull', '11:pull', '12:pull']);
 });
 
 test('delayed bundle keeps approval required when it was checked before mounting', async ({ page }) => {
@@ -973,6 +991,7 @@ test('responsive themed form keeps controls reachable and accessibility wiring i
     expect.soft(await page.locator(selector).evaluate((element) => element.scrollWidth - element.clientWidth),
       `${selector} must not overflow horizontally`).toBeLessThanOrEqual(1);
   }
+  await page.getByText('Exact expiration and lifetime', { exact: true }).click();
   for (const control of await form(page).locator('input:not([type="hidden"]), textarea, select, button[type="submit"]').all()) {
     await control.scrollIntoViewIfNeeded();
     await expect(control).toBeInViewport();
@@ -990,4 +1009,251 @@ test('responsive themed form keeps controls reachable and accessibility wiring i
       'aria-valid-attr-value', 'aria-allowed-attr', 'aria-required-attr', 'duplicate-id-aria'])
     .analyze();
   expect(accessibility.violations).toEqual([]);
+});
+
+for (const mode of ['mounted', 'no-js']) {
+  test(`Never expires is an explicit choice with a warning (${mode})`, async ({ browser }) => {
+    const context = await browser.newContext({ javaScriptEnabled: mode === 'mounted' });
+    const page = await context.newPage();
+    await open(page, '/', mode === 'mounted');
+    const never = page.getByRole('checkbox', { name: 'Never expires', exact: true });
+    await expect(never).not.toBeChecked();
+    await expect(page.locator('#expires_in_days')).toHaveValue('14');
+    await page.locator('#description').fill('Never expires audit');
+    await page.locator('input[name="repo_ids"]').first().check();
+    await page.locator('#expires_in_days').fill('');
+    if (mode === 'mounted') {
+      await never.check();
+      await expect(page.getByText('This invitation link will never expire.', { exact: false })).toBeVisible();
+      await submit(page).click();
+      await expect(page.getByText('Automatically approved links need an expiration, a maximum use limit, or an email-domain restriction.', { exact: true })).toBeVisible();
+      await approval(page).check();
+    } else {
+      await expect(page.getByText('Choosing Never expires allows anyone holding the URL', { exact: false })).toBeVisible();
+      await never.check();
+      await approval(page).check();
+    }
+    const entries = await post(page);
+    expect(entries.getAll('never_expires')).toEqual(['true']);
+    expect(entries.get('expires_in_days')).toBe('');
+    await context.close();
+  });
+}
+
+
+test('explicit heterogeneous grants survive delayed mount and set-all changes only on request', async ({ page }) => {
+  const release = await openDelayed(page);
+  await page.locator('#description').fill('Mixed grants');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  await page.getByRole('checkbox', { name: 'acme/web', exact: true }).check();
+  await page.locator('#repo-grant-10').selectOption('10:triage');
+  await page.locator('#repo-grant-11').selectOption('11:maintain');
+  await page.locator('#permission').selectOption('admin');
+  release();
+  await expectMounted(page);
+  await expect(page.locator('#repo-grant-10')).toHaveValue('10:triage');
+  await expect(page.locator('#repo-grant-11')).toHaveValue('11:maintain');
+  const data = await post(page);
+  expect(data.getAll('repo_ids')).toEqual(['10', '11']);
+  expect(data.getAll('repo_grants')).toEqual(['10:triage', '11:maintain', '12:pull']);
+});
+
+test('set-all helper explicitly updates every offered grant without selecting repositories', async ({ page }) => {
+  await open(page);
+  await page.locator('#permission').selectOption('maintain');
+  await page.getByRole('button', { name: 'Apply permission to all repositories' }).click();
+  for (const id of [10,11,12]) await expect(page.locator(`#repo-grant-${id}`)).toHaveValue(`${id}:maintain`);
+  await expect(page.locator('[name="repo_ids"]:checked')).toHaveCount(0);
+  await page.locator('#description').fill('Only one target');
+  await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+  const data = await post(page);
+  expect(data.getAll('repo_ids')).toEqual(['10']);
+  expect(data.getAll('repo_grants')).toEqual(['10:maintain', '11:maintain', '12:maintain']);
+});
+
+for (const mode of ['mounted', 'without JavaScript']) {
+  test.describe(`lifetime and abuse controls ${mode}`, () => {
+    test.use({ javaScriptEnabled: mode === 'mounted' });
+    test('immutable guardrails validate bounds and submit explicit values', async ({ page }) => {
+      await open(page, '/', mode === 'mounted');
+      const lifetime = page.locator('#invitation_lifetime_hours');
+      const threshold = page.locator('#abuse_threshold_per_hour');
+      const share = page.locator('#budget_share_pct');
+      await expect(share).toHaveValue('50');
+      await expect(share).toHaveAttribute('min', '1');
+      await expect(share).toHaveAttribute('max', '100');
+      await expect(lifetime).toHaveValue('168');
+      await expect(lifetime).toHaveAttribute('min', '1');
+      await expect(lifetime).toHaveAttribute('max', '168');
+      await expect(threshold).toHaveValue('');
+      await page.locator('#description').fill('Lifecycle guardrails');
+      await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+      await lifetime.fill('169');
+      await threshold.fill('0');
+      await share.fill('101');
+      await page.locator('#description').focus();
+      expect(await form(page).evaluate(element => element.checkValidity())).toBe(false);
+      if (mode === 'mounted') {
+        await expect(page.locator('#invitation_lifetime_hours-error')).toHaveText('Invitation lifetime must be a whole number of hours from 1 to 168 (7 days).');
+        await expect(page.locator('#budget_share_pct-error')).toHaveText('Enter a whole percentage from 1 to 100.');
+        await expect(page.locator('#abuse_threshold_per_hour-error')).toHaveText('Hourly abuse threshold must be a whole number from 1 to 4294967295, or blank for the automatic threshold.');
+      }
+      await lifetime.fill('1');
+      await threshold.fill('23');
+      await share.fill('17');
+      const entries = await post(page);
+      expect(entries.getAll('invitation_lifetime_hours')).toEqual(['1']);
+      expect(entries.getAll('abuse_threshold_per_hour')).toEqual(['23']);
+      expect(entries.getAll('budget_share_pct')).toEqual(['17']);
+    });
+  });
+}
+
+for (const mode of ['mounted', 'no-js']) {
+  test.describe(`organization targets ${mode}`, () => {
+    if (mode === 'no-js') test.use({ javaScriptEnabled: false });
+    test('organization-only form keeps Member and explicit team selection', async ({ page }) => {
+      await open(page, '/organization', mode === 'mounted');
+      await page.getByRole('textbox', { name: 'Description', exact: true }).fill('Organization workshop');
+      await page.getByRole('checkbox', { name: 'Join acme as a Member' }).check();
+      await page.getByRole('checkbox', { name: 'Learners', exact: true }).check();
+      await expect(page.getByRole('checkbox', { name: /Managed team/ })).toBeDisabled();
+      await approval(page).check();
+      const data = await form(page).evaluate((element) => [...new FormData(element)]);
+      expect(data.filter(([key]) => key === 'include_organization')).toEqual([['include_organization', 'true']]);
+      expect(data.filter(([key]) => key === 'team_ids')).toEqual([['team_ids', '7']]);
+      expect(data.filter(([key]) => key === 'repo_ids')).toEqual([]);
+      expect(data.some(([key]) => ['organization_role', 'team_role', 'installation_id'].includes(key))).toBe(false);
+      if (mode === 'mounted') {
+        await expect(page.getByRole('region', { name: 'Invitation preview' })).toContainText('Organization: acme — Member');
+        await expect(page.getByRole('region', { name: 'Invitation preview' })).toContainText('Team: Learners — Member');
+      }
+      const params = await post(page);
+      expect(params.getAll('team_ids')).toEqual(['7']);
+      expect(params.getAll('repo_ids')).toEqual([]);
+      expect(params.get('include_organization')).toBe('true');
+    });
+    test('mixed targets retain independent grants and exact Duplicate guardrails', async ({ page }) => {
+      await open(page, '/organization', mode === 'mounted');
+      await page.locator('#description').fill('Mixed exact invitation');
+      await page.getByRole('checkbox', { name: 'Join acme as a Member' }).check();
+      await page.getByRole('checkbox', { name: 'Learners', exact: true }).check();
+      await page.getByRole('checkbox', { name: 'acme/api', exact: true }).check();
+      await page.locator('#repo-grant-10').selectOption('10:triage');
+      await approval(page).check();
+      await page.locator('details').filter({ has: page.locator('#expiration_timestamp') }).locator('summary').click();
+      await page.locator('#expiration_timestamp').fill('2099-02-03T04:05:06.123456789Z');
+      await page.locator('#invitation_lifetime_seconds').fill('3601');
+      const data = await post(page);
+      expect(data.getAll('repo_ids')).toEqual(['10']);
+      expect(data.getAll('repo_grants')).toContain('10:triage');
+      expect(data.getAll('team_ids')).toEqual(['7']);
+      expect(data.get('expiration_timestamp')).toBe('2099-02-03T04:05:06.123456789Z');
+      expect(data.get('invitation_lifetime_seconds')).toBe('3601');
+    });
+  });
+}
+
+test('organization and team edits made before hydration survive takeover', async ({ page }) => {
+  const release = await openDelayed(page, '/organization');
+  await page.getByRole('checkbox', { name: 'Join acme as a Member' }).check();
+  await page.getByRole('checkbox', { name: 'Learners', exact: true }).check();
+  release();
+  await expect(page.locator('#link-form-island')).toHaveAttribute('data-island', 'mounted');
+  await expect(page.getByRole('checkbox', { name: 'Join acme as a Member' })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'Learners', exact: true })).toBeChecked();
+});
+
+test('organization refresh enhancement preserves native CSRF body and bounded throttle feedback', async ({ page }) => {
+  await open(page);
+  // The real app.js delegates to native forms, including this requester fixture.
+  await page.evaluate(() => {
+    const node=document.createElement('form');
+    node.method='post';node.action='/join/organization/refresh';node.dataset.organizationRefresh='';
+    node.innerHTML='<input type="hidden" name="request_id" value="01ARZ3NDEKTSV4RRFFQ69G5FAV"><input type="hidden" name="csrf_token" value="fixture-csrf"><button type="submit">Refresh organization delivery</button><p role="status" aria-live="polite" data-refresh-status></p>';
+    document.querySelector('main').append(node);
+  });
+  const bodies=[];
+  await page.route('**/join/organization/refresh', async route => {
+    const request=route.request();
+    bodies.push(new URLSearchParams(request.postData()));
+    expect(request.headers().accept).toBe('application/json');
+    await route.fulfill({status:bodies.length===1?200:429,contentType:'application/json',body:JSON.stringify(bodies.length===1?{kind:'requested'}:{kind:'throttled',retry_at:'2099-01-01T00:00:00Z',diagnostic:'PRIVATE-MARKER'})});
+  });
+  const form=page.locator('form[data-organization-refresh]');
+  await form.getByRole('button').click();
+  await expect(form.getByRole('status')).toContainText('Refresh requested');
+  await form.getByRole('button').click();
+  await expect(form.getByRole('status')).toContainText('2099-01-01T00:00:00.000Z');
+  await expect(form).not.toContainText('PRIVATE-MARKER');
+  expect(bodies).toHaveLength(2);
+  for(const body of bodies) {
+    expect([...body.keys()]).toEqual(['request_id','csrf_token']);
+    expect(body.get('csrf_token')).toBe('fixture-csrf');
+  }
+});
+
+for (const enhanced of [false, true]) {
+  test(`email-domain restrictions preserve native form values ${enhanced ? 'enhanced' : 'native'}`, async ({ browser }) => {
+    const context = await browser.newContext({ javaScriptEnabled: enhanced });
+    const page = await context.newPage();
+    await page.goto('http://127.0.0.1:4173/');
+    if (enhanced) await expect(page.locator('#link-form-island')).toHaveAttribute('data-island', 'mounted');
+    const control = page.getByRole('textbox', {name:'Allowed email domains (optional)',exact:true});
+    await control.fill('EXAMPLE.com., *.bücher.example');
+    await expect(control).toHaveAttribute('maxlength','4096');
+    const data = await page.locator('#link-form-island form').evaluate(form => Array.from(new FormData(form).entries()));
+    expect(new Map(data).get('email_domains')).toBe('EXAMPLE.com., *.bücher.example');
+    if (enhanced) {
+      await control.blur();
+      await expect(page.getByRole('region', {name:'Invitation preview'})).toContainText('*.xn--bcher-kva.example');
+    }
+    await context.close();
+  });
+}
+
+for (const enhanced of [false, true]) {
+  test(`organization eligibility remains advisory ${enhanced ? 'enhanced' : 'native'}`, async ({browser}) => {
+    const context = await browser.newContext({javaScriptEnabled:enhanced});
+    const page = await context.newPage();
+    await page.goto('http://127.0.0.1:4173/eligibility');
+    if(enhanced) await expect(page.locator('#link-form-island')).toHaveAttribute('data-island','mounted');
+    const panel = page.getByRole('region',{name:'Organization eligibility'});
+    await expect(panel).toContainText('No free organization seat was reported');
+    await expect(panel).toContainText('Enterprise-managed user policy: unknown');
+    await page.locator('input[name="repo_ids"][value="10"]').check();
+    if(enhanced) {
+      await expect(panel).toContainText('acme/api: existing organization members');
+      await page.locator('#repo-grant-10').selectOption('10:push');
+      await expect(panel).not.toContainText('acme/api: existing organization members');
+    }
+    await expect(page.getByRole('button',{name:'Create invitation link',exact:true})).toBeEnabled();
+    await context.close();
+  });
+}
+
+for (const enhanced of [false,true]) {
+  test.describe(`access lifetime ${enhanced?'enhanced':'native'}`,()=>{
+    test.use({javaScriptEnabled:enhanced});
+    test('optional exact lifetime and removal caveats are preserved in submission',async({page})=>{
+      await open(page,'/access-removal',enhanced);
+      const lifetime=page.locator('#access_lifetime_hours');
+      await expect(lifetime).toHaveValue('');
+      await expect(page.getByText(/private forks/)).toBeVisible();
+      await page.locator('#description').fill('Temporary access');
+      await page.getByRole('checkbox',{name:'acme/api',exact:true}).check();
+      await lifetime.fill('3601s');
+      const data=await post(page);
+      expect(data.get('access_lifetime_hours')).toBe('3601s');
+    });
+  });
+}
+test('access lifetime typed before island mount survives takeover and validates without truncation',async({page})=>{
+  const release=await openDelayed(page,'/access-removal');
+  await page.locator('#description').fill('Exact lifetime');
+  await page.getByRole('checkbox',{name:'acme/api',exact:true}).check();
+  await page.locator('#access_lifetime_hours').fill('4294967295s');
+  release();await expectMounted(page);
+  await expect(page.locator('#access_lifetime_hours')).toHaveValue('4294967295s');
+  const data=await post(page);expect(data.get('access_lifetime_hours')).toBe('4294967295s');
 });

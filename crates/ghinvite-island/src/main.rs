@@ -141,6 +141,7 @@ mod browser {
     fn read_form(root: &web_sys::Element, repos: &[RepositoryChoice]) -> Option<FormSnapshot> {
         let fields = CreateLinkForm::fields();
         let checkboxes = query_all(root, &checkbox_selector(fields.repo_ids().field_name()));
+        let teams = query_all(root, &checkbox_selector(fields.team_ids().field_name()));
         let offered: Option<Vec<u64>> = checkboxes
             .iter()
             .map(|choice| choice.value().parse().ok())
@@ -149,12 +150,40 @@ mod browser {
             return None;
         }
         Some(FormSnapshot {
+            access_lifetime_hours: input(root, fields.access_lifetime_hours().field_name())
+                .unwrap_or_default(),
+            email_domains: input(root, fields.email_domains().field_name())?,
             description: input(root, fields.description().field_name())?,
             internal_note: textarea(root, fields.internal_note().field_name())?,
             permission: select(root, fields.permission().field_name())?,
+            repo_grants: repos
+                .iter()
+                .map(|repo| {
+                    Some((
+                        repo.id,
+                        select_control(query(root, &format!("#repo-grant-{}", repo.id))?)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?,
             approval_required: checkbox(root, fields.approval_required().field_name())?.checked(),
+            expiration_timestamp: input(root, fields.expiration_timestamp().field_name())?,
+            invitation_lifetime_seconds: input(
+                root,
+                fields.invitation_lifetime_seconds().field_name(),
+            )?,
+            never_expires: checkbox(root, fields.never_expires().field_name())?.checked(),
+            include_organization: checkbox(root, fields.include_organization().field_name())
+                .is_some_and(|input| input.checked()),
+            checked_team_ids: repo_ids_where(&teams, |input| input.checked()),
+            default_team_ids: repo_ids_where(&teams, |input| input.default_checked()),
             max_uses: input(root, fields.max_uses().field_name())?,
             expires_in_days: input(root, fields.expires_in_days().field_name())?,
+            invitation_lifetime_hours: input(
+                root,
+                fields.invitation_lifetime_hours().field_name(),
+            )?,
+            abuse_threshold_per_hour: input(root, fields.abuse_threshold_per_hour().field_name())?,
+            budget_share_pct: input(root, fields.budget_share_pct().field_name())?,
             checked_repo_ids: repo_ids_where(&checkboxes, |box_| box_.checked()),
             default_repo_ids: repo_ids_where(&checkboxes, |box_| box_.default_checked()),
         })
@@ -192,6 +221,10 @@ mod browser {
     /// browser rather than the current markup.
     fn select(root: &web_sys::Element, name: &str) -> Option<ControlText> {
         let control = query::<web_sys::HtmlSelectElement>(root, &named("select", name))?;
+        select_control(control)
+    }
+
+    fn select_control(control: web_sys::HtmlSelectElement) -> Option<ControlText> {
         let default = control
             .query_selector("option[selected]")
             .ok()
@@ -359,10 +392,13 @@ mod browser {
         let props = boot.props;
         rsx! {
             LinkFormIsland {
+                access_removal_enabled: props.access_removal_enabled,
                 csrf_token: props.csrf_token,
                 action: props.action,
                 values: props.values,
                 repos: props.repos,
+                organization: props.organization,
+                eligibility: props.eligibility,
                 now: props.now,
             }
         }

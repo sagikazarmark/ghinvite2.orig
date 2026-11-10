@@ -1,8 +1,7 @@
-//! Cloudflare D1 implementation of the Storage trait.
-//! Only compiles on wasm32-unknown-unknown.
-
-#[cfg(target_arch = "wasm32")]
+//! One D1 SQL/mapping implementation, with Worker and native bridge transports.
+#[cfg(all(not(target_arch = "wasm32"), feature = "native-bridge"))]
+pub mod native;
+#[cfg(any(target_arch = "wasm32", feature = "native-bridge"))]
 mod wasm_impl;
-
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", feature = "native-bridge"))]
 pub use wasm_impl::D1Storage;

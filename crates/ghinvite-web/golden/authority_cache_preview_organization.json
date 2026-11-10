@@ -1,0 +1,84 @@
+{
+  "authz:bulk:v1:org:2:07557f0d6314f133476324acc7b85eadef8b7a30a8797270900635fd4aca11fc": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "id": 100,
+        "login": "acme"
+      }
+    }
+  },
+  "authz:bulk:v1:org:2:181072b63fb76a25a3d6ac2d264f86b03fc7a510b38ced291e5c70046364a446": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/8?v=4",
+        "created_at": "2015-01-01T00:00:00Z",
+        "id": 8,
+        "login": "alice",
+        "type": "User"
+      }
+    }
+  },
+  "authz:bulk:v1:org:2:375aaad13ea260132027fbe17792f33c0350dfbc91d024a544497c985558953c": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "id": 5,
+        "ldap_dn": null,
+        "name": "Build",
+        "organization": {
+          "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+          "id": 100,
+          "login": "acme",
+          "type": "Organization"
+        },
+        "slug": "build"
+      }
+    }
+  },
+  "authz:bulk:v1:org:2:9387f38f92194229e9604865af48257ea4df719e15457772bc37f57b94bd0851": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "kind": "membership",
+        "role": "maintainer",
+        "state": "pending"
+      }
+    }
+  },
+  "authz:bulk:v1:org:2:ac55a0080b36f070d65502249427b848a096487f45c2272bb1991af25040ce7f": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "kind": "membership",
+        "role": "member",
+        "state": "active"
+      }
+    }
+  },
+  "authz:org:2:9:membership": {
+    "observed_at": 0,
+    "value": {
+      "organization": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+        "id": 100,
+        "login": "acme",
+        "type": "Organization"
+      },
+      "role": "admin",
+      "state": "active",
+      "user": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/9?v=4",
+        "id": 9,
+        "login": "installer",
+        "type": "User"
+      }
+    }
+  }
+}

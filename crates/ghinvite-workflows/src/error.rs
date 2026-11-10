@@ -10,8 +10,14 @@ pub enum HandlerError {
     #[error(transparent)]
     Storage(#[from] ghinvite_core::storage::Error),
 
+    /// Read-side API failure. Write ambiguity must be consumed by the delivery
+    /// protocol as OutcomeUnknown before reaching this retryable error bridge.
     #[error(transparent)]
-    Github(#[from] ghinvite_github::Error),
+    GithubApi(#[from] ghinvite_github::ApiError),
+
+    /// No installation token could be had (`octotoken`).
+    #[error(transparent)]
+    Token(#[from] octotoken::TokenError),
 
     /// Domain invariant the caller should not have allowed.
     #[error("invariant violated: {0}")]
@@ -19,9 +25,8 @@ pub enum HandlerError {
 }
 
 impl HandlerError {
-    /// Returns `true` if the underlying cause is transient and the caller
-    /// should let Restate retry (i.e. NOT wrap this in `TerminalError`).
-    /// Returns `false` for terminal errors that should bypass Restate retry.
+    /// Returns `true` for terminal errors that should bypass Restate retry;
+    /// `false` for transient failures that may be retried.
     pub fn is_terminal(&self) -> bool {
         match self {
             HandlerError::Storage(e) => match e {
@@ -32,23 +37,9 @@ impl HandlerError {
                 | ghinvite_core::storage::Error::NotFound
                 | ghinvite_core::storage::Error::Corrupt(_) => true, // terminal
             },
-            HandlerError::Github(e) => match e {
-                // Every throttled response, 429 included, arrives as
-                // `RateLimited`, so a `Status` 4xx is GitHub's decision.
-                ghinvite_github::Error::Status { status, .. } => match *status {
-                    500..=599 => false, // transient
-                    _ => true,          // terminal (4xx)
-                },
-                // GitHub declining to answer for now, not a decision about the
-                // request: a throttled 403 must never settle as a failure.
-                ghinvite_github::Error::RateLimited { .. } => false,
-                ghinvite_github::Error::Transport(_)
-                | ghinvite_github::Error::Decode(_)
-                | ghinvite_github::Error::OAuth(_)
-                | ghinvite_github::Error::InvalidInput(_)
-                | ghinvite_github::Error::Jwt(_) => false, // transient
-            },
             HandlerError::Invariant(_) => true, // bug — terminal
+            HandlerError::GithubApi(e) => !e.is_transient_for_retry_safe(true),
+            HandlerError::Token(e) => !e.is_transient(),
         }
     }
 
@@ -67,10 +58,38 @@ impl HandlerError {
     /// GitHub's throttling evidence when this failure is a rate limit. Callers
     /// use it to defer by [`crate::throttle::backoff`] instead of leaving the
     /// transient classification to retry on a cadence of its own.
-    pub fn rate_limit(&self) -> Option<ghinvite_github::RateLimit> {
+    pub fn rate_limit(&self) -> Option<RateLimit> {
         match self {
-            HandlerError::Github(e) => e.rate_limit(),
+            HandlerError::GithubApi(ghinvite_github::ApiError::RateLimited {
+                scope,
+                retry_after,
+                ..
+            }) => Some(RateLimit {
+                scope: *scope,
+                retry_after: *retry_after,
+            }),
+            HandlerError::Token(e) => ghinvite_github::apps::rate_limit(e)
+                .map(|(scope, retry_after)| RateLimit { scope, retry_after }),
             _ => None,
+        }
+    }
+}
+
+/// GitHub's throttling evidence for a failed read or token creation: which
+/// limit GitHub cited, and the wait it asked for, if any.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RateLimit {
+    pub scope: ghinvite_github::error::RateLimitScope,
+    pub retry_after: Option<std::time::Duration>,
+}
+
+impl From<ghinvite_github::TokenCallError> for HandlerError {
+    fn from(error: ghinvite_github::TokenCallError) -> Self {
+        use ghinvite_github::{CallError, TokenCallError};
+        match error {
+            TokenCallError::Token(error) => Self::Token(error),
+            TokenCallError::Call(CallError::Api(error)) => Self::GithubApi(error),
+            TokenCallError::Call(CallError::App(impossible)) => match impossible {},
         }
     }
 }
@@ -106,6 +125,106 @@ pub fn to_sdk_handler_error(e: HandlerError) -> ::restate_sdk::errors::HandlerEr
 mod tests {
     use super::*;
     use ghinvite_core::storage::ConflictKind;
+    use ghinvite_github::ApiError;
+
+    #[test]
+    fn ghinvite_github_read_failures_keep_the_api_retry_rule() {
+        for (error, terminal) in [
+            (ApiError::Ambiguous, false),
+            (ApiError::NotSent, false),
+            (ApiError::Server { status: 502 }, false),
+            (ApiError::NotFound, true),
+            (ApiError::Unauthorized, true),
+            (ApiError::Conflict, true),
+            (ApiError::Decode { what: "test" }, true),
+        ] {
+            let handler = HandlerError::from(error.clone());
+            assert!(matches!(handler, HandlerError::GithubApi(_)));
+            assert_eq!(handler.is_terminal(), terminal, "{error:?}");
+            assert!(handler.rate_limit().is_none());
+        }
+    }
+
+    #[test]
+    fn token_failures_retry_only_when_transient() {
+        use octoauth::Error as GitHub;
+        for (error, terminal) in [
+            (GitHub::InstallationGone, true),
+            (GitHub::InstallationSuspended, true),
+            (GitHub::PermissionsNotGranted, true),
+            (GitHub::Decode, true),
+            (GitHub::Redirected, true),
+            (
+                GitHub::Transient {
+                    kind: octoauth::TransientKind::Server { status: 502 },
+                },
+                false,
+            ),
+        ] {
+            let handler = HandlerError::from(octotoken::TokenError::GitHub(error.clone()));
+            assert!(matches!(handler, HandlerError::Token(_)));
+            assert_eq!(handler.is_terminal(), terminal, "{error:?}");
+            assert!(handler.rate_limit().is_none());
+        }
+        assert!(HandlerError::from(octotoken::TokenError::ForeignToken).is_terminal());
+    }
+
+    /// Read and token-creation rate limits are transient and keep GitHub's
+    /// scope and wait, without naming the token.
+    #[test]
+    fn rate_limits_keep_scope_and_wait() {
+        use ghinvite_github::error::RateLimitScope;
+        let wait = Some(std::time::Duration::from_secs(30));
+        for scope in [RateLimitScope::Primary, RateLimitScope::Secondary] {
+            for error in [
+                HandlerError::from(ApiError::RateLimited {
+                    scope,
+                    retry_after: wait,
+                    resource: None,
+                }),
+                HandlerError::from(octotoken::TokenError::GitHub(
+                    octoauth::Error::RateLimited {
+                        scope,
+                        retry_after: wait,
+                    },
+                )),
+            ] {
+                assert!(!error.is_terminal());
+                assert_eq!(
+                    error.rate_limit(),
+                    Some(RateLimit {
+                        scope,
+                        retry_after: wait,
+                    })
+                );
+                assert!(!error.to_string().contains("token"));
+            }
+        }
+    }
+
+    #[test]
+    fn token_call_errors_map_to_token_and_api_failures() {
+        use ghinvite_github::{CallError, TokenCallError};
+        let token = HandlerError::from(TokenCallError::Token(octotoken::TokenError::GitHub(
+            octoauth::Error::InstallationGone,
+        )));
+        assert!(matches!(
+            token,
+            HandlerError::Token(octotoken::TokenError::GitHub(
+                octoauth::Error::InstallationGone
+            ))
+        ));
+        let call = HandlerError::from(TokenCallError::Call(CallError::Api(ApiError::NotFound)));
+        assert!(matches!(call, HandlerError::GithubApi(ApiError::NotFound)));
+        // A second 401 from `read` is the API's 401.
+        let unauthorized =
+            HandlerError::from(TokenCallError::Call(CallError::Api(ApiError::Unauthorized)));
+        assert!(matches!(
+            unauthorized,
+            HandlerError::GithubApi(ApiError::Unauthorized)
+        ));
+        assert!(unauthorized.is_terminal());
+    }
 
     #[test]
     fn storage_database_is_transient() {
@@ -129,36 +248,35 @@ mod tests {
         assert!(e.is_terminal());
     }
 
-    #[test]
-    fn github_5xx_is_transient() {
-        let e = HandlerError::Github(ghinvite_github::Error::Status {
-            status: 502,
-            body: "bad gateway".into(),
-        });
-        assert!(!e.is_terminal());
-    }
-
     /// The error a GitHub response of this shape actually produces, so these
     /// cases stay pinned to the boundary's classification rather than to a
     /// variant hand-built here.
-    fn github_response(status: u16, headers: &[(&str, &str)], message: &str) -> HandlerError {
-        HandlerError::Github(crate::test_support::refusal(status, headers, message).status_error())
+    async fn github_response(status: u16, headers: &[(&str, &str)], message: &str) -> HandlerError {
+        HandlerError::from(crate::test_support::refused(status, headers, message).await)
     }
 
-    #[test]
-    fn github_429_is_transient() {
-        let e = github_response(429, &[("retry-after", "60")], "Too Many Requests");
+    #[tokio::test]
+    async fn github_5xx_is_transient() {
+        let e = github_response(502, &[], "bad gateway").await;
+        assert!(!e.is_terminal());
+        assert!(e.rate_limit().is_none());
+    }
+
+    #[tokio::test]
+    async fn github_429_is_transient() {
+        let e = github_response(429, &[("retry-after", "60")], "Too Many Requests").await;
         assert!(!e.is_terminal());
         assert!(e.rate_limit().is_some());
     }
 
-    #[test]
-    fn github_throttled_403_is_transient() {
+    #[tokio::test]
+    async fn github_throttled_403_is_transient() {
         let e = github_response(
             403,
             &[("retry-after", "60")],
             "You have exceeded a secondary rate limit",
-        );
+        )
+        .await;
         assert!(!e.is_terminal());
         assert_eq!(
             e.rate_limit().and_then(|limit| limit.retry_after),
@@ -166,26 +284,30 @@ mod tests {
         );
     }
 
-    #[test]
-    fn github_permission_denied_403_is_terminal() {
-        let e = github_response(403, &[], "Resource not accessible by integration");
+    #[tokio::test]
+    async fn github_permission_denied_403_is_terminal() {
+        let e = github_response(403, &[], "Resource not accessible by integration").await;
         assert!(e.is_terminal());
         assert!(e.rate_limit().is_none());
     }
 
-    #[test]
-    fn github_404_is_terminal() {
-        let e = HandlerError::Github(ghinvite_github::Error::Status {
-            status: 404,
-            body: "not found".into(),
-        });
+    #[tokio::test]
+    async fn github_404_is_terminal() {
+        let e = github_response(404, &[], "Not Found").await;
         assert!(e.is_terminal());
     }
 
     #[test]
     fn github_transport_is_transient() {
-        let e = HandlerError::Github(ghinvite_github::Error::Transport("dns".into()));
-        assert!(!e.is_terminal());
+        use ghinvite_github::TransportError;
+        for failure in [
+            TransportError::NotSent,
+            TransportError::SentNoResponse { timed_out: false },
+            TransportError::SentNoResponse { timed_out: true },
+        ] {
+            let e = HandlerError::from(ApiError::from(failure));
+            assert!(!e.is_terminal(), "{e:?}");
+        }
     }
 
     #[test]

@@ -54,7 +54,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                                     }
                                 })}
                             }
-                            a { class: "btn btn-ghost btn-sm mt-4", href: "/install", "Install another account" }
+                            a { class: "btn btn-ghost btn-sm mt-4", href: "/onboarding", "Install another account" }
                         },
                         ConsoleIndexState::Empty => rsx! {
                             div { class: "mac-panel p-6",
@@ -62,7 +62,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                                 h1 { class: "mt-3 text-2xl font-semibold tracking-tight", "No accounts connected" }
                                 p { class: "mt-2 text-sm leading-6 text-base-content/70", "Install the GitHub App on a personal account or organization before creating invitation links." }
                                 div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
-                                    a { class: "btn btn-primary", href: "/install", "Install GitHub App" }
+                                    a { class: "btn btn-primary", href: "/onboarding", "Install GitHub App" }
                                     a { class: "btn btn-ghost", href: "/", "Go home" }
                                 }
                             }
@@ -74,7 +74,7 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
                                 p { class: "mt-2 text-sm leading-6 text-base-content/70", "GitHub account discovery did not complete. Try again before changing installation settings." }
                                 div { class: "mt-5 flex flex-col gap-2 sm:flex-row",
                                     a { class: "btn btn-primary", href: "/console", "Try again" }
-                                    a { class: "btn btn-ghost", href: "/install", "Install GitHub App" }
+                                    a { class: "btn btn-ghost", href: "/onboarding", "Install GitHub App" }
                                     a { class: "btn btn-ghost", href: "/", "Go home" }
                                 }
                             }
@@ -88,6 +88,14 @@ pub fn ConsoleIndexPage(props: ConsoleIndexPageProps) -> Element {
 
 #[derive(Clone, PartialEq, Props)]
 pub struct OverviewProps {
+    #[props(default)]
+    pub bulk_enabled: bool,
+    #[props(default)]
+    pub daily_digest: Option<ghinvite_core::storage::blocked_digest::BlockedDigest>,
+    #[props(default)]
+    pub digest_unavailable: bool,
+    #[props(default)]
+    pub authority_pending: bool,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
     pub account_login: String,
@@ -101,11 +109,16 @@ pub struct OverviewProps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghinvite_core::{AccountType, InvitationLinkId, InvitationLinkRepo, Permission};
+    use ghinvite_core::targets::{RepoRole, RepoTarget, Targets};
+    use ghinvite_core::{AccountType, InvitationLinkId};
 
     fn sample_link() -> InvitationLink {
         InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: InvitationLinkId::new(),
+            organization_installation_id: None,
             installation_id: 77,
             account_id: 9001,
             created_by: 42,
@@ -114,17 +127,28 @@ mod tests {
                 .with_timezone(&Utc),
             expires_at: None,
             max_uses: Some(5),
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 2,
-            permission: Permission::Pull,
             approval_required: false,
             description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: "acme/api".to_string(),
-            }],
+            pause: None,
+            targets: Targets {
+                repos: vec![RepoTarget {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".to_string(),
+                    grant: RepoRole::Read,
+                }],
+                ..Default::default()
+            },
+            secret: ghinvite_core::LinkSecretState {
+                secret_generation: 1,
+                sha256: [17; 32].into(),
+            },
         }
     }
 
@@ -285,7 +309,7 @@ mod tests {
 
         assert!(html.contains("No accounts connected"));
         assert!(html.contains("Install GitHub App"));
-        assert!(html.contains("href=\"/install\""));
+        assert!(html.contains("href=\"/onboarding\""));
         assert!(html.contains("Go home"));
         assert!(html.contains("href=\"/\""));
     }
@@ -346,12 +370,17 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
             active_nav: Some("overview".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
+                if props.authority_pending {
+                    p { role: "status", class: "mb-4", "Checking access… Some results are unavailable while GitHub is busy. Try again in a minute." }
+                }
+
                 header { class: "mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
                     div {
                         h1 { class: "text-xl font-semibold tracking-tight", "Console overview" }
                         p { class: "mt-0.5 text-sm text-muted", "{account_type}: {props.account_login}" }
                     }
                     a { class: "btn btn-primary btn-sm", href: "/console/accounts/{login}/links/new", "New invitation link" }
+                    if props.bulk_enabled {a {class:"btn btn-secondary btn-sm",href:"/console/accounts/{login}/bulk/new","Bulk invite"}}
                 }
                 section { class: "mac-panel mb-4 overflow-hidden",
                     div { class: "grid divide-y divide-base-300 md:grid-cols-2 md:divide-x md:divide-y-0",
@@ -372,6 +401,11 @@ pub fn OverviewPage(props: OverviewProps) -> Element {
                             }
                         }
                     }
+                }
+                crate::daily_digest::DailyDeliveryDigest {
+                    digest: props.daily_digest.clone(),
+                    requested_day: props.now.date_naive(),
+                    unavailable: props.digest_unavailable,
                 }
                 section { class: "mac-panel compact-table overflow-hidden",
                     if props.pending_requests.is_none() || props.active_links.is_none() {

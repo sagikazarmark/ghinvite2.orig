@@ -1,23 +1,21 @@
 //! Session-bound continuations of in-flight attempts, retained before the
 //! request reaches the authority so an uncertain outcome can be recovered with
-//! the exact submitted input. Payloads are sealed under the session secret;
+//! the exact submitted input. Payloads are sealed with the immutable deployment keyring;
 //! each record expires with the browser session that retained it. What an
 //! outcome means stays with each flow.
 use crate::{AppState, WebError};
-use base64::Engine;
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
+use anykms_core::{Ciphertext, ErrorKind};
+use anykms_keyring::{ContextEnvelopeSync, Keyring};
+use anykms_keyring::{EncryptionContext, purposes};
+use anykms_recipes::envelope::Padding;
 use chrono::Utc;
 use ghinvite_core::storage::ContinuationStorage;
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
-use rand::RngCore;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Display;
+use std::sync::Arc;
 
 const UNAVAILABLE: &str = "Attempt recovery temporarily unavailable.";
-const NONCE: usize = 24;
 
 fn unavailable(_: impl Display) -> WebError {
     WebError::Session(UNAVAILABLE.into())
@@ -31,6 +29,17 @@ pub(crate) struct Scope {
 }
 
 impl Scope {
+    /// Separate typed recovery records for one browser's bulk batch. Bulk
+    /// payloads must never enter the ordinary Console attempt list.
+    pub(crate) fn bulk(
+        tower: &tower_sessions::Session,
+        user: u64,
+        account: u64,
+        batch: ghinvite_core::bulk::BulkBatchId,
+    ) -> crate::Result<Self> {
+        Self::of(tower, "bulk", &[&user, &account, &batch])
+    }
+
     /// A console admin's mutations of one account.
     pub(crate) fn console(
         tower: &tower_sessions::Session,
@@ -88,17 +97,17 @@ pub(crate) enum Retention<T> {
     Bound(T),
 }
 
-/// Continuation storage for one app, sealed with its session secret.
+/// Continuation storage for one app, sealed with its deployment keyring.
 pub(crate) struct AttemptContinuations<'a> {
     storage: &'a dyn ContinuationStorage,
-    secret: &'a [u8; 32],
+    keyring: Arc<Keyring>,
 }
 
 impl<'a> AttemptContinuations<'a> {
     pub(crate) fn new(state: &'a AppState) -> Self {
         Self {
             storage: state.storage.as_ref(),
-            secret: &state.config.session_secret,
+            keyring: state.config.keyring.clone(),
         }
     }
 
@@ -118,7 +127,7 @@ impl<'a> AttemptContinuations<'a> {
                 &scope.key,
                 id,
                 binding.unwrap_or(id),
-                &self.seal(scope, id, payload)?,
+                &self.seal(scope, binding.unwrap_or(id), payload)?,
                 scope.expires_at,
                 Utc::now().timestamp(),
             )
@@ -177,29 +186,23 @@ impl<'a> AttemptContinuations<'a> {
             .map_err(unavailable)
     }
 
-    fn cipher(&self) -> XChaCha20Poly1305 {
-        XChaCha20Poly1305::new(self.secret.into())
-    }
-
-    fn seal<T: Serialize>(&self, scope: &Scope, id: &str, payload: &T) -> crate::Result<String> {
-        let mut nonce = [0; NONCE];
-        rand::rngs::OsRng
-            .try_fill_bytes(&mut nonce)
-            .map_err(unavailable)?;
+    fn seal<T: Serialize>(
+        &self,
+        scope: &Scope,
+        binding: &str,
+        payload: &T,
+    ) -> crate::Result<String> {
+        let context = EncryptionContext::try_from(&purposes::AttemptContinuation {
+            scope: &scope.key,
+            binding,
+        })
+        .map_err(crypto_error)?;
         let plaintext = serde_json::to_vec(payload).map_err(unavailable)?;
-        let encrypted = self
-            .cipher()
-            .encrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: &plaintext,
-                    aad: aad(scope, id).as_bytes(),
-                },
-            )
-            .map_err(unavailable)?;
-        let mut bytes = nonce.to_vec();
-        bytes.extend(encrypted);
-        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+        self.keyring
+            .context_envelope(Padding::NONE)
+            .and_then(|envelope| envelope.encrypt_sync(&plaintext, &context))
+            .map(|ciphertext| ciphertext.to_base64())
+            .map_err(crypto_error)
     }
 
     fn open<T: DeserializeOwned>(
@@ -207,45 +210,127 @@ impl<'a> AttemptContinuations<'a> {
         scope: &Scope,
         stored: StoredContinuation,
     ) -> crate::Result<T> {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(stored.payload)
-            .map_err(unavailable)?;
-        if bytes.len() < NONCE {
-            return Err(unavailable("invalid continuation"));
+        if stored.scope != scope.key {
+            return Err(WebError::Unauthenticated);
         }
+        let context = EncryptionContext::try_from(&purposes::AttemptContinuation {
+            scope: &stored.scope,
+            binding: &stored.binding,
+        })
+        .map_err(crypto_error)?;
+        let ciphertext = Ciphertext::from_base64(&stored.payload).map_err(crypto_error)?;
         let plaintext = self
-            .cipher()
-            .decrypt(
-                &XNonce::try_from(&bytes[..NONCE]).map_err(unavailable)?,
-                Payload {
-                    msg: &bytes[NONCE..],
-                    aad: aad(scope, &stored.id).as_bytes(),
-                },
-            )
-            .map_err(unavailable)?;
+            .keyring
+            .context_envelope(Padding::NONE)
+            .and_then(|envelope| envelope.decrypt_sync(&ciphertext, &context))
+            .map_err(crypto_error)?;
         serde_json::from_slice(&plaintext).map_err(unavailable)
     }
 }
 
-/// Binds a sealed payload to its scope and identity, so it cannot be replayed
-/// under another.
-fn aad(scope: &Scope, id: &str) -> String {
-    format!("ghinvite/attempt-continuation/v1/{}/{id}", scope.key)
+fn crypto_error(error: anykms_core::Error) -> WebError {
+    match error.kind() {
+        ErrorKind::UnknownKeyVersion => WebError::KeyringRetry,
+        ErrorKind::KeyVersionUnusable | ErrorKind::DecryptFailed => WebError::Unauthenticated,
+        _ => {
+            tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), "P1 continuation encryption unavailable");
+            WebError::KeyringConfig
+        }
+    }
+}
+
+/// Actual D1 gate, exposed only in the fixture build. Uses the same mechanism
+/// and persisted columns as console/invitation continuations.
+#[cfg(feature = "runtime-tests")]
+pub async fn verify_continuation_envelope(
+    storage: &dyn ContinuationStorage,
+    keyring: Arc<Keyring>,
+) -> crate::Result<()> {
+    let store = AttemptContinuations { storage, keyring };
+    let scope = Scope {
+        key: "runtime-envelope-continuation".into(),
+        expires_at: Utc::now().timestamp() + 60,
+    };
+    for id in ["a", "b", "copied"] {
+        store.release(&scope, id).await?;
+    }
+    if store
+        .retain(
+            &scope,
+            "a",
+            Some("logical-binding"),
+            &"private payload".to_owned(),
+        )
+        .await?
+        != Retention::Retained
+    {
+        return Err(unavailable("retain"));
+    }
+    if store.load::<String>(&scope, "a").await? != Some("private payload".into()) {
+        return Err(unavailable("roundtrip"));
+    }
+    if store
+        .retain(
+            &scope,
+            "b",
+            Some("logical-binding"),
+            &"other input".to_owned(),
+        )
+        .await?
+        != Retention::Bound("private payload".into())
+    {
+        return Err(unavailable("binding recovery"));
+    }
+    let raw = storage
+        .get_attempt_continuation(&scope.key, "a", Utc::now().timestamp())
+        .await?
+        .ok_or_else(|| unavailable("readback"))?;
+    if raw.scope != scope.key
+        || raw.binding != "logical-binding"
+        || raw.payload.contains("private payload")
+    {
+        return Err(unavailable("plaintext/context readback"));
+    }
+    storage
+        .retain_attempt_continuation(
+            &scope.key,
+            "copied",
+            "other-binding",
+            &raw.payload,
+            scope.expires_at,
+            Utc::now().timestamp(),
+        )
+        .await?;
+    if !matches!(
+        store.load::<String>(&scope, "copied").await,
+        Err(WebError::Unauthenticated)
+    ) {
+        return Err(unavailable("binding substitution accepted"));
+    }
+    for id in ["a", "b", "copied"] {
+        store.release(&scope, id).await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use ghinvite_storage_sqlx::SqlxStorage;
 
-    const LIVE: i64 = i64::MAX;
+    // A distant timestamp representable by both SQLite and D1 bindings.
+    const LIVE: i64 = 4_102_444_800; // 2100-01-01 UTC
 
     fn scope(session: &str, user: u64, account: u64) -> Scope {
         Scope::derive("console", session, &[&user, &account], LIVE)
     }
 
     fn store<'a>(storage: &'a SqlxStorage, secret: &'a [u8; 32]) -> AttemptContinuations<'a> {
-        AttemptContinuations { storage, secret }
+        AttemptContinuations {
+            storage,
+            keyring: crate::WebConfig::for_local_dev_with_secret(*secret).keyring,
+        }
     }
 
     async fn retain(
@@ -424,6 +509,100 @@ mod tests {
         assert_eq!(
             store.latest::<String>(&scope).await.unwrap().as_deref(),
             Some("second")
+        );
+    }
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    fn ring(current: u32, generations: &[(u32, u8)]) -> Arc<Keyring> {
+        let mut builder = Keyring::builder("p1");
+        for (v, k) in generations {
+            builder = builder.generation(*v, [*k; 32]).unwrap();
+        }
+        Arc::new(builder.current(current).unwrap().build().unwrap())
+    }
+    #[tokio::test]
+    async fn continuation_rotation_classifies_failures_without_losing_retained_input() {
+        let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+            .await
+            .unwrap();
+        let scope = Scope {
+            key: "console-user-subject".into(),
+            expires_at: Utc::now().timestamp() + 300,
+        };
+        let old = AttemptContinuations {
+            storage: &storage,
+            keyring: ring(1, &[(1, 7)]),
+        };
+        old.retain(&scope, "original", Some("subject"), &"input".to_owned())
+            .await
+            .unwrap();
+        let both = AttemptContinuations {
+            storage: &storage,
+            keyring: ring(2, &[(1, 7), (2, 8)]),
+        };
+        assert_eq!(
+            both.load::<String>(&scope, "original").await.unwrap(),
+            Some("input".into())
+        );
+        assert_eq!(
+            both.retain(&scope, "retry", Some("subject"), &"changed".to_owned())
+                .await
+                .unwrap(),
+            Retention::Bound("input".into())
+        );
+        both.retain(&scope, "new", None, &"new input".to_owned())
+            .await
+            .unwrap();
+        assert!(matches!(
+            old.load::<String>(&scope, "new").await,
+            Err(WebError::KeyringRetry)
+        ));
+        let retired = AttemptContinuations {
+            storage: &storage,
+            keyring: ring(2, &[(2, 8)]),
+        };
+        assert!(matches!(
+            retired.load::<String>(&scope, "original").await,
+            Err(WebError::Unauthenticated)
+        ));
+        let changed = AttemptContinuations {
+            storage: &storage,
+            keyring: ring(2, &[(2, 9)]),
+        };
+        assert!(matches!(
+            changed.load::<String>(&scope, "new").await,
+            Err(WebError::KeyringConfig)
+        ));
+        let stored = storage
+            .get_attempt_continuation(&scope.key, "new", Utc::now().timestamp())
+            .await
+            .unwrap()
+            .unwrap();
+        let other_scope = Scope {
+            key: "other-scope".into(),
+            expires_at: scope.expires_at,
+        };
+        storage
+            .retain_attempt_continuation(
+                &other_scope.key,
+                "new",
+                "new",
+                &stored.payload,
+                scope.expires_at,
+                Utc::now().timestamp(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            both.load::<String>(&other_scope, "new").await,
+            Err(WebError::Unauthenticated)
+        ));
+        assert_eq!(
+            both.load::<String>(&scope, "new").await.unwrap(),
+            Some("new input".into())
         );
     }
 }

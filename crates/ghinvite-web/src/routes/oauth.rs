@@ -1,4 +1,6 @@
-//! OAuth flow routes: /login, /oauth/callback, /install, /logout.
+//! Sign-in and installation routes: /login, /oauth/callback, /install, /logout.
+//! Sign-in is token-free (`typed`, on octologin).
+mod typed;
 
 use crate::error::{OAuthFailure, Result, WebError};
 use crate::session;
@@ -8,9 +10,6 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Redirect};
 use axum::routing::get;
 use chrono::Utc;
-use ghinvite_github::oauth::{AuthorizeUrl, UserApiClient, exchange_code};
-use rand::RngCore;
-use rand::rngs::OsRng;
 use serde::Deserialize;
 use tower_sessions::Session as TowerSession;
 
@@ -24,33 +23,18 @@ pub fn router() -> Router<AppState> {
         .route("/login", get(login))
         .route("/logout", axum::routing::post(logout))
         .route("/install", get(install))
+        .route("/install/org", get(install_org))
         .route("/oauth/callback", get(oauth_callback))
 }
 
-/// Generate a CSRF state, stash it in the session, redirect to GitHub's
-/// authorize endpoint.
+/// Start sign-in: store pending state and redirect to GitHub's authorize
+/// endpoint (see [`typed::login`]).
 async fn login(
     State(state): State<AppState>,
     tower: TowerSession,
     axum::extract::Query(q): axum::extract::Query<LoginQuery>,
 ) -> Result<impl IntoResponse> {
-    let csrf = generate_csrf_token();
-    let mut session = session::load(&tower)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-    session.oauth_csrf = Some(csrf.clone());
-    session.return_to = q
-        .return_to
-        .as_deref()
-        .and_then(crate::session::validate_return_to);
-    session::save(&tower, &session)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-
-    let authorize =
-        AuthorizeUrl::build(&state.config.oauth, csrf, &[]).map_err(WebError::Github)?;
-
-    Ok(Redirect::to(&authorize.url))
+    typed::login(&state, &tower, q.return_to.as_deref()).await
 }
 
 async fn logout(
@@ -75,8 +59,28 @@ async fn logout(
         .as_deref()
         .and_then(session::validate_return_to)
         .unwrap_or_else(|| "/".to_owned());
+    let pending_link = if destination.starts_with("/join") {
+        session::load(&tower)
+            .await
+            .ok()
+            .and_then(|session| session.pending_link)
+    } else {
+        None
+    };
     match tower.flush().await {
-        Ok(()) => Redirect::to(&destination).into_response(),
+        Ok(()) => {
+            if pending_link.is_some() {
+                let anonymous = session::Session {
+                    pending_link,
+                    csrf_token: Some(crate::middleware::csrf::generate_token()),
+                    ..Default::default()
+                };
+                if session::save(&tower, &anonymous).await.is_err() {
+                    return unconfirmed_signout(state.config.cookie_secure);
+                }
+            }
+            Redirect::to(&destination).into_response()
+        }
         Err(_) => unconfirmed_signout(state.config.cookie_secure),
     }
 }
@@ -105,11 +109,11 @@ async fn install(State(state): State<AppState>) -> impl IntoResponse {
     Redirect::to(&state.config.github_install_url)
 }
 
-fn generate_csrf_token() -> String {
-    use base64::Engine;
-    let mut buf = [0u8; 24]; // 24 bytes -> 32 base64url chars
-    OsRng.fill_bytes(&mut buf);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
+async fn install_org(State(state): State<AppState>) -> axum::response::Response {
+    match &state.config.github_org_install_url {
+        Some(url) => Redirect::to(url).into_response(),
+        None => (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::response::Html("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Organization app installation unavailable</title></head><body><main><h1>Organization app installation is unavailable</h1><p>This deployment has not configured the organization app installation page. Contact the operator, or continue with repository invitations.</p><a href=\"/console\">Return to Console</a></main></body></html>")).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,99 +136,11 @@ async fn oauth_callback(
     tower: TowerSession,
     axum::extract::Query(q): axum::extract::Query<CallbackQuery>,
 ) -> Result<impl IntoResponse> {
-    // GitHub may redirect with `?error=access_denied` if the user clicked
-    // cancel. Both parameters are browser-supplied: the code is bounded to a
-    // documented shape and the description is dropped, so neither can be
-    // reflected back into the response.
-    if let Some(err) = q.error {
-        return Err(WebError::OAuth(OAuthFailure::from_callback(&err)));
-    }
-
-    let code = q
-        .code
-        .ok_or_else(|| WebError::BadRequest("missing 'code'".into()))?;
-    let supplied_state = q
-        .state
-        .ok_or_else(|| WebError::BadRequest("missing 'state'".into()))?;
-
-    let mut session = session::load(&tower)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-    let expected_state = session
-        .oauth_csrf
-        .clone()
-        .ok_or(WebError::OAuth(OAuthFailure::NoPendingSignIn))?;
-    // Constant-time-ish comparison (the strings are short and not secret in
-    // the timing-attack sense, but defensive).
-    if expected_state.len() != supplied_state.len()
-        || expected_state
-            .as_bytes()
-            .iter()
-            .zip(supplied_state.as_bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            != 0
-    {
-        return Err(WebError::OAuth(OAuthFailure::StateMismatch));
-    }
-    // Consume the CSRF token so it can't be replayed.
-    session.oauth_csrf = None;
-    session::save(&tower, &session)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-    // Persist before calling GitHub: the session middleware does not save on
-    // server errors, including a failed token exchange or user lookup.
-    tower
-        .save()
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-
-    // Exchange the code for a user access token.
-    let token = exchange_code(state.github_transport.as_ref(), &state.config.oauth, &code).await?;
-
-    // Fetch /user via the user-token client.
-    let user_api = UserApiClient::new(state.github_transport.clone(), token.access_token.clone());
-    let gh_user = user_api.get_user().await?;
-
-    // Upsert into our `users` table.
-    let user_row = ghinvite_core::User {
-        user_id: gh_user.id,
-        login: gh_user.login.clone(),
-        avatar_url: gh_user.avatar_url.clone(),
-        last_seen_at: Utc::now(),
-    };
-    state.storage.upsert_user(&user_row).await?;
-
-    tower
-        .cycle_id()
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-
-    // Start with fresh identity-bound state, even when signing in as the same
-    // user. Only the validated return destination survives the old session.
-    let destination = session.return_to.take().unwrap_or_else(|| "/".to_string());
-    tower.clear().await;
-    crate::session_store::establish_authenticated_lifetime(&tower)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-    let session = session::Session {
-        user_id: gh_user.id,
-        login: gh_user.login,
-        access_token: token.access_token,
-        csrf_token: Some(crate::middleware::csrf::generate_token()),
-        ..Default::default()
-    };
-    session::save(&tower, &session)
-        .await
-        .map_err(|e| WebError::Session(e.to_string()))?;
-
     if let Some(installation_id) = q.installation_id {
         tracing::info!(
             installation_id,
             "OAuth callback carried installation_id; setup URL handles verified onboarding"
         );
     }
-
-    // SessionManagerLayer persists the new record and emits its cookie before
-    // sending this redirect. A store failure replaces the redirect with a 500.
-    Ok(Redirect::to(&destination))
+    typed::callback(&state, &tower, q).await
 }

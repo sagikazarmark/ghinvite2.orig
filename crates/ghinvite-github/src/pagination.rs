@@ -5,10 +5,9 @@
 //! that is no longer pending) must be able to tell "walked every page" from
 //! "stopped early", so this module only ever reports a next page or nothing,
 //! and refuses to follow a link that leaves the configured API base.
-//! [`walk_link_pages`] is the one walk every `Link`-paged listing shares: it
+//! [`walk_link_pages_with`] is the walk every `Link`-paged listing shares: it
 //! reads to the last page or fails, never returning what it read so far.
 
-use crate::error::{Error, Result};
 use crate::transport::Response;
 use std::collections::HashSet;
 
@@ -16,23 +15,23 @@ use std::collections::HashSet;
 /// listing; exceeding it is a paging fault, not a complete list.
 pub(crate) const MAX_PAGES: usize = 1000;
 
-/// Walk a `Link`-paged listing from `first` to its last page.
-///
-/// `fetch` sends one page's path and returns its successful response;
-/// `absorb` takes each page in order once its next link has been read. The
-/// walk is complete only when it returns `Ok`: a failed fetch, an
-/// untrustworthy `Link` header, a revisited page, or more than `max_pages`
-/// pages is an error, because a listing cut short is an incomplete
-/// observation, not a shorter one.
-pub(crate) async fn walk_link_pages<Fut>(
+/// A `Link` header that cannot be trusted to mean "no next page". Carries no
+/// part of the header: it is upstream text and may hold a credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PagingFault;
+
+/// The walk every `Link`-paged listing shares. Typed errors from fetch/absorb are
+/// preserved; pagination faults use the caller's fixed, secret-free error.
+pub(crate) async fn walk_link_pages_with<Fut, E>(
     first: String,
     base_url: &str,
     max_pages: usize,
     mut fetch: impl FnMut(String) -> Fut,
-    mut absorb: impl FnMut(Response) -> Result<()>,
-) -> Result<()>
+    mut absorb: impl FnMut(Response) -> std::result::Result<(), E>,
+    paging_error: impl Fn() -> E,
+) -> std::result::Result<(), E>
 where
-    Fut: Future<Output = Result<Response>>,
+    Fut: Future<Output = std::result::Result<Response, E>>,
 {
     let mut path = first;
     // Every page already walked. A cycle of any length — not just a link back
@@ -43,21 +42,17 @@ where
         if !walked.insert(path.clone()) {
             // `path` came out of an upstream `Link` header; the fault is the
             // revisit, which needs none of its text to state.
-            return Err(Error::InvalidInput(
-                "pagination returned to a page already walked".into(),
-            ));
+            return Err(paging_error());
         }
         let resp = fetch(path).await?;
-        let next = next_page_path(&resp, base_url)?;
+        let next = next_page_path(&resp, base_url).map_err(|_| paging_error())?;
         absorb(resp)?;
         match next {
             Some(next) => path = next,
             None => return Ok(()),
         }
     }
-    Err(Error::InvalidInput(
-        "listing exceeded its page bound".into(),
-    ))
+    Err(paging_error())
 }
 
 /// The `rel="next"` target of a `Link` header, as a path under `base_url`.
@@ -67,7 +62,10 @@ where
 /// mean "no next page" — unparseable, or pointing off the API base — because
 /// silently stopping there would fabricate absence. Whether the target advances
 /// is the caller's business: only it knows which pages it has already walked.
-pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Option<String>> {
+pub(crate) fn next_page_path(
+    response: &Response,
+    base_url: &str,
+) -> Result<Option<String>, PagingFault> {
     let Some(link) = response.headers.get("link") else {
         return Ok(None);
     };
@@ -75,13 +73,10 @@ pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Opti
         return Ok(None);
     };
     let Some(path) = next.strip_prefix(base_url).filter(|p| p.starts_with('/')) else {
-        // The rejected target is whatever answered us, so it is named by shape
-        // only: a gateway can put a credential in a query string as readily as
-        // in a body, and this error reaches logs and Restate terminal errors.
-        return Err(Error::InvalidInput(format!(
-            "pagination link points outside {base_url} ({}-byte target)",
-            next.len()
-        )));
+        // The rejected target is whatever answered us, so none of it is kept:
+        // a gateway can put a credential in a query string as readily as in a
+        // body, and this error reaches logs and Restate terminal errors.
+        return Err(PagingFault);
     };
     Ok(Some(path.to_owned()))
 }
@@ -95,33 +90,81 @@ pub(crate) fn next_page_path(response: &Response, base_url: &str) -> Result<Opti
 /// unclosed — is an error rather than `None`: it may well have announced a next
 /// page we could not read, and reading it as the last page would turn a
 /// truncated walk into confirmed absence.
-fn next_relation(header: &str) -> Result<Option<&str>> {
-    // Same reasoning as the off-base case: the header is upstream text, so only
-    // its size is reported.
-    let malformed = || {
-        Error::InvalidInput(format!(
-            "unparseable pagination link header ({}-byte value)",
-            header.len()
-        ))
-    };
-    let mut rest = header;
-    let mut seen_link = false;
-    while let Some(open) = rest.find('<') {
-        let after = &rest[open + 1..];
+fn next_relation(header: &str) -> Result<Option<&str>, PagingFault> {
+    // Same reasoning as the off-base case: the header is upstream text.
+    let malformed = || PagingFault;
+    let mut rest = header.trim();
+    let mut next = None;
+    loop {
+        let after = rest.strip_prefix('<').ok_or_else(malformed)?;
         let close = after.find('>').ok_or_else(malformed)?;
-        seen_link = true;
         let url = &after[..close];
-        let params = &after[close + 1..];
-        let params_end = params.find('<').unwrap_or(params.len());
-        if is_next(&params[..params_end]) {
-            return Ok(Some(url));
+        let tail = &after[close + 1..];
+        let mut quoted = false;
+        let mut split = tail.len();
+        for (index, ch) in tail.char_indices() {
+            if ch == '"' {
+                quoted = !quoted;
+            }
+            if ch == ',' && !quoted {
+                split = index;
+                break;
+            }
+            if ch == '<' && !quoted {
+                return Err(malformed());
+            }
         }
-        rest = &params[params_end..];
-    }
-    if seen_link {
-        Ok(None)
-    } else {
-        Err(malformed())
+        if quoted {
+            return Err(malformed());
+        }
+        let params = &tail[..split];
+        if !params.trim().is_empty() && !params.trim_start().starts_with(';') {
+            return Err(malformed());
+        }
+        // Reject malformed parameter values rather than accidentally treating
+        // an unreadable `rel=next` as the end of an authoritative listing.
+        for parameter in params.split(';').skip(1) {
+            let parameter = parameter.trim();
+            if parameter.is_empty() {
+                return Err(malformed());
+            }
+            let Some((name, value)) = parameter.split_once('=') else {
+                if parameter
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                {
+                    continue;
+                }
+                return Err(malformed());
+            };
+            if name.trim().is_empty() {
+                return Err(malformed());
+            }
+            let value = value.trim();
+            if value.starts_with('"') {
+                if value.len() < 2
+                    || !value.ends_with('"')
+                    || value[1..value.len() - 1].contains('"')
+                {
+                    return Err(malformed());
+                }
+            } else if value.is_empty()
+                || value.chars().any(char::is_whitespace)
+                || value.contains('"')
+            {
+                return Err(malformed());
+            }
+        }
+        if is_next(params) && next.replace(url).is_some() {
+            return Err(malformed());
+        }
+        if split == tail.len() {
+            return Ok(next);
+        }
+        rest = tail[split + 1..].trim();
+        if rest.is_empty() {
+            return Err(malformed());
+        }
     }
 }
 
@@ -231,7 +274,7 @@ mod tests {
         for link in cases {
             let err =
                 next_page_path(&response(Some(&link)), "https://api.github.test").unwrap_err();
-            let rendered = format!("{err} {err:?}");
+            let rendered = format!("{err:?}");
             assert!(!rendered.contains(token), "{rendered}");
             assert!(!rendered.contains("evil.test"), "{rendered}");
         }
@@ -241,14 +284,14 @@ mod tests {
     fn off_base_next_link_is_an_error() {
         let link = "<https://evil.test/x?page=3>; rel=\"next\"";
         let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
     }
 
     #[test]
     fn host_prefix_alone_does_not_make_a_link_on_base() {
         let link = "<https://api.github.test.evil.test/x?page=3>; rel=\"next\"";
         let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
     }
 
     #[test]
@@ -282,29 +325,32 @@ mod tests {
     fn an_unclosed_link_header_is_an_error_not_the_last_page() {
         let link = "<https://api.github.test/x?page=3; rel=\"next\"";
         let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
     }
 
     #[test]
     fn a_link_header_carrying_no_link_at_all_is_an_error() {
         let err =
             next_page_path(&response(Some("rel=next")), "https://api.github.test").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
     }
 
     #[test]
     fn an_unclosed_link_after_a_complete_one_is_an_error() {
         let link = "<https://api.github.test/x?page=1>; rel=\"prev\", <https://api.github.test/x";
         let err = next_page_path(&response(Some(link)), "https://api.github.test").unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
     }
 
     /// Walk a listing whose page `n` links to `links[n]`, recording every
     /// path fetched and every page absorbed.
-    async fn walk(links: &[Option<&str>], max_pages: usize) -> (Result<()>, Vec<String>, usize) {
+    async fn walk(
+        links: &[Option<&str>],
+        max_pages: usize,
+    ) -> (Result<(), PagingFault>, Vec<String>, usize) {
         let mut fetched = Vec::new();
         let mut absorbed = 0;
-        let result = walk_link_pages(
+        let result = walk_link_pages_with(
             "/x?page=0".into(),
             "https://api.github.test",
             max_pages,
@@ -319,6 +365,7 @@ mod tests {
                 absorbed += 1;
                 Ok(())
             },
+            || PagingFault,
         )
         .await;
         (result, fetched, absorbed)
@@ -341,7 +388,7 @@ mod tests {
         )
         .await;
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
         assert_eq!(fetched.len(), 3);
     }
 
@@ -349,7 +396,7 @@ mod tests {
     async fn a_walk_past_its_page_bound_is_an_error_not_a_partial_list() {
         let (result, fetched, _) = walk(&[Some("/x?page=1"), Some("/x?page=2"), None], 2).await;
         let err = result.unwrap_err();
-        assert!(matches!(err, Error::InvalidInput(_)), "got {err:?}");
+        assert_eq!(err, PagingFault);
         assert_eq!(fetched, ["/x?page=0", "/x?page=1"]);
     }
 

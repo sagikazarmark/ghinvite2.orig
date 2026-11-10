@@ -11,6 +11,7 @@ publish.workspace = true
 # nothing here needs a `cfg(target_arch)` to pick a runtime.
 
 [features]
+runtime-tests = []
 # Native-only: runs the handlers against the local `restate-server`
 # (compose.yaml) via `scripts/test-restate.sh`. Never enabled for the Workers
 # build, which is why `axum` and `ghinvite-web` can be plain optional deps.
@@ -21,10 +22,14 @@ async-trait.workspace = true
 axum = { workspace = true, optional = true }
 ghinvite-web = { workspace = true, optional = true }
 restate-sdk.workspace = true
+web-time = "1.1"
 tracing-subscriber.workspace = true
 chrono.workspace = true
 ghinvite-core.workspace = true
+ghinvite-email-vault.workspace = true
 ghinvite-github.workspace = true
+octoscrub.workspace = true
+octotoken.workspace = true
 rand.workspace = true
 schemars.workspace = true
 serde.workspace = true
@@ -37,8 +42,13 @@ tracing.workspace = true
 # shape, so it is enabled by `ghinvite-workflows-server` and by this crate's
 # own tests — never by the library itself.
 [dev-dependencies]
+anykms-keyring.workspace = true
+# Restate payload encodings in the PD-8 journal tests.
+bytes = "1"
+ghinvite-e2e = { path = "../ghinvite-e2e" }
 hmac.workspace = true
 ghinvite-github = { workspace = true, features = ["test-mock"] }
+octoauth.workspace = true
 ghinvite-core = { workspace = true, features = ["test-suite"] }
 ghinvite-storage-sqlx = { workspace = true, features = ["test-util"] }
 rand_chacha.workspace = true

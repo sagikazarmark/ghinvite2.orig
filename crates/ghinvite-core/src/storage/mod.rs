@@ -5,10 +5,7 @@
 //! (`ghinvite-storage-d1`, production on Cloudflare Workers).
 
 use crate::audit::AuditEvent;
-use crate::{
-    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
-    InvitationRequest, RequestId, SelectedRepos, User,
-};
+use crate::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, User};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -18,19 +15,39 @@ use thiserror::Error;
 #[cfg(feature = "test-suite")]
 pub mod test_suite;
 
+pub mod access_grants;
 pub mod attempt_continuations;
 pub mod audit_read;
 pub mod audit_write;
+pub mod blocked_digest;
+pub mod bulk;
+pub mod console_scope;
+pub mod continuation_rotation;
 pub mod delivery_attempts;
 pub mod delivery_projection;
-pub mod github_invitations;
+
+pub mod installation_projection;
 pub mod installations;
+pub mod integer;
 pub mod invitation_links;
 pub mod invitation_requests;
+pub mod invite_budget;
+pub mod link_secrets;
+pub mod link_targets;
+pub mod operational;
+pub mod org_delivery;
+pub mod organization_telemetry;
+pub use org_delivery::OrgDeliveryStorage;
+pub mod org_delivery_reads;
+pub mod org_webhooks;
+pub use org_delivery_reads::OrgDeliveryReadStorage;
+pub use org_webhooks::OrgWebhookStorage;
 pub mod pending_queue;
+pub mod pending_signin;
 pub mod projection;
 pub mod request_history;
 pub mod settlement;
+pub mod signin_budget;
 pub mod users;
 pub use audit_read::{AUDIT_PAGE_SIZE, AuditBoundary, AuditPage, AuditPosition};
 
@@ -91,6 +108,8 @@ pub fn classify_insert(message: String) -> Error {
 /// Decode one result row, presented by either driver as a JSON object of its
 /// column values, into a shared row type. Undecodable rows are corrupt.
 pub fn decode_row<T: serde::de::DeserializeOwned>(row: serde_json::Value) -> Result<T> {
+    integer::validate_json(&row)
+        .map_err(|_| Error::Corrupt("integer outside portable storage range".into()))?;
     serde_json::from_value(row).map_err(|e| Error::Corrupt(e.to_string()))
 }
 
@@ -107,9 +126,14 @@ pub trait Storage:
     RecordStorage
     + ConsoleStorage
     + ContinuationStorage
-    + WebhookStorage
-    + InstallationStorage
+    + AppInstallationStorage
+    + LinkCapabilityStorage
+    + SigninBudgetStorage
     + DeliveryStorage
+    + OrgDeliveryStorage
+    + OrgDeliveryReadStorage
+    + OrgWebhookStorage
+    + OperationalReadStorage
     + AuditStorage
 {
 }
@@ -118,9 +142,14 @@ impl<T> Storage for T where
     T: RecordStorage
         + ConsoleStorage
         + ContinuationStorage
-        + WebhookStorage
-        + InstallationStorage
+        + AppInstallationStorage
+        + LinkCapabilityStorage
+        + SigninBudgetStorage
         + DeliveryStorage
+        + OrgDeliveryStorage
+        + OrgDeliveryReadStorage
+        + OrgWebhookStorage
+        + OperationalReadStorage
         + AuditStorage
 {
 }
@@ -129,21 +158,6 @@ impl<T> Storage for T where
 /// profile refreshed at sign-in.
 #[async_trait]
 pub trait RecordStorage: Send + Sync + 'static {
-    /// Look up an installation by primary key. Returns the row whether or not it's
-    /// active — callers needing only active rows should filter with `uninstalled_at`.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>>;
-
-    /// Look up the *active* installation for a GitHub account id, if any.
-    /// Equivalent to `WHERE account_id = ? AND uninstalled_at IS NULL`.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>>;
-
     /// Insert-or-replace a user row keyed on `user_id`. Updates `login`,
     /// `avatar_url`, `last_seen_at` on conflict. Used on every successful sign-in.
     ///
@@ -170,29 +184,51 @@ pub trait RecordStorage: Send + Sync + 'static {
     ///
     /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>>;
-
-    /// Look up a github_invitations row by primary key.
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>>;
 }
 
 /// Bounded, eventually consistent reads behind Console pages, Console sign-in
 /// and the Invitation Request Flow's status. Never authority.
 #[async_trait]
 pub trait ConsoleStorage: Send + Sync + 'static {
-    /// Look up the *active* installation by GitHub login (org or user name).
-    /// Logins are mutable upstream — fall back to id-based lookup whenever possible.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
-
-    /// Console history lookup after uninstall. Never grants authority: callers
-    /// must validate the returned numeric account against current GitHub identity.
-    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>>;
+    async fn revoke_preview(
+        &self,
+        account_id: u64,
+        link_id: InvitationLinkId,
+    ) -> Result<Option<crate::revocation::RevokePreview>>;
+    /// Latest immutable daily snapshot at or before the requested UTC day.
+    /// None is missing evidence; an empty snapshot is a scoped healthy zero.
+    async fn scoped_blocked_digest(
+        &self,
+        scope: &console_scope::ConsoleScope,
+        day: chrono::NaiveDate,
+    ) -> Result<Option<blocked_digest::BlockedDigest>>;
+    async fn scoped_list_invitation_links_for_account(
+        &self,
+        scope: &console_scope::ConsoleScope,
+    ) -> Result<Vec<InvitationLink>>;
+    async fn scoped_count_pending_requests_for_account(
+        &self,
+        scope: &console_scope::ConsoleScope,
+    ) -> Result<u64>;
+    async fn scoped_list_pending_requests_page(
+        &self,
+        scope: &console_scope::ConsoleScope,
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage>;
+    async fn scoped_list_audit_events(
+        &self,
+        scope: &console_scope::ConsoleScope,
+        event: Option<crate::audit::EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage>;
+    /// Complete bounded discovery across retained invitation-link and Bulk
+    /// manifests. Display names are hints; current GitHub evidence grants access.
+    async fn distinct_console_repo_targets(
+        &self,
+        account_id: u64,
+        after_repo_id: Option<u64>,
+        limit: u16,
+    ) -> Result<console_scope::RepoTargetPage>;
 
     /// Bounded identity-only lookup for safe Console resource links. Does not
     /// load private metadata or the link's (potentially large) repository scope.
@@ -238,16 +274,14 @@ pub trait ConsoleStorage: Send + Sync + 'static {
         after: Option<pending_queue::PendingBoundary>,
     ) -> Result<pending_queue::PendingPage>;
 
+    /// Read an exact kind-qualified repository delivery projection. Never authority.
+    async fn get_delivery(&self, key: &str) -> Result<Option<crate::delivery::DeliverySnapshot>>;
+
     /// Query projection of the receiving object's receipts, separate from lifecycle.
     async fn list_delivery_for_request(
         &self,
         id: RequestId,
     ) -> Result<Vec<crate::delivery::DeliverySnapshot>>;
-
-    async fn list_github_invitations_for_request(
-        &self,
-        id: RequestId,
-    ) -> Result<Vec<GithubInvitation>>;
 
     /// Read at most 25 account events in (occurred_at DESC, id DESC) order.
     /// Exact event filtering precedes limiting. Boundaries are exclusive; After
@@ -265,6 +299,23 @@ pub trait ConsoleStorage: Send + Sync + 'static {
 /// Browser attempt continuations, retained until the authority answers.
 #[async_trait]
 pub trait ContinuationStorage: Send + Sync + 'static {
+    /// Primary-consistent bounded rowid page, including expired records; one
+    /// sentinel row carries the epoch even when the continuation table is empty.
+    async fn continuation_rotation_page(
+        &self,
+        after: Option<i64>,
+    ) -> Result<Vec<continuation_rotation::ScanRow>>;
+    /// Primary-consistent mutation counter. Missing/corrupt state is unavailable.
+    async fn continuation_rotation_epoch(&self) -> Result<i64>;
+    /// Only ciphertext may change; exact old context, identity, expiry and global
+    /// mutation epoch are compared atomically. Unknown ACK is an error, not false.
+    async fn rewrap_attempt_continuation(
+        &self,
+        old: &continuation_rotation::ScanRow,
+        replacement: &str,
+        expected_epoch: i64,
+    ) -> Result<bool>;
+
     /// First writer wins atomically by ID and logical binding; return that record.
     async fn retain_attempt_continuation(
         &self,
@@ -292,87 +343,6 @@ pub trait ContinuationStorage: Send + Sync + 'static {
     async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()>;
 }
 
-/// Webhook ingress routing: which GitHub invitation an upstream event names.
-#[async_trait]
-pub trait WebhookStorage: Send + Sync + 'static {
-    /// Look up a github_invitations row by GitHub's invitation id (the integer
-    /// surfaced in webhook payloads). Returns `None` if we never persisted such
-    /// an id (e.g. row never reached `Sent`).
-    ///
-    /// **Errors:** [`Error::Corrupt`] / [`Error::Database`].
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>>;
-
-    /// At most two historical matches for verified member-event identities.
-    /// Exactly one Sent row with an upstream ID permits webhook settlement;
-    /// ambiguity requires invitation-specific reconciliation instead.
-    async fn member_invitation_candidates(
-        &self,
-        account_id: u64,
-        repo_id: u64,
-        requester_id: u64,
-    ) -> Result<Vec<GithubInvitation>>;
-
-    /// Retain the first matching result (including None) for a verified body hash.
-    /// Returns the retained binding on replay/concurrency, never a new match.
-    /// This is ingress routing identity; lifecycle settlement remains owner-only.
-    async fn bind_member_webhook(
-        &self,
-        payload_sha256: &str,
-        invitation_id: Option<GithubInvitationId>,
-    ) -> Result<Option<GithubInvitationId>>;
-}
-
-/// Installation writers, driven by the installation workflows.
-#[async_trait]
-pub trait InstallationStorage: Send + Sync + 'static {
-    /// Insert a brand-new installation row.
-    ///
-    /// **Errors:**
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] if `installation_id`
-    ///   already exists.
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateActiveInstallation`] if
-    ///   another row with the same `account_id` is still active (partial unique index).
-    /// - [`Error::Database`] for any other SQLite/D1 failure.
-    ///
-    /// **Idempotency:** not idempotent — caller must distinguish "first install"
-    /// from "reinstall" before calling.
-    async fn insert_installation(&self, account: &Account) -> Result<()>;
-
-    /// Mark an installation as uninstalled by stamping `uninstalled_at`.
-    ///
-    /// **Preconditions:** caller decides "when" (typically `Utc::now()`).
-    ///
-    /// **Errors:**
-    /// - [`Error::NotFound`] if no row matches `installation_id` *or* the row was
-    ///   already marked uninstalled (idempotent guard via `WHERE uninstalled_at IS NULL`).
-    /// - [`Error::Database`] otherwise.
-    async fn mark_installation_uninstalled(
-        &self,
-        installation_id: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()>;
-
-    /// Update the `selected_repos` field on an active installation.
-    ///
-    /// **Errors:**
-    /// - [`Error::NotFound`] if `installation_id` is unknown or already uninstalled.
-    /// - [`Error::Database`] otherwise.
-    async fn update_installation_repos(
-        &self,
-        installation_id: u64,
-        selected: &SelectedRepos,
-    ) -> Result<()>;
-
-    /// List every active installation, ordered by `installed_at` ascending.
-    /// Used by the daily reconcile sweep.
-    ///
-    /// **Errors:** [`Error::Database`] only.
-    async fn list_active_installations(&self) -> Result<Vec<Account>>;
-}
-
 /// GitHub invitation delivery and settlement, driven by the workflows.
 #[async_trait]
 pub trait DeliveryStorage: Send + Sync + 'static {
@@ -383,32 +353,56 @@ pub trait DeliveryStorage: Send + Sync + 'static {
         &self,
         command: &crate::delivery::CreateCommand,
     ) -> Result<Option<u64>>;
-    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()>;
-    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool>;
+    async fn reject_delivery_attempt(
+        &self,
+        command: &crate::delivery::CreateCommand,
+        generation: u64,
+    ) -> Result<()>;
+    async fn delivery_attempt_exists(
+        &self,
+        command: &crate::delivery::CreateCommand,
+    ) -> Result<bool>;
+
+    /// Separately input-bound DELETE authorization. A missing generation means
+    /// the prior effect is uncertain/confirmed, never permission to retry it.
+    async fn claim_cancellation_attempt(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+    ) -> Result<Option<u64>>;
+    /// Conservative read for run retries; unknown fence state never permits a write.
+    async fn cancellation_attempt_exists(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+    ) -> Result<bool>;
+    /// Only a positively rejected DELETE may release its exact generation.
+    async fn reject_cancellation_attempt(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+        generation: u64,
+    ) -> Result<()>;
 
     /// Atomically establish/validate invitation identity, create the initial row,
     /// project the receipt and permitted Sending advance, and publish immutable
     /// audit facts. Missing parents are ProjectionDependency; conflicting input
     /// or equal-revision content is ProjectionInvariant. Stale receipts cannot
     /// regress lifecycle but still publish their audit; identical replay is safe.
-    async fn project_delivery(&self, receipt: &crate::delivery::DeliverySnapshot) -> Result<()>;
+    async fn project_delivery(&self, receipt: &crate::delivery::DeliverySnapshot) -> Result<()> {
+        self.project_delivery_with_events(&receipt.clone().into())
+            .await
+    }
 
-    /// Insert a GitHub invitation fixture/import row. Create delivery uses the
-    /// complete atomic `project_delivery` operation instead.
-    ///
-    /// **Errors:**
-    /// - [`Error::Conflict`] with [`ConflictKind::DuplicateId`] on `id` collision.
-    /// - [`Error::Conflict`] with [`ConflictKind::ForeignKey`] if
-    ///   `invitation_request_id` references a row that does not exist.
-    /// - [`Error::Database`] for any other failure.
-    async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()>;
-
-    /// In-flight GitHub invitations across all historical installations of an
-    /// immutable account. Installation IDs on links remain original provenance.
-    async fn list_pending_github_invitations_for_account(
+    /// Retained transition facts are inserted even for stale snapshots. The
+    /// snapshot and all facts commit atomically; changed event identities fail.
+    async fn project_delivery_with_events(
         &self,
-        account_id: u64,
-    ) -> Result<Vec<GithubInvitation>>;
+        projection: &crate::delivery_audit::RepositoryDeliveryProjection,
+    ) -> Result<()>;
+
+    /// Monotonic telemetry only; cannot rewrite retained facts or lifecycle.
+    async fn project_repository_telemetry(
+        &self,
+        telemetry: &operational::RepositoryTelemetry,
+    ) -> Result<()>;
 }
 
 /// Audit Log appends. No update/delete surface is exposed.
@@ -424,6 +418,87 @@ pub trait AuditStorage: Send + Sync + 'static {
     /// idempotency key, so a duplicate primary key succeeds without another row.
     /// Other constraints and database errors must still surface.
     async fn audit(&self, event: &AuditEvent) -> Result<()>;
+}
+
+/// App-scoped reads available to the web without granting installation writes.
+#[async_trait]
+pub trait AppInstallationReadStorage: Send + Sync + 'static {
+    async fn app_installation(
+        &self,
+        app: crate::account::App,
+        installation_id: u64,
+    ) -> Result<Option<crate::account::Installation>>;
+    async fn active_app_installation(
+        &self,
+        app: crate::account::App,
+        account_id: u64,
+    ) -> Result<Option<crate::account::Installation>>;
+    async fn active_app_installation_by_login(
+        &self,
+        app: crate::account::App,
+        login: &str,
+    ) -> Result<Option<crate::account::Installation>>;
+    async fn latest_app_installation_by_login(
+        &self,
+        app: crate::account::App,
+        login: &str,
+    ) -> Result<Option<crate::account::Installation>>;
+    async fn list_active_app_installations(
+        &self,
+        app: crate::account::App,
+    ) -> Result<Vec<crate::account::Installation>>;
+    async fn account_settings(
+        &self,
+        account_id: u64,
+    ) -> Result<Option<crate::account::AccountSettings>>;
+}
+
+/// Authoritative snapshots are revisioned; stale projection cannot restore old
+/// permissions, an installer or a delegation flag. All writers use this app-scoped port.
+#[async_trait]
+pub trait AppInstallationStorage: AppInstallationReadStorage {
+    async fn project_installation_change(
+        &self,
+        owner: crate::account::AccountInstallationRef,
+        change: &crate::installation_audit::InstallationChange,
+    ) -> Result<()>;
+    async fn put_app_installation(&self, installation: &crate::account::Installation)
+    -> Result<()>;
+    async fn put_account_settings(&self, settings: &crate::account::AccountSettings) -> Result<()>;
+}
+
+#[async_trait]
+pub trait LinkCapabilityStorage: Send + Sync + 'static {
+    async fn link_targets(&self, id: InvitationLinkId) -> Result<crate::targets::Targets>;
+    async fn register_link_secret(&self, secret: &link_secrets::LinkSecret) -> Result<()>;
+    async fn resolve_link_secret(
+        &self,
+        sha256: &crate::SecretHash,
+    ) -> Result<Option<link_secrets::LinkSecret>>;
+    async fn retire_link_secrets(
+        &self,
+        id: InvitationLinkId,
+        through_generation: u32,
+        at: DateTime<Utc>,
+    ) -> Result<()>;
+}
+
+/// Shared atomic admission before a browser starts OAuth. An ambiguous failure
+/// spends the reservation conservatively and never starts an exchange.
+#[async_trait]
+pub trait SigninBudgetStorage: Send + Sync + 'static {
+    async fn reserve_signin(
+        &self,
+        key: signin_budget::SigninBudgetKey,
+        reservation: RequestId,
+        now_ms: i64,
+    ) -> Result<bool>;
+}
+
+/// Operator-only aggregate reads; this port grants no account Console authority.
+#[async_trait]
+pub trait OperationalReadStorage: Send + Sync + 'static {
+    async fn delivery_signals(&self, now: DateTime<Utc>) -> Result<operational::DeliverySignals>;
 }
 
 #[cfg(test)]
@@ -459,3 +534,8 @@ mod tests {
         ));
     }
 }
+
+pub mod email_review;
+pub mod email_vault;
+
+pub mod email_delivery;

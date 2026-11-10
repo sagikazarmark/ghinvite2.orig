@@ -86,9 +86,13 @@ test('sidebar account actions remain reachable by keyboard in short windows', as
   await page.locator('aside').hover();
   await page.mouse.wheel(0, 600);
   await expect(install).toBeInViewport({ ratio: 1 });
-  // Tab from the last Console navigation item, without scrollIntoView rescuing
+  // Tab through the Apps item and into account actions, without scrollIntoView rescuing
   // an otherwise unreachable control.
   await page.locator('aside').getByRole('link', { name: 'Settings', exact: true }).focus();
+  await page.keyboard.press('Tab');
+  const apps = page.locator('aside').getByRole('link', { name: 'Apps', exact: true });
+  await expect(apps).toBeFocused();
+  await expect(apps).toBeInViewport({ ratio: 1 });
   await page.keyboard.press('Tab');
   await expect(account).toBeFocused();
   await expect(account).toBeInViewport({ ratio: 1 });

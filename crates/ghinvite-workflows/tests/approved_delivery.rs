@@ -1,5 +1,6 @@
 //! Approved delivery's public Restate/HTTP seam, with read projections withheld.
 #![cfg(feature = "integration")]
+use ghinvite_core::storage::AppInstallationReadStorage as _;
 use ghinvite_core::storage::{ConsoleStorage, RecordStorage};
 use restate_sdk::{endpoint::Endpoint, http_server::HttpServer};
 use serde_json::{Value, json};
@@ -7,6 +8,7 @@ use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn approved_delivery_progresses_without_projected_parents() {
+    let harness = ghinvite_e2e::Harness::start().await;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -31,18 +33,24 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let lose_fence_after_put = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observation_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let fail_observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let wrong_repository_owner = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let router = {
         let sql = sql.clone();
+        let wrong_owner = wrong_repository_owner.clone();
         let lose_fence = lose_fence_after_put.clone();
         let reads = observation_reads.clone();
         let fail = fail_observations.clone();
         ghinvite_github::stub::router().layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let sql = sql.clone();
+                let wrong_owner = wrong_owner.clone();
                 let lose_fence = lose_fence.clone();
                 let reads = reads.clone();
                 let fail = fail.clone();
                 async move {
+                    if request.uri().path()=="/repos/acme/web" && wrong_owner.load(std::sync::atomic::Ordering::SeqCst) {
+                        return axum::response::Response::builder().status(200).header("content-type","application/json").body(axum::body::Body::from(json!({"id":11,"full_name":"acme/web","owner":{"id":200,"login":"acme"}}).to_string())).unwrap();
+                    }
                     let put = request.method() == axum::http::Method::PUT;
                     if request.method() == axum::http::Method::GET
                         && request.uri().path() == "/repos/acme/api/invitations"
@@ -71,20 +79,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
         ))
     };
     let stub_server = tokio::spawn(async move { axum::serve(stub, router).await.unwrap() });
-    let github = Arc::new(
-        ghinvite_github::InstallationClient::new(
-            Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
-                client.clone(),
-            )),
-            ghinvite_github::jwt::AppJwtSigner::from_pem(
-                123,
-                include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
-            )
-            .unwrap(),
+    let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
+        ghinvite_workflows::RepositoryGithub::new(
+            ghinvite_e2e::github_transport(client.clone()),
+            &base,
+            ghinvite_e2e::repository_apps(&base),
         )
-        .with_base(&base),
-    );
-    let state = ghinvite_workflows::AppState::new(storage.clone(), github);
+        .unwrap(),
+    ));
     let builder = Endpoint::builder()
         .bind(ghinvite_workflows::installation::Installation {
             state: state.clone(),
@@ -108,9 +110,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .serve_with_cancel(listener, std::future::pending::<()>())
             .await;
     });
-    let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
-    let ingress = std::env::var("RESTATE_INGRESS_URL").unwrap();
-    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
+    let admin = harness.restate.admin_url().to_owned();
+    let ingress = harness.restate.ingress_url().to_owned();
+    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let response = client
         .post(format!("{admin}/deployments"))
         .json(&json!({"uri":format!("http://{host}:{port}")}))
@@ -125,14 +127,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     // An early/stale timer must not manufacture known-uninstalled authority.
     post(
         &client,
-        &format!("{ingress}/AccountInstallation/100/recheck"),
+        &format!("{ingress}/AccountInstallation/repo:100/recheck"),
         Value::Null,
     )
     .await;
     assert_eq!(
         client
             .post(format!(
-                "{ingress}/AccountInstallation/100/current_installation"
+                "{ingress}/AccountInstallation/repo:100/current_installation"
             ))
             .send()
             .await
@@ -143,7 +145,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     assert_eq!(
         client
             .post(format!(
-                "{ingress}/AccountInstallation/100/admission_evidence"
+                "{ingress}/AccountInstallation/repo:100/admission_evidence"
             ))
             .json(&json!({"account_id":100,"repo_ids":[10]}))
             .send()
@@ -158,9 +160,11 @@ async fn approved_delivery_progresses_without_projected_parents() {
         json!([10]),
     )
     .await;
-    let onboard = json!({"installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()});
+    let onboard = ghinvite_e2e::setup_command(
+        json!({"app":"repo","installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}),
+    );
     let response = client
-        .post(format!("{ingress}/Installation/9/onboard"))
+        .post(format!("{ingress}/Installation/repo:9/onboard"))
         .json(&onboard)
         .send()
         .await
@@ -182,11 +186,13 @@ async fn approved_delivery_progresses_without_projected_parents() {
         };
         client.post(format!("{ingress}/{route}")).json(&input)
     };
-    let response = call("create", json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},"description":"Withheld parents","approval_required":false,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]})).send().await.unwrap();
+    let response = call("create", json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},"description":"Withheld parents","approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"},{"repo_id":11,"repo_full_name":"acme/web","grant":"write"}]}})).send().await.unwrap();
     assert!(response.status().is_success());
+    let created: Value = response.json().await.unwrap();
+    assert!(created["Ok"].is_object());
     let admitted: Value = call(
         "admit",
-        json!({"link_id":link,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()}),
+        json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()}),
     )
     .send()
     .await
@@ -194,6 +200,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .json()
     .await
     .unwrap();
+    assert_eq!(admitted["result"]["kind"], "accepted");
     let plan: Value = call(
         "approved_plan",
         json!({"link_id":link,"request_id":admitted["result"]["request_id"],"requester_id":8}),
@@ -204,12 +211,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .json()
     .await
     .unwrap();
+    assert_eq!(plan["commands"].as_array().unwrap().len(), 2);
     let command = plan["commands"][0].clone();
-    let id = command["invitation_id"].as_str().unwrap();
+    assert!(command.get("invitation_id").is_none());
     let delivery_key = format!(
-        "{}:{}",
+        "{}:{}:{}",
         command["request_id"].as_str().unwrap(),
-        command["repo_id"]
+        command["repo_id"],
+        command["delivery_generation"]
     );
     let response = client
         .post(format!(
@@ -227,20 +236,52 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let receipt: Value = response.json().await.unwrap();
     assert_eq!(receipt["outcome"]["kind"], "created");
     assert_eq!(receipt["command"], command);
-    // Settlement is retained beside the original create even while every
-    // projected parent is unavailable. Replays return that original receipt.
+    client
+        .delete(format!(
+            "{base}/repos/acme/api/invitations/{}",
+            receipt["outcome"]["upstream_id"]
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
     post(
         &client,
-        &format!("{ingress}/RepositoryDelivery/{delivery_key}/on_webhook"),
-        json!({"invitation_id":id,"action":"accepted","at":"2026-09-24T12:00:00Z"}),
+        &format!("{base}/identity"),
+        json!({"login":"alice","addressed_id":8,"role_name":"write"}),
     )
     .await;
-    let snapshot = post(
+    // Settlement is retained beside the original create even while every
+    // projected parent is unavailable. Replays return that original receipt.
+    let pending = post(
         &client,
         &format!("{ingress}/RepositoryDelivery/{delivery_key}/status"),
         Value::Null,
     )
     .await;
+    post(
+        &client,
+        &format!("{ingress}/DeliveryObservation/observe"),
+        pending,
+    )
+    .await;
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = post(
+                &client,
+                &format!("{ingress}/RepositoryDelivery/{delivery_key}/status"),
+                Value::Null,
+            )
+            .await;
+            if snapshot["settlement"]["state"] == "accepted" {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("read-only acceptance verification completes");
     assert_eq!(snapshot["create"], receipt);
     assert_eq!(snapshot["settlement"]["state"], "accepted");
     let replay = post(
@@ -250,7 +291,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     )
     .await;
     assert_eq!(replay, receipt);
-    assert!(storage.get_installation(9).await.unwrap().is_none());
+    assert!(
+        storage
+            .app_installation(ghinvite_core::account::App::Repo, 9)
+            .await
+            .map(|value| value.map(|installation| installation.account))
+            .unwrap()
+            .is_none()
+    );
     assert!(storage.get_user(8).await.unwrap().is_none());
     assert!(
         storage
@@ -285,9 +333,10 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     let blocked_command = plan["commands"][1].clone();
     let blocked_url = format!(
-        "{ingress}/RepositoryDelivery/{}:{}/create",
+        "{ingress}/RepositoryDelivery/{}:{}:{}/create",
         blocked_command["request_id"].as_str().unwrap(),
-        blocked_command["repo_id"]
+        blocked_command["repo_id"],
+        blocked_command["delivery_generation"]
     );
     let blocked = post(&client, &blocked_url, blocked_command.clone()).await;
     assert_eq!(blocked["outcome"]["kind"], "blocked");
@@ -321,8 +370,8 @@ async fn approved_delivery_progresses_without_projected_parents() {
     // entirely absent. Delayed old events cannot retire the replacement.
     post(
         &client,
-        &format!("{ingress}/Installation/9/uninstall"),
-        json!({"installation_id":9,"uninstalled_at":chrono::Utc::now()}),
+        &format!("{ingress}/Installation/repo:9/uninstall"),
+        json!({"app":"repo","installation_id":9,"uninstalled_at":chrono::Utc::now()}),
     )
     .await;
     post(
@@ -332,42 +381,40 @@ async fn approved_delivery_progresses_without_projected_parents() {
     )
     .await;
     let mut replacement = onboard.clone();
-    replacement["installation_id"] = json!(19);
+    replacement["operation_id"] = json!(ghinvite_core::RequestId::new());
+    replacement["verified"]["account"]["installation_id"] = json!(19);
     post(
         &client,
-        &format!("{ingress}/Installation/19/onboard"),
-        replacement,
+        &format!("{ingress}/Installation/repo:19/onboard"),
+        replacement.clone(),
     )
     .await;
     post(
         &client,
-        &format!("{ingress}/Installation/9/repos_changed"),
-        json!({"installation_id":9,"selected_repos":[]}),
+        &format!("{ingress}/Installation/repo:9/repos_changed"),
+        json!({"app":"repo","installation_id":9,"selected_repos":[]}),
     )
     .await;
     post(
         &client,
-        &format!("{ingress}/Installation/9/uninstall"),
-        json!({"installation_id":9,"uninstalled_at":chrono::Utc::now()}),
+        &format!("{ingress}/Installation/repo:9/uninstall"),
+        json!({"app":"repo","installation_id":9,"uninstalled_at":chrono::Utc::now()}),
     )
     .await;
+    // The installation-token repository read must bind the numeric owner.
     post(
         &client,
-        &format!("{base}/installation-identity"),
-        json!({"id":200,"login":"acme","type":"Organization"}),
+        &format!("{base}/identity"),
+        json!({"login":"alice","addressed_id":8}),
     )
     .await;
+    wrong_repository_owner.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         post(&client, &blocked_url, blocked_command.clone()).await["outcome"]["kind"],
         "blocked"
     );
     assert_eq!(puts(&client, &base).await, 1);
-    post(
-        &client,
-        &format!("{base}/installation-identity"),
-        json!({"id":100,"login":"acme","type":"Organization"}),
-    )
-    .await;
+    wrong_repository_owner.store(false, std::sync::atomic::Ordering::SeqCst);
     post(
         &client,
         &format!("{base}/identity"),
@@ -391,33 +438,28 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let owner_url = blocked_url.trim_end_matches("/create");
     let pending = post(&client, &format!("{owner_url}/status"), Value::Null).await;
     // A withdrawal authorized for the retired installation cannot use its replacement.
-    post(&client, &format!("{owner_url}/cancel"), json!({"invitation_id":blocked_command["invitation_id"],"installation_id":9,"by_user":7,"at":chrono::Utc::now()})).await;
+    refuse_cancel(&client, &format!("{owner_url}/cancel"), json!({"invitation_id":json!(ghinvite_core::GithubInvitationId::new()),"installation_id":9,"by_user":7,"at":chrono::Utc::now()})).await;
     assert_eq!(
         post(&client, &format!("{owner_url}/status"), Value::Null).await,
         pending
     );
-    // Competing valid withdrawal/webhook commands choose one retained winner.
-    let webhook_url = format!("{owner_url}/on_webhook");
+    // A refused legacy cancellation cannot override exact canonical observation evidence.
+    // Positive fenced cancellation races live in repository_protocol/cancellation.
+    let evidence_url = format!("{owner_url}/reconcile");
+    let declined = absence(&pending, "none");
     let cancel_url = format!("{owner_url}/cancel");
     tokio::join!(
-        post(
+        refuse_cancel(
             &client,
             &cancel_url,
-            json!({"invitation_id":blocked_command["invitation_id"],"installation_id":19,"by_user":7,"at":chrono::Utc::now()})
+            json!({"invitation_id":json!(ghinvite_core::GithubInvitationId::new()),"installation_id":19,"by_user":7,"at":chrono::Utc::now()})
         ),
-        post(
-            &client,
-            &webhook_url,
-            json!({"invitation_id":blocked_command["invitation_id"],"action":"accepted","at":chrono::Utc::now()})
-        )
+        post(&client, &evidence_url, declined.clone())
     );
     let winner = post(&client, &format!("{owner_url}/status"), Value::Null).await;
-    assert!(matches!(
-        winner["settlement"]["state"].as_str(),
-        Some("accepted" | "cancelled")
-    ));
+    assert_eq!(winner["settlement"]["state"], "declined");
     assert_eq!(winner["create"], resumed);
-    post(&client, &webhook_url, json!({"invitation_id":blocked_command["invitation_id"],"action":"declined","at":chrono::Utc::now()})).await;
+    post(&client, &evidence_url, declined).await;
     assert_eq!(
         post(&client, &format!("{owner_url}/status"), Value::Null).await,
         winner
@@ -461,6 +503,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
                 user_id,
                 login: format!("user-{user_id}"),
                 avatar_url: None,
+                github_created_at: None,
                 last_seen_at: chrono::Utc::now(),
             })
             .await
@@ -495,11 +538,11 @@ async fn approved_delivery_progresses_without_projected_parents() {
     )
     .await;
     let manual = ghinvite_core::InvitationLinkId::new();
-    post(&client, &format!("{ingress}/InvitationLink/{manual}/create"), json!({"link_id":manual,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Stale pending","approval_required":true,"permission":"push","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).await;
+    post(&client, &format!("{ingress}/InvitationLink/{manual}/create"), json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":manual,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Stale pending","approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
     let admission = post(
         &client,
         &format!("{ingress}/InvitationLink/{manual}/admit"),
-        json!({"link_id":manual,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()}),
+        json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":manual,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()}),
     )
     .await;
     let request = admission["result"]["request_id"].as_str().unwrap();
@@ -522,6 +565,17 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .execute(&sql)
         .await
         .unwrap();
+    let signed = client
+        .post(format!("{ingress}/Installation/repo:19/onboard_webhook"))
+        .json(&ghinvite_e2e::signed_owner_command(&replacement, 7))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        signed.status().is_success(),
+        "{}",
+        signed.text().await.unwrap()
+    );
     post(&client, &format!("{ingress}/InvitationRequest/{request}/decide"), json!({"link_id":manual,"request_id":request,"operation_id":ghinvite_core::RequestId::new(),"admin":{"account_id":100,"user_id":7},"action":{"kind":"approve"}})).await;
     let manual_plan = post(
         &client,
@@ -531,9 +585,10 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .await;
     let manual_command = manual_plan["commands"][0].clone();
     let manual_url = format!(
-        "{ingress}/RepositoryDelivery/{}:{}/create",
+        "{ingress}/RepositoryDelivery/{}:{}:{}/create",
         manual_command["request_id"].as_str().unwrap(),
-        manual_command["repo_id"]
+        manual_command["repo_id"],
+        manual_command["delivery_generation"]
     );
     assert_eq!(
         client
@@ -625,8 +680,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     assert_eq!(puts(&client, &base).await, 1);
     // An absent read result and even loss of the fence row do not permit an
     // unknown retained receipt to write. Projected parents are unreadable too.
-    sqlx::query("DELETE FROM delivery_attempts WHERE invitation_id = ?")
-        .bind(manual_command["invitation_id"].as_str().unwrap())
+    sqlx::query("DELETE FROM delivery_attempts WHERE delivery_key = ? AND step = 'repo'")
+        .bind(
+            manual_url
+                .split("/RepositoryDelivery/")
+                .nth(1)
+                .unwrap()
+                .trim_end_matches("/create"),
+        )
         .execute(&sql)
         .await
         .unwrap();
@@ -655,23 +716,35 @@ async fn approved_delivery_progresses_without_projected_parents() {
         json!({"login":"recovered-user","addressed_id":8}),
     )
     .await;
-    let mut uncertain_command = manual_command.clone();
-    uncertain_command["request_id"] = json!(ghinvite_core::RequestId::new());
-    uncertain_command["invitation_id"] = json!(ghinvite_core::GithubInvitationId::new());
-    let owner = format!(
-        "{ingress}/RepositoryDelivery/{}:10",
-        uncertain_command["request_id"].as_str().unwrap()
-    );
     lose_fence_after_put.store(true, std::sync::atomic::Ordering::SeqCst);
     faults
         .lose_http_result
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let uncertain = post(
-        &client,
-        &format!("{owner}/create"),
-        uncertain_command.clone(),
-    )
-    .await;
+    let recovery_link = ghinvite_core::InvitationLinkId::new();
+    post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/create"), json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":recovery_link,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Lost create acknowledgement","approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
+    let recovery_admission = post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/admit"), json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":recovery_link,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()})).await;
+    assert_eq!(recovery_admission["result"]["kind"], "accepted");
+    let recovery_plan = post(&client, &format!("{ingress}/InvitationRequest/{}/approved_plan", recovery_admission["result"]["request_id"].as_str().unwrap()), json!({"link_id":recovery_link,"request_id":recovery_admission["result"]["request_id"],"requester_id":8})).await;
+    let uncertain_command = recovery_plan["commands"][0].clone();
+    assert!(uncertain_command.get("invitation_id").is_none());
+    let owner = format!(
+        "{ingress}/RepositoryDelivery/{}:10:{}",
+        uncertain_command["request_id"].as_str().unwrap(),
+        uncertain_command["delivery_generation"]
+    );
+    // Admission already sent create. Read its retained first result without
+    // issuing a second create, which legitimately performs positive recovery.
+    let uncertain = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let snapshot = post(&client, &format!("{owner}/status"), Value::Null).await;
+            if !snapshot.is_null() {
+                break snapshot["create"].clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("lost-result invocation retains uncertainty");
     assert_eq!(uncertain["outcome"]["kind"], "outcome_unknown");
     assert_eq!(
         faults
@@ -707,16 +780,27 @@ async fn approved_delivery_progresses_without_projected_parents() {
         observation_reads.load(std::sync::atomic::Ordering::SeqCst),
         before + 1
     );
-    post(&client, &format!("{owner}/on_webhook"), json!({"invitation_id":uncertain_command["invitation_id"],"action":"declined","at":chrono::Utc::now()})).await;
+    refuse_cancel(&client, &format!("{owner}/cancel"), json!({"invitation_id":json!(ghinvite_core::GithubInvitationId::new()),"installation_id":19,"by_user":7,"at":chrono::Utc::now()})).await;
+    post(
+        &client,
+        &format!("{owner}/reconcile"),
+        absence(&sent, "none"),
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     // Also redrive the stale observation and a repeated member event explicitly.
     post(
         &client,
         &format!("{ingress}/DeliveryObservation/observe"),
-        sent,
+        sent.clone(),
     )
     .await;
-    post(&client, &format!("{owner}/on_webhook"), json!({"invitation_id":uncertain_command["invitation_id"],"action":"accepted","verify":true,"at":chrono::Utc::now()})).await;
+    post(
+        &client,
+        &format!("{owner}/reconcile"),
+        absence(&sent, "write"),
+    )
+    .await;
     assert_eq!(
         observation_reads.load(std::sync::atomic::Ordering::SeqCst),
         before + 1
@@ -725,6 +809,22 @@ async fn approved_delivery_progresses_without_projected_parents() {
         post(&client, &format!("{owner}/status"), Value::Null).await["settlement"]["state"],
         "declined"
     );
+    let calls: Value = client
+        .get(format!("{base}/calls"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !calls["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|call| call["method"] == "DELETE")
+    );
+    harness.finish().await;
     server.abort();
     stub_server.abort();
 }
@@ -767,4 +867,14 @@ async fn puts(client: &reqwest::Client, base: &str) -> usize {
         .iter()
         .filter(|c| c["method"] == "PUT")
         .count()
+}
+
+async fn refuse_cancel(client: &reqwest::Client, url: &str, input: Value) {
+    let response = client.post(url).json(&input).send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+}
+
+fn absence(snapshot: &Value, role: &str) -> Value {
+    let command = &snapshot["create"]["command"];
+    json!({"delivery_key":format!("{}:{}:{}",command["request_id"].as_str().unwrap(),command["repo_id"],command["delivery_generation"]),"expected_revision":snapshot["revision"],"at":chrono::Utc::now(),"evidence":{"kind":"absent","availability_verified":true,"role_name":role,"direct_collaborator":null,"membership":null}})
 }

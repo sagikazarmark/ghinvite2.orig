@@ -1,5 +1,5 @@
 use super::*;
-use ghinvite_core::storage::InstallationStorage;
+
 use std::sync::atomic::{AtomicU16, Ordering};
 
 struct MembershipFailureTransport {
@@ -7,17 +7,14 @@ struct MembershipFailureTransport {
     status: u16,
 }
 
-#[async_trait::async_trait]
 impl ghinvite_github::HttpTransport for MembershipFailureTransport {
     async fn send(
         &self,
-        request: ghinvite_github::transport::Request,
-    ) -> ghinvite_github::Result<Response> {
+        request: ghinvite_github::Request,
+    ) -> std::result::Result<Response, ghinvite_github::TransportError> {
         if request.url.contains("/memberships/") {
             if self.status == 0 {
-                return Err(ghinvite_github::Error::Transport(
-                    "private transport diagnostic".into(),
-                ));
+                return Err(ghinvite_github::TransportError::SentNoResponse { timed_out: false });
             }
             return Ok(Response {
                 status: self.status,
@@ -32,11 +29,11 @@ impl ghinvite_github::HttpTransport for MembershipFailureTransport {
 #[tokio::test]
 async fn github_authorization_failures_use_dependency_statuses_without_disclosing_diagnostics() {
     for (upstream, expected) in [
-        (0, StatusCode::BAD_GATEWAY),
-        (500, StatusCode::BAD_GATEWAY),
-        (401, StatusCode::BAD_GATEWAY),
+        (0, StatusCode::SERVICE_UNAVAILABLE),
+        (500, StatusCode::SERVICE_UNAVAILABLE),
+        (401, StatusCode::SERVICE_UNAVAILABLE),
         (429, StatusCode::SERVICE_UNAVAILABLE),
-        (504, StatusCode::GATEWAY_TIMEOUT),
+        (504, StatusCode::SERVICE_UNAVAILABLE),
         (404, StatusCode::NOT_FOUND),
     ] {
         let storage = Arc::new(
@@ -45,17 +42,22 @@ async fn github_authorization_failures_use_dependency_statuses_without_disclosin
                 .unwrap(),
         );
         storage
-            .insert_installation(&identity_account(9001, "acme", AccountType::Organization))
+            .seed_console_installation(&identity_account(9001, "acme", AccountType::Organization))
             .await
             .unwrap();
-        let state = AppState::new(
+        seed_org_authority(
+            &storage,
+            &identity_account(9001, "acme", AccountType::Organization),
+        )
+        .await;
+        let state = crate::common::sign_in::app_state(
             storage,
             Arc::new(MembershipFailureTransport {
                 oauth: MockTransport::scripted(oauth_expectations(OCTOCAT)),
                 status: upstream,
             }),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-            WebConfig::for_local_dev_with_secret([7; 32]),
+            console_config(),
         );
         let app = build_app(state, tower_sessions::MemoryStore::default());
         let cookie = sign_in(&app).await;
@@ -81,22 +83,23 @@ async fn historical_settings_require_current_authority() {
                 .unwrap(),
         );
         let account = identity_account(account_id, "historical", kind);
-        storage.insert_installation(&account).await.unwrap();
+        storage.seed_console_installation(&account).await.unwrap();
         storage
-            .mark_installation_uninstalled(account.installation_id, Utc::now())
+            .uninstall_console_installation(account.installation_id, Utc::now())
             .await
             .unwrap();
         let mut expectations = oauth_expectations(OCTOCAT);
         if kind == AccountType::Organization {
+            seed_org_authority(&storage, &account).await;
             expectations.push(Expectation::ok_json(Method::Get,
-                "https://api.github.com/user/memberships/orgs/historical",
-                serde_json::json!({"role": if authorized { "admin" } else { "member" }, "state":"active", "organization":{"id":9001}})));
+                "https://api.github.com/orgs/historical/memberships/octocat",
+                serde_json::json!({"role": if authorized { "admin" } else { "member" }, "state":"active", "organization":{"id":9001,"login":"historical"},"user":{"id":42,"login":"octocat"}})));
         }
-        let state = AppState::new(
+        let state = crate::common::sign_in::app_state(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-            WebConfig::for_local_dev_with_secret([7; 32]),
+            console_config(),
         );
         let app = build_app(state, tower_sessions::MemoryStore::default());
         let cookie = sign_in(&app).await;
@@ -126,24 +129,42 @@ async fn historical_settings_require_current_authority() {
 #[tokio::test]
 async fn authorization_read_failure_preserves_submission_without_account_disclosure() {
     for (upstream, expected) in [
-        (503, StatusCode::BAD_GATEWAY),
+        (503, StatusCode::SERVICE_UNAVAILABLE),
         (429, StatusCode::SERVICE_UNAVAILABLE),
-        (504, StatusCode::GATEWAY_TIMEOUT),
+        (504, StatusCode::SERVICE_UNAVAILABLE),
     ] {
         let mut expectations = oauth_expectations(OCTOCAT);
         expectations.push(Expectation::status(
             Method::Get,
-            "https://api.github.com/user/memberships/orgs/acme",
+            "https://api.github.com/orgs/acme/memberships/octocat",
             upstream,
         ));
         expectations.extend([
-            oauth_expectations(ACME_ADMIN).pop().unwrap(),
+            org_membership("acme", 9001, "acme"),
             installation_repos_expectation(),
         ]);
-        let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
+        let storage = Arc::new(
+            ghinvite_storage_sqlx::SqlxStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let account = acme_installation();
+        storage.seed_console_installation(&account).await.unwrap();
+        seed_org_authority(&storage, &account).await;
+        let authority = FakeLinkAuthority::start().await;
+        let app = build_app(
+            crate::common::sign_in::app_state(
+                storage,
+                Arc::new(MockTransport::scripted(expectations)),
+                authority.client(),
+                console_config(),
+            ),
+            tower_sessions::MemoryStore::default(),
+        );
+        let cookie = sign_in(&app).await;
         let csrf = common::csrf_token(&app, &cookie).await;
         let body = format!(
-            "csrf_token={csrf}&description=Preserve+me&permission=push&repo_ids=10&repo_ids=11"
+            "csrf_token={csrf}&description=Preserve+me&permission=push&repo_ids=10&repo_grants=10:push&repo_ids=11&repo_grants=11:push"
         );
         let identity = format!(
             "link_id={}&anchor={}",
@@ -211,7 +232,7 @@ async fn creation_storage_failure_remains_internal_error_instead_of_access_recov
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "csrf_token={csrf}&description=Workshop&permission=pull&repo_ids=10"
+                    "csrf_token={csrf}&description=Workshop&permission=pull&repo_ids=10&repo_grants=10:pull"
                 )))
                 .unwrap(),
         )
@@ -244,7 +265,7 @@ async fn overview_keeps_unavailable_sections_distinct_from_empty_work() {
             "0 active invitation links",
         ),
         (
-            "invitation_link_repos",
+            "invitation_link_targets",
             "Invitation links are unavailable",
             "0 pending invitation requests",
         ),
@@ -275,7 +296,7 @@ async fn overview_keeps_unavailable_sections_distinct_from_empty_work() {
         assert!(html.contains(healthy));
         assert!(html.contains("href=\"/console/accounts/acme\">Try again</a>"));
         assert!(!html.contains(table));
-        if table == "invitation_link_repos" {
+        if table == "invitation_link_targets" {
             assert!(!html.contains("No invitation links yet"));
             assert!(!html.contains("0 active invitation links"));
         } else {
@@ -303,7 +324,7 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
             false,
             503,
             "Installation availability could not be verified",
-            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
             "/console/accounts/octocat/settings",
         ),
     ] {
@@ -313,24 +334,24 @@ async fn settings_distinguishes_installed_historical_and_unavailable_state() {
                 .unwrap(),
         );
         let account = identity_account(42, "octocat", AccountType::User);
-        storage.insert_installation(&account).await.unwrap();
+        storage.seed_console_installation(&account).await.unwrap();
         if uninstalled {
             storage
-                .mark_installation_uninstalled(account.installation_id, Utc::now())
+                .uninstall_console_installation(account.installation_id, Utc::now())
                 .await
                 .unwrap();
         }
         let mut expectations = oauth_expectations(OCTOCAT);
         if !uninstalled {
-            let mut repos = installation_repos_expectation();
+            let mut repos = repos_for(42, "octocat");
             repos.response.status = upstream;
             expectations.push(repos);
         }
-        let state = AppState::new(
+        let state = crate::common::sign_in::app_state(
             storage,
             Arc::new(MockTransport::scripted(expectations)),
             Arc::new(RestateClient::new("http://127.0.0.1:1").unwrap()),
-            WebConfig::for_local_dev_with_secret([7; 32]),
+            console_config(),
         );
         let app = build_app(state, tower_sessions::MemoryStore::default());
         let cookie = sign_in(&app).await;
@@ -352,42 +373,38 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
     for (upstream, message, status) in [
         (
             504,
-            "GitHub did not respond in time",
-            StatusCode::GATEWAY_TIMEOUT,
+            "Repository access could not be checked",
+            StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
             429,
-            "GitHub is limiting requests",
+            "Repository access could not be checked",
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
             401,
-            "GitHub authorization needs attention",
-            StatusCode::BAD_GATEWAY,
+            "Repository access could not be checked",
+            StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
             403,
-            "GitHub denied repository access",
-            StatusCode::BAD_GATEWAY,
+            "Repository access could not be checked",
+            StatusCode::SERVICE_UNAVAILABLE,
         ),
         (
             500,
-            "Repositories could not be loaded",
-            StatusCode::BAD_GATEWAY,
+            "Repository access could not be checked",
+            StatusCode::SERVICE_UNAVAILABLE,
         ),
     ] {
         let mut expectations = oauth_expectations(ACME_ADMIN);
         let mut failure = installation_repos_expectation();
         failure.response.status = upstream;
         failure.response.body = b"private-upstream-diagnostic".to_vec();
-        let membership = oauth_expectations(ACME_ADMIN).pop().unwrap();
-        expectations.extend([
-            failure.clone(),
-            membership.clone(),
-            failure,
-            membership,
-            installation_repos_expectation(),
-        ]);
+        for _ in 0..if upstream == 401 { 4 } else { 2 } {
+            expectations.push(failure.clone());
+        }
+        expectations.push(installation_repos_expectation());
         let (app, cookie, authority) = build_signed_in_admin_app_with_authority(expectations).await;
         let response =
             identity_request(&app, &cookie, "GET", "/console/accounts/acme/links/new").await;
@@ -396,7 +413,7 @@ async fn repository_failures_preserve_native_form_and_retry_before_creation() {
         assert!(html.contains(message));
         assert!(!html.contains("No repositories are available"));
         let csrf = common::csrf_token(&app, &cookie).await;
-        let values = "description=Workshop&internal_note=Keep+this&permission=push&approval_required=true&max_uses=7&expires_in_days=9&repo_ids=10&repo_ids=11";
+        let values = "description=Workshop&internal_note=Keep+this&permission=push&approval_required=true&max_uses=7&expires_in_days=9&repo_ids=10&repo_grants=10:push&repo_ids=11&repo_grants=11:push";
         let uri = format!(
             "/console/accounts/acme/links?link_id={}&anchor={}",
             ghinvite_core::InvitationLinkId::new(),
@@ -448,20 +465,17 @@ struct RepositoryFailureTransport {
     status: Arc<AtomicU16>,
 }
 
-#[async_trait::async_trait]
 impl ghinvite_github::HttpTransport for RepositoryFailureTransport {
     async fn send(
         &self,
-        request: ghinvite_github::transport::Request,
-    ) -> ghinvite_github::Result<Response> {
+        request: ghinvite_github::Request,
+    ) -> std::result::Result<Response, ghinvite_github::TransportError> {
         if request.url.contains("/repositories?") {
             let status = self.status.load(Ordering::SeqCst);
             if status == 0 {
-                return Err(ghinvite_github::Error::Transport(
-                    "connection failure: private credential".into(),
-                ));
+                return Err(ghinvite_github::TransportError::SentNoResponse { timed_out: false });
             }
-            let mut response = installation_repos_expectation().response;
+            let mut response = repos_for(42, "octocat").response;
             response.status = status;
             return Ok(response);
         }
@@ -470,27 +484,86 @@ impl ghinvite_github::HttpTransport for RepositoryFailureTransport {
 }
 
 async fn repository_recovery_app(status: Arc<AtomicU16>) -> axum::Router {
+    repository_recovery_app_with_cache(status, Arc::new(BrowserEvidenceCache::default())).await
+}
+/// Stores only evidence actually obtained from GitHub. The control ages records
+/// past five minutes, exercising service freshness rather than granting access.
+#[derive(Default)]
+struct BrowserEvidenceCache(
+    std::sync::Mutex<BTreeMap<String, ghinvite_web::authority_cache::CacheEntry>>,
+);
+impl BrowserEvidenceCache {
+    fn expire(&self) -> usize {
+        let mut rows = self.0.lock().unwrap();
+        let count = rows.len();
+        for row in rows.values_mut() {
+            row.observed_at = Utc::now().timestamp() - 301;
+        }
+        count
+    }
+}
+#[async_trait::async_trait]
+impl ghinvite_web::authority_cache::AuthorityCache for BrowserEvidenceCache {
+    async fn get(
+        &self,
+        key: &str,
+    ) -> Result<
+        Option<ghinvite_web::authority_cache::CacheEntry>,
+        ghinvite_web::authority_cache::CacheUnavailable,
+    > {
+        Ok(self.0.lock().unwrap().get(key).cloned())
+    }
+    async fn put(
+        &self,
+        key: &str,
+        value: ghinvite_web::authority_cache::CacheEntry,
+    ) -> Result<(), ghinvite_web::authority_cache::CacheUnavailable> {
+        let mut rows = self.0.lock().unwrap();
+        assert!(rows.len() < 32);
+        rows.insert(key.into(), value);
+        Ok(())
+    }
+}
+async fn repository_recovery_app_with_cache(
+    status: Arc<AtomicU16>,
+    cache: Arc<BrowserEvidenceCache>,
+) -> axum::Router {
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
     );
     storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .seed_console_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    build_app(
-        AppState::new(
+    ghinvite_web::build_app(
+        crate::common::sign_in::with_signin_bridge(crate::common::sign_in::app_state(
             storage,
             Arc::new(RepositoryFailureTransport {
-                oauth: MockTransport::scripted(oauth_expectations(OCTOCAT)),
+                oauth: MockTransport::scripted(
+                    oauth_expectations(OCTOCAT)
+                        .into_iter()
+                        .chain([
+                            repo_identity(10, "octocat/api", 42),
+                            repo_identity(11, "octocat/web", 42),
+                        ])
+                        .collect(),
+                ),
                 status,
             }),
             std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-            WebConfig::for_local_dev_with_secret([7; 32]),
-        ),
+            console_config(),
+        ))
+        .with_authority_cache(cache)
+        .with_edge_limits(Arc::new(
+            ghinvite_web::rate_limit::MemoryRateLimiter::default(),
+        )),
         tower_sessions::MemoryStore::default(),
     )
+    .layer(axum::Extension(
+        ghinvite_web::rate_limit::TrustedClientIp::new(std::net::Ipv4Addr::LOCALHOST.into()),
+    ))
 }
 
 #[tokio::test]
@@ -499,9 +572,9 @@ async fn repository_transport_failure_is_not_reported_as_timeout_or_empty_instal
     let cookie = sign_in(&app).await;
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/links/new").await;
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let html = response_html(response).await;
-    assert!(html.contains("Repositories could not be loaded"));
+    assert!(html.contains("Repository access could not be checked"));
     assert!(!html.contains("GitHub did not respond in time"));
     assert!(!html.contains("private credential"));
     assert!(!html.contains("No repositories are available"));
@@ -512,7 +585,8 @@ async fn repository_transport_failure_is_not_reported_as_timeout_or_empty_instal
 async fn read_recovery_browser_server() {
     use axum::response::IntoResponse;
     let status = Arc::new(AtomicU16::new(200));
-    let app = repository_recovery_app(status.clone()).await;
+    let cache = Arc::new(BrowserEvidenceCache::default());
+    let app = repository_recovery_app_with_cache(status.clone(), cache.clone()).await;
     let login_app = app.clone();
     let fixture = axum::Router::new()
         .route(
@@ -537,9 +611,11 @@ async fn read_recovery_browser_server() {
             axum::routing::post(
                 move |axum::extract::Path(value): axum::extract::Path<u16>| {
                     let status = status.clone();
+                    let cache = cache.clone();
                     async move {
                         status.store(value, Ordering::SeqCst);
-                        StatusCode::NO_CONTENT
+                        let expired = cache.expire();
+                        axum::Json(serde_json::json!({"expired_evidence":expired}))
                     }
                 },
             ),

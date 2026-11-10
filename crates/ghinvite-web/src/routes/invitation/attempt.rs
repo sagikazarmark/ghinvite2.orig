@@ -11,8 +11,8 @@ use ghinvite_core::admission::{
     AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, Rejection, RequesterPage,
 };
 
-fn attempt_url(code: &str, id: &str) -> String {
-    format!("/i/{code}?operation_id={id}")
+fn attempt_url(_code: &str, id: &str) -> String {
+    format!("/join?operation_id={id}")
 }
 
 const RETRY_UNKNOWN: &str =
@@ -41,6 +41,11 @@ impl From<InvalidInput> for WebError {
 struct AttemptInput {
     operation_id: AdmissionOperationId,
     justification: Option<String>,
+    secret_sha256: ghinvite_core::SecretHash,
+    secret_generation: u32,
+    scope_evidence: Vec<ghinvite_core::admission::ScopeEvidence>,
+    #[serde(default)]
+    domain_evidence: Option<ghinvite_core::email_domain::DomainEvidence>,
 }
 
 impl From<&Admit> for AttemptInput {
@@ -48,13 +53,17 @@ impl From<&Admit> for AttemptInput {
         Self {
             operation_id: command.operation_id.clone(),
             justification: command.justification.clone(),
+            secret_sha256: command.secret_sha256,
+            secret_generation: command.secret_generation,
+            scope_evidence: command.scope_evidence.clone(),
+            domain_evidence: command.domain_evidence.clone(),
         }
     }
 }
 
 /// Parse and normalize submitted input before any network call.
 fn admit_command(
-    link_id: ghinvite_core::InvitationLinkId,
+    capability: &crate::session::PendingLink,
     operation_id: &str,
     requester_id: u64,
     justification: Option<String>,
@@ -62,7 +71,11 @@ fn admit_command(
     let operation_id = AdmissionOperationId::try_from(operation_id.to_owned())
         .map_err(|_| InvalidInput::OperationId)?;
     let mut command = Admit {
-        link_id,
+        domain_evidence: None,
+        link_id: capability.link_id,
+        secret_sha256: capability.secret_sha256,
+        secret_generation: capability.secret_generation,
+        scope_evidence: vec![],
         operation_id,
         requester_id,
         justification,
@@ -77,13 +90,11 @@ pub async fn page(
     state: &crate::AppState,
     tower: &tower_sessions::Session,
     session: &Session,
-    code: &str,
+    capability: &crate::session::PendingLink,
     operation: Option<&str>,
     fresh: bool,
 ) -> Response {
-    let Ok(link_id) = code.parse::<ghinvite_core::InvitationLinkId>() else {
-        return super::invitation_not_found_response(session);
-    };
+    let link_id = capability.link_id;
     let canonical = link_id.to_string();
     let code = canonical.as_str();
     let authority = &state.link_authority;
@@ -94,9 +105,25 @@ pub async fn page(
         Ok(id) => id,
         Err(_) => return safe_error(code, WebError::BadRequest("Invalid operation ID.".into())),
     };
-    let local = load_local(state, tower, session, code, operation).await;
+    let local = match load_local(state, tower, session, code, operation).await {
+        Ok(local) => local,
+        Err(error) => return safe_error(code, error),
+    };
+    let retained_capability =
+        local
+            .as_ref()
+            .filter(|_| operation.is_some())
+            .map(|input| crate::session::PendingLink {
+                link_id,
+                secret_sha256: input.secret_sha256,
+                secret_generation: input.secret_generation,
+            });
     let page = match authority
-        .requester_page(code, session.user_id, operation_id)
+        .requester_page(
+            retained_capability.as_ref().unwrap_or(capability),
+            session.user_id,
+            operation_id,
+        )
         .await
     {
         Ok(page) => page,
@@ -105,8 +132,16 @@ pub async fn page(
                 // The exact attempt may never have reached ingress. Recover
                 // current eligibility independently, without submitting it.
                 if matches!(error, AuthorityError::Missing)
-                    && let Ok(summary) = authority.requester_page(code, session.user_id, None).await
+                    && let Ok(summary) = authority
+                        .requester_page(capability, session.user_id, None)
+                        .await
                 {
+                    if fresh
+                        && summary.can_start_fresh
+                        && let Some(response) = super::domains::gate(state, session, &summary)
+                    {
+                        return response;
+                    }
                     let original = attempt_url(code, &String::from(local.operation_id.clone()));
                     let (id, justification, message, mode) = if fresh && summary.can_start_fresh {
                         let id = ghinvite_core::RequestId::new().to_string();
@@ -125,6 +160,7 @@ pub async fn page(
                         mode,
                         status: StatusCode::OK,
                         delivery: vec![],
+                        organization_delivery: None,
                     }
                     .render(session, code);
                 }
@@ -148,7 +184,11 @@ pub async fn page(
             // unresolved. A completed old browser record cannot hide a newer
             // request from another browser. Fresh navigation retains this path.
             let unresolved = match authority
-                .requester_page(code, session.user_id, Some(local.operation_id.clone()))
+                .requester_page(
+                    capability,
+                    session.user_id,
+                    Some(local.operation_id.clone()),
+                )
                 .await
             {
                 Ok(known) => known.attempt.as_ref().is_none_or(|a| a.receipt.is_none()),
@@ -156,6 +196,12 @@ pub async fn page(
                 Err(_) => false,
             };
             if unresolved {
+                if fresh
+                    && page.can_start_fresh
+                    && let Some(response) = super::domains::gate(state, session, &page)
+                {
+                    return response;
+                }
                 let original = attempt_url(code, &local_id);
                 let fresh_id = ghinvite_core::RequestId::new().to_string();
                 return View {
@@ -183,13 +229,94 @@ pub async fn page(
                     },
                     status: StatusCode::OK,
                     delivery: vec![],
+                    organization_delivery: None,
                 }
                 .render(session, code);
             }
         }
     }
-    if !page.can_start_fresh && page.attempt.is_none() && page.request.is_none() {
+    if page
+        .attempt
+        .as_ref()
+        .and_then(|attempt| attempt.receipt.as_ref())
+        .is_some_and(|receipt| {
+            matches!(
+                receipt.result,
+                AdmissionResult::Rejected {
+                    reason: Rejection::NotAvailable
+                }
+            )
+        })
+    {
         return super::invitation_not_found_response(session);
+    }
+    if !page.can_start_fresh && !page.paused && page.attempt.is_none() && page.request.is_none() {
+        return super::invitation_not_found_response(session);
+    }
+    // A generic visit may start anew after reauthentication. An explicit old
+    // operation still answers its immutable original domain refusal.
+    let domain_refusal = page
+        .attempt
+        .as_ref()
+        .and_then(|a| a.receipt.as_ref())
+        .is_some_and(|r| {
+            matches!(
+                r.result,
+                AdmissionResult::Rejected {
+                    reason: Rejection::DomainEvidenceMissing
+                        | Rejection::DomainEvidenceStale
+                        | Rejection::DomainMismatch { .. }
+                }
+            )
+        });
+    let fresh = fresh
+        || (operation.is_none()
+            && domain_refusal
+            && page.can_start_fresh
+            && state.config.signin_apps.is_some()
+            && session.domain_evidence.as_ref().is_some_and(|e| {
+                e.check(&page.email_domains, page.link_id, chrono::Utc::now())
+                    .is_ok()
+            }));
+    if !fresh && let Some(receipt) = page.attempt.as_ref().and_then(|a| a.receipt.as_ref()) {
+        match &receipt.result {
+            AdmissionResult::Rejected {
+                reason: Rejection::DomainEvidenceMissing | Rejection::DomainEvidenceStale,
+            } => {
+                return super::domains::prompt(
+                    session,
+                    &page.email_domains,
+                    false,
+                    state.config.signin_apps.is_none(),
+                );
+            }
+            AdmissionResult::Rejected {
+                reason: Rejection::DomainMismatch { required },
+            } => {
+                return super::domains::prompt(
+                    session,
+                    required,
+                    true,
+                    state.config.signin_apps.is_none(),
+                );
+            }
+            _ => {}
+        }
+    }
+    if page.request.as_ref().is_none_or(|r| {
+        !matches!(
+            r.state,
+            ghinvite_core::RequestState::Pending | ghinvite_core::RequestState::Approved
+        )
+    }) && (fresh
+        || page
+            .attempt
+            .as_ref()
+            .and_then(|a| a.receipt.as_ref())
+            .is_none())
+        && let Some(response) = super::domains::gate(state, session, &page)
+    {
+        return response;
     }
     let fresh = fresh && page.can_start_fresh;
     let original = page
@@ -215,14 +342,30 @@ pub async fn page(
             FRESH_ATTEMPT.into()
         } else if page.request.is_some() {
             "Your existing request is shown below.".into()
+        } else if page.paused {
+            "This link isn't accepting requests right now.".into()
+        } else if page.targets.organization.is_some() {
+            "Review the organization, team and repository targets and submit your request.".into()
         } else {
             "Review the repositories and submit your request.".into()
         }
     });
     let mut delivery = Vec::new();
+    let mut organization_delivery = None;
     if let Some(request) = &page.request
-        && request.state == ghinvite_core::RequestState::Approved
+        && matches!(
+            request.state,
+            ghinvite_core::RequestState::Approved | ghinvite_core::RequestState::Lapsed
+        )
     {
+        organization_delivery = crate::organization_delivery::load(
+            state,
+            &page.targets,
+            page.link_id,
+            request.request_id,
+            session.user_id,
+        )
+        .await;
         let progress = state
             .request_authority
             .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
@@ -237,27 +380,55 @@ pub async fn page(
             .list_delivery_for_request(request.request_id)
             .await
             .ok();
-        let invitations = state
-            .storage
-            .list_github_invitations_for_request(request.request_id)
-            .await
-            .ok();
-        for repo in &page.repos {
-            let current = state
-                .delivery_authority
-                .snapshot(request.request_id, repo.repo_id)
-                .await;
-            let unavailable = current.is_err();
-            let current = current.ok().flatten();
+        for target in &page.targets.repos {
+            let repo = &ghinvite_core::InvitationLinkRepo {
+                repo_id: target.repo_id,
+                repo_full_name: target.repo_full_name.clone(),
+            };
+            let generation = progress
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|p| p.repo_id == repo.repo_id)
+                .map(|p| p.delivery_generation)
+                .filter(|g| *g > 0);
+            let current = match generation {
+                Some(generation) => {
+                    state
+                        .delivery_authority
+                        .snapshot(request.request_id, repo.repo_id, generation)
+                        .await
+                }
+                None => Err(crate::link_authority::AuthorityError::Missing),
+            };
+            let matches_scope = |s: &ghinvite_core::delivery::DeliverySnapshot| {
+                s.create.command.request_id == request.request_id
+                    && s.create.command.link_id == Some(page.link_id)
+                    && s.create.command.account_id == request.account_id
+                    && s.create.command.requester_id == session.user_id
+                    && s.create.command.repo_id == repo.repo_id
+                    && s.create.command.permission == target.grant.into()
+                    && Some(s.create.command.delivery_generation) == generation
+            };
+            let current = current.ok().flatten().filter(matches_scope);
+            // Absence or a mismatched owner response is not a current
+            // observation, even when an exact-generation projection survives.
+            let unavailable = current.is_none();
+            let projected: Vec<_> = receipts
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .filter(|s| matches_scope(s))
+                .cloned()
+                .collect();
             let current = current
                 .as_ref()
                 .map(std::slice::from_ref)
-                .unwrap_or_else(|| receipts.as_deref().unwrap_or_default());
+                .unwrap_or(&projected);
             let row = ghinvite_ui::invitation::delivery_presentation(
                 repo,
                 current,
                 progress.as_deref().unwrap_or_default(),
-                invitations.as_deref().unwrap_or_default(),
                 unavailable || current.is_empty() || progress.is_none(),
             );
             delivery.push(row);
@@ -279,6 +450,7 @@ pub async fn page(
         mode,
         status: StatusCode::OK,
         delivery,
+        organization_delivery,
     }
     .render(session, code)
 }
@@ -287,14 +459,12 @@ pub async fn submit(
     state: &crate::AppState,
     tower: &tower_sessions::Session,
     session: &Session,
-    code: &str,
+    capability: &crate::session::PendingLink,
     operation: &str,
     justification: Option<String>,
 ) -> Response {
     let authority = &state.link_authority;
-    let Ok(link_id) = code.parse::<ghinvite_core::InvitationLinkId>() else {
-        return WebError::NotFound.into_response();
-    };
+    let link_id = capability.link_id;
     let canonical = link_id.to_string();
     let code = canonical.as_str();
     // Validate identity and normalize input before any network call.
@@ -302,15 +472,32 @@ pub async fn submit(
         justification.as_deref().unwrap_or_default(),
     )
     .is_some();
-    let command = match admit_command(link_id, operation, session.user_id, justification.clone()) {
+    let local = match load_local(state, tower, session, code, Some(operation)).await {
+        Ok(local) => local,
+        Err(error) => return safe_error(code, error),
+    };
+    let retained_capability = local.as_ref().map(|input| crate::session::PendingLink {
+        link_id,
+        secret_sha256: input.secret_sha256,
+        secret_generation: input.secret_generation,
+    });
+    let mut command = match admit_command(
+        retained_capability.as_ref().unwrap_or(capability),
+        operation,
+        session.user_id,
+        justification.clone(),
+    ) {
         Ok(command) => command,
         Err(InvalidInput::Justification) if invalid_justification => {
-            let page = match authority.requester_page(code, session.user_id, None).await {
+            let page = match authority
+                .requester_page(capability, session.user_id, None)
+                .await
+            {
                 Ok(page) => page,
                 Err(error) => return page_error(session, code, error),
             };
             if !page.can_start_fresh {
-                return self::page(state, tower, session, code, None, false).await;
+                return self::page(state, tower, session, capability, None, false).await;
             }
             return View {
                 id: operation,
@@ -321,17 +508,51 @@ pub async fn submit(
                 mode: FormMode::Validation,
                 status: StatusCode::BAD_REQUEST,
                 delivery: vec![],
+                organization_delivery: None,
             }
             .render(session, code);
         }
         Err(invalid) => return safe_error(code, invalid.into()),
     };
+    if let Some(input) = local.as_ref() {
+        command.scope_evidence.clone_from(&input.scope_evidence);
+        command.domain_evidence.clone_from(&input.domain_evidence);
+    } else if state.config.signin_apps.is_some() {
+        let page = match authority
+            .requester_page(capability, session.user_id, None)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => return page_error(session, code, error),
+        };
+        if !page.email_domains.is_empty() {
+            // Exact existing attempts retain their original evidence, including stale evidence.
+            let original = match authority
+                .requester_page(
+                    capability,
+                    session.user_id,
+                    Some(command.operation_id.clone()),
+                )
+                .await
+            {
+                Ok(page) => page.attempt,
+                Err(AuthorityError::Missing) => None,
+                Err(error) => return page_error(session, code, error),
+            };
+            if let Some(original) = original {
+                command.domain_evidence = original.input.domain_evidence;
+            } else {
+                if let Some(response) = super::domains::gate(state, session, &page) {
+                    return response;
+                }
+                command.domain_evidence.clone_from(&session.domain_evidence);
+            }
+        }
+    }
     // Retain the input before ingress: if the request never reaches the
     // authority, this is all that recovers the attempt.
-    let input = AttemptInput {
-        operation_id: command.operation_id.clone(),
-        justification,
-    };
+    let mut input = AttemptInput::from(&command);
+    input.justification = justification;
     let id = String::from(input.operation_id.clone());
     let retained = async {
         AttemptContinuations::new(state)
@@ -342,12 +563,20 @@ pub async fn submit(
         Ok(Retention::Retained) => {}
         Ok(Retention::Conflict(original)) => {
             let canonical = admit_command(
-                link_id,
+                &crate::session::PendingLink {
+                    link_id,
+                    secret_sha256: original.secret_sha256,
+                    secret_generation: original.secret_generation,
+                },
                 &id,
                 session.user_id,
                 original.justification.clone(),
             );
-            if !canonical.is_ok_and(|original| original == command) {
+            if !canonical.is_ok_and(|mut recovered| {
+                recovered.scope_evidence = original.scope_evidence;
+                recovered.domain_evidence = original.domain_evidence;
+                recovered == command
+            }) {
                 return conflict(session, code, &input);
             }
         }
@@ -369,6 +598,15 @@ pub async fn submit(
                 let id = String::from(command.operation_id.clone());
                 Redirect::to(&attempt_url(code, &id)).into_response()
             }
+            AdmissionResult::Rejected {
+                reason: Rejection::NotAvailable,
+            } => super::invitation_not_found_response(session),
+            AdmissionResult::Rejected {
+                reason: Rejection::DomainEvidenceMissing | Rejection::DomainEvidenceStale,
+            } => super::domains::prompt(session, &[], false, state.config.signin_apps.is_none()),
+            AdmissionResult::Rejected {
+                reason: Rejection::DomainMismatch { ref required },
+            } => super::domains::prompt(session, required, true, false),
             AdmissionResult::Rejected { .. } => render_attempt(
                 session,
                 code,
@@ -386,6 +624,9 @@ pub async fn submit(
 /// Render what the authority's answer means for this attempt.
 fn failed(session: &Session, code: &str, command: &Admit, error: AuthorityError) -> Response {
     match error {
+        AuthorityError::AuthorizationUnavailable => {
+            crate::WebError::ConsoleAuthority.into_response()
+        }
         AuthorityError::Invalid | AuthorityError::Missing => safe_error(code, error.into()),
         AuthorityError::Conflict => conflict(session, code, &command.into()),
         AuthorityError::Unknown(_) => unknown(session, code, &command.into()),
@@ -436,6 +677,7 @@ fn render_attempt(
         mode,
         status,
         delivery: vec![],
+        organization_delivery: None,
     }
     .render(session, code)
 }
@@ -452,15 +694,28 @@ async fn load_local(
     session: &Session,
     code: &str,
     operation: Option<&str>,
-) -> Option<AttemptInput> {
-    let scope = scope(tower, session, code).ok()?;
+) -> crate::Result<Option<AttemptInput>> {
+    let Ok(scope) = scope(tower, session, code) else {
+        return Ok(None);
+    };
     let continuations = AttemptContinuations::new(state);
-    match operation {
+    let result = match operation {
         Some(id) => {
-            let id = String::from(AdmissionOperationId::try_from(id.to_owned()).ok()?);
-            continuations.load(&scope, &id).await.ok()?
+            let Ok(id) = AdmissionOperationId::try_from(id.to_owned()) else {
+                return Ok(None);
+            };
+            continuations.load(&scope, &String::from(id)).await
         }
-        None => continuations.latest(&scope).await.ok()?,
+        None => continuations.latest(&scope).await,
+    };
+    match result {
+        // Crypto failures must never turn a retained attempt into fresh input.
+        Err(
+            error @ (WebError::KeyringRetry | WebError::KeyringConfig | WebError::Unauthenticated),
+        ) => Err(error),
+        // Preserve the existing authoritative recovery path on storage failure.
+        Err(_) => Ok(None),
+        Ok(local) => Ok(local),
     }
 }
 
@@ -475,12 +730,15 @@ enum FormMode {
 /// Render a failure that interrupted the invitation request flow, sending the
 /// visitor back to the invitation link they were working through rather than
 /// to a generic page.
-pub(crate) fn safe_error(code: &str, error: WebError) -> Response {
-    error.into_response_with_recovery(format!("/i/{code}"), "Back to the invitation link")
+pub(crate) fn safe_error(_code: &str, error: WebError) -> Response {
+    error.into_response_with_recovery("/join", "Back to the invitation link")
 }
 
 fn page_error(session: &Session, code: &str, error: AuthorityError) -> Response {
     match error {
+        AuthorityError::AuthorizationUnavailable => {
+            crate::WebError::ConsoleAuthority.into_response()
+        }
         AuthorityError::Missing => super::invitation_not_found_response(session),
         error => safe_error(code, error.into()),
     }
@@ -502,10 +760,22 @@ fn receipt_copy(receipt: &AdmissionReceipt) -> String {
         AdmissionResult::Rejected { reason } => format!(
             "Request not accepted: {}. This attempt's result is final.",
             match reason {
-                Rejection::Revoked => "the invitation link was revoked",
-                Rejection::Expired => "the invitation link expired",
-                Rejection::Exhausted => "the invitation link has reached its max use",
+                Rejection::DomainEvidenceMissing | Rejection::DomainEvidenceStale =>
+                    "confirm your email domain with a fresh sign-in before starting a new attempt",
+                Rejection::DomainMismatch { .. } =>
+                    "your verified email domain does not match this link",
+                Rejection::Paused =>
+                    "this invitation link is paused; try again after the admin resumes it",
+                Rejection::NotAvailable => "the invitation is not available",
+                Rejection::ScopeUnavailable => "the requested access is currently unavailable",
                 Rejection::ExistingRequest => "you already have a pending or approved request",
+                Rejection::AlreadyPending => "you already have a request awaiting review",
+                Rejection::AlreadyApproved => "your existing request is already approved",
+                Rejection::RerequestLimited { retry_after } =>
+                    return format!(
+                        "You can request again after {}. This attempt’s result is final; a later request must use a new attempt.",
+                        retry_after.to_rfc3339()
+                    ),
                 Rejection::InstallationUnavailable => "the GitHub installation is unavailable",
                 Rejection::RepositoryUnavailable =>
                     "one or more repositories in this invitation link are unavailable",
@@ -524,17 +794,26 @@ struct View<'a> {
     mode: FormMode,
     status: StatusCode,
     delivery: Vec<ghinvite_ui::invitation::DeliveryPresentation>,
+    organization_delivery: Option<ghinvite_ui::organization_delivery::OrganizationDeliveryView>,
 }
 
 impl View<'_> {
-    fn render(self, session: &Session, code: &str) -> Response {
-        let code = code.to_owned();
+    fn render(self, session: &Session, _code: &str) -> Response {
         let id = self.id.to_owned();
         let justification = self.justification.unwrap_or_default().to_owned();
         let page = self.page.cloned();
         let message = self.message.to_owned();
         let original = self.original.map(str::to_owned);
         let (mode, status, delivery) = (self.mode, self.status, self.delivery);
+        let organization_delivery = self.organization_delivery;
+        let has_organization = page
+            .as_ref()
+            .is_some_and(|p| p.targets.organization.is_some());
+        let title = if has_organization {
+            "Request access"
+        } else {
+            "Request repository access"
+        };
         let login = session.login.clone();
         let refresh_seconds = page
             .as_ref()
@@ -544,24 +823,51 @@ impl View<'_> {
         let html = crate::render::render_with_csrf(session.csrf_token.clone(), move || {
             rsx! {
                 ghinvite_ui::layouts::InvitationLayout {
-                    signed_in_login: Some(login.clone()), title: "Request repository access · ghinvite".to_owned(),
+                    signed_in_login: Some(login.clone()), title: format!("{title} · ghinvite"),
                     account_login: None, active_nav: None, flash: None,
                     refresh_seconds,
                     div { class: "space-y-5",
-                    h1 { class: "text-2xl font-semibold tracking-tight", "Request repository access" }
+                    h1 { class: "text-2xl font-semibold tracking-tight", "{title}" }
                     ghinvite_ui::invitation::IdentityConfirmation {
                         login: login.clone(),
-                        return_to: format!("/i/{code}"),
+                        return_to: "/join".to_owned(),
                     }
                     if let Some(page) = &page {
                         ghinvite_ui::invitation::AccessSummary {
-                            permission: page.permission, repos: page.repos.clone(), approval_required: page.approval_required,
+                            targets: page.targets.clone(), approval_required: page.approval_required || page.request.as_ref().is_some_and(|r| r.state == ghinvite_core::RequestState::Pending),
+                        }
+                        if page.targets.organization.is_some() && page.two_factor_required == Some(true) {
+                            p { class: "alert alert-info", role: "note", "This organization requires two-factor authentication; you'll need it to accept." }
                         }
                     }
                     p { class: "alert alert-info", role: "status", "{message}" }
                     if let Some(page) = &page {
+                        if page.paused && (page.request.is_some() || page.attempt.is_some()) {
+                            p { class: "alert alert-warning", role: "status", "This link isn't accepting requests right now. Existing requests continue." }
+                        }
                         if let Some(request) = &page.request {
                             p { "Current request status: {request.state}" }
+                            if request.state == ghinvite_core::RequestState::Declined {
+                                if let Some(message) = request.decision.as_ref().and_then(|d|d.requester_message.as_ref()) {
+                                    p { class: "whitespace-pre-wrap", "Message from the reviewer: {message}" }
+                                }
+                            }
+                            if request.state == ghinvite_core::RequestState::Cancelled {
+                                p { role: "status", "Your request was cancelled because this invitation link was revoked." }
+                            }
+                            if request.state == ghinvite_core::RequestState::Lapsed {
+                                h2 { class: "text-xl font-semibold", "Invitation lapsed" }
+                                p { "Your invitation expired before it was accepted. The original approval and recorded delivery history remain below." }
+                                p { "A new request consumes another use and must satisfy this link’s current rules. Re-requests are limited to one per seven days; a short invitation lifetime requires another admin review." }
+                                if let Some(retry_after) = page.rerequest_after {
+                                    p { role: "status", "You can request again after {retry_after.to_rfc3339()}. The link must still accept requests then." }
+                                }
+                                if page.can_start_fresh && mode != FormMode::Fresh {
+                                    a { class: "btn btn-primary", href: "/join?fresh=true", "Request again" }
+                                } else if !page.can_start_fresh && page.rerequest_after.is_none() {
+                                    p { "This link is not accepting another request right now." }
+                                }
+                            }
                             if request.state == ghinvite_core::RequestState::Pending {
                                 h2 { class: "text-xl font-semibold", "Awaiting review" }
                                 p { class: "text-sm leading-6 text-base-content/70", "The account admins have your request. This page checks for updates every 20 seconds." }
@@ -570,13 +876,25 @@ impl View<'_> {
                                 div { class: "alert alert-success",
                                     div {
                                         h2 { class: "text-xl font-semibold", "Approved" }
-                                        p { "Your request is approved. Repository delivery is tracked separately below. Check again for updates; accepting access happens on GitHub." }
+                                        p { if has_organization { "Your request is approved. Organization, team and repository delivery are tracked separately below. Check again for updates; accepting access happens on GitHub." } else { "Your request is approved. Repository delivery is tracked separately below. Check again for updates; accepting access happens on GitHub." } }
                                     }
                                 }
                             }
-                            p { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." }
+                            p { if has_organization { "Approval does not guarantee delivery. Organization or team eligibility and unavailable repositories may block delivery; your request keeps its original targets and decision deadline." } else { "Approval does not guarantee delivery. Unavailable repositories may block delivery; your request keeps its original scope and decision deadline." } }
                             if original.is_none() {
-                                a { class: "btn btn-outline", href: "/i/{code}", "Check again" }
+                                a { class: "btn btn-outline", href: "/join", "Check again" }
+                            }
+                            a { class:"link",href:format!("/requests/{}",request.request_id),"View request status and refresh delivery" }
+                        }
+                    }
+                    if let Some(view) = &organization_delivery {
+                        ghinvite_ui::organization_delivery::OrganizationDelivery { view: view.clone() }
+                        if let Some(request) = page.as_ref().and_then(|p|p.request.as_ref()).filter(|r|r.state == ghinvite_core::RequestState::Approved) {
+                            form { method:"post", action:"/join/organization/refresh", "data-organization-refresh":"",
+                                ghinvite_ui::csrf::CsrfField {}
+                                input {r#type:"hidden",name:"request_id",value:request.request_id.to_string()}
+                                button {r#type:"submit",class:"btn btn-outline","Refresh organization delivery"}
+                                p {role:"status","aria-live":"polite","data-refresh-status":""}
                             }
                         }
                     }
@@ -588,16 +906,16 @@ impl View<'_> {
                         }
                     }
                     if mode != FormMode::Closed {
-                        form { method: "post", action: "/i/{code}?operation_id={id}", class: "space-y-4",
+                        form { method: "post", action: "/join?operation_id={id}", class: "space-y-4",
                             ghinvite_ui::csrf::CsrfField {}
                             input { r#type: "hidden", name: "operation_id", value: "{id}" }
                             ghinvite_ui::invitation::JustificationField {
                                 value: justification.clone(), readonly: mode == FormMode::Retry,
-                                max_bytes: Some(ghinvite_core::admission::MAX_JUSTIFICATION_BYTES),
+                                max_chars: Some(ghinvite_core::admission::MAX_JUSTIFICATION_CHARS),
                                 error: if mode == FormMode::Validation { ghinvite_ui::request_form::justification_error(&justification) } else { None },
                             }
                             div { class: "card-actions justify-end",
-                                button { r#type: "submit", class: "btn btn-primary", if mode == FormMode::Retry { "Retry same attempt" } else { "Submit request" } }
+                                button { r#type: "submit", class: "btn btn-primary", if mode == FormMode::Retry { "Retry same attempt" } else if page.as_ref().and_then(|p|p.request.as_ref()).is_some_and(|r|r.state == ghinvite_core::RequestState::Lapsed) { "Request again" } else { "Submit request" } }
                             }
                         }
                     }
@@ -609,7 +927,7 @@ impl View<'_> {
                             }
                         }
                     }
-                    p { class: "text-sm leading-6 text-base-content/70", "Keep the attempt URL to recover it after signing in again. Opening this invitation link also recovers your latest attempt." }
+                    p { class: "text-sm leading-6 text-base-content/70", "Keep the invitation URL. Open it again to recover your latest request after signing in." }
                     }
                 }
             }

@@ -40,3 +40,15 @@ is.
 `GithubInvitation` Restate object's registration surface: its handler names and
 input types are a wire contract with Restate and webhook callers. Do not fold
 it into settlement.
+
+## P1 typed-client cleanup (2026-10-17)
+
+The separate prerequisite semantics above remain. The historical
+`repository_access` helper and parallel test-only delivery attempt have been
+removed: they were the last application callers of the toolkit's legacy
+`InstallationClient`. Production workflow state and both deployment roots now
+construct only `RepositoryGithub` (typed broker and App JWT environment).
+Numeric identity, read failures, pagination and guarded-write assertions run
+against the production repository protocol; the existing retained runtime
+suites continue to cover installation selection and observation/recovery.
+This removes a dead dependency, not a wire-handler rename or an OAuth cutover.

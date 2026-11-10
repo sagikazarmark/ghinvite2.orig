@@ -18,6 +18,18 @@ pub struct ProjectionEnvelope {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct RequestProjectionEnvelope {
+    /// Original retained approval, atomically replayed before Lapsed projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovedRequestProjection>,
+    pub request: RequestSnapshot,
+    pub events: Vec<AuditIntent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ApprovedRequestProjection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reissue: Option<Box<crate::reissue_projection::RequestReissueProjection>>,
     pub request: RequestSnapshot,
     pub events: Vec<AuditIntent>,
 }
@@ -38,11 +50,21 @@ pub struct AuditIntent {
 /// invariant errors need repair and redrive with the original envelope.
 #[async_trait::async_trait]
 pub trait ProjectionStorage: Send + Sync + 'static {
+    async fn apply_reissue(
+        &self,
+        envelope: &crate::reissue_projection::RequestReissueProjection,
+    ) -> super::Result<()>;
+    async fn apply_revocation(
+        &self,
+        envelope: &crate::revocation::RevocationProjection,
+    ) -> super::Result<()>;
     async fn apply_transition(&self, envelope: &ProjectionEnvelope) -> super::Result<()>;
     async fn apply_request(&self, envelope: &RequestProjectionEnvelope) -> super::Result<()>;
 }
 
+pub mod reissue_sql;
 pub mod request_sql;
+pub mod revocation_sql;
 pub mod sql;
 
 /// Test seeding through the projector.

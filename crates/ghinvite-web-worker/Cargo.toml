@@ -10,21 +10,31 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [features]
-runtime-tests = []
+runtime-tests = ["ghinvite-web/runtime-tests"]
+link-secret-fixture = ["runtime-tests", "ghinvite-web/link-secret-fixture"]
 
 # This crate is the Cloudflare Workers entry point for the web binary. The
 # whole crate exists only on wasm32 — `worker`, `console_error_panic_hook`,
 # `tracing-wasm`, and the wasm32-only D1 backing in `ghinvite-storage-d1` are gated to
 # wasm32. On native (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+anykms-keyring = { workspace = true, features = ["js"] }
+tracing.workspace = true
+getrandom = { version = "0.4", features = ["wasm_js"] }
 async-trait.workspace = true
 chrono.workspace = true
 # Mirror `crates/ghinvite-web/Cargo.toml`: axum without the `tokio` feature so we don't
 # pull in mio/tokio-net on wasm32.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 ghinvite-github.workspace = true
+octoauth.workspace = true
+futures-util = "0.3"
 serde_json.workspace = true
+serde.workspace = true
+zeroize = "1"
 ghinvite-core.workspace = true
+ghinvite-email-vault.workspace = true
+ghinvite-config.workspace = true
 ghinvite-storage-d1.workspace = true
 tower.workspace = true
 tower-sessions.workspace = true

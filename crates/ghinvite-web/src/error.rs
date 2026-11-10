@@ -90,25 +90,23 @@ impl IngressFailure {
 /// GitHub's `error` parameter arrives on a redirect the browser controls, so
 /// it is attacker-supplied text until it has been through here. The field is
 /// private: [`OAuthErrorCode::new`] is the only way in.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OAuthErrorCode(String);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OAuthErrorCode(octologin::OAuthErrorCode);
 
 impl OAuthErrorCode {
+    /// A documented code, or `unrecognized` for anything else.
     pub fn new(raw: &str) -> Self {
-        Self(ghinvite_github::bounded_upstream_code(
-            raw,
-            ghinvite_github::OAUTH_ERROR_CODES,
-        ))
+        Self(octologin::OAuthErrorCode::from_github(raw))
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.code()
     }
 }
 
 impl std::fmt::Display for OAuthErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(self.as_str())
     }
 }
 
@@ -162,16 +160,21 @@ impl OAuthFailure {
 
 #[derive(Debug, Error)]
 pub enum WebError {
+    #[error("Console access could not be verified")]
+    ConsoleAuthority,
     #[error("operation conflict")]
     Conflict,
     #[error("storage error: {0}")]
     Storage(#[from] ghinvite_core::storage::Error),
 
-    #[error("github api error: {0}")]
-    Github(#[from] ghinvite_github::Error),
-
     #[error("session error: {0}")]
     Session(String),
+
+    #[error("keyring rollout in progress; try again")]
+    KeyringRetry,
+
+    #[error("keyring configuration failure")]
+    KeyringConfig,
 
     #[error("oauth error: {0}")]
     OAuth(OAuthFailure),
@@ -212,9 +215,11 @@ impl WebError {
     pub fn kind(&self) -> &'static str {
         match self {
             WebError::Conflict => "conflict",
+            WebError::ConsoleAuthority => "console_authority",
             WebError::Storage(_) => "storage",
-            WebError::Github(_) => "github",
             WebError::Session(_) => "session",
+            WebError::KeyringRetry => "keyring_retry",
+            WebError::KeyringConfig => "keyring_config",
             WebError::OAuth(_) => "oauth",
             WebError::Restate(_) => "ingress",
             WebError::NotFound => "not_found",
@@ -229,7 +234,6 @@ impl WebError {
     /// it is a number, not a body.
     pub fn upstream_status(&self) -> Option<u16> {
         match self {
-            WebError::Github(error) => error.status(),
             WebError::Restate(failure) => failure.upstream_status(),
             _ => None,
         }
@@ -344,40 +348,6 @@ fn oauth_problem(failure: &OAuthFailure) -> Problem {
     }
 }
 
-fn github_problem(error: &ghinvite_github::Error) -> Problem {
-    let (status, heading, message) = match error {
-        // Every throttled response arrives here, a 429 and a rate-limited 403
-        // alike: GitHub declined to answer, so the read is unavailable rather
-        // than refused.
-        ghinvite_github::Error::RateLimited { .. } => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub is limiting requests",
-            "GitHub is limiting requests. Wait a moment, then try again.",
-        ),
-        ghinvite_github::Error::Status { status: 504, .. } => (
-            StatusCode::GATEWAY_TIMEOUT,
-            "GitHub did not respond in time",
-            "GitHub did not respond in time. Please try again.",
-        ),
-        // Transport errors do not carry a typed timeout distinction;
-        // DNS/TLS failures must not be reported as known timeouts.
-        _ => (
-            StatusCode::BAD_GATEWAY,
-            "GitHub access could not be verified",
-            "GitHub access could not be verified. Please try again.",
-        ),
-    };
-    Problem {
-        status,
-        eyebrow: "GitHub",
-        heading,
-        message,
-        primary_href: "/".into(),
-        primary_label: "Go home",
-        secondary: None,
-    }
-}
-
 /// The failure page for errors that get one, or `None` for the variants with
 /// their own response shape (404, the login redirect, a form's own message).
 fn problem_for(error: &WebError) -> Option<Problem> {
@@ -393,7 +363,24 @@ fn problem_for(error: &WebError) -> Option<Problem> {
         },
         WebError::OAuth(failure) => oauth_problem(failure),
         WebError::Restate(failure) => ingress_problem(failure),
-        WebError::Github(error) => github_problem(error),
+        WebError::ConsoleAuthority => Problem {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            eyebrow: "Access",
+            heading: "Checking access",
+            message: "GitHub access could not be checked. Try again in a minute.",
+            primary_href: "/console".into(),
+            primary_label: "Try again",
+            secondary: None,
+        },
+        WebError::KeyringRetry => Problem {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            eyebrow: "Session",
+            heading: "Please try again",
+            message: "This server is updating. Please try again in a moment; your session is preserved.",
+            primary_href: "/".into(),
+            primary_label: "Go home",
+            secondary: None,
+        },
         WebError::Session(_) => Problem {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             eyebrow: "Session",
@@ -403,7 +390,7 @@ fn problem_for(error: &WebError) -> Option<Problem> {
             primary_label: "Go home",
             secondary: None,
         },
-        WebError::Storage(_) | WebError::Internal(_) => Problem {
+        WebError::KeyringConfig | WebError::Storage(_) | WebError::Internal(_) => Problem {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             eyebrow: "Error",
             heading: "Something went wrong",
@@ -433,11 +420,6 @@ impl WebError {
                 ingress_failure = %failure,
                 upstream_status = ?self.upstream_status(),
                 "restate ingress call failed"
-            ),
-            WebError::Github(error) => tracing::warn!(
-                upstream_status = ?error.status(),
-                kind = error.kind(),
-                "GitHub read failed"
             ),
             WebError::Storage(_) | WebError::Internal(_) => {
                 // Neither variant can reach a GitHub or ingress response body.
@@ -624,12 +606,35 @@ mod tests {
         );
         assert_eq!(
             OAuthErrorCode::new("<script>alert(1)</script>").as_str(),
-            ghinvite_github::UNRECOGNIZED
+            "unrecognized"
         );
         assert_eq!(
             OAuthFailure::from_callback("access_denied"),
             OAuthFailure::Declined
         );
+    }
+
+    #[test]
+    fn oauth_error_codes_are_githubs_documented_set() {
+        for documented in [
+            "access_denied",
+            "application_suspended",
+            "bad_verification_code",
+            "incorrect_client_credentials",
+            "redirect_uri_mismatch",
+            "unsupported_response_type",
+            "unverified_user_email",
+        ] {
+            assert_eq!(OAuthErrorCode::new(documented).as_str(), documented);
+        }
+        for raw in [
+            "",
+            "ACCESS_DENIED",
+            "access_denied ",
+            "temporarily_unavailable",
+        ] {
+            assert_eq!(OAuthErrorCode::new(raw).as_str(), "unrecognized", "{raw:?}");
+        }
     }
 
     /// Routes that know where the visitor was send them back there instead of
@@ -679,46 +684,6 @@ mod tests {
             WebError::Restate(IngressFailure::Rejected { status: 503 }).upstream_status(),
             Some(503)
         );
-        assert_eq!(
-            WebError::Github(ghinvite_github::Error::Status {
-                status: 429,
-                body: "secret".into(),
-            })
-            .upstream_status(),
-            Some(429)
-        );
         assert_eq!(WebError::Conflict.upstream_status(), None);
-    }
-
-    #[tokio::test]
-    async fn throttled_github_reads_are_unavailable_and_denied_ones_are_not() {
-        // The status alone no longer decides: a 403 that carried a limit is as
-        // unavailable as a 429, and one that carried none is still a refusal.
-        for (headers, message, expected) in [
-            (
-                vec![("retry-after", "60")],
-                "You have exceeded a secondary rate limit",
-                StatusCode::SERVICE_UNAVAILABLE,
-            ),
-            (
-                vec![],
-                "Resource not accessible by integration",
-                StatusCode::BAD_GATEWAY,
-            ),
-        ] {
-            let error = ghinvite_github::Response {
-                status: 403,
-                headers: headers
-                    .into_iter()
-                    .map(|(k, v)| (k.to_owned(), v.to_owned()))
-                    .collect(),
-                body: serde_json::json!({ "message": message }).to_string().into(),
-            }
-            .status_error();
-            let resp = WebError::Github(error).into_response();
-            assert_eq!(resp.status(), expected, "for {message:?}");
-            // Neither discloses the upstream diagnostic.
-            assert!(!body_text(resp).await.contains(message));
-        }
     }
 }

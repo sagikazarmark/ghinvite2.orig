@@ -1,0 +1,1403 @@
+{
+ "schema": 1,
+ "scope": "Executable synthetic HTTP pairs for every declared Endpoint of ghinvite-github; trimmed from gh-toolkit's contract/http-fixtures.json (GM-01). Native test-stub fixture only. No live-provider claim.",
+ "endpoints": [
+  {
+   "endpoint": "CancelOrgInvitation",
+   "feature": null,
+   "method": "DELETE",
+   "path": "/orgs/{}/invitations/{}",
+   "segments": [
+    "acme",
+    "42"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#cancel-an-organization-invitation; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/invitations/42",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/invitations/42",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "CollaboratorPermission",
+   "feature": null,
+   "method": "GET",
+   "path": "/repos/{}/{}/collaborators/{}/permission",
+   "segments": [
+    "acme",
+    "api",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "user": {
+       "id": 8,
+       "login": "alice"
+      },
+      "role_name": "write",
+      "permission": "write"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/collaborators#get-repository-permissions-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/collaborators/alice/permission",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api/collaborators/alice/permission",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "CreateOrgInvitation",
+   "feature": null,
+   "method": "POST",
+   "path": "/orgs/{}/invitations",
+   "segments": [
+    "acme"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": {
+    "invitee_id": 8,
+    "role": "direct_member",
+    "team_ids": [
+     20
+    ]
+   },
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 201,
+     "body": {
+      "id": 42,
+      "invitee_id": 8,
+      "role": "direct_member",
+      "created_at": "2026-01-01T00:00:00Z",
+      "inviter": {
+       "id": 7,
+       "login": "creator"
+      },
+      "team_count": 1
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#create-an-organization-invitation; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/invitations",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28",
+    "content-type": "application/json"
+   },
+   "helper_target": "/orgs/acme/invitations",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "{\"invitee_id\":8,\"role\":\"direct_member\",\"team_ids\":[20]}",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "DeleteRepoInvitation",
+   "feature": null,
+   "method": "DELETE",
+   "path": "/repos/{}/{}/invitations/{}",
+   "segments": [
+    "acme",
+    "api",
+    "42"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/invitations#delete-a-repository-invitation; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/invitations/42",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api/invitations/42",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetInstallation",
+   "feature": null,
+   "method": "GET",
+   "path": "/app/installations/{}",
+   "segments": [
+    "77"
+   ],
+   "credentials": [
+    "AppJwt"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 77,
+      "account": {
+       "id": 100,
+       "login": "acme",
+       "two_factor_requirement_enabled": false
+      },
+      "app_id": 123,
+      "permissions": {
+       "metadata": "read"
+      },
+      "suspended_at": null,
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "repository_selection": "all"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/apps/apps#get-an-installation-for-the-authenticated-app; specs/components/L2-github-app-toolkit.md §6.6/BR-19; research/github-app-tokens.md Q1/Q2",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/app/installations/77",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/app/installations/77",
+   "authorization": {
+    "AppJwt": "Bearer JWT_WIRE_MATRIX_PRIVATE"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetOrg",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}",
+   "segments": [
+    "acme"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 100,
+      "login": "acme",
+      "two_factor_requirement_enabled": false,
+      "created_at": "2026-01-01T00:00:00Z"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/orgs#get-an-organization; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetOrgMembership",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/memberships/{}",
+   "segments": [
+    "acme",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "state": "active",
+      "role": "member",
+      "user": {
+       "id": 8,
+       "login": "alice"
+      },
+      "organization": {
+       "id": 100,
+       "login": "acme",
+       "two_factor_requirement_enabled": false
+      }
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#get-organization-membership-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/memberships/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/memberships/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetRepository",
+   "feature": null,
+   "method": "GET",
+   "path": "/repos/{}/{}",
+   "segments": [
+    "acme",
+    "api"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 10,
+      "full_name": "acme/api",
+      "private": true,
+      "owner": {
+       "id": 100,
+       "login": "acme"
+      }
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/repos/repos#get-a-repository; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetTeam",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/teams/{}",
+   "segments": [
+    "acme",
+    "developers"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 20,
+      "slug": "developers",
+      "name": "Developers",
+      "permission": "push"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/teams/teams#get-a-team-by-name; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/teams/developers",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/teams/developers",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetTeamMembership",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "segments": [
+    "acme",
+    "developers",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "state": "active",
+      "role": "member"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/teams/members#get-team-membership-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/teams/developers/memberships/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/teams/developers/memberships/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetUserById",
+   "feature": null,
+   "method": "GET",
+   "path": "/user/{}",
+   "segments": [
+    "8"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 8,
+      "login": "alice"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/users/users#get-a-user-using-their-id; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/user/8",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/user/8",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "GetUserByLogin",
+   "feature": null,
+   "method": "GET",
+   "path": "/users/{}",
+   "segments": [
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 8,
+      "login": "alice"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/users/users#get-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/users/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/users/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListCollaborators",
+   "feature": null,
+   "method": "GET",
+   "path": "/repos/{}/{}/collaborators",
+   "segments": [
+    "acme",
+    "api"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 8,
+       "login": "alice",
+       "role_name": "write",
+       "permissions": {
+        "push": true
+       }
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/collaborators#list-repository-collaborators; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/collaborators",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api/collaborators?affiliation=direct&per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListFailedOrgInvitations",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/failed_invitations",
+   "segments": [
+    "acme"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 42,
+       "login": "alice",
+       "role": "direct_member",
+       "failed_reason": "fixture-only",
+       "inviter": {
+        "id": 7,
+        "login": "creator"
+       },
+       "team_count": 1,
+       "created_at": "2026-01-01T00:00:00Z"
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#list-failed-organization-invitations; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/failed_invitations",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/failed_invitations?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListInstallationRepos",
+   "feature": null,
+   "method": "GET",
+   "path": "/installation/repositories",
+   "segments": [],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "total_count": 1,
+      "repositories": [
+       {
+        "id": 10,
+        "full_name": "acme/api",
+        "private": true,
+        "owner": {
+         "id": 100,
+         "login": "acme"
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/apps/installations#list-repositories-accessible-to-the-app-installation; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/installation/repositories",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/installation/repositories?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListInstallationRequests",
+   "feature": null,
+   "method": "GET",
+   "path": "/app/installation-requests",
+   "segments": [],
+   "credentials": [
+    "AppJwt"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 77,
+       "account": {
+        "id": 100,
+        "login": "acme",
+        "two_factor_requirement_enabled": false
+       },
+       "requester": {
+        "id": 8,
+        "login": "alice"
+       },
+       "created_at": "2026-01-01T00:00:00Z"
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/apps/apps#list-installation-requests-for-the-authenticated-app; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/app/installation-requests",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/app/installation-requests?per_page=100",
+   "authorization": {
+    "AppJwt": "Bearer JWT_WIRE_MATRIX_PRIVATE"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListOrgInvitationTeams",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/invitations/{}/teams",
+   "segments": [
+    "acme",
+    "42"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 20,
+       "slug": "developers",
+       "name": "Developers",
+       "permission": "push"
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#list-organization-invitation-teams; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/invitations/42/teams",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/invitations/42/teams?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListOrgInvitations",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/invitations",
+   "segments": [
+    "acme"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 42,
+       "login": "alice",
+       "role": "direct_member",
+       "created_at": "2026-01-01T00:00:00Z",
+       "inviter": {
+        "id": 7,
+        "login": "creator"
+       },
+       "team_count": 1
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#list-pending-organization-invitations; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/invitations",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/invitations?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListOrgTeams",
+   "feature": null,
+   "method": "GET",
+   "path": "/orgs/{}/teams",
+   "segments": [
+    "acme"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 20,
+       "slug": "developers",
+       "name": "Developers",
+       "permission": "push"
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/teams/teams#list-teams; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/teams",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/teams?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "ListRepoInvitations",
+   "feature": null,
+   "method": "GET",
+   "path": "/repos/{}/{}/invitations",
+   "segments": [
+    "acme",
+    "api"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": [
+      {
+       "id": 42,
+       "invitee": {
+        "id": 8,
+        "login": "alice"
+       },
+       "permissions": "read",
+       "created_at": "2026-01-01T00:00:00Z",
+       "expired": false
+      }
+     ]
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/invitations#list-repository-invitations; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/invitations",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api/invitations?per_page=100",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "PutCollaborator",
+   "feature": null,
+   "method": "PUT",
+   "path": "/repos/{}/{}/collaborators/{}",
+   "segments": [
+    "acme",
+    "api",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": {
+    "permission": "push"
+   },
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 201,
+     "body": {
+      "id": 42,
+      "invitee": {
+       "id": 8,
+       "login": "alice"
+      },
+      "permissions": "read",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expired": false
+     }
+    },
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/collaborators#add-a-repository-collaborator; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/collaborators/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28",
+    "content-type": "application/json"
+   },
+   "helper_target": "/repos/acme/api/collaborators/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "{\"permission\":\"push\"}",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "PutTeamMembership",
+   "feature": null,
+   "method": "PUT",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "segments": [
+    "acme",
+    "developers",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": {
+    "role": "member"
+   },
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "state": "active",
+      "role": "member"
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/teams/members#add-or-update-team-membership-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/teams/developers/memberships/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28",
+    "content-type": "application/json"
+   },
+   "helper_target": "/orgs/acme/teams/developers/memberships/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "{\"role\":\"member\"}",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "RemoveCollaborator",
+   "feature": null,
+   "method": "DELETE",
+   "path": "/repos/{}/{}/collaborators/{}",
+   "segments": [
+    "acme",
+    "api",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/collaborators#remove-a-repository-collaborator; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/collaborators/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/repos/acme/api/collaborators/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "RemoveOrgMember",
+   "feature": null,
+   "method": "DELETE",
+   "path": "/orgs/{}/memberships/{}",
+   "segments": [
+    "acme",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/orgs/members#remove-organization-membership-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/memberships/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/memberships/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "RemoveTeamMembership",
+   "feature": null,
+   "method": "DELETE",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "segments": [
+    "acme",
+    "developers",
+    "alice"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": null,
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 204,
+     "body": null
+    }
+   ],
+   "source": "https://docs.github.com/rest/teams/members#remove-team-membership-for-a-user; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/orgs/acme/teams/developers/memberships/alice",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28"
+   },
+   "helper_target": "/orgs/acme/teams/developers/memberships/alice",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "",
+   "source_kind": "primary-docs-derived-synthetic"
+  },
+  {
+   "endpoint": "UpdateRepoInvitation",
+   "feature": null,
+   "method": "PATCH",
+   "path": "/repos/{}/{}/invitations/{}",
+   "segments": [
+    "acme",
+    "api",
+    "42"
+   ],
+   "credentials": [
+    "Installation"
+   ],
+   "request_body": {
+    "permissions": "write"
+   },
+   "secret_body": false,
+   "response_headers": {
+    "content-type": "application/json",
+    "x-ratelimit-limit": "5000",
+    "x-ratelimit-remaining": "4999",
+    "x-ratelimit-used": "1",
+    "x-ratelimit-resource": "core",
+    "x-ratelimit-reset": "4102444800"
+   },
+   "responses": [
+    {
+     "status": 200,
+     "body": {
+      "id": 42,
+      "invitee": {
+       "id": 8,
+       "login": "alice"
+      },
+      "permissions": "write",
+      "created_at": "2026-01-01T00:00:00Z",
+      "expired": false
+     }
+    }
+   ],
+   "source": "https://docs.github.com/rest/collaborators/invitations#update-a-repository-invitation; specs/projects/P1-github-invite.md §7.2; specs/components/L2-github-app-toolkit.md TR-12/TR-13",
+   "provenance": "Reviewed synthetic local request/response pair; not a live GitHub recording or resolution of open spikes.",
+   "target": "/repos/acme/api/invitations/42",
+   "request_headers": {
+    "accept": "application/vnd.github+json",
+    "user-agent": "portable-wire-contract",
+    "x-github-api-version": "2022-11-28",
+    "content-type": "application/json"
+   },
+   "helper_target": "/repos/acme/api/invitations/42",
+   "authorization": {
+    "Installation": "Bearer ghs_WIRE_MATRIX_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "request_body_wire": "{\"permissions\":\"write\"}",
+   "source_kind": "primary-docs-derived-synthetic"
+  }
+ ],
+ "protocol_cases": [
+  {
+   "name": "sso-partial",
+   "endpoint": "ListInstallationRepos",
+   "credential": "Installation",
+   "status": 200,
+   "headers": {
+    "content-type": "application/json",
+    "x-github-sso": "partial-results; organizations=100"
+   },
+   "body": {
+    "total_count": 1,
+    "repositories": [
+     {
+      "id": 10,
+      "full_name": "acme/api",
+      "private": true
+     }
+    ]
+   },
+   "expected_error": "gh:api:partial",
+   "source": "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api; specs/components/L2-github-app-toolkit.md PG-07/TS-10; synthetic header, live SP-15 unresolved; retargeted from ListUserInstallations to ListInstallationRepos in GM-01"
+  },
+  {
+   "name": "sso-required",
+   "endpoint": "ListInstallationRepos",
+   "credential": "Installation",
+   "status": 403,
+   "headers": {
+    "content-type": "application/json",
+    "x-github-sso": "required; url=https://sso.example.test/authorize"
+   },
+   "body": {
+    "message": "SSO required (synthetic fixture)"
+   },
+   "expected_error": "gh:api:forbidden",
+   "source": "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api; specs/components/L2-github-app-toolkit.md ER-03/TS-10; synthetic header, live SP-15 unresolved; retargeted from ListUserInstallations to ListInstallationRepos in GM-01"
+  },
+  {
+   "name": "secondary-limit",
+   "endpoint": "ListInstallationRepos",
+   "credential": "Installation",
+   "status": 429,
+   "headers": {
+    "content-type": "application/json",
+    "retry-after": "2"
+   },
+   "body": {
+    "message": "synthetic secondary rate limit"
+   },
+   "expected_error": "gh:api:rate_limited:secondary",
+   "source": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits; specs/components/L2-github-app-toolkit.md RL-01/TS-10; synthetic fixture; retargeted from ListUserInstallations to ListInstallationRepos in GM-01"
+  },
+  {
+   "name": "validation",
+   "endpoint": "PutCollaborator",
+   "credential": "Installation",
+   "status": 422,
+   "headers": {
+    "content-type": "application/json"
+   },
+   "body": {
+    "message": "Validation Failed",
+    "errors": [
+     {
+      "resource": "RepositoryInvitation",
+      "code": "already_exists",
+      "field": "invitee_id"
+     }
+    ]
+   },
+   "expected_error": "gh:api:validation",
+   "source": "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api; specs/components/L2-github-app-toolkit.md ER-01/TS-10; synthetic fixture, live SP-08 unresolved"
+  },
+  {
+   "name": "foreign-redirect",
+   "endpoint": "PutCollaborator",
+   "credential": "Installation",
+   "status": 307,
+   "headers": {
+    "location": "https://foreign.invalid/leak"
+   },
+   "body": null,
+   "expected_error": "gh:api:moved",
+   "source": "https://docs.github.com/en/rest/guides/best-practices-for-using-the-rest-api#follow-redirects; specs/components/L2-github-app-toolkit.md TR-17/TS-10; synthetic foreign-origin redirect; .invalid is reserved and must never be contacted"
+  }
+ ]
+}

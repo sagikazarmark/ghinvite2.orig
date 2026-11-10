@@ -5,19 +5,30 @@ by #117–#122. One entity has one mutable owner:
 
 | Owner/key | Retained authority | Independent SQL writer |
 |---|---|---|
-| `AccountInstallation/<account>` | Current installation, availability, tombstones, continuations | `InstallationProjection` |
-| `Installation/<installation>` | Account routing and uninstall tombstone | Routes to account owner |
+| `AccountInstallation/<app>:<account>` | Current installation, availability, tombstones, continuations | `InstallationProjection` |
+| `Installation/<app>:<installation>` | Account routing and uninstall tombstone | Routes to account owner |
 | `InvitationLink/<link ULID>` | Creation, guardrails, metadata, revocation, uses, attempts/receipts, latest-request index | `InvitationProjection` |
 | `InvitationRequest/<request ULID>` | Initialization, decisions, deadlines, eligibility verdicts, approved manifest, submission IDs | `RequestProjection` |
-| `RepositoryDelivery/<request ULID>:<repository>` | Bound command/internal invitation ID, original create receipt, current lifecycle, terminal winner | `DeliveryProjection` |
+| `RepositoryDelivery/<request ULID>:<repository>:<generation>` | Bound canonical command, original create receipt, current lifecycle, terminal winner | `DeliveryProjection` |
 
 Web allocates one link ULID before submission and retains exact input and expiration
 anchor for recovery. Admission consumes a use and completes request initialization
 before acknowledgement. Approval retains the immutable manifest before dispatch.
 Repository sends progress independently. Submission acknowledgement is not GitHub
 success. Current numeric installation/account/repository/requester identities are
-verified before effects. Signed member evidence triggers conservative correlation
-and read-only verification of the known upstream invitation before settlement.
+verified before effects. Repository member events do not dispatch delivery commands. Retained sweeps
+verify known upstream invitation and membership evidence before settlement.
+Organization events use the separate app-scoped routing receipt protocol.
+
+[ADR0011](adr/0011-canonical-delivery-identity-with-retained-audit-compatibility.md)
+removes the production invitation-ULID read facade. New dispatch and reissue
+commands omit that compatibility field and choose `canonical_v2` audit facts.
+Legacy/V1 receipts retain their original value and bytes; only historical fixture
+data still uses the old row shape. Repository reads return exact canonical
+snapshots, including separate immutable creation and settlement facts. SQL write
+fences bind the entire command and canonical key; rejection also binds the exact
+attempt generation. App installation fixtures and consumers use app-scoped
+ports; the domain `Account` and app-keyed owner getter remain intact.
 
 ## Retained SQL is more than a read model
 
@@ -26,8 +37,9 @@ and read-only verification of the known upstream invitation before settlement.
 - `delivery_attempts` is an input-bound external-write fence. Unavailable storage
   prevents new PUTs. Lost claim acknowledgement or uncertain PUT permits only
   read-only reconciliation, never another PUT on absence alone.
-- `member_webhook_receipts` retains original match **or no-match**, including
-  historical ambiguity. Redelivery cannot bind to a newer invitation.
+- `organization_webhook_receipts` retains original match **or no-match** for
+  authenticated organization/team events for seven days. Repository member-event
+  matching was retired; additive migration0022 removes its unused SQL table.
 - `audit_events` retains required immutable history; current snapshots alone
   cannot replace it.
 - Installation/user records support routing, authorization and historical parents.

@@ -1,67 +1,52 @@
 [package]
 name = "ghinvite-github"
+description = "ghinvite's GitHub REST client: transport, typed endpoints and fixtures"
+rust-version = "1.91"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# Moved from gh-toolkit (GM-01) and trimmed to what ghinvite uses. Credentials
+# come from octoauth; this crate never mints or caches a token itself.
+
 [features]
-# `test-mock` exposes the in-process `MockTransport` so other workspace crates
-# (notably `ghinvite-workflows`) can write hermetic tests against the GitHub
-# clients without spinning up an HTTP server.
+# In-process `MockTransport` and credential builders for other crates' tests.
 test-mock = []
+# Native fake-GitHub HTTP fixture (`stub::router`) and the `stub` example.
 test-stub = ["dep:axum"]
-# `wiremock-tests` enables an optional integration test that runs the
-# installation client against a real local HTTP server. Off by default so
-# `cargo test --workspace` stays hermetic and fast.
-wiremock-tests = ["dep:wiremock"]
 
 [dependencies]
-axum = { workspace = true, optional = true }
-async-trait.workspace = true
-base64.workspace = true
 chrono.workspace = true
-ghinvite-core.workspace = true
+http = "1"
+octoauth.workspace = true
+octotoken.workspace = true
 parking_lot.workspace = true
-reqwest.workspace = true
-rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
+trait-variant = "0.1.3"
 url.workspace = true
-wiremock = { workspace = true, optional = true }
+zeroize = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest.workspace = true
+# The fixture binds native TCP listeners; keep it off the wasm graph.
+axum = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures-util = "0.3"
+js-sys = "0.3"
+send_wrapper = { version = "0.6", features = ["futures"] }
+worker = "0.8"
 
 [dev-dependencies]
+futures-util = "0.3"
 ghinvite-github = { path = ".", features = ["test-mock"] }
-jsonwebtoken = { workspace = true, features = ["rust_crypto", "use_pem"] }   # used to *verify* the JWTs we mint, not to sign them
-tokio.workspace = true
-# Captures `tracing` output so the credential-disclosure tests can assert on
-# what an operator would actually see.
-tracing-subscriber.workspace = true
-wiremock.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
 # examples/stub.rs only:
 clap = { version = "4", features = ["derive"] }
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-# `getrandom`'s `js` / `wasm_js` features are required on wasm32-unknown-unknown
-# so `rsa` key-gen and OAuth state tokens can pull from
-# `crypto.getRandomValues()`. We pin both major versions because both appear
-# transitively:
-#   * `getrandom 0.2` ← `rsa 0.9` and `rand_core 0.6` (via `rand 0.8` →
-#     `ghinvite-core`/`rsa`)
-#   * `getrandom 0.3` ← `rand_core 0.9` (via `rand 0.9` → `ulid 1.2` →
-#     `ghinvite-core`)
-# The 0.3 line additionally needs `--cfg getrandom_backend="wasm_js"` (set in
-# the workspace-root `.cargo/config.toml`).
-# Re-validate after `ulid` / `rand` bumps: `cargo tree -p ghinvite-github -i
-# getrandom@0.2` and `cargo tree -p ghinvite-github -i getrandom@0.3`.
-getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
-getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
-
-# examples/stub.rs — standalone fake-GitHub server used by the ghinvite-workflows
-# integration tests and local dev (enable `--features test-stub`).
 [[example]]
 name = "stub"
 required-features = ["test-stub"]

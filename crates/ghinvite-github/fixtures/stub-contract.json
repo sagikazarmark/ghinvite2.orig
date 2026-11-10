@@ -1,0 +1,593 @@
+{
+ "schema": 1,
+ "scope": "Endpoint metadata contract for ghinvite-github, trimmed from gh-toolkit's contract/stub-contract.json (GM-01). Synthetic; passing stubs do not prove live provider behavior.",
+ "endpoints": [
+  {
+   "endpoint": "CancelOrgInvitation",
+   "method": "DELETE",
+   "path": "/orgs/{}/invitations/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "CollaboratorPermission",
+   "method": "GET",
+   "path": "/repos/{}/{}/collaborators/{}/permission",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Metadata",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "CreateOrgInvitation",
+   "method": "POST",
+   "path": "/orgs/{}/invitations",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": false,
+   "provenance_group": "organization",
+   "success_statuses": [
+    201
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "DeleteRepoInvitation",
+   "method": "DELETE",
+   "path": "/repos/{}/{}/invitations/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Administration",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetInstallation",
+   "method": "GET",
+   "path": "/app/installations/{}",
+   "credentials": [
+    "AppJwt"
+   ],
+   "permission": null,
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "broker",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetOrg",
+   "method": "GET",
+   "path": "/orgs/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Metadata",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetOrgMembership",
+   "method": "GET",
+   "path": "/orgs/{}/memberships/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetRepository",
+   "method": "GET",
+   "path": "/repos/{}/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Metadata",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetTeam",
+   "method": "GET",
+   "path": "/orgs/{}/teams/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetTeamMembership",
+   "method": "GET",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetUserById",
+   "method": "GET",
+   "path": "/user/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": null,
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "GetUserByLogin",
+   "method": "GET",
+   "path": "/users/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": null,
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListCollaborators",
+   "method": "GET",
+   "path": "/repos/{}/{}/collaborators",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Metadata",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListFailedOrgInvitations",
+   "method": "GET",
+   "path": "/orgs/{}/failed_invitations",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListInstallationRepos",
+   "method": "GET",
+   "path": "/installation/repositories",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Metadata",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListInstallationRequests",
+   "method": "GET",
+   "path": "/app/installation-requests",
+   "credentials": [
+    "AppJwt"
+   ],
+   "permission": null,
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListOrgInvitationTeams",
+   "method": "GET",
+   "path": "/orgs/{}/invitations/{}/teams",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListOrgInvitations",
+   "method": "GET",
+   "path": "/orgs/{}/invitations",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListOrgTeams",
+   "method": "GET",
+   "path": "/orgs/{}/teams",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "ListRepoInvitations",
+   "method": "GET",
+   "path": "/repos/{}/{}/invitations",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Administration",
+    "Read"
+   ],
+   "paginated": true,
+   "feature": null,
+   "api_version": null,
+   "content_creating": false,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "PutCollaborator",
+   "method": "PUT",
+   "path": "/repos/{}/{}/collaborators/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Administration",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    201,
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "PutTeamMembership",
+   "method": "PUT",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "RemoveCollaborator",
+   "method": "DELETE",
+   "path": "/repos/{}/{}/collaborators/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Administration",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "repository",
+   "success_statuses": [
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "RemoveOrgMember",
+   "method": "DELETE",
+   "path": "/orgs/{}/memberships/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "RemoveTeamMembership",
+   "method": "DELETE",
+   "path": "/orgs/{}/teams/{}/memberships/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Members",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": true,
+   "provenance_group": "organization",
+   "success_statuses": [
+    204
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  },
+  {
+   "endpoint": "UpdateRepoInvitation",
+   "method": "PATCH",
+   "path": "/repos/{}/{}/invitations/{}",
+   "credentials": [
+    "Installation"
+   ],
+   "permission": [
+    "Administration",
+    "Write"
+   ],
+   "paginated": false,
+   "feature": null,
+   "api_version": null,
+   "content_creating": true,
+   "retry_safe": false,
+   "provenance_group": "repository",
+   "success_statuses": [
+    200
+   ],
+   "fixture_kind": "synthetic-provider-wire",
+   "fixture_status_note": "Synthetic success shapes exercised by the referenced contract family; not a live response recording."
+  }
+ ]
+}

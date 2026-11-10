@@ -1,17 +1,22 @@
 # GitHub invitation settlement
 
 Issue #120 unifies creation and settlement in
-`RepositoryDelivery/<request_id>:<repo_id>`. The internal invitation ID is bound
+`RepositoryDelivery/<request_id>:<repo_id>:<generation>`. The internal invitation ID is bound
 once by the approved command; another ID cannot create another writer.
 
 - `on_webhook`, `reconcile`, `cancel`, and `tick_expire` share object
   exclusivity with creation and retain one terminal winner before projecting it.
-- `Reconcile/daily_run` journals read-only GitHub evidence, then calls the
-  invitation owner with the observed invitation identity, state, and upstream ID.
-  Concurrent sweeps can observe the same row; only the first valid settlement wins.
-- Only `Sent` rows with an upstream ID qualify. `Sending` placeholders, including
-  blocked and outcome-unknown creates, keep separate create semantics. A missing
-  GitHub list entry cannot resolve an uncertain create.
+- `SweepSchedule/repo:<account_id>` retains the sweep set independently of SQL.
+  Created, AlreadyPending and OutcomeUnknown owners send registration hints;
+  terminal/stopped owners send removal hints. The schedule verifies each hint
+  against the current shared owner snapshot, so stale or reordered hints cannot
+  remove live work or resurrect terminal work.
+- `Reconcile/sweep` queues one repository walk per tracked numeric target. A walk
+  completes all invitation pages once, then separate `observe_next` invocations
+  inspect one delivery each and send evidence to its owner. Every absent known
+  invitation requires current installation and numeric repository verification
+  in that observation. Unknown creation resolves only from positive presence.
+  Failed/partial reads supply no evidence and are retried by the next sweep.
 - The owner retains the winning terminal transition. Independent `DeliveryProjection`
   execution applies one revision lineage. The SQLx transaction / D1 batch commits
   the complete snapshot, create audit and settlement audit together.
@@ -62,7 +67,19 @@ withdrawal with webhook settlement while parent projections are withheld.
 The SQLx boundary also verifies audit-ID conflict rollback and
 rejection of a late write after settlement.
 
-## Member-added webhooks
+## Retired member-added webhook protocol
+
+The following #84 section records a retired prelaunch protocol. Current signed
+`/webhooks/repo` ingress acknowledges `member` and `repository_invitation` events
+without dispatch. Repository settlement uses retained scheduling and verified
+invitation observations. Migration0022 removes the unused `webhook_receipts`
+table and its storage/fixture matching API; prior migrations stay unchanged.
+The separately retained organization webhook bindings and their seven-day
+retention are unaffected. The private legacy delivery handlers below remain
+registered pending their separate endpoint-version cutover; removing this SQL
+facade does not rewrite their commands or audit identities.
+
+### Historical #84 behavior
 
 Issue [#84](https://github.com/sagikazarmark/ghinvite2.orig/issues/84) supports
 `POST /webhooks/github` with `X-GitHub-Event: member`, action `added`, JSON content,
@@ -145,14 +162,14 @@ previously observed delayed provider event occurred.
 ## Recovery after reinstall
 
 Issue [#65](https://github.com/sagikazarmark/ghinvite2.orig/issues/65) makes
-`Reconcile/daily_run` discover pending work by the link's immutable account ID
+the retained account schedule discover pending work by immutable account ID
 across historical installations. Each observation reloads the current active
 installation, verifies its installation/account IDs and suspension status with
 GitHub, and validates the scoped numeric repository ID before reading invitation
 or requester access evidence. Another account or a reused repository name cannot
 supply settlement authority. Missing installations, unavailable credentials, or
 unverified identities leave the invitation recoverable for a later sweep;
-transient API/storage failures retain the existing retry behavior.
+failed GitHub reads leave the work registered for the next sweep. Projection retries remain independent.
 
 The original link installation ID, request, fixed scope, create receipt and audit
 history are preserved. Settlement runs through the request/repository-keyed owner.
@@ -175,10 +192,58 @@ pages are still not a consistent snapshot: an invitation cancelled on an earlier
 page mid-walk can shift a later one out of view. That residual race is unchanged
 by this work and is bounded by the settlement fence, which admits one terminal
 transition per invitation. Native tests cover
-lifecycle reconciliation (`Reconcile/daily_run` and `settlement::observe`) and
+lifecycle reconciliation (`Reconcile/sweep` and `settlement::observe`) and
 retained-create evidence with multi-page results and a failing later page:
 
 ```sh
 cargo test --locked -p ghinvite-github --lib
 cargo test --locked -p ghinvite-workflows --lib
 ```
+
+## One scheduled chain per account (B0-18)
+
+Onboarding queues `ensure_scheduled`. Empty accounts run every 24 hours and
+request an installation drift recheck. Registering work pulls the deadline to
+`min(next_run, now + 1 hour)`, advancing a bounded monotonic schedule token only
+when a new delayed send is required. Duplicate registrations do not fork timers.
+`run` ignores stale tokens and premature manual invocations. The current due
+run calls the fan-out service, then advances the token and schedules one successor.
+After the work set empties, the next run returns to the 24-hour cadence.
+Old delayed sends can remain queued, but their obsolete tokens are inert.
+
+There is no D1 pending-row discovery and no synchronous loop over delivery owners
+in a sweep invocation. A repository observation continuation handles one delivery
+and queues the next continuation before its external read. Listings retain only
+numeric invitation/invitee identities, typed role and expiry evidence. HTTP errors
+do not become empty listings, and failed reads do not accumulate a second retry
+chain alongside the account schedule.
+
+`tests/sweep_schedule.rs` exercises actual Restate with a journaled fixture clock:
+24-hour cadence, pull-forward at t, acceptance by t+1 hour without a webhook,
+exactly one successor token, stale/early/duplicate runs, late track/stale untrack,
+a shared two-page walk for two deliveries, unavailable projection and later
+convergence, same-sweep repository 404, insufficient base role, uncertain-create
+presence-only recovery, and explicit upstream expiry. Its fixed named-run table
+covers every current SweepSchedule handler, including all three run paths.
+`SWEEP_ONLY=1 node tests/worker/admission.mjs` repeats cadence, shared listing,
+stale-token/hint and acceptance behavior against actual workerd, Restate and D1
+with a failing delivery-projection trigger, then proves convergence after repair.
+
+Deployment remains gated by ID-21/ID-32. These new calls and retired `daily_run`
+wire are incompatible with old retained journals. Pin old invocations to their
+original endpoint or drain them. Existing pending owners must finish on that
+endpoint or be explicitly enrolled through validated registration before relying
+on the new schedule; merely deploying this code does not migrate that work.
+Organization sweeps and requester-triggered refresh remain M1 work. Direct
+collaborator acceptance checks remain behind SP-07; current evidence records
+verified effective role. No live GitHub or production rollout is claimed.
+
+### Migration0022 rollout boundary
+
+The removed table contains obsolete repository member-event deduplication
+bindings, not Audit Log rows. Existing organization bindings and audit events
+remain. Before a deployed database drop, inventory and drain or route away every
+older serving/pinned artifact that still calls this SQL; current source's lack
+of callers cannot establish deployed compatibility. Legacy private delivery
+handlers remain registered independently of this table removal. Local tests do
+not claim remote migration or release.

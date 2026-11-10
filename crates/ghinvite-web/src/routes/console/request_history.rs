@@ -49,7 +49,14 @@ async fn owned_request(
         .get_invitation_request(id)
         .await?
         .ok_or(crate::WebError::NotFound)?;
-    let link = owned_link(storage, account_id, request.invitation_link_id).await?;
+    let link = owned_link(
+        storage,
+        account_id,
+        request
+            .invitation_link_id
+            .ok_or(crate::WebError::NotFound)?,
+    )
+    .await?;
     Ok((request, link))
 }
 
@@ -95,6 +102,9 @@ pub(super) async fn history(
             );
         }
     };
+    if let Err(error) = authorize_targets(&admin, &link.targets, false).await {
+        return error.into_response();
+    }
     let before = cursor(&uri, id);
     let mut older_href = None;
     let history = if projected {
@@ -127,7 +137,26 @@ pub(super) async fn history(
                         .get(&request.requester_id)
                         .map(String::as_str),
                 );
-                rows.push(HistoryRow { request, requester });
+                let avatar_href = page
+                    .requester_avatars
+                    .get(&request.requester_id)
+                    .filter(|url| !url.is_empty())
+                    .map(|_| {
+                        format!(
+                            "/console/accounts/{}/requests/{}/avatar",
+                            admin.account.account_login, request.id
+                        )
+                    });
+                let github_created_at = page
+                    .requester_created_at
+                    .get(&request.requester_id)
+                    .copied();
+                rows.push(HistoryRow {
+                    request,
+                    requester,
+                    avatar_href,
+                    github_created_at,
+                });
             }
             (StatusCode::OK, Some(rows))
         }
@@ -136,9 +165,10 @@ pub(super) async fn history(
             (StatusCode::SERVICE_UNAVAILABLE, None)
         }
     };
-    let html = render(admin.session.csrf_token.clone(), move || {
+    let html = render(admin.render_context(), move || {
         rsx! {
             RequestHistoryPage {
+                now: Utc::now(),
                 signed_in_login: Some(admin.session.login.clone()), account_login: admin.account.account_login.clone(),
                 link_id: id.to_string(), description: link.description.clone(), rows: rows.clone(),
                 older_href: older_href.clone(), in_range: before.is_some(),
@@ -148,10 +178,16 @@ pub(super) async fn history(
     (status, Html(html)).into_response()
 }
 
+#[derive(Default, serde::Deserialize)]
+pub(super) struct DetailQuery {
+    preview: Option<u8>,
+}
+
 pub(super) async fn detail(
     State(state): State<AppState>,
     admin: RequireConsoleAdminOf,
     Path((_, id)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<DetailQuery>,
 ) -> axum::response::Response {
     let id: RequestId = match path_id(&admin, &id) {
         Ok(id) => id,
@@ -170,9 +206,15 @@ pub(super) async fn detail(
                 Ok(snapshot) => snapshot.as_request(),
                 Err(error) => return Err(crate::WebError::from(error)),
             };
-            let link = authoritative_link(&state, &admin, request.invitation_link_id)
-                .await
-                .map_err(crate::WebError::from)?;
+            let link = authoritative_link(
+                &state,
+                &admin,
+                request
+                    .invitation_link_id
+                    .ok_or(crate::WebError::NotFound)?,
+            )
+            .await
+            .map_err(crate::WebError::from)?;
             Ok((request, link))
         };
         match owned_request(state.storage.as_ref(), admin.account.account_id, id).await {
@@ -193,42 +235,147 @@ pub(super) async fn detail(
             );
         }
     };
-    let requester = user_label(&state, request.requester_id).await;
+    if let Err(error) = authorize_targets(&admin, &link.targets, false).await {
+        return error.into_response();
+    }
+    let profile = state
+        .storage
+        .get_user(request.requester_id)
+        .await
+        .ok()
+        .flatten()
+        .filter(|user| user.user_id == request.requester_id);
+    let access_preview = if query.preview == Some(1) {
+        let login = profile
+            .as_ref()
+            .map(|user| user.login.clone())
+            .unwrap_or_default();
+        Some(
+            admin
+                .authority
+                .request_preview(&link.targets, request.requester_id, &login)
+                .await,
+        )
+    } else {
+        None
+    };
+    let requester = profile_label(
+        request.requester_id,
+        profile.as_ref().map(|user| user.login.as_str()),
+    );
+    let avatar_href = profile
+        .as_ref()
+        .and_then(|user| user.avatar_url.as_ref())
+        .filter(|url| !url.is_empty())
+        .map(|_| {
+            format!(
+                "/console/accounts/{}/requests/{}/avatar",
+                admin.account.account_login, request.id
+            )
+        });
+    let github_created_at = profile.as_ref().and_then(|user| user.github_created_at);
     let decision_actor = match request.decided_by {
         Some(id) => user_label(&state, id).await,
-        None if request.state == RequestState::Approved && !link.approval_required => {
+        None if matches!(request.state, RequestState::Approved | RequestState::Lapsed)
+            && !link.approval_required =>
+        {
             "Auto-approved by invitation-link policy".into()
         }
         None if request.state == RequestState::Expired => "System (decision deadline)".into(),
         None => "Unavailable".into(),
     };
+    let (organization_delivery, organization_delivery_history) =
+        if matches!(request.state, RequestState::Approved | RequestState::Lapsed) {
+            crate::organization_delivery::load_console(
+                &state,
+                &link.targets,
+                link.id,
+                id,
+                request.requester_id,
+            )
+            .await
+        } else {
+            (None, vec![])
+        };
+    let progress = state
+        .request_authority
+        .delivery_progress(ghinvite_core::request_lifecycle::RequestStatus {
+            link_id: link.id,
+            request_id: id,
+            requester_id: request.requester_id,
+        })
+        .await
+        .ok();
     let receipts = state.storage.list_delivery_for_request(id).await;
-    let invitations = state.storage.list_github_invitations_for_request(id).await;
-    let mut delivery_unavailable = receipts.is_err() || invitations.is_err();
+    let mut delivery_unavailable = receipts.is_err() || progress.is_none();
     let mut receipts = receipts.unwrap_or_default();
-    let mut invitations = invitations.unwrap_or_default();
-    for repo in &link.repos {
-        match state.delivery_authority.snapshot(id, repo.repo_id).await {
-            Ok(Some(snapshot)) => {
-                receipts.retain(|r| r.create.command.repo_id != repo.repo_id);
-                invitations.retain(|r| r.repo_id != repo.repo_id);
-                invitations.push(snapshot.invitation());
+    receipts.retain(|s| {
+        s.create.command.request_id == id
+            && s.create.command.link_id == Some(link.id)
+            && s.create.command.account_id == link.account_id
+            && s.create.command.requester_id == request.requester_id
+            && link.targets.repos.iter().any(|target| {
+                target.repo_id == s.create.command.repo_id
+                    && s.create.command.permission == target.grant.into()
+            })
+    });
+    for repo in &link.targets.repos {
+        let Some(generation) = progress
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .find(|p| p.repo_id == repo.repo_id)
+            .map(|p| p.delivery_generation)
+            .filter(|g| *g > 0)
+        else {
+            delivery_unavailable = true;
+            continue;
+        };
+        match state
+            .delivery_authority
+            .snapshot(id, repo.repo_id, generation)
+            .await
+        {
+            Ok(Some(snapshot))
+                if snapshot.create.command.request_id == id
+                    && snapshot.create.command.link_id == Some(link.id)
+                    && snapshot.create.command.account_id == link.account_id
+                    && snapshot.create.command.requester_id == request.requester_id
+                    && snapshot.create.command.repo_id == repo.repo_id
+                    && snapshot.create.command.permission == repo.grant.into()
+                    && snapshot.create.command.delivery_generation == generation =>
+            {
+                receipts.retain(|r| {
+                    r.create.command.repo_id != repo.repo_id
+                        || r.create.command.delivery_generation != generation
+                });
                 receipts.push(snapshot);
             }
-            Ok(None) => (),
-            Err(_) => delivery_unavailable = true,
+            Ok(None | Some(_)) | Err(_) => delivery_unavailable = true,
         }
     }
     let delivery: Vec<_> = link
+        .targets
         .repos
         .iter()
         .map(|repo| RepositoryDelivery {
             repo_id: repo.repo_id,
             presentation: ghinvite_ui::invitation::delivery_presentation(
-                repo,
-                &receipts,
-                &[],
-                &invitations,
+                &ghinvite_core::InvitationLinkRepo {
+                    repo_id: repo.repo_id,
+                    repo_full_name: repo.repo_full_name.clone(),
+                },
+                &receipts
+                    .iter()
+                    .filter(|r| {
+                        progress.as_deref().unwrap_or_default().iter().any(|p| {
+                            p.repo_id == repo.repo_id
+                                && p.delivery_generation == r.create.command.delivery_generation
+                        })
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                progress.as_deref().unwrap_or_default(),
                 delivery_unavailable,
             ),
             receipts: receipts
@@ -236,23 +383,75 @@ pub(super) async fn detail(
                 .filter(|r| r.create.command.repo_id == repo.repo_id)
                 .cloned()
                 .collect(),
-            invitations: invitations
-                .iter()
-                .filter(|r| r.repo_id == repo.repo_id)
-                .cloned()
-                .collect(),
         })
         .collect();
-    let html = render(admin.session.csrf_token.clone(), move || {
+    let html = render(admin.render_context(), move || {
         rsx! {
             RequestDetailPage {
+                access_preview: access_preview.as_ref().map(|p| p.targets.clone()),
+                preview_observed_at: access_preview.as_ref().and_then(|p| p.observed_at),
+                reissue_enabled: state.config.reissue_enabled,
+                organization_reissue_enabled: state.config.organization_delivery_enabled,
                 signed_in_login: Some(admin.session.login.clone()), account_login: admin.account.account_login.clone(),
-                request: request.clone(), link: link.clone(), requester: requester.clone(), decision_actor: decision_actor.clone(),
-                delivery: delivery.clone(), delivery_unavailable, now: Utc::now(),
+                request: request.clone(), link: link.clone(), requester: requester.clone(), avatar_href: avatar_href.clone(), github_created_at, decision_actor: decision_actor.clone(),
+                delivery: delivery.clone(), delivery_unavailable, organization_delivery: organization_delivery.clone(), organization_delivery_history: organization_delivery_history.clone(), now: Utc::now(),
             }
         }
     });
     Html(html).into_response()
+}
+
+/// Images use the same complete request visibility check as the details page.
+/// Numeric IDs come from retained/projected request identity, never a URL input.
+pub(super) async fn avatar(
+    State(state): State<AppState>,
+    admin: RequireConsoleAdminOf,
+    Path((_, raw)): Path<(String, String)>,
+) -> axum::response::Response {
+    let result = async {
+        let id: RequestId = raw.parse().ok()?;
+        let (request, link) = owned_request(state.storage.as_ref(), admin.account.account_id, id)
+            .await
+            .ok()?;
+        authorize_targets(&admin, &link.targets, false).await.ok()?;
+        let user = state
+            .storage
+            .get_user(request.requester_id)
+            .await
+            .ok()
+            .flatten()?;
+        if user.user_id != request.requester_id
+            || user.avatar_url.as_ref().is_none_or(|url| url.is_empty())
+        {
+            return None;
+        }
+        ghinvite_github::avatar::get(
+            state.github_transport.as_ref(),
+            ghinvite_github::ids::UserId::new(request.requester_id),
+        )
+        .await
+        .ok()
+    }
+    .await;
+    let mut response = match result {
+        Some(image) => (
+            [(axum::http::header::CONTENT_TYPE, image.content_type)],
+            image.bytes,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    };
+    for (name, value) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        response.headers_mut().insert(
+            axum::http::header::HeaderName::from_static(name),
+            axum::http::HeaderValue::from_static(value),
+        );
+    }
+    response
 }
 
 #[cfg(test)]
@@ -260,10 +459,9 @@ mod tests {
     use super::{owned_link, owned_request};
     use chrono::{DateTime, Utc};
     use ghinvite_core::storage::projection::fixture::Seed;
-    use ghinvite_core::storage::{InstallationStorage, RecordStorage, Result};
+    use ghinvite_core::storage::{AppInstallationStorage, RecordStorage, Result};
     use ghinvite_core::{
-        Account, AccountType, GithubInvitation, GithubInvitationId, InvitationLink,
-        InvitationLinkId, InvitationLinkRepo, InvitationRequest, Permission, RequestId,
+        Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, RequestId,
         RequestState, SelectedRepos, User,
     };
 
@@ -288,43 +486,63 @@ mod tests {
             user_id,
             login: login.into(),
             avatar_url: None,
+            github_created_at: None,
             last_seen_at: dt("2026-05-04T12:00:00Z"),
         }
     }
 
     fn link(account_id: u64, installation_id: u64) -> InvitationLink {
         InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: InvitationLinkId::new(),
+            organization_installation_id: None,
             installation_id,
             account_id,
             created_by: 701,
             created_at: dt("2026-05-04T12:00:00Z"),
             expires_at: None,
             max_uses: None,
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 0,
-            permission: Permission::Pull,
             approval_required: true,
             description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: "acme/api".into(),
-            }],
+            pause: None,
+            targets: ghinvite_core::targets::Targets {
+                repos: vec![ghinvite_core::targets::RepoTarget {
+                    repo_id: 10,
+                    repo_full_name: "acme/api".into(),
+                    grant: ghinvite_core::targets::RepoRole::Read,
+                }],
+                ..Default::default()
+            },
+            secret: ghinvite_core::LinkSecretState {
+                secret_generation: 1,
+                sha256: [42; 32].into(),
+            },
         }
     }
 
     fn request(invitation_link_id: InvitationLinkId) -> InvitationRequest {
         InvitationRequest {
+            batch: None,
+            domain_evidence: None,
             id: RequestId::new(),
-            invitation_link_id,
+            invitation_link_id: Some(invitation_link_id),
             requester_id: 802,
             justification: Some("need repository access".into()),
             state: RequestState::Pending,
             decided_by: None,
             decided_at: None,
+            cancellation_reason: None,
             decline_reason: None,
+            requester_message: None,
             decision_deadline: None,
             created_at: dt("2026-05-04T12:30:00Z"),
         }
@@ -336,7 +554,9 @@ mod tests {
             .unwrap();
         for (installation, account_id, login) in [(1, 9001, "acme"), (2, 9002, "other")] {
             storage
-                .insert_installation(&account(installation, account_id, login))
+                .put_app_installation(&ghinvite_core::account::Installation::repo(
+                    (account(installation, account_id, login)).clone(),
+                ))
                 .await
                 .unwrap();
         }
@@ -397,22 +617,10 @@ mod tests {
         ) -> Result<Option<InvitationLink>> {
             Ok(None)
         }
-        async fn get_installation(&self, _: u64) -> Result<Option<Account>> {
-            unreachable!()
-        }
-        async fn get_active_installation_by_account_id(&self, _: u64) -> Result<Option<Account>> {
-            unreachable!()
-        }
         async fn upsert_user(&self, _: &User) -> Result<()> {
             unreachable!()
         }
         async fn get_user(&self, _: u64) -> Result<Option<User>> {
-            unreachable!()
-        }
-        async fn get_github_invitation(
-            &self,
-            _: GithubInvitationId,
-        ) -> Result<Option<GithubInvitation>> {
             unreachable!()
         }
     }

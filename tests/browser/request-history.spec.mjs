@@ -1,18 +1,28 @@
 import { test, expect } from '@playwright/test';
 
-test('investigate terminal requests from link details through bounded history', async ({ page }) => {
+test('investigate terminal requests from link details through bounded history', async ({ page }, testInfo) => {
   await page.goto('/fixture-login');
   await page.getByRole('link', { name: 'Request history', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Request history', exact: true })).toBeVisible();
   const rows = page.getByRole('list', { name: 'Invitation request history' }).getByRole('listitem');
   await expect(rows).toHaveCount(25);
+  await expect(rows.first()).toContainText('created 2010-01-02');
+  const avatar = rows.first().locator('img');
+  await expect(avatar).toHaveAttribute('src', /^\/console\/accounts\/octocat\/requests\/[^/]+\/avatar$/);
+  await expect(avatar).toHaveJSProperty('naturalWidth', 1);
   await page.getByRole('link', { name: 'Older requests' }).click();
   await expect(rows).toHaveCount(3);
   await page.getByRole('link', { name: 'Latest requests' }).click();
   await rows.first().getByRole('link').click();
   await expect(page.getByRole('heading', { name: 'Invitation request', exact: true })).toBeVisible();
   await expect(page.getByText('State: declined', { exact: true })).toBeVisible();
-  await expect(page.getByText('Immutable requested permission: pull')).toBeVisible();
+  await expect(page.getByText('Requested targets are fixed at admission. Current availability does not change them.')).toBeVisible();
+  await expect(page.getByText(/GitHub account age:.*created 2010-01-02/)).toBeVisible();
+  await expect(page.locator('img')).toHaveJSProperty('naturalWidth', 1);
+  await page.screenshot({ path: testInfo.outputPath('requester-profile.png'), fullPage: true });
+  const target = page.getByRole('listitem').filter({ has: page.getByText('Read (pull)', { exact: true }) });
+  await expect(target).toHaveCount(1);
+  await expect(target).toContainText('octocat/api');
   await expect(page.getByText('Decline reason (admin-only): Browser decision')).toBeVisible();
   await page.reload();
   await expect(page.getByText('State: declined', { exact: true })).toBeVisible();

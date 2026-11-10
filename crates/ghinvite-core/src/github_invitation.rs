@@ -1,4 +1,6 @@
+#[cfg(any(test, feature = "test-suite"))]
 use crate::ids::{GithubInvitationId, RequestId};
+#[cfg(any(test, feature = "test-suite"))]
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -59,9 +61,12 @@ impl InvitationState {
     }
 }
 
+#[cfg(any(test, feature = "test-suite"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubInvitation {
     pub id: GithubInvitationId,
+    #[serde(default = "crate::delivery::initial_generation")]
+    pub delivery_generation: u64,
     pub invitation_request_id: RequestId,
     pub repo_id: u64,
     /// Set after `PUT /repos/.../collaborators` returns 201 with an invitation id.

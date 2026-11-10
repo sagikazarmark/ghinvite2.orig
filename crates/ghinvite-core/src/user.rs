@@ -7,6 +7,9 @@ pub struct User {
     pub user_id: u64,
     pub login: String,
     pub avatar_url: Option<String>,
+    /// Account creation reported by GitHub, never local sign-in/admission time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_created_at: Option<DateTime<Utc>>,
     pub last_seen_at: DateTime<Utc>,
 }
 
@@ -21,6 +24,7 @@ mod tests {
             user_id: 42,
             login: "octocat".into(),
             avatar_url: Some("https://example.test/a.png".into()),
+            github_created_at: None,
             last_seen_at: Utc.with_ymd_and_hms(2026, 5, 4, 12, 0, 0).unwrap(),
         };
         let s = serde_json::to_string(&u).unwrap();

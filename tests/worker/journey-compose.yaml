@@ -1,0 +1,7 @@
+# Only the journey's deliberate SQL outage uses this scheduling fixture. Keep
+# real automatic retries bounded after restoring all three projection parents;
+# the shared 25-second convergence deadline and every failure assertion remain.
+services:
+  restate-smoke:
+    environment:
+      RESTATE_DEFAULT_RETRY_POLICY__MAX_INTERVAL: 1s

@@ -1,4 +1,6 @@
+pub mod apps;
 pub mod authority_http_fixture;
+pub mod capability;
 pub mod restate_recorder;
 pub mod sign_in;
 
@@ -37,4 +39,37 @@ pub async fn csrf_token(app: &axum::Router, cookie: &str) -> String {
         .next()
         .unwrap()
         .to_owned()
+}
+
+/// Runtime-equivalent throttles with an explicit trusted socket peer. Tests do
+/// not implicitly disable production throttles or trust forwarding headers.
+/// Without a sign-in app of its own, the app signs in against its scripted
+/// GitHub (`state.github_transport`) through a [`sign_in::signin_bridge`].
+#[allow(dead_code)]
+pub fn build_app<S: tower_sessions::SessionStore + Clone + 'static>(
+    state: ghinvite_web::AppState,
+    store: S,
+) -> axum::Router {
+    build_app_with(state, store, None)
+}
+#[allow(dead_code)]
+pub fn build_app_with<S: tower_sessions::SessionStore + Clone + 'static>(
+    state: ghinvite_web::AppState,
+    store: S,
+    extra: Option<axum::Router<ghinvite_web::AppState>>,
+) -> axum::Router {
+    ghinvite_web::build_app_with(
+        sign_in::with_signin_bridge(state)
+            .with_authority_cache(std::sync::Arc::new(
+                ghinvite_web::authority_cache::MemoryAuthorityCache::default(),
+            ))
+            .with_edge_limits(std::sync::Arc::new(
+                ghinvite_web::rate_limit::MemoryRateLimiter::default(),
+            )),
+        store,
+        extra,
+    )
+    .layer(axum::Extension(
+        ghinvite_web::rate_limit::TrustedClientIp::new(std::net::Ipv4Addr::LOCALHOST.into()),
+    ))
 }

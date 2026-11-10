@@ -1,5 +1,7 @@
+import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
+import { capabilityFor } from './capability.mjs';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 import { stalledResponse } from './deadline-recovery.mjs';
@@ -17,23 +19,24 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     scriptPath: fileURLToPath(new URL('./worker.mjs', import.meta.url)),
     modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
     compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
-    kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
+    kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'], d1Databases: ['DB'],
+    ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
     bindings: {
-      GHINVITE_BASE_URL: 'https://browser.test',
-      GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: ingress,
-      GHINVITE_RESTATE_AUTH: 'bearer', GHINVITE_RESTATE_API_KEY: ingressApiKey,
+      P1_HOST: 'browser.test',
+      P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29', RESTATE_INGRESS_URL: 'https://ingress.fixture.test',
+      RESTATE_INGRESS_TOKEN: ingressApiKey,
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-      GHINVITE_GITHUB_CLIENT_ID: 'dummy', GHINVITE_GITHUB_CLIENT_SECRET: 'dummy', GHINVITE_WEBHOOK_SECRET: 'dummy',
+      ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',
     },
     async outboundService(request) {
       const url = new URL(request.url);
-      if (url.origin === ingress) {
+      if (url.origin === 'https://ingress.fixture.test') {
         assert.equal(request.headers.get('authorization'), `Bearer ${ingressApiKey}`);
         authenticatedIngressCalls++;
         const input = request.method === 'GET' ? undefined : Buffer.from(await request.arrayBuffer());
         const mutation = url.pathname.endsWith('/admit');
         if (mutation) attempted.push(JSON.parse(input));
-        const response = await fetch(request.url, { method: request.method, headers: request.headers,
+        const response = await fetch(`${ingress}${url.pathname}${url.search}`, { method: request.method, headers: request.headers,
           body: input });
         if (stall && mutation) {
           assert.equal(response.status, 200);
@@ -44,20 +47,34 @@ export async function browserAdmission(ingress, code, requester, operation, reco
       }
       // Controlled OAuth boundary only; Rust session creation/rotation is real.
       if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
+      const revoked = signinRevocation(request); if (revoked) return revoked;
       if (request.url === 'https://api.github.com/user') return Response.json({ id: requester, login: `user-${requester}`, avatar_url: null });
       throw new Error(`unexpected browser outbound ${url.origin}${url.pathname}`);
     },
   });
   try {
     const db = await mf.getD1Database('DB');
-    await db.exec('CREATE TABLE users (user_id INTEGER PRIMARY KEY, login TEXT NOT NULL, avatar_url TEXT, last_seen_at TEXT NOT NULL)');
+    for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
+      const schema = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
+      await db.exec(schema.replace(/^[ \t]*--.*$/gm, '').replaceAll('\n', ' '));
+    }
     const login = await mf.dispatchFetch('https://browser.test/login', { redirect: 'manual' });
     const state = new URL(login.headers.get('location')).searchParams.get('state');
     let cookie = login.headers.get('set-cookie').split(';')[0];
-    const callback = await mf.dispatchFetch(`https://browser.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie }, redirect: 'manual' });
+    const callback = await mf.dispatchFetch(`https://browser.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie, 'CF-Connecting-IP': '192.0.2.20' }, redirect: 'manual' });
     assert.equal(callback.status, 303, await callback.clone().text());
     cookie = callback.headers.get('set-cookie').split(';')[0];
-    const page = await mf.dispatchFetch(`https://browser.test/i/${code}?operation_id=${operation}`, { headers: { cookie }, redirect: 'manual' });
+    const select = async linkId => {
+      const capability = capabilityFor(linkId);
+      await db.prepare('INSERT INTO link_secrets (secret_sha256,link_id,secret_generation,created_at,retired_at) VALUES (?,?,?,?,NULL)').bind(capability.sha256, linkId, capability.generation, new Date().toISOString()).run();
+      const bootstrap = await mf.dispatchFetch('https://browser.test/i', { headers: { cookie } });
+      const csrf = (await bootstrap.text()).match(/name="csrf_token"[^>]*value="([^"]+)"/)[1];
+      const selected = await mf.dispatchFetch('https://browser.test/i', { method: 'POST', headers: { cookie, 'CF-Connecting-IP': '192.0.2.20', 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({secret:capability.secret,csrf_token:csrf}).toString(), redirect:'manual' });
+      assert.equal(selected.status,303,await selected.clone().text());
+      assert.equal(selected.headers.get('location'),'/join');
+    };
+    await select(code);
+    const page = await mf.dispatchFetch(`https://browser.test/join?operation_id=${operation}`, { headers: { cookie }, redirect: 'manual' });
     assert.equal(page.status, 200, await page.clone().text());
     const html = await page.text();
     assert.match(html, /pending|awaiting|Waiting/i);
@@ -65,17 +82,14 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     assert.equal(html.includes(ingressApiKey), false);
     assert.equal(JSON.stringify([...page.headers]).includes(ingressApiKey), false);
     assert.ok(authenticatedIngressCalls > 0, 'browser status must call authenticated ingress');
-    assert.equal(page.headers.get('cache-control'), 'private, no-store');
-    console.log('PASS browser Worker Bearer ingress binding and authoritative status with empty D1');
-    // Submissions retain their pre-ingress continuation in D1.
-    const schema = readFileSync(new URL('../../migrations/0001_initial.sql', import.meta.url), 'utf8');
-    for (const statement of schema.match(/CREATE (TABLE|INDEX) attempt_continuations[^;]*;/g)) {
-      await db.exec(statement.replaceAll('\n', ' '));
-    }
+    assert.equal(page.headers.get('cache-control'), 'no-store');
+    console.log('PASS browser Worker Bearer ingress binding and authoritative status without projected link/request rows');
     if (recovery) for (const phase of ['headers', 'body']) {
       const input = recovery.creation();
       const created = await recovery.http(`${ingress}/InvitationLink/${input.link_id}/create`, input);
-       const path = `https://browser.test/i/${created.link_id}`;
+      assert.deepEqual(created, { Ok: { link_id: input.link_id, secret_generation: 1 } });
+      await select(created.Ok.link_id);
+      const path = `https://browser.test/join`;
       const form = await mf.dispatchFetch(path, { headers: { cookie } });
       assert.equal(form.status, 200);
       const html = await form.text();

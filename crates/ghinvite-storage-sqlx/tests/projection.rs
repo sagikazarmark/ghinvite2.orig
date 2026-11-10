@@ -1,8 +1,9 @@
+use ghinvite_core::storage::AppInstallationReadStorage as _;
 use ghinvite_core::storage::projection::{
     ProjectionEnvelope, ProjectionStorage, RequestProjectionEnvelope,
 };
 use ghinvite_core::storage::{
-    AuditPosition, ConsoleStorage, DeliveryStorage, InstallationStorage, RecordStorage,
+    AppInstallationStorage, AuditPosition, ConsoleStorage, DeliveryStorage, RecordStorage,
 };
 use ghinvite_core::{Account, AccountType, SelectedRepos, User};
 use ghinvite_storage_sqlx::SqlxStorage;
@@ -15,13 +16,14 @@ fn envelope() -> ProjectionEnvelope {
             "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "revision": 2, "uses": 1,
             "created_at": "2026-09-14T00:00:00Z",
             "revoked_at": null, "revoked_by": null,
+                "secret":{"secret_generation":1,"sha256":"01".repeat(32)},
             "creation": {
                 "link_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "admin": {"account_id": 100, "user_id": 7}, "account_id": 100,
                 "installation_id": 1, "description": "Workshop", "internal_note": null,
-                "expires_at": null, "max_uses": 1, "permission": "pull",
+                "expires_at": null, "max_uses": 1, "secret_sha256": "01".repeat(32),
                 "approval_required": true,
-                "repos": [{"repo_id": 10, "repo_full_name": "acme/api"}]
+                "targets": {"organization":null,"teams":[],"repos": [{"repo_id": 10, "repo_full_name": "acme/api", "grant":"read"}]}
             }
         },
         "events": []
@@ -47,15 +49,18 @@ fn request_envelope() -> RequestProjectionEnvelope {
 async fn parents(storage: &SqlxStorage) {
     let now = "2026-09-14T00:00:00Z".parse().unwrap();
     storage
-        .insert_installation(&Account {
-            installation_id: 1,
-            account_id: 100,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            installed_at: now,
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        })
+        .put_app_installation(&ghinvite_core::account::Installation::repo(
+            (Account {
+                installation_id: 1,
+                account_id: 100,
+                account_login: "acme".into(),
+                account_type: AccountType::Organization,
+                installed_at: now,
+                uninstalled_at: None,
+                selected_repos: SelectedRepos::All,
+            })
+            .clone(),
+        ))
         .await
         .unwrap();
     for user_id in [7, 8] {
@@ -64,6 +69,7 @@ async fn parents(storage: &SqlxStorage) {
                 user_id,
                 login: format!("user{user_id}"),
                 avatar_url: None,
+                github_created_at: None,
                 last_seen_at: now,
             })
             .await
@@ -82,7 +88,7 @@ async fn missing_repository_rows_repair_only_from_the_original_scope() {
     let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
-    sqlx::query("DELETE FROM invitation_link_repos")
+    sqlx::query("DELETE FROM invitation_link_targets")
         .execute(&pool)
         .await
         .unwrap();
@@ -105,6 +111,7 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
     let fault = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
         .await
         .unwrap();
+    let mut delivery_generation = 0;
     for (outcome, kind, actor) in [
         (
             json!({"kind":"created","upstream_id":9876}),
@@ -112,19 +119,20 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
             "system",
         ),
         (
-            json!({"kind":"already_collaborator"}),
-            "invitation.accepted",
+            json!({"kind":"already_satisfied","effective_role":"read"}),
+            "delivery.already_satisfied",
             "github",
         ),
         (
-            json!({"kind":"failed","status":422}),
+            json!({"kind":"failed","reason":{"kind":"rejected","status":422}}),
             "invitation.send_failed",
             "system",
         ),
     ] {
+        delivery_generation += 1;
         let id = ghinvite_core::GithubInvitationId::new();
         let receipt: ghinvite_core::delivery::CreateReceipt = serde_json::from_value(json!({
-            "command":{"invitation_id":id,"link_id":envelope.link.link_id,"request_id":request_envelope().request.request_id,
+            "command":{"invitation_id":id,"delivery_generation":delivery_generation,"link_id":envelope.link.link_id,"request_id":request_envelope().request.request_id,
                 "approval_id":"approval","account_id":100,"installation_id":1,"requester_id":8,"repo_id":10,
                 "repo_full_name":"acme/api","permission":"pull","approved_at":"2026-09-14T01:00:00Z"},
             "revision":1,"outcome":outcome,"confirmed_at":"2026-09-14T02:00:00Z"
@@ -137,14 +145,20 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .is_err()
         );
-        assert!(storage.get_github_invitation(id).await.unwrap().is_none());
+        assert!(
+            storage
+                .get_delivery(&receipt.command.delivery_key())
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             !storage
                 .list_delivery_for_request(receipt.command.request_id)
                 .await
                 .unwrap()
                 .iter()
-                .any(|r| r.create.command.invitation_id == id)
+                .any(|r| r.create.command.invitation_id == Some(id))
         );
         sqlx::query("DROP TRIGGER fail_delivery_audit")
             .execute(&fault)
@@ -171,9 +185,21 @@ async fn create_audit_failure_rolls_back_and_retry_preserves_each_confirmed_outc
                 .await
                 .is_err()
         );
-        let initial = storage.get_github_invitation(id).await.unwrap().unwrap();
-        assert_eq!(initial.state, ghinvite_core::InvitationState::Sending);
-        assert_eq!(initial.updated_at, receipt.command.approved_at);
+        let initial = storage
+            .get_delivery(&receipt.command.delivery_key())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(initial.create, unknown);
+        let updated: String = sqlx::query_scalar("SELECT updated_at FROM deliveries WHERE id=?1")
+            .bind(receipt.command.delivery_key())
+            .fetch_one(&fault)
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.parse::<chrono::DateTime<chrono::Utc>>().unwrap(),
+            receipt.command.approved_at
+        );
         assert!(
             storage
                 .list_delivery_for_request(receipt.command.request_id)
@@ -234,7 +260,7 @@ async fn accepted_request_becomes_queryable_with_one_use_and_audit() {
         .unwrap()
         .unwrap();
     assert_eq!(link.uses_count, 1);
-    assert_eq!(link.repos[0].repo_full_name, "acme/api");
+    assert_eq!(link.targets.repos[0].repo_full_name, "acme/api");
     let pending = storage.pending_request_page(100, None).await.unwrap().rows;
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].justification.as_deref(), Some("Access please"));
@@ -314,6 +340,21 @@ async fn restored_relational_identity_conflicts_are_not_hidden_by_snapshot_json(
     ));
     let storage = SqlxStorage::at_path(&path).await.unwrap();
     parents(&storage).await;
+    // The corrupted relational identity must itself be a valid app/account
+    // binding, so the replay guard (rather than a foreign key) detects the
+    // disagreement with the retained snapshot.
+    storage
+        .put_app_installation(&ghinvite_core::account::Installation::repo(Account {
+            installation_id: 2,
+            account_id: 101,
+            account_login: "other".into(),
+            account_type: AccountType::Organization,
+            installed_at: "2026-09-14T00:00:00Z".parse().unwrap(),
+            uninstalled_at: None,
+            selected_repos: SelectedRepos::All,
+        }))
+        .await
+        .unwrap();
     let input = envelope();
     storage.apply_transition(&input).await.unwrap();
     storage.apply_request(&request_envelope()).await.unwrap();
@@ -322,16 +363,16 @@ async fn restored_relational_identity_conflicts_are_not_hidden_by_snapshot_json(
         .unwrap();
     for (corrupt, repair) in [
         (
-            "UPDATE invitation_links SET account_id = 101",
-            "UPDATE invitation_links SET account_id = 100",
+            "UPDATE invitation_links SET account_id = 101, installation_id = 2",
+            "UPDATE invitation_links SET account_id = 100, installation_id = 1",
         ),
         (
             "UPDATE invitation_requests SET requester_id = 7",
             "UPDATE invitation_requests SET requester_id = 8",
         ),
         (
-            "UPDATE invitation_link_repos SET repo_full_name = 'other/repo'",
-            "UPDATE invitation_link_repos SET repo_full_name = 'acme/api'",
+            "UPDATE invitation_link_targets SET display_name = 'other/repo'",
+            "UPDATE invitation_link_targets SET display_name = 'acme/api'",
         ),
         (
             "UPDATE audit_events SET account_id = 101",
@@ -462,15 +503,20 @@ async fn parent_repair_retries_without_overwriting_owned_facts() {
     assert!(storage.get_user(7).await.unwrap().is_none());
     parents(&storage).await;
     let when = "2026-09-15T00:00:00Z".parse().unwrap();
-    storage
-        .mark_installation_uninstalled(1, when)
+    let mut installation = storage
+        .app_installation(ghinvite_core::account::App::Repo, 1)
         .await
+        .unwrap()
         .unwrap();
+    installation.revision += 1;
+    installation.account.uninstalled_at = Some(when);
+    storage.put_app_installation(&installation).await.unwrap();
     storage
         .upsert_user(&User {
             user_id: 8,
             login: "renamed".into(),
             avatar_url: Some("https://example.org/avatar".into()),
+            github_created_at: None,
             last_seen_at: when,
         })
         .await
@@ -480,8 +526,9 @@ async fn parent_repair_retries_without_overwriting_owned_facts() {
     assert_eq!(storage.get_user(8).await.unwrap().unwrap().login, "renamed");
     assert_eq!(
         storage
-            .get_installation(1)
+            .app_installation(ghinvite_core::account::App::Repo, 1)
             .await
+            .map(|value| value.map(|installation| installation.account))
             .unwrap()
             .unwrap()
             .uninstalled_at,
@@ -604,6 +651,8 @@ fn expire(envelope: &mut RequestProjectionEnvelope) {
         decided_by: None,
         effective_at: at,
         evaluated_at: at,
+        cancellation_reason: None,
         decline_reason: None,
+        requester_message: None,
     });
 }

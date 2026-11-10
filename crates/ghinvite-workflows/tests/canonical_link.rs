@@ -2,14 +2,16 @@
 //! projection deliberately unavailable until after creation and admission replay.
 #![cfg(feature = "integration")]
 
+#[path = "common/web_apps.rs"]
+mod web_apps;
+
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
     response::Response,
 };
 use ghinvite_core::storage::projection::{ProjectionEnvelope, ProjectionStorage};
-use ghinvite_core::storage::{ConsoleStorage, RecordStorage};
-use ghinvite_github::transport::{HttpTransport, ReqwestTransport};
+use ghinvite_core::storage::{AppInstallationReadStorage, ConsoleStorage, RecordStorage};
 use serde_json::json;
 use std::sync::{
     Arc,
@@ -18,32 +20,32 @@ use std::sync::{
 use std::time::Duration;
 use tower::ServiceExt;
 
-// Only the network destination changes: OAuth and UserApiClient still use the
-// production request construction, transport, and response decoding.
-struct GithubHttpStub {
-    base: String,
-    transport: ReqwestTransport,
-}
-#[async_trait::async_trait]
-impl HttpTransport for GithubHttpStub {
-    async fn send(
-        &self,
-        mut request: ghinvite_github::transport::Request,
-    ) -> ghinvite_github::Result<ghinvite_github::transport::Response> {
-        request.url = request
-            .url
-            .replace("https://api.github.com", &self.base)
-            .replace("https://github.com", &self.base);
-        self.transport.send(request).await
-    }
-}
-
 struct DelayedProjection {
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     delayed: AtomicBool,
 }
 #[async_trait::async_trait]
 impl ProjectionStorage for DelayedProjection {
+    async fn apply_reissue(
+        &self,
+        envelope: &ghinvite_core::reissue_projection::RequestReissueProjection,
+    ) -> ghinvite_core::storage::Result<()> {
+        if self.delayed.load(Ordering::SeqCst) {
+            return Err(ghinvite_core::storage::Error::ProjectionDependency);
+        }
+        self.storage.apply_reissue(envelope).await
+    }
+
+    async fn apply_revocation(
+        &self,
+        envelope: &ghinvite_core::revocation::RevocationProjection,
+    ) -> ghinvite_core::storage::Result<()> {
+        if self.delayed.load(Ordering::SeqCst) {
+            return Err(ghinvite_core::storage::Error::ProjectionDependency);
+        }
+        self.storage.apply_revocation(envelope).await
+    }
+
     async fn apply_request(
         &self,
         envelope: &ghinvite_core::storage::projection::RequestProjectionEnvelope,
@@ -155,73 +157,72 @@ fn field(html: &str, name: &str) -> String {
         .into()
 }
 
+fn revealed_secret(page: &str) -> String {
+    page.split("/i#")
+        .nth(1)
+        .expect("show-once invitation URL")
+        .chars()
+        .take(43)
+        .collect()
+}
+async fn select_secret(app: &axum::Router, cookie: &str, secret: &str) {
+    let bootstrap = request(app, cookie, "/i", None).await;
+    assert_eq!(bootstrap.status(), StatusCode::OK);
+    let csrf = field(&html(bootstrap).await, "csrf_token");
+    let response = request(
+        app,
+        cookie,
+        "/i",
+        Some(&format!("csrf_token={csrf}&secret={secret}")),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "{}",
+        html(response).await
+    );
+    assert_eq!(response.headers()["location"], "/join");
+}
+
 #[tokio::test]
 async fn authenticated_journey_settles_and_recovers_across_projection_and_response_loss() {
-    let ingress =
-        std::env::var("RESTATE_INGRESS_URL").expect("bash scripts/test-restate.sh canonical_link");
-    let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
-    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(25))
-        .build()
-        .unwrap();
     let requester_login = Arc::new(AtomicBool::new(false));
     let login_identity = requester_login.clone();
     let stub = ghinvite_github::stub::router()
         .route("/login/oauth/access_token", axum::routing::post(|| async { axum::Json(json!({"access_token":"fixture", "token_type":"bearer", "scope":""})) }))
+        .route(&format!("/applications/{}/token", web_apps::SIGNIN_CLIENT_ID), axum::routing::delete(|| async { axum::http::StatusCode::NO_CONTENT }))
         .route("/user", axum::routing::get(move || { let requester = login_identity.load(Ordering::SeqCst); async move { axum::Json(if requester { json!({"id":8,"login":"alice"}) } else { json!({"id":7,"login":"creator"}) }) } }))
         .route("/user/memberships/orgs/acme", axum::routing::get(|| async { axum::Json(json!({"role":"admin","state":"active","organization":{"id":100}})) }))
         .route("/user/installations/1/repositories", axum::routing::get(|| async { axum::Json(json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]})) }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let stub_task = tokio::spawn(async move {
-        axum::serve(listener, stub).await.unwrap();
-    });
+    let harness = ghinvite_e2e::Harness::start_with_github_router(stub).await;
+    let ingress = harness.restate.ingress_url().to_owned();
+    let admin = harness.restate.admin_url().to_owned();
+    let client = harness.client.clone();
+    let base = harness.github_url.clone();
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
             .unwrap(),
-    );
-    let github = Arc::new(
-        ghinvite_github::InstallationClient::new(
-            Arc::new(ReqwestTransport::with_client(client.clone())),
-            ghinvite_github::jwt::AppJwtSigner::from_pem(
-                123,
-                include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
-            )
-            .unwrap(),
-        )
-        .with_base(&base),
     );
     let projection = Arc::new(DelayedProjection {
         storage: storage.clone(),
         delayed: AtomicBool::new(true),
     });
     let endpoint = ghinvite_workflows::build_endpoint(
-        ghinvite_workflows::AppState::new(storage.clone(), github),
+        ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
+            ghinvite_workflows::RepositoryGithub::new(
+                ghinvite_e2e::github_transport(client.clone()),
+                &base,
+                ghinvite_e2e::repository_apps(&base),
+            )
+            .unwrap(),
+        )),
         projection.clone(),
         None,
     )
     .unwrap();
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let endpoint_task = tokio::spawn(async move {
-        restate_sdk::http_server::HttpServer::new(endpoint)
-            .serve(listener)
-            .await;
-    });
-    let deployment = client
-        .post(format!("{admin}/deployments"))
-        .json(&json!({"uri":format!("http://{host}:{port}")}))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        deployment.status().is_success(),
-        "{}",
-        deployment.text().await.unwrap()
-    );
+    harness.restate.deploy(endpoint).await;
     // Only this disposable runtime: original executions must actually expire.
     for service in ["InvitationLink", "InvitationRequest", "RepositoryDelivery"] {
         client
@@ -233,13 +234,31 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .error_for_status()
             .unwrap();
     }
-    let onboard = client.post(format!("{ingress}/Installation/1/onboard"))
-        .json(&json!({"installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme",
-            "account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
-        .send().await.unwrap();
+    let setup = ghinvite_e2e::setup_command(
+        json!({"app":"repo","installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme", "account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}),
+    );
+    let onboard = client
+        .post(format!("{ingress}/Installation/repo:1/onboard"))
+        .json(&setup)
+        .send()
+        .await
+        .unwrap();
     assert!(onboard.status().is_success());
+    client
+        .post(format!("{ingress}/Installation/repo:1/onboard_webhook"))
+        .json(&ghinvite_e2e::signed_owner_command(&setup, 7))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
     tokio::time::timeout(Duration::from_secs(20), async {
-        while storage.get_installation(1).await.unwrap().is_none() {
+        while storage
+            .app_installation(ghinvite_core::account::App::Repo, 1)
+            .await
+            .unwrap()
+            .is_none_or(|installation| installation.installed_by_user_id != Some(7))
+        {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
@@ -344,19 +363,39 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     let proxy_task = tokio::spawn(async move {
         axum::serve(listener, proxy).await.unwrap();
     });
+    // Installation reads create tokens at and call the stub.
+    let github_transport = ghinvite_e2e::github_transport(client.clone());
+    let web_github = ghinvite_web::WebGithub {
+        apps: ghinvite_github::GithubApps::new(
+            ghinvite_github::rest::RestEnv::new(github_transport.clone(), &base, "p1").unwrap(),
+            ghinvite_e2e::installed_apps(&base, true),
+        )
+        .unwrap(),
+        transport: github_transport,
+    };
     let state = ghinvite_web::AppState::new(
         storage.clone(),
-        Arc::new(GithubHttpStub {
-            base: base.clone(),
-            transport: ReqwestTransport::with_client(client.clone()),
-        }),
+        web_github,
         Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()),
         ghinvite_web::WebConfig {
-            webhook_secret: b"journey-secret".to_vec(),
+            webhooks: Some(web_apps::webhooks("journey-secret")),
+            // Sign-in calls the stub, too.
+            signin_apps: Some(web_apps::signin_app(&base)),
             ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
         },
     );
-    let app = ghinvite_web::build_app(state, tower_sessions::MemoryStore::default());
+    let state = state
+        .with_authority_cache(Arc::new(
+            ghinvite_web::authority_cache::MemoryAuthorityCache::default(),
+        ))
+        .with_edge_limits(Arc::new(
+            ghinvite_web::rate_limit::MemoryRateLimiter::default(),
+        ));
+    let app = ghinvite_web::build_app(state, tower_sessions::MemoryStore::default()).layer(
+        axum::Extension(ghinvite_web::rate_limit::TrustedClientIp::new(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+        )),
+    );
     let cookie = sign_in(&app).await;
     let form = html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
     let action = form
@@ -374,7 +413,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     assert_eq!(id.len(), 26);
     let csrf = field(&form, "csrf_token");
     let body = format!(
-        "csrf_token={csrf}&description=Workshop&permission=pull&repo_ids=10&approval_required=on&expires_in_days=2"
+        "csrf_token={csrf}&description=Workshop&permission=pull&repo_ids=10&repo_grants=10:pull&approval_required=on&expires_in_days=2"
     );
     // Validation and repository reload both retain the allocated ID/anchor.
     for fields in [
@@ -436,7 +475,19 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     assert_eq!(history.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(html(history).await.contains("Request history unavailable"));
     let page = html(request(&app, &cookie, &detail, None).await).await;
-    assert!(page.contains(&format!("/i/{id}")));
+    assert!(!page.contains(&format!("/i/{id}")));
+    let rotated = request(
+        &app,
+        &cookie,
+        &format!("{detail}/rotate"),
+        Some(&format!(
+            "csrf_token={csrf}&operation_id={}",
+            ghinvite_core::RequestId::new()
+        )),
+    )
+    .await;
+    assert_eq!(rotated.status(), StatusCode::OK, "{}", html(rotated).await);
+    let secret = revealed_secret(&html(rotated).await);
     assert!(
         storage
             .get_invitation_link_by_id(id.parse().unwrap())
@@ -479,9 +530,17 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         .status(),
         StatusCode::CONFLICT
     );
-    let public = format!("/i/{id}");
+    let public = "/join".to_owned();
+    let capability_hash = snapshot["secret"]["sha256"].clone();
     requester_login.store(true, Ordering::SeqCst);
     let requester_cookie = sign_in(&app).await;
+    assert_eq!(
+        request(&app, &requester_cookie, &format!("/i/{id}"), None)
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    select_secret(&app, &requester_cookie, &secret).await;
     let page = html(request(&app, &requester_cookie, &public.to_lowercase(), None).await).await;
     assert!(page.contains("acme/api"));
     let operation = field(&page, "operation_id");
@@ -519,7 +578,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     assert!(status.contains("Awaiting review"));
     let page: serde_json::Value = client
         .post(format!("{ingress}/InvitationLink/{id}/requester_page"))
-        .json(&json!({"link_id":id,"requester_id":8,"operation_id":operation}))
+        .json(&json!({"secret_sha256":capability_hash,"secret_generation":2,"link_id":id,"requester_id":8,"operation_id":operation}))
         .send()
         .await
         .unwrap()
@@ -661,10 +720,10 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     )
     .await;
     let command = &plan["commands"][0];
-    let delivery_path = format!("RepositoryDelivery/{request_id}:10/status");
+    let delivery_path = format!("RepositoryDelivery/{request_id}:10:1/status");
     let delivered = owner(&client, &ingress, &delivery_path, json!(null)).await;
     assert_eq!(delivered["create"]["outcome"]["kind"], "created");
-    // Supported member evidence: GitHub reports current numeric identity/access,
+    // Read-only settlement evidence: GitHub reports current numeric identity/access,
     // and the complete pending list no longer contains the known invitation.
     let upstream = delivered["create"]["outcome"]["upstream_id"]
         .as_u64()
@@ -687,7 +746,12 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             if storage
-                .get_github_invitation(command["invitation_id"].as_str().unwrap().parse().unwrap())
+                .get_delivery(&format!(
+                    "{}:{}:{}",
+                    command["request_id"].as_str().unwrap(),
+                    command["repo_id"],
+                    command["delivery_generation"]
+                ))
                 .await
                 .unwrap()
                 .is_some()
@@ -715,7 +779,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/webhooks/github")
+                    .uri("/webhooks/repo")
                     .header("content-type", "application/json")
                     .header("x-github-event", "member")
                     .header("x-github-delivery", "journey-member")
@@ -725,8 +789,19 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
+    // The signed member event is ignored; the observer verifies current access.
+    assert!(
+        client
+            .post(format!("{ingress}/DeliveryObservation/observe"))
+            .json(&delivered)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             let page = html(
@@ -750,7 +825,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         }
     })
     .await
-    .expect("requester status and admin audit converge after signed evidence");
+    .expect("requester status and admin audit converge after verified read evidence");
     let settled = owner(&client, &ingress, &delivery_path, json!(null)).await;
     assert_eq!(settled["settlement"]["state"], "accepted");
     assert_eq!(settled["create"], delivered["create"]);
@@ -850,7 +925,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     // before asserting absence of duplicate history/effects.
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            let rows = owner(&client, &admin, "query", json!({"query":format!("SELECT id FROM sys_invocation WHERE target_service_name = 'DeliveryProjection' AND target_service_key = '{request_id}:10' AND status != 'completed'")})).await;
+            let rows = owner(&client, &admin, "query", json!({"query":format!("SELECT id FROM sys_invocation WHERE target_service_name = 'DeliveryProjection' AND target_service_key = '{request_id}:10:1' AND status != 'completed'")})).await;
             if rows["rows"].as_array().unwrap().is_empty() { break; }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -905,6 +980,15 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     // The same authenticated routes cover fresh admission after decline and
     // admission-time auto approval. Keep the deadline/race matrix in request_owner.
     for auto in [false, true] {
+        // Independent delivery scenarios need independent upstream invitations;
+        // the typed protocol correctly tracks a previous scenario's pending invite.
+        client
+            .delete(format!("{base}/reset"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
         let form =
             html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
         let action = form
@@ -919,14 +1003,30 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         let action = format!("/console/accounts/acme/links?{action}");
         let link_id = url_query(&action)["link_id"].clone();
         let body = format!(
-            "csrf_token={csrf}&description=Two+repositories&permission=pull&repo_ids=10&repo_ids=11{}",
+            "csrf_token={csrf}&description=Two+repositories&permission=admin&repo_ids=10&repo_ids=11&repo_grants=10:pull&repo_grants=11:push{}",
             if auto { "" } else { "&approval_required=on" }
         );
+        let created = request(&app, &cookie, &action, Some(&body)).await;
+        assert_eq!(created.status(), StatusCode::OK, "{}", html(created).await);
+        let secret = revealed_secret(&html(created).await);
+        select_secret(&app, &requester_cookie, &secret).await;
+        let capability = owner(
+            &client,
+            &ingress,
+            &format!("InvitationLink/{link_id}/link_status"),
+            json!({"link_id":link_id,"admin":{"account_id":100,"user_id":7}}),
+        )
+        .await;
+        let capability_hash = capability["secret"]["sha256"].clone();
         assert_eq!(
-            request(&app, &cookie, &action, Some(&body)).await.status(),
-            StatusCode::SEE_OTHER
+            capability["creation"]["targets"]["repos"][0]["grant"],
+            "read"
         );
-        let public = format!("/i/{link_id}");
+        assert_eq!(
+            capability["creation"]["targets"]["repos"][1]["grant"],
+            "write"
+        );
+        let public = "/join".to_owned();
         let page = html(request(&app, &requester_cookie, &public, None).await).await;
         let mut operation = field(&page, "operation_id");
         let submission = |op: &str| {
@@ -947,7 +1047,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             &client,
             &ingress,
             &format!("InvitationLink/{link_id}/requester_page"),
-            json!({"link_id":link_id,"requester_id":8,"operation_id":operation}),
+            json!({"secret_sha256":capability_hash,"secret_generation":1,"link_id":link_id,"requester_id":8,"operation_id":operation}),
         )
         .await;
         let mut request_id = page["request"]["request_id"].as_str().unwrap().to_owned();
@@ -987,7 +1087,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
                 &client,
                 &ingress,
                 &format!("InvitationLink/{link_id}/requester_page"),
-                json!({"link_id":link_id,"requester_id":8,"operation_id":operation}),
+                json!({"secret_sha256":capability_hash,"secret_generation":1,"link_id":link_id,"requester_id":8,"operation_id":operation}),
             )
             .await;
             let fresh = page["request"]["request_id"].as_str().unwrap();
@@ -1016,19 +1116,29 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         )
         .await;
         assert_eq!(plan["commands"].as_array().unwrap().len(), 2);
+        for command in plan["commands"].as_array().unwrap() {
+            assert_eq!(
+                command["permission"],
+                if command["repo_id"] == 10 {
+                    "pull"
+                } else {
+                    "push"
+                }
+            );
+        }
         tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 let api = owner(
                     &client,
                     &ingress,
-                    &format!("RepositoryDelivery/{request_id}:10/status"),
+                    &format!("RepositoryDelivery/{request_id}:10:1/status"),
                     json!(null),
                 )
                 .await;
                 let web = owner(
                     &client,
                     &ingress,
-                    &format!("RepositoryDelivery/{request_id}:11/status"),
+                    &format!("RepositoryDelivery/{request_id}:11:1/status"),
                     json!(null),
                 )
                 .await;
@@ -1057,7 +1167,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
                     let web = owner(
                         &client,
                         &ingress,
-                        &format!("RepositoryDelivery/{request_id}:11/status"),
+                        &format!("RepositoryDelivery/{request_id}:11:1/status"),
                         json!(null),
                     )
                     .await;
@@ -1070,10 +1180,35 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .await
             .expect("explicit recovery resumes refused repository");
         }
+        let calls: serde_json::Value = client
+            .get(format!("{base}/calls"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        for (path, permission) in [
+            ("/repos/acme/api/collaborators/alice", "pull"),
+            ("/repos/acme/web/collaborators/alice", "push"),
+        ] {
+            let writes = calls["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|call| call["method"] == "PUT" && call["path"] == path)
+                .collect::<Vec<_>>();
+            assert!(!writes.is_empty());
+            assert!(
+                writes.iter().all(|call| call["permission"] == permission),
+                "each repository keeps its own grant through approval and recovery"
+            );
+        }
     }
-    endpoint_task.abort();
     proxy_task.abort();
-    stub_task.abort();
+    harness.finish().await;
 }
 
 fn url_query(action: &str) -> std::collections::BTreeMap<String, String> {

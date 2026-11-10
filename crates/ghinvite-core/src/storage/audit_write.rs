@@ -29,3 +29,12 @@ pub fn metadata(event: &AuditEvent) -> Option<String> {
     (!event.metadata.is_null())
         .then(|| serde_json::to_string(&event.metadata).expect("audit metadata serializes"))
 }
+
+/// Insert a bounded envelope event batch independently of snapshot freshness.
+pub(crate) fn retained_events() -> String {
+    format!(
+        r#"INSERT INTO audit_events(id,account_id,occurred_at,event_type,actor_kind,actor_id,target_kind,target_id,metadata,request_id)
+SELECT json_extract(value,'$.id'),json_extract(value,'$.account_id'),json_extract(value,'$.occurred_at'),json_extract(value,'$.event_type'),json_extract(value,'$.actor_kind'),json_extract(value,'$.actor_id'),json_extract(value,'$.target_kind'),json_extract(value,'$.target_id'),json_extract(value,'$.metadata'),json_extract(value,'$.request_id') FROM json_each(?1,'$.events') WHERE true {}"#,
+        INSTALLATION_REPLAY
+    )
+}

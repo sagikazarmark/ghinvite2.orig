@@ -164,3 +164,25 @@ through `encode_selected_repos`, so no sequence of trait calls can plant an
 undecodable row. The D1 constraint above — that a corrupt row becomes an error
 rather than a Worker panic — is held by the adapter's structure and by review,
 not by the suite.
+
+
+## Amendment (2026-10-16): daily projection summaries
+
+`storage::blocked_digest` owns the daily snapshot SQL and typed parameters.
+The SQLx and D1 adapters bind and execute the same atomic header/item/retention
+transaction. Ordinary positional parameters preserve this ADR's boundary;
+no new generic JSON executor is introduced.
+
+`DailyDigestStorage` is a separate projection-maintenance port, included in the
+native web composition's `WebStorage` bundle so its startup task can share the
+configured database. The Worker scheduled entrypoint constructs the same D1
+adapter directly. These callers may write only summary tables; delivery,
+request, installation and audit authority remain with workflows. This changes
+neither workflow ordering nor business receipts, and requires no Restate call.
+`ConsoleStorage` reads the snapshot through current account/all-target scope.
+
+The first successful observation in each UTC day is immutable. Hourly retry
+opportunities and the native startup run recover missed observations without
+backdating current projected facts. The observation time, missing and stale
+states remain visible to readers. Migration0004 must precede these entrypoints;
+local acceptance does not claim a deployed migration or cron registration.

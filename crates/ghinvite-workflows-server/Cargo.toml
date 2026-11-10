@@ -20,10 +20,26 @@ path = "src/main.rs"
 
 [dependencies]
 ghinvite-core.workspace = true
+ghinvite-config.workspace = true
+ghinvite-email-vault.workspace = true
 ghinvite-github.workspace = true
 ghinvite-storage-sqlx.workspace = true
+ghinvite-storage-d1 = { workspace = true, features = ["native-bridge"] }
+serde_json.workspace = true
 ghinvite-workflows.workspace = true
 restate-sdk = { workspace = true, features = ["http_server"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+reqwest.workspace = true
+
+[features]
+bridge-fixture = ["ghinvite-storage-d1/bridge-test"]
+
+[[example]]
+name = "native-bridge-endpoint"
+path = "examples/native_bridge_endpoint.rs"
+required-features = ["bridge-fixture"]

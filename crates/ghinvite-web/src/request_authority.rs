@@ -18,6 +18,21 @@ impl RequestAuthority {
         Self { client }
     }
 
+    pub async fn requester_status(
+        &self,
+        input: ghinvite_core::request_lifecycle::RequesterStatus,
+    ) -> Result<ghinvite_core::request_lifecycle::RequesterView> {
+        self.client
+            .invoke(
+                "InvitationRequest",
+                &input.request_id.to_string(),
+                "requester_status",
+                &input,
+            )
+            .await
+            .map_err(AuthorityError::from_ingress)
+    }
+
     pub async fn admin_status(
         &self,
         input: ghinvite_core::request_lifecycle::AdminRequestStatus,
@@ -27,6 +42,36 @@ impl RequestAuthority {
                 "InvitationRequest",
                 &input.request_id.to_string(),
                 "admin_status",
+                &input,
+            )
+            .await
+            .map_err(AuthorityError::from_ingress)
+    }
+
+    pub async fn admin_dispatch(
+        &self,
+        input: ghinvite_core::request_lifecycle::AdminRequestStatus,
+    ) -> Result<Option<ghinvite_core::request_lifecycle::ApprovedDispatch>> {
+        self.client
+            .invoke(
+                "InvitationRequest",
+                &input.request_id.to_string(),
+                "admin_dispatch",
+                &input,
+            )
+            .await
+            .map_err(AuthorityError::from_ingress)
+    }
+
+    pub async fn reissue(
+        &self,
+        input: ghinvite_core::reissue::ReissueCommand,
+    ) -> Result<ghinvite_core::reissue::ReissueOutcome> {
+        self.client
+            .invoke(
+                "InvitationRequest",
+                &input.request_id.to_string(),
+                "reissue",
                 &input,
             )
             .await
@@ -78,6 +123,20 @@ impl RequestAuthority {
                 "InvitationRequest",
                 &input.request_id.to_string(),
                 "delivery_progress",
+                &input,
+            )
+            .await
+            .map_err(AuthorityError::from_ingress)
+    }
+    pub async fn organization_delivery_progress(
+        &self,
+        input: RequestStatus,
+    ) -> Result<Option<ghinvite_core::request_lifecycle::OrganizationProgress>> {
+        self.client
+            .invoke(
+                "InvitationRequest",
+                &input.request_id.to_string(),
+                "organization_delivery_progress",
                 &input,
             )
             .await

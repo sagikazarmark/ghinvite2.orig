@@ -11,7 +11,9 @@ crate-type = ["cdylib"]
 
 [features]
 # Disposable binding conformance harness only; never enable in deployed builds.
-runtime-tests = ["ghinvite-core/test-suite"]
+runtime-tests = ["ghinvite-core/test-suite", "ghinvite-workflows/runtime-tests"]
+# Explicit local preactivation composition; isolated from ordinary fixture bundles.
+cancellation-fixture = ["runtime-tests"]
 
 # This crate is the Cloudflare Workers entry point for the Restate service
 # binary. The whole crate exists only on wasm32 — `worker`,
@@ -19,11 +21,12 @@ runtime-tests = ["ghinvite-core/test-suite"]
 # in `ghinvite-storage-d1` are gated to wasm32. On native
 # (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-base64.workspace = true
 ghinvite-github.workspace = true
 restate-sdk.workspace = true
 ghinvite-workflows.workspace = true
 ghinvite-core.workspace = true
+ghinvite-config.workspace = true
+ghinvite-email-vault.workspace = true
 ghinvite-storage-d1.workspace = true
 worker = { version = "0.8", features = ["d1", "http"] }
 console_error_panic_hook = "0.1.7"

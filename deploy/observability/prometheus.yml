@@ -1,0 +1,10 @@
+# Local template: run node_exporter with --collector.textfile.directory=/var/lib/p1-metrics.
+# Bind it to loopback/private networking. This template deploys nothing.
+global:
+  scrape_interval: 30s
+rule_files:
+  - alerts.yml
+scrape_configs:
+  - job_name: p1-textfile
+    static_configs:
+      - targets: ['127.0.0.1:9100']

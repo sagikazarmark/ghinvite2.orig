@@ -1,0 +1,47 @@
+[package]
+name = "octoauth"
+description = "GitHub App authentication: installation access tokens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Send through `reqwest_middleware` (retries, reqwest-tracing, …).
+middleware = ["dep:reqwest-middleware"]
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+http.workspace = true
+reqwest.workspace = true
+reqwest-middleware = { workspace = true, optional = true }
+rsa.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+# No reqwest `stream` feature on wasm32: it links wasm-streams 0.4, whose
+# wasm-bindgen exports collide with wasm-streams 0.5 in `worker` 0.8, so a
+# Worker using both fails to link (`tests/wasm_dependencies.rs`).
+
+# Cloudflare Workers and other wasm32-unknown-unknown (JavaScript) hosts.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# `SystemClock` reads JavaScript `Date.now()`: `SystemTime::now()` panics here.
+js-sys.workspace = true
+# Not used directly: `rsa` reaches getrandom 0.2 (num-bigint-dig -> rand),
+# which needs its JS backend selected. PKCS#1 v1.5 signing draws no randomness.
+getrandom_02.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+futures-util = { workspace = true, features = ["alloc"] }
+# Verifies the JWTs we sign; never used to sign.
+jsonwebtoken.workspace = true
+static_assertions.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

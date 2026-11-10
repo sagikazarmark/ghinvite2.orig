@@ -1,46 +1,58 @@
+import { installedWebApp, signinApp } from './app-config.mjs';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response } from 'miniflare';
 
 let outgoing = 0;
-const mf = new Miniflare({
+const options = {
   modules: true,
   scriptPath: fileURLToPath(new URL('./worker.mjs', import.meta.url)),
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   // Match wrangler/web.toml, including its intentionally older compatibility date.
   compatibilityDate: '2024-09-23',
   compatibilityFlags: ['nodejs_compat'],
-  kvNamespaces: ['SESSIONS'],
+  ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
+  kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'],
   d1Databases: ['DB'],
   bindings: {
-    GHINVITE_BASE_URL: 'https://session.test',
-    GHINVITE_SESSION_SECRET: '07'.repeat(32),
-    GHINVITE_RESTATE_INGRESS: 'https://restate.invalid',
-    GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
+    P1_HOST: 'session.test',
+    P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29',
+    RESTATE_INGRESS_URL: 'https://restate.invalid',
+    RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-    GHINVITE_GITHUB_CLIENT_ID: 'dummy-client-id',
-    GHINVITE_GITHUB_CLIENT_SECRET: 'dummy-client-secret',
-    GHINVITE_WEBHOOK_SECRET: 'dummy-webhook-secret',
+    ...signinApp,
+    ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy-webhook-secret',
   },
   outboundService(request) {
     outgoing++;
     console.error('Blocked unexpected outbound request:', request.url);
     return new Response('Outbound network disabled', { status: 502 });
   },
-});
+};
+const mf = new Miniflare(options);
 
 try {
+  const db = await mf.getD1Database('DB');
+  for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(f => f.endsWith('.sql')).sort()) {
+    await db.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8').replace(/^[ \t]*--.*$/gm, '').replaceAll('\n', ' '));
+  }
   const health = await mf.dispatchFetch('https://session.test/health', { redirect: 'manual' });
   assert.equal(health.status, 200);
   assert.equal(await health.text(), 'ok');
   console.log('PASS /health: 200 ok');
+  const immutable = await mf.dispatchFetch('https://session.test/health', {
+    headers: { 'x-test-keyring-descriptor': 'malformed-secret-must-not-be-read-again' },
+  });
+  assert.equal(immutable.status, 200, 'loaded keyring is immutable for this isolate');
+
 
   const login = await mf.dispatchFetch('https://session.test/login?return_to=%2Fconsole', { redirect: 'manual' });
   assert.equal(login.status, 303, await login.text());
   const location = new URL(login.headers.get('location'));
   assert.equal(location.origin, 'https://github.com');
   assert.equal(location.pathname, '/login/oauth/authorize');
-  assert.equal(location.searchParams.get('client_id'), 'dummy-client-id');
+  assert.equal(location.searchParams.get('client_id'), signinApp.GH_SIGNIN_CLIENT_ID);
   const state = location.searchParams.get('state');
   assert.ok(state?.length >= 32);
   const setCookie = login.headers.get('set-cookie');
@@ -55,31 +67,41 @@ try {
   const keys = (await kv.list()).keys;
   assert.equal(keys.length, 1);
   assert.equal(keys[0].name, key);
-  const raw = Buffer.from(await kv.get(key, 'arrayBuffer'));
-  const magic = Buffer.from('ghinvite-session\x01');
-  assert.deepEqual(raw.subarray(0, magic.length), magic);
-  assert.ok(raw.length > magic.length + 8 + 24 + 16, 'header, deadline, nonce, tag and ciphertext');
-  for (const plaintext of [state, 'oauth_csrf', 'ghinvite_lifetime', '/console']) {
+  let raw = Buffer.from(await kv.get(key, 'arrayBuffer'));
+  assert.equal(raw.subarray(0, 3).toString(), 'AKE', 'anykms envelope magic');
+  assert.equal(raw[3], 1, 'anykms envelope v1');
+  assert.ok(raw.length > 100, 'wrapped DEK, authenticated header and encrypted record');
+  assert.ok(keys[0].expiration <= Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, 'session TTL bounded by thirty days');
+  for (const plaintext of [state, 'ghinvite_lifetime', '/console']) {
     assert.equal(raw.includes(Buffer.from(plaintext)), false, `plaintext leak: ${plaintext}`);
   }
-  console.log(`PASS /login: 303; one protected KV record (${raw.length} bytes), no plaintext state`);
+  // The pending sign-in (state, PKCE verifier) is one encrypted D1 row.
+  const pending = await db.prepare('SELECT ciphertext FROM pending_signins').all();
+  assert.equal(pending.results.length, 1);
+  assert.equal(JSON.stringify(pending.results).includes(state), false, 'plaintext state in D1');
+  console.log(`PASS /login: 303; one protected KV record (${raw.length} bytes), one encrypted pending sign-in, no plaintext state`);
 
   const mismatch = await mf.dispatchFetch('https://session.test/oauth/callback?code=dummy&state=wrong', {
-    headers: { cookie }, redirect: 'manual',
+    headers: { cookie, 'CF-Connecting-IP':'192.0.2.1' }, redirect: 'manual',
   });
   assert.equal(mismatch.status, 400);
   // The failure page says ghinvite's own words, never the upstream or internal
   // diagnostic. "Did not match the sign-in started", rather than the
-  // no-sign-in-pending copy, still proves a later request decrypted and loaded
-  // the pending OAuth state through the actual Worker KV adapter.
+  // no-sign-in-pending copy, proves a later request loaded the session through
+  // the actual Worker KV adapter and decrypted its pending sign-in from D1.
   const mismatchBody = await mismatch.text();
   assert.match(mismatchBody, /did not match the sign-in started in this browser/);
   assert.doesNotMatch(mismatchBody, /no sign-in in progress/);
   assert.match(mismatchBody, /href="\/login"/);
   assert.doesNotMatch(mismatchBody, /CSRF/);
   assert.equal(mismatch.headers.get('set-cookie'), null);
-  assert.deepEqual(Buffer.from(await kv.get(key, 'arrayBuffer')), raw);
-  console.log('PASS callback mismatch: 400; persisted state loaded, ciphertext unchanged');
+  // The callback consumed the pending sign-in; the session stays one record
+  // under the same ID (re-sealed before the callback's reads).
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM pending_signins').first()).n, 0);
+  assert.deepEqual((await kv.list()).keys.map(k => k.name), [key]);
+  raw = Buffer.from(await kv.get(key, 'arrayBuffer'));
+  assert.equal(raw.includes(Buffer.from(state)), false);
+  console.log('PASS callback mismatch: 400; pending sign-in loaded and consumed, session ID unchanged');
 
   const logout = await mf.dispatchFetch('https://session.test/logout', {
     method: 'POST',
@@ -97,8 +119,27 @@ try {
   assert.equal((await kv.list({ prefix: 'revoked:' })).keys.length, 0);
   console.log('PASS logout KV-read failure: 503; cookie cleared, no storage mutation');
 
+  const continuation = await mf.dispatchFetch('https://session.test/__fixture/continuation-envelope');
+  assert.equal(continuation.status, 200, await continuation.clone().text());
+  assert.deepEqual(await continuation.json(), { ok: true });
+  console.log('PASS actual D1 envelope continuation roundtrip, binding recovery, substitution rejection');
+
   assert.equal(outgoing, 0);
   console.log('PASS Worker runtime smoke; outbound requests: 0');
 } finally {
   await mf.dispose();
 }
+
+for (const descriptor of [undefined, 'malformed-secret-must-not-leak']) {
+  const bindings = { ...options.bindings };
+  if (descriptor === undefined) delete bindings.P1_KEYRING;
+  else bindings.P1_KEYRING = descriptor;
+  const invalid = new Miniflare({ ...options, bindings });
+  try {
+    const response = await invalid.dispatchFetch('https://session.test/health');
+    assert.equal(response.status, 500, 'missing/malformed keyring fails startup closed');
+    assert.doesNotMatch(await response.text(), /malformed-secret-must-not-leak/);
+    assert.equal(response.headers.get('set-cookie'), null);
+  } finally { await invalid.dispose(); }
+}
+console.log('PASS missing/malformed P1_KEYRING startup fails closed without disclosure');

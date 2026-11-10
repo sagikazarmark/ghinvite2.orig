@@ -54,3 +54,55 @@ commands from one `RestateClient`, as production already did.
 The Invitation Code is now the canonical link ULID. Local parsing replaces the
 `InvitationCode` registration/resolution protocol. The concrete HTTP seam and
 error mapping remain; public lookup calls `InvitationLink` directly.
+
+## P1 amendment (2026-10-16): hash-only public capability
+
+The ULID remains the internal object key, but no longer grants public access.
+The concrete requester client requires a typed hash and generation obtained from
+the session's selected capability; it cannot look up a public page by ID alone.
+Creation and rotation pass only hashes into Restate. The edge registers the hash
+routing row after confirmation and before displaying the fragment URL once.
+Routing is available before projection; the authority checks the current secret.
+Lost responses retain hash-only commands and require rotation if the URL was lost.
+The concrete HTTP test seam and definitive/unknown outcome mapping are unchanged.
+
+## P1 amendment (2026-10-16): app-scoped installation ingress
+
+Setup verifies `GET /app/installations/{id}` with the selected app's JWT and
+checks the returned numeric App and installation IDs before sending canonical
+`OnboardInput` to `Installation/repo:<id>` or `Installation/org:<id>`. Its facts
+type has no installer field. A signed-in callback viewer therefore cannot become
+the Installing Owner through the setup query.
+
+`/webhooks/{app}` selects that app's rotated HMAC secrets. Only authenticated
+installation facts and sender reach `onboard_webhook`; the operation receipt key
+is the authenticated payload hash, not the unsigned delivery header. Signed
+upstream update times fence delayed owner changes. The Installation schema
+[requires creation and update timestamps](https://raw.githubusercontent.com/octokit/webhooks/main/payload-schemas/api.github.com/common/installation.schema.json),
+and accepts RFC3339 or epoch seconds; equal timestamps do not establish ordering.
+Repo member and repository-invitation events no longer dispatch delivery commands.
+Repository settlement uses the reconciler's verified read evidence.
+
+The new installation keys and required input/state shapes use the pinned endpoint
+transition described in ADR0009. Console authority now uses installation read
+credentials; these ingress changes alone do not complete its acceptance gates.
+
+## P1 amendment (2026-10-16): Console authority and decision receipts
+
+The web checks current authority before exposing account-scoped records or
+dispatching mutations, including retained attempt retries. Installation-token
+reads establish numeric repository/user identity and administrator permission;
+the cache is independent of sessions and expires evidence after five minutes.
+Delegated SQL scopes filter all target repositories before counts and pagination.
+No user OAuth token supplies Console authority.
+
+Delegation changes use concrete `AccountInstallation/repo:<account_id>` ingress
+with a typed actor and operation ID. Tests exercise its real HTTP encoding,
+typed refusals and unknown acknowledgements. There is no fake command trait.
+
+Request decisions independently check retained account authority. Exact operation
+replay precedes that fresh check, preserving a recorded decision or refusal.
+`NotAuthorized` leaves the request unchanged and becomes a generic web 404.
+This coarse retained-state check does not replace the web's per-target checks.
+Repository availability remains a delivery prerequisite rather than a reason to
+prevent a historical personal owner from deciding a request or stopping a link.

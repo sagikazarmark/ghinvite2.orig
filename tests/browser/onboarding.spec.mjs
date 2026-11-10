@@ -1,0 +1,27 @@
+import { test, expect } from '@playwright/test';
+test('choose apps and inspect only confirmed installation requests', async ({ page }) => {
+  await page.goto('/fixture-login');
+  await expect(page.getByRole('heading', { name: 'Choose what to invite people to' })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Install repo app' })).toHaveAttribute('href', '/install');
+  await expect(page.getByRole('link', { name: 'Install org app' })).toHaveAttribute('href', '/install/org');
+  await expect(page.getByText('Repository permissions: Administration', { exact: false })).toBeVisible();
+  await expect(page.getByText('Organization permissions: Members', { exact: false })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('app-chooser.png'), fullPage: true });
+  await page.getByRole('link', { name: 'Check pending installation requests' }).press('Enter');
+  await expect(page.getByRole('heading', { name: 'Pending installation requests' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'acme — Repo app' })).toBeVisible();
+  await expect(page.getByText('private-other-org')).toHaveCount(0);
+  await expect(page.getByText('Request sent to the organization owners; awaiting approval.')).toBeVisible();
+  await page.goto('/setup/org?setup_action=request');
+  await expect(page.getByText('No pending installation request is currently confirmed.', { exact: false })).toBeVisible();
+  await expect(page.getByText('Request sent to the organization owners;', { exact: false })).toHaveCount(0);
+  await page.goto('/console/accounts/acme/links');
+  const apps = page.locator('header[aria-label="Installed GitHub apps"]');
+  await expect(apps.getByText('Repo app: Not installed')).toBeVisible();
+  await expect(apps.getByText('Org app: Installed')).toBeVisible();
+  await expect(apps.getByRole('link', { name: 'Add repo app' })).toHaveAttribute('href', '/onboarding');
+  await apps.getByRole('link', { name: 'Manage apps' }).press('Enter');
+  await expect(page.getByRole('heading', { name: 'GitHub app installations' })).toBeVisible();
+  await expect(page.locator('header[aria-label="Installed GitHub apps"]')).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('account-apps.png'), fullPage: true });
+});

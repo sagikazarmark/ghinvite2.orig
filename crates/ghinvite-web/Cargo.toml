@@ -13,22 +13,36 @@ publish.workspace = true
 # enables it in its own manifest, so this crate no longer has to list axum
 # twice to work around Cargo unioning feature sets.
 
+[features]
+runtime-tests = []
+link-secret-fixture = ["runtime-tests"]
+
 [dependencies]
+anykms-core.workspace = true
+anykms-recipes.workspace = true
+anykms-keyring.workspace = true
 async-trait.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
 base64.workspace = true
 chrono.workspace = true
-chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
 # Runs the shared form model's validators on the server (ADR 0001). Dioxus-free;
 # the `dioform` facade must never appear here.
 dioform-core.workspace = true
 dioxus.workspace = true
 dioxus-ssr.workspace = true
 ghinvite-core.workspace = true
+ghinvite-email-vault.workspace = true
+ghinvite-config.workspace = true
 ghinvite-github.workspace = true
 ghinvite-ui.workspace = true
+getrandom = { version = "0.3", features = ["wasm_js"] }
+zeroize = "1"
 hex = "0.4"
+octoauth.workspace = true
 octoevents.workspace = true
+# Sign-in (`signin/`).
+octologin.workspace = true
+octoscrub.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -51,6 +65,7 @@ url.workspace = true
 # Covers both our deadlines and Tower's clock calls; std::SystemTime panics
 # on wasm32-unknown-unknown without time's JS-backed implementation.
 time = { version = "0.3", features = ["wasm-bindgen"] }
+js-sys = "0.3"
 send_wrapper = { version = "0.6", features = ["futures"] }
 
 # The native deployment's pieces are dev-dependencies now: the tests exercise

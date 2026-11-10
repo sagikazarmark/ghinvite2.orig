@@ -25,9 +25,8 @@ use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{
     DecideRequest, DecisionAction, DecisionOutcome, LifecycleOperationId, RequestStatus,
 };
-use ghinvite_core::{
-    InvitationLink, InvitationLinkId, InvitationLinkRepo, Permission, RequestId, RequestState,
-};
+use ghinvite_core::targets::{RepoRole, RepoTarget, Targets};
+use ghinvite_core::{InvitationLink, InvitationLinkId, RequestId, RequestState};
 use ghinvite_web::LinkAuthority;
 use ghinvite_web::link_authority::AuthorityError;
 
@@ -54,31 +53,56 @@ async fn http_fixture_rejects_request_commands_addressed_to_the_link() {
 
 fn link() -> InvitationLink {
     InvitationLink {
+        batch_source: None,
+        access_lifetime_seconds: None,
+        email_domains: vec![],
         id: InvitationLinkId::new(),
+        organization_installation_id: None,
         installation_id: 77,
         account_id: ADMIN.account_id,
         created_by: ADMIN.user_id,
         created_at: Utc::now(),
         expires_at: None,
-        max_uses: None,
+        max_uses: Some(100),
+        invitation_lifetime_seconds: 604800,
+        abuse_threshold_per_hour: None,
+        budget_share_pct: 50,
         uses_count: 0,
-        permission: Permission::Pull,
         approval_required: true,
         description: "Fake authority fixture".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: "octocat/api".into(),
-        }],
+        pause: None,
+        targets: Targets {
+            repos: vec![RepoTarget {
+                repo_id: 10,
+                repo_full_name: "octocat/api".into(),
+                grant: RepoRole::Read,
+            }],
+            ..Default::default()
+        },
+        secret: ghinvite_core::LinkSecretState {
+            secret_generation: 1,
+            sha256: [42; 32].into(),
+        },
+    }
+}
+
+fn capability(link: &InvitationLink) -> ghinvite_web::session::PendingLink {
+    ghinvite_web::session::PendingLink {
+        link_id: link.id,
+        secret_sha256: link.secret.sha256,
+        secret_generation: link.secret.secret_generation,
     }
 }
 
 fn pending(link: &InvitationLink, deadline: chrono::DateTime<Utc>) -> RequestSnapshot {
     RequestSnapshot {
+        batch: None,
+        domain_evidence: None,
         request_id: RequestId::new(),
-        link_id: link.id,
+        link_id: Some(link.id),
         account_id: link.account_id,
         requester_id: 99,
         justification: None,
@@ -92,11 +116,20 @@ fn pending(link: &InvitationLink, deadline: chrono::DateTime<Utc>) -> RequestSna
 
 fn decide(request: &RequestSnapshot, action: DecisionAction) -> DecideRequest {
     DecideRequest {
-        link_id: request.link_id,
+        link_id: request.link_id.expect("linked fixture"),
         request_id: request.request_id,
         operation_id: LifecycleOperationId::try_from(RequestId::new().to_string()).unwrap(),
         admin: ADMIN,
         action,
+    }
+}
+
+fn revoke_command(link: &InvitationLink) -> ghinvite_core::revocation::RevokeCommand {
+    ghinvite_core::revocation::RevokeCommand {
+        link_id: link.id,
+        admin: ADMIN,
+        operation_id: link.id.to_string().try_into().unwrap(),
+        cascade: Default::default(),
     }
 }
 
@@ -147,7 +180,10 @@ async fn a_decision_applies_once_and_its_operation_replays_the_receipt() {
 
     // The operation is bound to its first input.
     let mut changed = approve.clone();
-    changed.action = DecisionAction::Decline { reason: None };
+    changed.action = DecisionAction::Decline {
+        reason: None,
+        requester_message: None,
+    };
     assert!(matches!(
         authority.decide(changed.clone()).await,
         Err(AuthorityError::Conflict)
@@ -165,7 +201,13 @@ async fn a_decision_applies_once_and_its_operation_replays_the_receipt() {
         .unwrap();
     assert_eq!(again.outcome, DecisionOutcome::AlreadyCompleted);
     let opposite = authority
-        .decide(decide(&request, DecisionAction::Decline { reason: None }))
+        .decide(decide(
+            &request,
+            DecisionAction::Decline {
+                reason: None,
+                requester_message: None,
+            },
+        ))
         .await
         .unwrap();
     assert_eq!(opposite.outcome, DecisionOutcome::Incompatible);
@@ -230,15 +272,19 @@ async fn a_lost_acknowledgement_leaves_the_outcome_unknown_after_applying() {
     fake.lose_acknowledgements("revoke");
 
     assert!(matches!(
-        authority.revoke(admin_command(&link)).await,
+        authority.revoke(revoke_command(&link)).await,
         Err(AuthorityError::Unknown(_))
     ));
     let status = authority.link_status(admin_command(&link)).await.unwrap();
     assert!(status.revoked_at.is_some(), "the revocation applied");
     // A replay takes no effect, so its acknowledgement arrives.
     assert_eq!(
-        authority.revoke(admin_command(&link)).await.unwrap(),
-        status
+        authority.revoke(revoke_command(&link)).await.unwrap(),
+        Ok(ghinvite_core::revocation::RevokeAccepted {
+            addressed_access_grants: 0,
+            addressed_requests: 0,
+            addressed_deliveries: 0
+        })
     );
     assert_eq!(fake.applied(), ["revoke"]);
     assert_eq!(fake.calls(), ["revoke", "link_status", "revoke"]);
@@ -270,17 +316,16 @@ async fn a_one_shot_failure_answers_once_before_applying() {
     fake.fail_once("revoke", 503);
 
     assert!(matches!(
-        authority.revoke(admin_command(&link)).await,
+        authority.revoke(revoke_command(&link)).await,
         Err(AuthorityError::Unknown(_))
     ));
     assert!(fake.link(link.id).unwrap().revoked_at.is_none());
     assert!(
         authority
-            .revoke(admin_command(&link))
+            .revoke(revoke_command(&link))
             .await
             .unwrap()
-            .revoked_at
-            .is_some()
+            .is_ok()
     );
     assert_eq!(fake.applied(), ["revoke"]);
 }
@@ -292,18 +337,30 @@ async fn a_creation_replay_returns_the_original_receipt() {
     let authority = LinkAuthority::new(fake.client());
     let mut creation = fake::snapshot(&link).creation;
     // The authority canonicalises the repository scope before binding it.
-    creation.repos.push(InvitationLinkRepo {
+    creation.targets.repos.push(RepoTarget {
         repo_id: 5,
         repo_full_name: "octocat/web".into(),
+        grant: RepoRole::Read,
     });
-    let created = authority.create(creation.clone()).await.unwrap();
-    assert_eq!(created.creation.repos[0].repo_id, 5);
-    authority.revoke(admin_command(&link)).await.unwrap();
-    assert_eq!(authority.create(creation).await.unwrap(), created);
+    let created = authority.create(creation.clone()).await.unwrap().unwrap();
+    assert_eq!(created.link_id, link.id);
+    assert_eq!(created.secret_generation, 1);
+    let snapshot = authority.link_status(admin_command(&link)).await.unwrap();
+    assert_eq!(snapshot.creation.targets.repos[0].repo_id, 5);
+    authority
+        .revoke(revoke_command(&link))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(authority.create(creation).await.unwrap().unwrap(), created);
 }
 
 fn admit(link: &InvitationLink, requester_id: u64, justification: Option<&str>) -> Admit {
     Admit {
+        domain_evidence: None,
+        scope_evidence: vec![],
+        secret_sha256: link.secret.sha256,
+        secret_generation: link.secret.secret_generation,
         link_id: link.id,
         operation_id: AdmissionOperationId::try_from(RequestId::new().to_string()).unwrap(),
         requester_id,
@@ -377,7 +434,7 @@ async fn rejections_are_final_receipts() {
     // One pending or approved request per requester.
     let again = admit(&link, 99, None);
     let receipt = authority.admit(again.clone()).await.unwrap();
-    assert_eq!(rejection(&receipt), Rejection::ExistingRequest);
+    assert_eq!(rejection(&receipt), Rejection::AlreadyPending);
     assert_eq!(authority.admit(again).await.unwrap(), receipt);
 
     fake.set_availability(
@@ -387,9 +444,13 @@ async fn rejections_are_final_receipts() {
     let receipt = authority.admit(admit(&link, 100, None)).await.unwrap();
     assert_eq!(rejection(&receipt), Rejection::RepositoryUnavailable);
 
-    authority.revoke(admin_command(&link)).await.unwrap();
+    authority
+        .revoke(revoke_command(&link))
+        .await
+        .unwrap()
+        .unwrap();
     let receipt = authority.admit(admit(&link, 101, None)).await.unwrap();
-    assert_eq!(rejection(&receipt), Rejection::Revoked);
+    assert_eq!(rejection(&receipt), Rejection::NotAvailable);
     assert_eq!(fake.link(link.id).unwrap().uses, 1);
 }
 
@@ -415,19 +476,25 @@ async fn the_requester_page_recovers_the_latest_attempt_and_conceals_the_rest() 
     let mut link = link();
     link.approval_required = false;
     let (_fake, authority) = authority_with(&link).await;
-    let code = &link.id.to_string();
+    let capability = capability(&link);
 
-    let page = authority.requester_page(code, 99, None).await.unwrap();
+    let page = authority
+        .requester_page(&capability, 99, None)
+        .await
+        .unwrap();
     assert!(page.can_start_fresh);
     assert!(page.attempt.is_none() && page.request.is_none());
 
     let command = admit(&link, 99, None);
     authority.prepare(command.clone()).await.unwrap();
-    let page = authority.requester_page(code, 99, None).await.unwrap();
+    let page = authority
+        .requester_page(&capability, 99, None)
+        .await
+        .unwrap();
     assert_eq!(page.attempt.unwrap().input, command);
     let receipt = authority.admit(command.clone()).await.unwrap();
     let page = authority
-        .requester_page(code, 99, Some(command.operation_id.clone()))
+        .requester_page(&capability, 99, Some(command.operation_id.clone()))
         .await
         .unwrap();
     assert_eq!(page.attempt.unwrap().receipt, Some(receipt.clone()));
@@ -440,18 +507,52 @@ async fn the_requester_page_recovers_the_latest_attempt_and_conceals_the_rest() 
         (99, Some(admit(&link, 99, None).operation_id)),
     ] {
         assert!(matches!(
-            authority.requester_page(code, requester, operation).await,
+            authority
+                .requester_page(&capability, requester, operation)
+                .await,
             Err(AuthorityError::Missing)
         ));
     }
     // A revoked link offers nothing to a requester without an attempt.
-    authority.revoke(admin_command(&link)).await.unwrap();
+    authority
+        .revoke(revoke_command(&link))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(
-        authority.requester_page(code, 100, None).await,
+        authority.requester_page(&capability, 100, None).await,
         Err(AuthorityError::Missing)
     ));
-    let page = authority.requester_page(code, 99, None).await.unwrap();
+    let page = authority
+        .requester_page(&capability, 99, None)
+        .await
+        .unwrap();
     assert_eq!(page.request.unwrap().request_id, accepted(&receipt));
+}
+
+#[tokio::test]
+async fn capability_hash_and_generation_reach_authority_without_becoming_route_parts() {
+    let link = link();
+    let (fake, authority) = authority_with(&link).await;
+    let mut wrong_hash = capability(&link);
+    wrong_hash.secret_sha256 = [43; 32].into();
+    let mut wrong_generation = capability(&link);
+    wrong_generation.secret_generation += 1;
+    for supplied in [&wrong_hash, &wrong_generation] {
+        assert!(matches!(
+            authority.requester_page(supplied, 99, None).await,
+            Err(AuthorityError::Missing)
+        ));
+    }
+    let received = fake.received::<ghinvite_core::admission::AttemptQuery>("requester_page");
+    assert_eq!(received.len(), 2);
+    assert_eq!(received[0].link_id, link.id);
+    assert_eq!(received[0].secret_sha256, wrong_hash.secret_sha256);
+    assert_eq!(
+        received[1].secret_generation,
+        wrong_generation.secret_generation
+    );
+    assert!(fake.applied().is_empty());
 }
 
 /// The redaction itself is `rules::requester_view`, pinned by
@@ -470,13 +571,14 @@ async fn a_declined_request_reaches_the_requester_page_without_a_reason() {
             &pending,
             DecisionAction::Decline {
                 reason: Some("Private admin context".into()),
+                requester_message: None,
             },
         ))
         .await
         .unwrap();
 
     let page = authority
-        .requester_page(&link.id.to_string(), 99, None)
+        .requester_page(&capability(&link), 99, None)
         .await
         .unwrap();
     let request = page.request.unwrap();
@@ -501,11 +603,13 @@ async fn delivery_progress_covers_an_approved_request_in_scope_order() {
     assert_eq!(
         authority.delivery_progress(query(99)).await.unwrap(),
         [RepositoryProgress {
+            delivery_generation: 1,
             repo_id: 10,
             stage: DispatchStage::Approved
         }]
     );
     let planned = vec![RepositoryProgress {
+        delivery_generation: 1,
         repo_id: 10,
         stage: DispatchStage::Planned,
     }];
@@ -545,7 +649,7 @@ async fn attempts_without_a_requester_or_with_oversized_input_are_refused() {
         authority.admit(nobody).await,
         Err(AuthorityError::Missing)
     ));
-    let oversized = admit(&link, 99, Some(&"x".repeat(16_385)));
+    let oversized = admit(&link, 99, Some(&"x".repeat(501)));
     assert!(matches!(
         authority.prepare(oversized.clone()).await,
         Err(AuthorityError::Invalid)
@@ -571,5 +675,58 @@ async fn a_seeded_admission_is_what_preparing_it_again_answers() {
     fake.seed_admission(command.clone(), receipt.clone());
     let attempt = authority.prepare(command).await.unwrap();
     assert_eq!(attempt.receipt, Some(receipt));
+    assert!(fake.applied().is_empty());
+}
+
+#[tokio::test]
+async fn creation_business_refusals_are_typed_retained_values_not_transport_failures() {
+    use ghinvite_core::invitation_link::{CreateLinkError, GuardrailField};
+    let fake = FakeLinkAuthority::start().await;
+    let authority = LinkAuthority::new(fake.client());
+    let mut command = fake::snapshot(&link()).creation;
+    command.approval_required = false;
+    command.max_uses = None;
+    command.expires_at = None;
+    let refusal = authority.create(command.clone()).await.unwrap();
+    assert_eq!(refusal, Err(CreateLinkError::NoGuardrail));
+    assert_eq!(authority.create(command.clone()).await.unwrap(), refusal);
+    command.description = format!("  {}  ", command.description);
+    assert_eq!(authority.create(command.clone()).await.unwrap(), refusal);
+    assert!(fake.applied().is_empty());
+    command.max_uses = Some(1);
+    assert!(matches!(
+        authority.create(command.clone()).await,
+        Err(AuthorityError::Conflict)
+    ));
+    command.link_id = InvitationLinkId::new();
+    command.targets.repos.clear();
+    assert_eq!(
+        authority.create(command.clone()).await.unwrap(),
+        Err(CreateLinkError::InvalidTargets {
+            reason: ghinvite_core::targets::TargetError::Empty
+        })
+    );
+    command = fake::snapshot(&link()).creation;
+    command.link_id = InvitationLinkId::new();
+    command.targets.repos.push(RepoTarget {
+        repo_id: 22,
+        repo_full_name: "other/repo".into(),
+        grant: RepoRole::Read,
+    });
+    assert_eq!(
+        authority.create(command.clone()).await.unwrap(),
+        Err(CreateLinkError::InvalidTargets {
+            reason: ghinvite_core::targets::TargetError::DifferentAccounts
+        })
+    );
+    command = fake::snapshot(&link()).creation;
+    command.link_id = InvitationLinkId::new();
+    command.expires_at = Some(Utc::now() - Duration::days(1));
+    assert_eq!(
+        authority.create(command).await.unwrap(),
+        Err(CreateLinkError::InvalidGuardrail {
+            field: GuardrailField::ExpiresAt
+        })
+    );
     assert!(fake.applied().is_empty());
 }

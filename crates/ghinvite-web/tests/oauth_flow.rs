@@ -1,15 +1,15 @@
-//! End-to-end OAuth sign-in tests. Drives the full /login → /oauth/callback
-//! flow through axum + the in-process MockTransport.
+//! End-to-end sign-in tests. Drives the full /login → /oauth/callback flow
+//! through axum, with GitHub (token exchange, `/user`, revocation) scripted
+//! by an in-process MockTransport behind the sign-in bridge.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ghinvite_core::storage::InstallationStorage;
+use common::build_app;
+use common::sign_in::{ConsoleInstallationFixture, OCTOCAT, SIGNIN_CLIENT_ID, oauth_expectations};
 use ghinvite_core::{Account, AccountType, SelectedRepos};
+use ghinvite_github::Method;
 use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, WebConfig, build_app};
 use http_body_util::BodyExt;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use tower::ServiceExt;
@@ -25,7 +25,10 @@ async fn build_app_with_mock(mock: MockTransport) -> axum::Router {
     backend.migrate().await.unwrap();
     build_app_with_store(
         mock,
-        ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
+        ghinvite_web::session_store::ProtectedStore::new(
+            backend,
+            ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+        ),
     )
     .await
 }
@@ -39,9 +42,8 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
             .await
             .unwrap(),
     );
-    let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
     storage
-        .insert_installation(&Account {
+        .seed_console_installation(&Account {
             installation_id: 77,
             account_id: 42,
             account_login: "octocat".into(),
@@ -52,37 +54,20 @@ async fn build_app_with_store<S: SessionStore + Clone + 'static>(
         })
         .await
         .unwrap();
-    let state = AppState::new(
+    // Sign-in only: `mock` answers the sign-in bridge.
+    let state = common::sign_in::app_state(
         storage,
-        transport,
+        Arc::new(mock),
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        common::sign_in::console_config(),
     );
     build_app(state, session_store)
 }
 
 #[tokio::test]
 async fn signin_happy_path() {
-    let mock = MockTransport::scripted(vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]);
-    let app = build_app_with_mock(mock).await;
+    let mock = MockTransport::scripted(signin_expectations());
+    let app = build_app_with_mock(mock.clone()).await;
 
     // Step 1: hit /login, capture the cookie + state.
     let resp1 = app
@@ -153,6 +138,8 @@ async fn signin_happy_path() {
     )
     .await;
     assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    // The token was exchanged, read `/user` and was revoked; replay sent nothing.
+    mock.assert_exhausted();
 }
 
 #[tokio::test]
@@ -164,7 +151,10 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
     backend.migrate().await.unwrap();
     let old_app = build_app_with_store(
         MockTransport::scripted(signin_expectations()),
-        ProtectedStore::new(backend.clone(), [7; 32]),
+        ProtectedStore::new(
+            backend.clone(),
+            ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+        ),
     )
     .await;
     let (anonymous, state) = begin_login(&old_app, "/login").await;
@@ -184,7 +174,18 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
 
     let new_app = build_app_with_store(
         MockTransport::scripted(signin_expectations()),
-        ProtectedStore::new(backend, [8; 32]),
+        ProtectedStore::new(
+            backend,
+            Arc::new(
+                anykms_keyring::Keyring::builder("p1")
+                    .generation(2, [8; 32])
+                    .unwrap()
+                    .current(2)
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+            ),
+        ),
     )
     .await;
     assert_eq!(
@@ -217,7 +218,7 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
         get(&old_app, "/console/accounts/octocat", &new_cookie)
             .await
             .status(),
-        StatusCode::SEE_OTHER
+        StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
         get(&new_app, "/console/accounts/octocat", &new_cookie)
@@ -239,7 +240,7 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
     assert!(
         records
             .iter()
-            .all(|raw| !raw.windows(5).any(|part| part == b"u_xxx"))
+            .all(|raw| !raw.windows(7).any(|part| part == b"ghu_xxx"))
     );
 }
 
@@ -331,9 +332,12 @@ async fn aged_authenticated_deadlines_survive_requests_but_fresh_signin_renews_t
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool);
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend, [7; 32]);
+    let store = ProtectedStore::new(
+        backend,
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let app = build_app_with_store(
-        MockTransport::scripted(signin_expectations().into_iter().cycle().take(4).collect()),
+        MockTransport::scripted(signin_expectations().into_iter().cycle().take(6).collect()),
         store.clone(),
     )
     .await;
@@ -398,17 +402,15 @@ async fn unavailable_session_storage_is_a_generic_error_not_anonymous_success() 
     store
         .failure
         .store(StoreOperation::Load as u8, Ordering::SeqCst);
-    for path in [
-        "/",
-        "/login",
-        "/console",
-        "/i/AAAAAAAAAAAAAAAA",
-        "/missing-page",
-    ] {
+    for path in ["/", "/login", "/console", "/join", "/missing-page"] {
         let response = get(&app, path, &cookie).await;
         assert_eq!(
             response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            if path == "/login" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            },
             "{path}"
         );
         assert!(!response.headers().contains_key("location"));
@@ -453,19 +455,17 @@ async fn begin_login(app: &axum::Router, path: &str) -> (String, String) {
     (session_cookie(&response), state)
 }
 
+/// One sign-in as `octocat` (42): exchange, `/user`, revocation.
 fn signin_expectations() -> Vec<Expectation> {
-    vec![
-        Expectation::ok_json(
-            Method::Post,
-            "https://github.com/login/oauth/access_token",
-            serde_json::json!({"access_token": "u_xxx", "token_type": "bearer", "scope": "read:user"}),
-        ),
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]
+    oauth_expectations(OCTOCAT)
+}
+
+fn revocation(status: u16) -> Expectation {
+    Expectation::status(
+        Method::Delete,
+        format!("https://api.github.com/applications/{SIGNIN_CLIENT_ID}/token"),
+        status,
+    )
 }
 
 #[tokio::test]
@@ -556,7 +556,7 @@ async fn logout_requires_a_session_bound_native_form_token() {
 #[tokio::test]
 async fn browser_tokens_are_stable_session_separated_and_replaced_on_signin() {
     let app = build_app_with_mock(MockTransport::scripted(
-        signin_expectations().into_iter().cycle().take(6).collect(),
+        signin_expectations().into_iter().cycle().take(9).collect(),
     ))
     .await;
     let mut cookies = Vec::new();
@@ -625,8 +625,8 @@ async fn authenticated_session_without_csrf_authority_confers_no_identity() {
         .insert(
             "ghinvite",
             serde_json::json!({
-                "user_id": 42, "login": "octocat", "access_token": "u_xxx",
-                "oauth_csrf": null, "csrf_token": null, "admin_checks": {}, "return_to": null
+                "user_id": 42, "login": "octocat",
+                "csrf_token": null, "admin_checks": {}, "return_to": null
             }),
         )
         .await
@@ -644,6 +644,8 @@ async fn authenticated_session_without_csrf_authority_confers_no_identity() {
     );
 }
 
+/// A failed exchange or `/user` read consumes the pending sign-in without
+/// authenticating or rotating. A token that was obtained is still revoked.
 #[tokio::test]
 async fn github_failure_consumes_state_without_authenticating_or_rotating() {
     for fail_user_lookup in [false, true] {
@@ -663,13 +665,81 @@ async fn github_failure_consumes_state_without_authenticating_or_rotating() {
         let (cookie, state) = begin_login(&app, "/login").await;
         let callback = format!("/oauth/callback?code=test-code&state={state}");
         let response = get(&app, &callback, &cookie).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert!(!response.headers().contains_key("set-cookie"));
         assert!(!response.headers().contains_key("location"));
         let protected = get(&app, "/console/accounts/octocat", &cookie).await;
         assert_eq!(protected.status(), StatusCode::SEE_OTHER);
         let replay = get(&app, &callback, &cookie).await;
         assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+        mock.assert_exhausted();
+    }
+}
+
+/// Revocation is best effort: when GitHub refuses it, sign-in still
+/// completes, and the token is not kept anywhere.
+#[tokio::test]
+async fn failed_revocation_still_signs_in() {
+    let mut expectations = signin_expectations();
+    expectations[2] = revocation(500);
+    let mock = MockTransport::scripted(expectations);
+    let app = build_app_with_mock(mock.clone()).await;
+    let (cookie, state) = begin_login(&app, "/login").await;
+    let response = get(
+        &app,
+        &format!("/oauth/callback?code=test-code&state={state}"),
+        &cookie,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let signed_in = session_cookie(&response);
+    assert_ne!(signed_in, cookie);
+    assert_eq!(
+        get(&app, "/console/accounts/octocat", &signed_in)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    mock.assert_exhausted();
+}
+
+/// GitHub's `error` redirects (the user declined, or another documented or
+/// unknown error) consume the pending sign-in and call no GitHub endpoint.
+#[tokio::test]
+async fn declined_and_provider_errors_consume_the_signin_without_calling_github() {
+    for (error, heading) in [
+        ("access_denied", "Sign-in was not completed"),
+        ("redirect_uri_mismatch", "Sign-in could not be completed"),
+        ("SECRET_MARKER_unknown", "Sign-in could not be completed"),
+    ] {
+        let mock = MockTransport::scripted(vec![]);
+        let app = build_app_with_mock(mock.clone()).await;
+        let (cookie, state) = begin_login(&app, "/login").await;
+        let response = get(
+            &app,
+            &format!("/oauth/callback?error={error}&error_description=PRIVATE_PROSE&state={state}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{error}");
+        assert!(!response.headers().contains_key("set-cookie"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(heading), "{error}: {text}");
+        assert!(!text.contains("PRIVATE_PROSE") && !text.contains("SECRET_MARKER"));
+        let late = get(
+            &app,
+            &format!("/oauth/callback?code=test-code&state={state}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(late.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            get(&app, "/console/accounts/octocat", &cookie)
+                .await
+                .status(),
+            StatusCode::SEE_OTHER
+        );
         mock.assert_exhausted();
     }
 }
@@ -763,11 +833,12 @@ async fn session_write_or_rotation_failure_never_reports_success_or_authenticate
 #[tokio::test]
 async fn sqlite_rotation_preserves_only_valid_return_destinations() {
     for (return_to, destination) in [
-        ("/i/AAAAAAAAAAAAAAAA/request", "/i/AAAAAAAAAAAAAAAA/request"),
+        ("/join", "/join"),
+        ("/i/AAAAAAAAAAAAAAAA/request", "/"),
         ("/console/accounts/octocat", "/console/accounts/octocat"),
         (
-            "/setup/github?installation_id=77&setup_action=install",
-            "/setup/github?installation_id=77&setup_action=install",
+            "/setup/repo?installation_id=77&setup_action=install",
+            "/setup/repo?installation_id=77&setup_action=install",
         ),
         ("https://evil.example", "/"),
         ("//evil.example/console", "/"),
@@ -775,7 +846,10 @@ async fn sqlite_rotation_preserves_only_valid_return_destinations() {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let backend = ghinvite_web_server::SqliteBackend::new(pool);
         backend.migrate().await.unwrap();
-        let store = ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]);
+        let store = ghinvite_web::session_store::ProtectedStore::new(
+            backend,
+            ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+        );
         let app = build_app_with_store(MockTransport::scripted(signin_expectations()), store).await;
         let query = url::form_urlencoded::Serializer::new(String::new())
             .append_pair("return_to", return_to)
@@ -802,32 +876,41 @@ async fn sqlite_rotation_preserves_only_valid_return_destinations() {
     }
 }
 
+/// Every callback consumes the pending sign-in first, so a malformed or
+/// forged one also retires the genuine state: nothing authenticates or
+/// rotates, no GitHub call is made, and the browser starts again.
 #[tokio::test]
-async fn rejected_callback_preserves_state_and_does_not_authenticate_or_rotate() {
-    let mock = MockTransport::scripted(signin_expectations());
-    let app = build_app_with_mock(mock.clone()).await;
-    let (cookie, state) = begin_login(&app, "/login").await;
+async fn rejected_callback_consumes_state_and_does_not_authenticate_or_rotate() {
     for callback in [
         "/oauth/callback?error=access_denied&error_description=Cancelled",
         "/oauth/callback?code=test-code",
         "/oauth/callback?state=anything",
         "/oauth/callback?code=test-code&state=wrong",
     ] {
+        let mock = MockTransport::scripted(signin_expectations());
+        let app = build_app_with_mock(mock.clone()).await;
+        let (cookie, state) = begin_login(&app, "/login").await;
         let response = get(&app, callback, &cookie).await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{callback}");
         assert!(!response.headers().contains_key("set-cookie"));
         let protected = get(&app, "/console/accounts/octocat", &cookie).await;
         assert_eq!(protected.status(), StatusCode::SEE_OTHER);
+        let genuine = format!("/oauth/callback?code=test-code&state={state}");
+        let response = get(&app, &genuine, &cookie).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{callback}");
+        assert_eq!(mock.remaining(), 3, "{callback}: no GitHub call");
+
+        let (cookie, state) = begin_login(&app, "/login").await;
+        let response = get(
+            &app,
+            &format!("/oauth/callback?code=test-code&state={state}"),
+            &cookie,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_ne!(session_cookie(&response), cookie);
+        mock.assert_exhausted();
     }
-    let response = get(
-        &app,
-        &format!("/oauth/callback?code=test-code&state={state}"),
-        &cookie,
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_ne!(session_cookie(&response), cookie);
-    mock.assert_exhausted();
 }
 
 #[tokio::test]
@@ -878,25 +961,7 @@ async fn callback_csrf_mismatch_rejects() {
 
 #[tokio::test]
 async fn signin_with_installation_id_logs_and_proceeds() {
-    let mock = MockTransport::scripted(vec![
-        Expectation {
-            method: Method::Post,
-            url: "https://github.com/login/oauth/access_token".into(),
-            required_headers: BTreeMap::new(),
-            expected_body: None,
-            response: Response {
-                status: 200,
-                headers: BTreeMap::new(),
-                body: br#"{"access_token":"u_xxx","token_type":"bearer","scope":"read:user"}"#
-                    .to_vec(),
-            },
-        },
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.com/user",
-            serde_json::json!({"id": 42, "login": "octocat"}),
-        ),
-    ]);
+    let mock = MockTransport::scripted(signin_expectations());
     let app = build_app_with_mock(mock).await;
 
     let resp1 = app

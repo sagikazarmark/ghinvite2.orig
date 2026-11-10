@@ -4,14 +4,11 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use ghinvite_web::{AppState, WebConfig, build_app};
+use common::build_app;
+use ghinvite_web::WebConfig;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
-
-fn encoded_return_to(path: &str) -> String {
-    url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
-}
 
 /// Every `<script>` in rendered HTML must be the shared static bundle; inline
 /// script bodies are blocked by the CSP.
@@ -42,13 +39,20 @@ async fn build_test_app_with_webhook_secret(webhook_secret: &[u8]) -> axum::Rout
             .await
             .unwrap(),
     );
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
+    let transport: Arc<dyn ghinvite_github::HttpTransportDyn> =
         Arc::new(MockTransport::scripted(vec![]));
     let config = WebConfig {
-        webhook_secret: webhook_secret.to_vec(),
+        webhooks: (!webhook_secret.is_empty())
+            .then(|| common::apps::webhooks(std::str::from_utf8(webhook_secret).unwrap())),
+        // Sign-in against GitHub itself: these tests never complete it.
+        signin_apps: Some(Arc::new(ghinvite_web::config::apps::SignInApp::new(
+            "Iv1.signin",
+            "signin-test-secret",
+            "https://p1.test/oauth/callback".parse().unwrap(),
+        ))),
         ..WebConfig::for_local_dev_with_secret([7; 32])
     };
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage,
         transport,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
@@ -73,8 +77,7 @@ async fn health_returns_ok() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         csp_header(&resp),
-        None,
-        "non-HTML responses must not carry a CSP"
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
     );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
@@ -95,8 +98,11 @@ async fn login_redirects_to_github_authorize() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let location = resp.headers().get("location").unwrap().to_str().unwrap();
     assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
-    assert!(location.contains("client_id="));
+    assert!(location.contains("client_id=Iv1.signin"));
     assert!(location.contains("state="));
+    // PKCE, and no scopes: the token can only read the user's identity.
+    assert!(location.contains("code_challenge_method=S256"));
+    assert!(!location.contains("scope="));
 }
 
 #[tokio::test]
@@ -122,7 +128,7 @@ async fn setup_route_requires_installation_id() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/setup/github")
+                .uri("/setup/repo")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -164,8 +170,7 @@ async fn static_styles_returns_css() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         csp_header(&resp),
-        None,
-        "static assets must not carry a CSP"
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
     );
     let ct = resp
         .headers()
@@ -216,8 +221,7 @@ async fn static_app_js_returns_javascript() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
         csp_header(&resp),
-        None,
-        "static assets must not carry a CSP"
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
     );
     let ct = resp
         .headers()
@@ -235,7 +239,7 @@ async fn static_app_js_returns_javascript() {
     // Invitation-code shortcut.
     assert!(text.contains("[data-open-invitation-code]"));
     assert!(text.contains("[data-invitation-code-input]"));
-    assert!(text.contains("Enter an invitation code first."));
+    assert!(text.contains("Enter a valid invitation code."));
 }
 
 #[tokio::test]
@@ -313,7 +317,10 @@ async fn missing_static_asset_returns_plain_404() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(csp_header(&resp), None);
+    assert_eq!(
+        csp_header(&resp),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
+    );
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"Not Found");
 }
@@ -337,7 +344,7 @@ async fn favicon_returns_plain_404() {
 }
 
 #[tokio::test]
-async fn invitation_landing_unauthenticated_redirects_to_login() {
+async fn invitation_landing_legacy_path_is_neutral_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -348,23 +355,22 @@ async fn invitation_landing_unauthenticated_redirects_to_login() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "GET /i/AAAAAAAAAAAAAAAA"
-    );
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to("/i/AAAAAAAAAAAAAAAA")
-        )
-    );
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp.headers().get("location").is_none());
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("AAAAAAAAAAAAAAAA"));
 }
 
 #[tokio::test]
-async fn invitation_unknown_nested_route_unauthenticated_redirects_to_login() {
+async fn invitation_unknown_nested_route_legacy_path_is_neutral_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -376,19 +382,22 @@ async fn invitation_unknown_nested_route_unauthenticated_redirects_to_login() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to("/i/AAAAAAAAAAAAAAAA/anything")
-        )
-    );
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp.headers().get("location").is_none());
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("AAAAAAAAAAAAAAAA"));
 }
 
 #[tokio::test]
-async fn invitation_unknown_nested_post_unauthenticated_redirects_to_login() {
+async fn invitation_unknown_nested_post_legacy_path_is_neutral_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -401,19 +410,22 @@ async fn invitation_unknown_nested_post_unauthenticated_redirects_to_login() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to("/i/AAAAAAAAAAAAAAAA/anything")
-        )
-    );
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp.headers().get("location").is_none());
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("AAAAAAAAAAAAAAAA"));
 }
 
 #[tokio::test]
-async fn invitation_request_form_unauthenticated_redirects_to_login() {
+async fn invitation_request_form_legacy_path_is_neutral_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -424,23 +436,22 @@ async fn invitation_request_form_unauthenticated_redirects_to_login() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "GET /i/.../request unauthenticated should redirect to /login"
-    );
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to("/i/AAAAAAAAAAAAAAAA/request")
-        )
-    );
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp.headers().get("location").is_none());
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("AAAAAAAAAAAAAAAA"));
 }
 
 #[tokio::test]
-async fn invitation_pending_unauthenticated_redirects_to_login() {
+async fn invitation_pending_legacy_path_is_neutral_404() {
     let app = build_test_app().await;
     let resp = app
         .oneshot(
@@ -451,19 +462,18 @@ async fn invitation_pending_unauthenticated_redirects_to_login() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        StatusCode::SEE_OTHER,
-        "GET /i/.../pending/... unauthenticated should redirect to /login"
-    );
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to("/i/AAAAAAAAAAAAAAAA/pending/01ARZ3NDEKTSV4RRFFQ69G5FAV")
-        )
-    );
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(resp.headers().get("location").is_none());
+    let html = String::from_utf8(
+        resp.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!html.contains("AAAAAAAAAAAAAAAA"));
 }
 
 #[tokio::test]
@@ -495,7 +505,7 @@ async fn webhook_route_rejects_missing_signature() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/webhooks/github")
+                .uri("/webhooks/repo")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -512,7 +522,10 @@ async fn webhook_bad_hmac_returns_401() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/webhooks/github")
+                .uri("/webhooks/repo")
+                .header("content-type", "application/json")
+                .header("x-github-event", "ping")
+                .header("x-github-delivery", "bad-hmac")
                 .header(
                     "x-hub-signature-256",
                     "sha256=0000000000000000000000000000000000000000000000000000000000000000",
@@ -527,10 +540,10 @@ async fn webhook_bad_hmac_returns_401() {
 
 /// A verified ping is acknowledged without contacting Restate.
 #[tokio::test]
-async fn webhook_valid_hmac_returns_no_content() {
+async fn webhook_valid_hmac_is_acknowledged() {
     let app = build_test_app().await;
     let resp = app.oneshot(signed_webhook("ping", "{}")).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
 }
 
 fn signed_webhook(event: &str, body: &'static str) -> Request<Body> {
@@ -541,7 +554,7 @@ fn signed_webhook(event: &str, body: &'static str) -> Request<Body> {
     mac.update(body.as_bytes());
     Request::builder()
         .method("POST")
-        .uri("/webhooks/github")
+        .uri("/webhooks/repo")
         .header("content-type", "application/json")
         .header("x-github-event", event)
         .header("x-github-delivery", "test-delivery-id")
@@ -580,34 +593,31 @@ async fn webhook_rejects_malformed_signature() {
         .headers_mut()
         .insert("x-hub-signature-256", "sha256=invalid".parse().unwrap());
     let response = build_test_app().await.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn webhook_acknowledges_unhandled_events_and_actions() {
     let app = build_test_app().await;
-    for (event, body) in [
-        ("future_event", "{}"),
-        ("installation", r#"{"action":"created"}"#),
-    ] {
+    for (event, body) in [("future_event", "{}"), ("member", r#"{"action":"added"}"#)] {
         let response = app
             .clone()
             .oneshot(signed_webhook(event, body))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 }
 
 #[tokio::test]
-async fn webhook_handler_failure_returns_bare_500() {
-    // Unknown installation fails the storage lookup without a Restate call.
+async fn webhook_malformed_installation_is_rejected_before_dispatch() {
+    // Missing signed installation facts cannot reach Restate.
     let request = signed_webhook(
         "installation_repositories",
         r#"{"action":"added","installation":{"id":77},"repository_selection":"selected","repositories_added":[],"repositories_removed":[]}"#,
     );
     let response = build_test_app().await.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(
         response
             .into_body()
@@ -646,13 +656,13 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
             .await
             .unwrap(),
     );
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
+    let transport: Arc<dyn ghinvite_github::HttpTransportDyn> =
         Arc::new(MockTransport::scripted(vec![]));
     let config = WebConfig {
         island_assets_dir,
         ..WebConfig::for_local_dev_with_secret([7; 32])
     };
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage,
         transport,
         std::sync::Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
@@ -662,7 +672,7 @@ async fn build_test_app_with_assets(island_assets_dir: Option<std::path::PathBuf
     // Mount `/assets` exactly as the native binary does, so this still covers
     // the real wiring now that `ServeDir` lives in `ghinvite-web-server`.
     let assets = ghinvite_web_server::island_assets(&state.config);
-    ghinvite_web::build_app_with(state, session_store, assets)
+    common::build_app_with(state, session_store, assets)
 }
 
 /// A throwaway assets directory shaped like `dist/public/assets` after the
@@ -703,7 +713,10 @@ async fn island_assets_are_served_from_the_configured_directory() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(csp_header(&resp), None, "assets must not carry a CSP");
+    assert_eq!(
+        csp_header(&resp),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
+    );
     let ct = resp
         .headers()
         .get("content-type")
@@ -755,7 +768,10 @@ async fn missing_island_asset_is_a_plain_404() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    assert_eq!(csp_header(&resp), None);
+    assert_eq!(
+        csp_header(&resp),
+        Some(ghinvite_web::middleware::csp::CONTENT_SECURITY_POLICY.to_owned())
+    );
 
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -785,3 +801,5 @@ async fn local_dev_config_defaults_island_assets_to_dist_public_assets() {
         Some(std::path::Path::new("dist/public/assets"))
     );
 }
+
+mod common;

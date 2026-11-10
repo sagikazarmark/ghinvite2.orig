@@ -4,5 +4,9 @@ pub mod home;
 pub mod invitation;
 pub mod not_found;
 pub mod oauth;
+pub mod onboarding;
+pub mod operations;
 pub mod setup;
 pub mod webhook;
+
+pub mod continuation_rotation;

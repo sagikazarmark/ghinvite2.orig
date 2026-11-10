@@ -8,8 +8,7 @@
 //! `--target wasm32-unknown-unknown`.
 #![cfg(target_arch = "wasm32")]
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64_STANDARD;
+use ghinvite_config::apps::{AppStage, organization_delivery_enabled, parse_mint_apps};
 use http_body_util::BodyExt;
 use restate_sdk::endpoint::{HandleOptions, ProtocolMode};
 use std::sync::Arc;
@@ -24,35 +23,40 @@ fn worker_err(e: impl std::fmt::Display) -> worker::Error {
     worker::Error::RustError(e.to_string())
 }
 
-/// Build an [`InstallationClient`] from the wrangler-managed env. Two pieces
-/// of secret config are required:
-///   * `GHINVITE_GITHUB_APP_ID` — the GitHub App's numeric id, as a `var`.
-///   * `GHINVITE_GITHUB_APP_PRIVATE_KEY` — the App's PEM private key,
-///     **base64-encoded** because wrangler secrets are single-line strings.
-///     Generate with `base64 -w0 private-key.pem | wrangler secret put
-///     GHINVITE_GITHUB_APP_PRIVATE_KEY`.
-fn github_client_from_env(env: &Env) -> worker::Result<ghinvite_github::InstallationClient> {
-    let app_id_str = env.var("GHINVITE_GITHUB_APP_ID")?.to_string();
-    let app_id: u64 = app_id_str
-        .parse()
-        .map_err(|e| worker::Error::RustError(format!("GHINVITE_GITHUB_APP_ID not a u64: {e}")))?;
-
-    let pem_b64 = env.secret("GHINVITE_GITHUB_APP_PRIVATE_KEY")?.to_string();
-    let pem_bytes = B64_STANDARD.decode(pem_b64.trim()).map_err(|e| {
-        worker::Error::RustError(format!(
-            "GHINVITE_GITHUB_APP_PRIVATE_KEY not valid base64: {e}"
-        ))
-    })?;
-    let pem = std::str::from_utf8(&pem_bytes).map_err(|e| {
-        worker::Error::RustError(format!(
-            "GHINVITE_GITHUB_APP_PRIVATE_KEY decoded bytes are not utf-8: {e}"
-        ))
-    })?;
-    let signer = ghinvite_github::jwt::AppJwtSigner::from_pem(app_id, pem).map_err(worker_err)?;
-
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);
-    Ok(ghinvite_github::InstallationClient::new(transport, signer))
+/// The installed apps' `GithubApps` over the Worker fetch transport. Token
+/// providers are isolate-wide (`ghinvite_github::apps`, PD-4).
+fn github_from_env(env: &Env) -> worker::Result<(Arc<ghinvite_workflows::RepositoryGithub>, bool)> {
+    let stage = AppStage::from_config(
+        env.var("P1_APP_STAGE")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+    )
+    .map_err(worker_err)?;
+    let organization_enabled = organization_delivery_enabled(
+        stage,
+        env.var("GH_ORG_DELIVERY_ENABLED")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+    )
+    .map_err(worker_err)?;
+    let apps = parse_mint_apps(stage, |field| {
+        if matches!(field, "GH_REPO_PRIVATE_KEYS" | "GH_ORG_PRIVATE_KEYS") {
+            env.secret(field).ok().map(|v| v.to_string())
+        } else {
+            env.var(field).ok().map(|v| v.to_string())
+        }
+    })
+    .map_err(worker_err)?;
+    let github_transport = Arc::new(ghinvite_github::worker::WorkerFetchTransport::new());
+    let typed = ghinvite_workflows::RepositoryGithub::new(
+        github_transport,
+        "https://api.github.com",
+        apps.installed,
+    )
+    .map_err(worker_err)?;
+    Ok((Arc::new(typed), organization_enabled))
 }
 
 #[event(fetch)]
@@ -69,26 +73,81 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> worker::Result<http
         return fixture::fetch(req, &env).await;
     }
 
+    ghinvite_workflows::delivery_run_fixture::configure(
+        env.var("P1_DELIVERY_RUN_RETRY_FIXTURE")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+    )
+    .map_err(worker_err)?;
+    let (github_apps, organization_enabled) = github_from_env(&env)?;
+    let reissue_setting = env.var("GH_REISSUE_ENABLED").ok().map(|v| v.to_string());
+    let reissue_enabled =
+        ghinvite_config::reissue::enabled(reissue_setting.as_deref()).map_err(worker_err)?;
+    let bulk_setting = env.var("GH_BULK_ENABLED").ok().map(|v| v.to_string());
+    let bulk_enabled =
+        ghinvite_config::bulk::enabled(bulk_setting.as_deref()).map_err(worker_err)?;
+    let email_ring = ghinvite_config::bulk::email_keyring(
+        bulk_enabled && organization_enabled,
+        env.secret("P1_EMAIL_KEYRING").ok().map(|v| v.to_string()),
+    )
+    .map_err(worker_err)?;
+    let identity = ghinvite_workflows::endpoint_identity::EndpointIdentity::required(
+        env.var("RESTATE_IDENTITY_KEYS")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
+    )
+    .map_err(worker_err)?;
     let db = env.d1("DB")?;
     let storage = Arc::new(ghinvite_storage_d1::D1Storage::new(db));
-    let github_client = Arc::new(github_client_from_env(&env)?);
 
-    let state = ghinvite_workflows::AppState::new(storage.clone(), github_client);
-    // RESTATE_IDENTITY_KEY is required in production — it is the public key
-    // Restate Cloud uses to sign inbound requests. Without it the endpoint
-    // accepts any caller. Set via:
-    //   wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
-    let identity_key = env
-        .secret("RESTATE_IDENTITY_KEY")
-        .map(|s| s.to_string().trim().to_string())
-        .ok();
-    if identity_key.is_none() {
-        worker::console_warn!(
-            "RESTATE_IDENTITY_KEY is not set — endpoint will accept unsigned requests. \
-             This is only safe for local dev."
-        );
-    }
-    let endpoint = ghinvite_workflows::build_endpoint(state, storage, identity_key.as_deref())
+    let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(github_apps);
+    let state = if organization_enabled {
+        state
+            .with_organization_delivery(storage.clone())
+            .with_pre_activation_cancellation()
+    } else {
+        state
+    };
+    #[cfg(feature = "cancellation-fixture")]
+    let state = state
+        .with_invite_budget(storage.clone())
+        .with_pre_activation_cancellation();
+    let access_setting = env
+        .var("GH_ACCESS_REMOVAL_ENABLED")
+        .ok()
+        .map(|value| value.to_string());
+    let state = if ghinvite_config::apps::access_removal_enabled(access_setting.as_deref())
+        .map_err(worker_err)?
+    {
+        state.with_access_grants(storage.clone())
+    } else {
+        state
+    };
+    let state = if reissue_enabled {
+        state.with_reissues(storage.clone())
+    } else {
+        state
+    };
+    let state = if bulk_enabled {
+        state.with_bulk_invites(storage.clone())
+    } else {
+        state
+    };
+    let state = if bulk_enabled && organization_enabled {
+        let ring = email_ring.ok_or_else(|| worker_err("P1_EMAIL_KEYRING invalid"))?;
+        state.with_email_deliveries(
+            storage.clone(),
+            Arc::new(
+                ghinvite_email_vault::EmailVault::new(storage.clone(), ring)
+                    .with_review_storage(storage.clone()),
+            ),
+        )
+    } else {
+        state
+    };
+    let endpoint = ghinvite_workflows::build_endpoint_with_identity(state, storage, &identity)
         .map_err(worker_err)?;
 
     // Cloudflare Workers does not support true bidirectional streaming — it

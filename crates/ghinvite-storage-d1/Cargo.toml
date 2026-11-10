@@ -17,3 +17,16 @@ thiserror.workspace = true
 worker = { version = "0.8", features = ["d1"] }
 serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
+
+[features]
+default = []
+native-bridge = ["dep:reqwest"]
+# HTTP loopback is a fixture-only configuration, never enabled by the server.
+bridge-test = ["native-bridge"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { workspace = true, optional = true }
+
+[dev-dependencies]
+ghinvite-core = { workspace = true, features = ["test-suite"] }
+tokio.workspace = true

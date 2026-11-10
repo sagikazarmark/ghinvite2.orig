@@ -32,6 +32,25 @@ pub struct RequestProjection {
 #[restate_sdk::object]
 impl RequestProjection {
     #[handler]
+    async fn apply_reissue(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(envelope): Json<ghinvite_core::reissue_projection::RequestReissueProjection>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != envelope.command.request_id.to_string() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
+        ctx.run(|| async {
+            self.storage
+                .apply_reissue(&envelope)
+                .await
+                .map_err(HandlerError::from)
+        })
+        .name("apply_request_reissue_projection")
+        .await
+    }
+
+    #[handler]
     async fn apply(
         &self,
         ctx: ObjectContext<'_>,
@@ -53,6 +72,25 @@ impl RequestProjection {
 
 #[restate_sdk::object]
 impl InvitationProjection {
+    #[handler]
+    async fn apply_revocation(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(envelope): Json<ghinvite_core::revocation::RevocationProjection>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != envelope.command.link_id.to_string() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
+        ctx.run(|| async {
+            self.storage
+                .apply_revocation(&envelope)
+                .await
+                .map_err(HandlerError::from)
+        })
+        .name("apply_revocation_projection")
+        .await
+    }
+
     #[handler]
     async fn apply_transition(
         &self,

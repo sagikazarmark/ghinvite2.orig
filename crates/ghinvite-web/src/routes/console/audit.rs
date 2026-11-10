@@ -92,13 +92,17 @@ pub(super) async fn page(
     admin: RequireConsoleAdminOf,
     uri: Uri,
 ) -> impl IntoResponse {
+    let scope = match admin.authority.console_scope().await {
+        Ok(scope) => scope,
+        Err(error) => return crate::middleware::auth::authority_unavailable(error),
+    };
     let query = Query::parse(&uri);
     let base = format!("/console/accounts/{}/audit", admin.account.account_login);
     let mut older_href = None;
     let mut newer_href = None;
     let (status, rows) = match state
         .storage
-        .list_audit_events(admin.account.account_id, query.event, query.position)
+        .scoped_list_audit_events(&scope.scope, query.event, query.position)
         .await
     {
         Ok(page) => {
@@ -143,6 +147,11 @@ pub(super) async fn page(
                     TargetKind::InvitationLink => "Invitation link",
                     TargetKind::InvitationRequest => "Invitation request",
                     TargetKind::GithubInvitation => "GitHub invitation (internal ID)",
+                    TargetKind::RepositoryDelivery => "Repository delivery",
+                    TargetKind::OrganizationDelivery => "Organization delivery",
+                    TargetKind::TeamDelivery => "Team delivery",
+                    TargetKind::AccessGrant => "Access grant",
+                    TargetKind::BulkBatch => "Bulk batch",
                 };
                 let mut resource_href = None;
                 if event.target_kind == TargetKind::InvitationLink
@@ -188,16 +197,17 @@ pub(super) async fn page(
     };
     let latest_href = query.href(&base, AuditPosition::Latest);
     let retry_href = query.href(&base, query.position);
-    let html = render(admin.session.csrf_token.clone(), move || {
+    let html = render(admin.render_context(), move || {
         rsx! {
             AuditLogPage {
+                authority_pending: scope.pending,
                 signed_in_login: Some(admin.session.login.clone()), account_login: admin.account.account_login.clone(),
                 event: query.event, in_range: query.position != AuditPosition::Latest, rows: rows.clone(),
                 latest_href: latest_href.clone(), retry_href: retry_href.clone(), older_href: older_href.clone(), newer_href: newer_href.clone(),
             }
         }
     });
-    (status, Html(html))
+    (status, Html(html)).into_response()
 }
 
 fn details(event: &AuditEvent) -> String {

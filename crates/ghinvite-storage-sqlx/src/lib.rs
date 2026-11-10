@@ -2,6 +2,13 @@
 //! [`ghinvite_core::storage::Storage`] port. Used by the dev binaries and
 //! tests; production (Cloudflare Workers) uses `ghinvite-storage-d1`.
 
+mod access_grants;
+mod blocked_digest;
+mod bulk;
+mod invite_budget;
+mod org_delivery;
+mod org_webhooks;
+mod pending_signin;
 mod projection;
 pub mod sqlx_impl;
 
@@ -16,14 +23,10 @@ pub(crate) fn to_db_err(e: sqlx::Error) -> Error {
     Error::Database(e.to_string())
 }
 
-/// Centralized `u64 → i64` cast for SQLite bindings. SQLite has no unsigned
-/// integers, so every `u64` we store rides as `i64`. The `debug_assert!` is the
-/// safety net for development; production never sees `u64` values above
-/// `i64::MAX` from GitHub's id space.
+/// Use the same exact integer range as D1, including native development.
 #[inline]
-pub(crate) fn u64_to_i64(v: u64) -> i64 {
-    debug_assert!(v <= i64::MAX as u64, "u64 value {v} exceeds i64::MAX");
-    v as i64
+pub(crate) fn u64_to_i64(v: u64) -> Result<i64> {
+    ghinvite_core::storage::integer::unsigned(v)
 }
 
 /// Decode a row into one of core's shared row types. Each column becomes a
@@ -61,8 +64,16 @@ pub(crate) fn decode<T: DeserializeOwned>(row: &SqliteRow) -> Result<T> {
 mod tests {
     #[test]
     fn u64_to_i64_round_trips_normal_values() {
-        assert_eq!(super::u64_to_i64(0), 0);
-        assert_eq!(super::u64_to_i64(42), 42);
-        assert_eq!(super::u64_to_i64(i64::MAX as u64), i64::MAX);
+        assert_eq!(super::u64_to_i64(0).unwrap(), 0);
+        assert_eq!(super::u64_to_i64(42).unwrap(), 42);
+        assert!(super::u64_to_i64(1 << 53).is_err());
     }
 }
+
+mod email_review;
+mod email_vault;
+
+mod email_delivery;
+
+#[cfg(test)]
+mod invitation_timing_tests;

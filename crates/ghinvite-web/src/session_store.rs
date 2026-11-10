@@ -3,12 +3,12 @@
 //! Backends see opaque ciphertext, never a Tower record. The requested ID is
 //! authenticated independently of the envelope, preventing record substitution.
 
-use chacha20poly1305::{
-    KeyInit, XChaCha20Poly1305, XNonce,
-    aead::{Aead, Payload},
-};
-use rand::{RngCore, rngs::OsRng};
+use anykms_core::{Ciphertext, ErrorKind};
+use anykms_keyring::{ContextEnvelopeSync, Keyring};
+use anykms_keyring::{EncryptionContext, purposes};
+use anykms_recipes::envelope::Padding;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tower_sessions::cookie::time::{Duration, OffsetDateTime};
 use tower_sessions::{
     SessionStore,
@@ -20,7 +20,8 @@ pub const AUTHENTICATED_LIFETIME: Duration = Duration::days(30);
 pub const ANONYMOUS_LIFETIME: Duration = Duration::minutes(30);
 pub const REVOCATION_RETENTION: Duration = Duration::days(31);
 const LIFETIME_KEY: &str = "ghinvite_lifetime";
-const MAGIC: &[u8] = b"ghinvite-session\x01";
+pub(crate) const KEYRING_RETRY: &str = "P1 keyring generation not yet deployed";
+pub(crate) const KEYRING_CONFIG: &str = "P1 keyring configuration failure";
 
 /// Minimal opaque persistence boundary. `insert` must not overwrite a known ID;
 /// KV may rely on random IDs when concurrent absence checks race. Revocation
@@ -121,7 +122,7 @@ pub async fn apply_lifetime(
 #[derive(Clone)]
 pub struct ProtectedStore<B> {
     backend: B,
-    cipher: XChaCha20Poly1305,
+    keyring: Arc<Keyring>,
 }
 
 impl<B: std::fmt::Debug> std::fmt::Debug for ProtectedStore<B> {
@@ -133,11 +134,8 @@ impl<B: std::fmt::Debug> std::fmt::Debug for ProtectedStore<B> {
 }
 
 impl<B: Backend> ProtectedStore<B> {
-    pub fn new(backend: B, key: [u8; 32]) -> Self {
-        Self {
-            backend,
-            cipher: XChaCha20Poly1305::new((&key).into()),
-        }
+    pub fn new(backend: B, keyring: Arc<Keyring>) -> Self {
+        Self { backend, keyring }
     }
 
     fn seal(&self, record: &Record) -> Result<(Vec<u8>, i64)> {
@@ -153,63 +151,61 @@ impl<B: Backend> ProtectedStore<B> {
             return Err(backend_error("session expired or invalid"));
         }
         let mut record = record.clone();
+        // Store the session in its current shape: fields an earlier
+        // deployment wrote (legacy OAuth's user token among them) do not
+        // outlive the next write, whichever part of the record changed.
+        crate::session::canonicalize(&mut record)
+            .map_err(|_| backend_error("session expired or invalid"))?;
         let expiry = record.expiry_date.unix_timestamp().min(lifetime.deadline);
         record.expiry_date = OffsetDateTime::from_unix_timestamp(expiry)
             .map_err(|_| backend_error("invalid expiry"))?;
-        let mut envelope = MAGIC.to_vec();
-        envelope.extend_from_slice(&lifetime.deadline.to_be_bytes());
-        let mut nonce = [0u8; 24];
-        OsRng
-            .try_fill_bytes(&mut nonce)
-            .map_err(|_| backend_error("session randomness unavailable"))?;
-        envelope.extend_from_slice(&nonce);
-        let mut aad = envelope.clone();
-        aad.extend_from_slice(record.id.to_string().as_bytes());
+        let id = record.id.to_string();
+        let context = EncryptionContext::try_from(&purposes::Session { session_id: &id })
+            .map_err(keyring_error)?;
         let plaintext = serde_json::to_vec(&record)
             .map_err(|_| Error::Encode("session encoding failed".into()))?;
         let ciphertext = self
-            .cipher
-            .encrypt(
-                &XNonce::from(nonce),
-                Payload {
-                    msg: &plaintext,
-                    aad: &aad,
-                },
-            )
-            .map_err(|_| backend_error("session encryption failed"))?;
-        envelope.extend_from_slice(&ciphertext);
-        Ok((envelope, expiry))
+            .keyring
+            .context_envelope(Padding::NONE)
+            .and_then(|envelope| envelope.encrypt_sync(&plaintext, &context))
+            .map_err(keyring_error)?;
+        Ok((ciphertext.into_bytes(), expiry))
     }
 
-    fn open(&self, id: &Id, envelope: &[u8]) -> Option<Record> {
-        let header_len = MAGIC.len() + 8 + 24;
-        if envelope.len() < header_len + 16 || !envelope.starts_with(MAGIC) {
-            return None;
-        }
-        let deadline = i64::from_be_bytes(envelope[MAGIC.len()..MAGIC.len() + 8].try_into().ok()?);
-        let nonce = &envelope[MAGIC.len() + 8..header_len];
-        let mut aad = envelope[..header_len].to_vec();
-        aad.extend_from_slice(id.to_string().as_bytes());
-        let nonce = XNonce::try_from(nonce).ok()?;
-        let plaintext = self
-            .cipher
-            .decrypt(
-                &nonce,
-                Payload {
-                    msg: &envelope[header_len..],
-                    aad: &aad,
-                },
-            )
-            .ok()?;
-        let record: Record = serde_json::from_slice(&plaintext).ok()?;
-        let lifetime: Lifetime =
-            serde_json::from_value(record.data.get(LIFETIME_KEY)?.clone()).ok()?;
-        (record.id == *id
-            && lifetime.valid(&record)
-            && deadline == lifetime.deadline
-            && record.expiry_date > now()
-            && record.expiry_date.unix_timestamp() <= deadline)
-            .then_some(record)
+    fn open(&self, id: &Id, ciphertext: &[u8]) -> Result<Option<Record>> {
+        let requested_id = id.to_string();
+        let context = EncryptionContext::try_from(&purposes::Session {
+            session_id: &requested_id,
+        })
+        .map_err(keyring_error)?;
+        let plaintext = match self
+            .keyring
+            .context_envelope(Padding::NONE)
+            .and_then(|envelope| {
+                envelope.decrypt_sync(&Ciphertext::from(ciphertext.to_vec()), &context)
+            }) {
+            Ok(plaintext) => plaintext,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::KeyVersionUnusable | ErrorKind::DecryptFailed
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(keyring_error(error)),
+        };
+        let valid = || -> Option<Record> {
+            let record: Record = serde_json::from_slice(&plaintext).ok()?;
+            let lifetime: Lifetime =
+                serde_json::from_value(record.data.get(LIFETIME_KEY)?.clone()).ok()?;
+            (record.id == *id
+                && lifetime.valid(&record)
+                && record.expiry_date > now()
+                && record.expiry_date.unix_timestamp() <= lifetime.deadline)
+                .then_some(record)
+        };
+        Ok(valid())
     }
 }
 
@@ -250,11 +246,10 @@ impl<B: Backend> SessionStore for ProtectedStore<B> {
         }
         // Invalid ciphertext may belong to an overlapping new-key deployment.
         // Never mutate or revoke it merely because this reader cannot open it.
-        Ok(self
-            .backend
-            .get(id)
-            .await?
-            .and_then(|raw| self.open(id, &raw)))
+        match self.backend.get(id).await? {
+            Some(raw) => self.open(id, &raw),
+            None => Ok(None),
+        }
     }
 
     async fn delete(&self, id: &Id) -> Result<()> {
@@ -269,3 +264,52 @@ impl<B: Backend> SessionStore for ProtectedStore<B> {
 // Backends live with their deployment shape: `SqliteBackend` in
 // `ghinvite-web-server`, the KV backend in `ghinvite-web-worker`. This module
 // owns the envelope format they both store opaquely.
+
+fn keyring_error(error: anykms_core::Error) -> Error {
+    if error.kind() == ErrorKind::UnknownKeyVersion {
+        backend_error(KEYRING_RETRY)
+    } else {
+        tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), "P1 session encryption unavailable");
+        backend_error(KEYRING_CONFIG)
+    }
+}
+
+/// KV requires at least 60 seconds. Logical expiry is still enforced on read.
+/// The 30-day upper bound is the key-retirement gate, including stale writes.
+pub fn session_ttl(expires_at: i64, now: i64) -> u64 {
+    expires_at
+        .saturating_sub(now)
+        .clamp(61, AUTHENTICATED_LIFETIME.whole_seconds()) as u64
+}
+
+/// Load once before invoking handlers: a lagging keyring must not become an
+/// anonymous session or allow a route to swallow the load failure and sign out.
+pub(crate) async fn require_readable_session(
+    session: tower_sessions::Session,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if request.uri().path() == "/health"
+        || request.uri().path().starts_with("/static/")
+        || request.uri().path().starts_with("/webhooks/")
+    {
+        return next.run(request).await;
+    }
+    match crate::session::load(&session).await {
+        Ok(_) => next.run(request).await,
+        Err(tower_sessions::session::Error::Store(Error::Backend(message)))
+            if message == KEYRING_RETRY =>
+        {
+            crate::WebError::KeyringRetry.into_response()
+        }
+        Err(tower_sessions::session::Error::Store(Error::Backend(message)))
+            if message == KEYRING_CONFIG =>
+        {
+            crate::WebError::Session("session unavailable".into()).into_response()
+        }
+        // Preserve route-specific storage recovery, especially sign-out failure
+        // clearing the local cookie while reporting unconfirmed server revocation.
+        Err(_) => next.run(request).await,
+    }
+}

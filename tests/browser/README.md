@@ -16,13 +16,12 @@ This suite reuses the admin mutation recovery server on port 4175: production
 Console routes, CSRF middleware, sessions, shared JavaScript, and CSS, with the
 HTTP Restate fixture described below. No island bundle is required.
 
-Chromium verifies keyboard-only opening, accessible name/description, initial
-Cancel focus, forward/backward Tab wrapping, inert background, Escape/Cancel
-dismissal, and restored opener focus. With JavaScript disabled, confirmation is
-an ordinary inline region reached by a fragment link, with native keyboard
-navigation and cancellation. Both modes reject forged CSRF submissions and
-confirm using one native document-navigation POST carrying the original token;
-the recovery UI then verifies the link stopped accepting new requests.
+Chromium verifies keyboard navigation to the protected confirmation page, cancellation,
+bookmark/reload safety, and operation-preserving cascade validation. Both JavaScript
+modes reject forged CSRF submissions and confirm with one native document-navigation
+POST carrying the original token and operation ID. The recovery UI checks the exact
+retained operation before showing the stopped link; current revoked state alone does
+not prove another operation succeeded. Disabled executor options remain unavailable.
 
 ## Console accessibility
 
@@ -358,3 +357,11 @@ projects. It uploads HTML reports, screenshots, and traces on failure. Two worke
 and one CI retry limit resource contention while retaining failure diagnostics.
 The same job then runs the admission and document-shell suites, which need no
 island bundle.
+
+### Reissue confirmation
+
+Run `npm exec --prefix tests/browser -- playwright test --config tests/browser/reissue.config.mjs`. The native Console fixture exercises the real CSRF/authenticated routes with JavaScript enabled and disabled. It checks typed confirmation, zero ingress before confirmation, a lost acknowledgement followed by an identical operation retry, and truthful generation-issued presentation. Durable owner and GitHub effects are covered separately by the signed Worker reissue test.
+
+### App onboarding
+
+Run `npx playwright test --config onboarding.config.mjs` from `tests/browser`. Both JavaScript and no-JavaScript projects exercise the authenticated two-app chooser, keyboard navigation, confirmed installation requests, numeric requester privacy, and a request callback that cannot manufacture pending status. The native fixture uses real app-JWT construction and the documented numeric-only requester response. Live consent screenshots remain a separate SP-02 gate.

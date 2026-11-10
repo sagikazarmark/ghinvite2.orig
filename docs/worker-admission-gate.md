@@ -29,8 +29,8 @@ Do not describe that run as verification of the CI compiler.
 
 Pins:
 
-- Restate **1.7.9**, digest
-  `sha256:329e32e12059610b681e165161bcd0722d193325b6c893bc46bfec72cd54b595`
+- Restate **1.8.1**, digest
+  `sha256:fea6b4a893616fd8ec4594bd72fbf9967f9ab9242c8c75008de75edfbb58b2c7`
   from `compose.yaml`.
 - Rust SDK **0.12.0**, Cargo patch pinned to
   `e882e9e04f9ad9942b4fe7f3788999a521dfa336` from the maintainer's

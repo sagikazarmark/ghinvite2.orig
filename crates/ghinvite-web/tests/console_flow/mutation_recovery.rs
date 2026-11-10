@@ -3,7 +3,7 @@ use common::authority_http_fixture::snapshot;
 use ghinvite_core::invitation_link::CreateLink;
 use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
-use ghinvite_core::storage::{ContinuationStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{ContinuationStorage, RecordStorage};
 
 async fn recovery_app(authority: &FakeLinkAuthority) -> (axum::Router, String) {
     let storage = Arc::new(
@@ -12,14 +12,14 @@ async fn recovery_app(authority: &FakeLinkAuthority) -> (axum::Router, String) {
             .unwrap(),
     );
     storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .seed_console_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage,
         Arc::new(BrowserGithub),
         authority.client(),
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        console_config(),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
     let cookie = sign_in(&app).await;
@@ -49,7 +49,14 @@ async fn post(
 /// The octocat link the recovery tests act on.
 fn recovery_link(id: ghinvite_core::InvitationLinkId) -> ghinvite_core::InvitationLink {
     ghinvite_core::InvitationLink {
+        batch_source: None,
+        access_lifetime_seconds: None,
+        email_domains: vec![],
+        invitation_lifetime_seconds: 604800,
+        abuse_threshold_per_hour: None,
+        budget_share_pct: 50,
         id,
+        organization_installation_id: None,
         installation_id: 77,
         account_id: 42,
         created_by: 42,
@@ -57,16 +64,27 @@ fn recovery_link(id: ghinvite_core::InvitationLinkId) -> ghinvite_core::Invitati
         expires_at: None,
         max_uses: None,
         uses_count: 0,
-        permission: ghinvite_core::Permission::Pull,
+        secret: common::capability::state(),
         approval_required: true,
         description: "Recovery fixture".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![ghinvite_core::InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: "octocat/api".into(),
-        }],
+        pause: None,
+        targets: ghinvite_core::targets::Targets {
+            repos: vec![ghinvite_core::InvitationLinkRepo {
+                repo_id: 10,
+                repo_full_name: "octocat/api".into(),
+            }]
+            .into_iter()
+            .map(|repo| ghinvite_core::targets::RepoTarget {
+                repo_id: repo.repo_id,
+                repo_full_name: repo.repo_full_name,
+                grant: ghinvite_core::Permission::Pull.into(),
+            })
+            .collect(),
+            ..Default::default()
+        },
     }
 }
 
@@ -82,13 +100,13 @@ async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retr
         &app,
         &cookie,
         &format!("/console/accounts/octocat/links/{id}/revoke"),
-        &format!("csrf_token={csrf}"),
+        &format!("csrf_token={csrf}&operation_id={id}"),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let html = response_html(response).await;
     assert!(html.contains("Retry original attempt"));
-    let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
+    let url = format!("/console/accounts/octocat/attempts/revoke-{id}-{id}");
     assert!(html.contains(&url));
     let response =
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await;
@@ -103,7 +121,7 @@ async fn uncertain_revocation_has_navigation_safe_status_and_csrf_protected_retr
     assert!(!html.contains("Retry original attempt"));
     assert_eq!(
         authority.calls()[before..],
-        ["link_status"],
+        ["link_status", "revoke_status"],
         "status must not mutate"
     );
     assert_eq!(authority.applied(), ["revoke"]);
@@ -119,24 +137,25 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
             .unwrap(),
     );
     storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .seed_console_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage.clone(),
         Arc::new(BrowserGithub),
         authority.client(),
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        console_config(),
     );
     let app = build_app(state, protected_store().await);
     let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(link));
     post(
         &app,
         &cookie,
         &format!("/console/accounts/octocat/links/{link}/revoke"),
-        &format!("csrf_token={csrf}"),
+        &format!("csrf_token={csrf}&operation_id={link}"),
     )
     .await;
     let original = authority.received::<serde_json::Value>("revoke")[0].clone();
@@ -153,7 +172,7 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         let response = post(
             &app,
             &cookie,
-            &format!("/console/accounts/octocat/attempts/revoke-{link}"),
+            &format!("/console/accounts/octocat/attempts/revoke-{link}-{link}"),
             &format!("csrf_token={csrf}"),
         )
         .await;
@@ -174,7 +193,7 @@ async fn retries_reclaim_expired_continuations_in_bounded_batches_and_preserve_l
         identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
     )
     .await;
-    assert!(html.contains(&format!("revoke-{link}")));
+    assert!(html.contains(&format!("revoke-{link}-{link}")));
 }
 
 #[tokio::test]
@@ -185,6 +204,7 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
     let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(link));
     let request = ghinvite_core::RequestId::new();
     let operation = ghinvite_core::RequestId::new();
     let original = format!("/console/accounts/octocat/attempts/decision-{request}-{operation}");
@@ -209,12 +229,12 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
     let html = response_html(response).await;
     assert!(html.contains("requested decision was not applied"));
     assert!(html.contains(&original));
-    assert_eq!(authority.calls().len(), 1);
+    assert_eq!(authority.received::<DecideRequest>("decide").len(), 1);
     post(
         &app,
         &cookie,
         &format!("/console/accounts/octocat/links/{link}/revoke"),
-        &format!("csrf_token={csrf}"),
+        &format!("csrf_token={csrf}&operation_id={link}"),
     )
     .await;
     let html = response_html(
@@ -222,7 +242,9 @@ async fn recovery_lists_every_attempt_and_opposite_intent_is_not_reported_as_suc
     )
     .await;
     assert!(html.contains(&original));
-    assert!(html.contains(&format!("/console/accounts/octocat/attempts/revoke-{link}")));
+    assert!(html.contains(&format!(
+        "/console/accounts/octocat/attempts/revoke-{link}-{link}"
+    )));
 }
 
 #[tokio::test]
@@ -232,6 +254,7 @@ async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_reco
     let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(link));
     let request = ghinvite_core::RequestId::new();
     let first = ghinvite_core::RequestId::new();
     let second = ghinvite_core::RequestId::new();
@@ -244,7 +267,7 @@ async fn concurrent_decision_submissions_bind_one_input_and_keep_the_winner_reco
         (StatusCode::BAD_GATEWAY, StatusCode::SEE_OTHER)
             | (StatusCode::SEE_OTHER, StatusCode::BAD_GATEWAY)
     ));
-    assert_eq!(authority.calls(), ["decide"]);
+    assert_eq!(authority.calls(), ["link_status", "link_status", "decide"]);
     let winner = String::from(
         authority.received::<DecideRequest>("decide")[0]
             .operation_id
@@ -271,6 +294,7 @@ async fn operation_identity_on_another_request_does_not_override_request_recover
     let (app, cookie) = recovery_app(&authority).await;
     let csrf = common::csrf_token(&app, &cookie).await;
     let link = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(link));
     let first_request = ghinvite_core::RequestId::new();
     let second_request = ghinvite_core::RequestId::new();
     let first_operation = "01ARZ3NDEKTSV4RRFFQ69G5FAZ";
@@ -297,7 +321,7 @@ async fn operation_identity_on_another_request_does_not_override_request_recover
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     let location = response.headers()["location"].to_str().unwrap();
     assert!(location.contains(&format!("decision-{second_request}-{second_operation}")));
-    assert_eq!(authority.calls().len(), 2);
+    assert_eq!(authority.received::<DecideRequest>("decide").len(), 2);
 }
 
 #[tokio::test]
@@ -311,20 +335,24 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
             .unwrap(),
     );
     storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .seed_console_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
     let mut expectations = oauth_expectations(OCTOCAT);
-    let mut repositories = installation_repos_expectation();
+    let mut repositories = repos_for(42, "octocat");
     let mut body: serde_json::Value = serde_json::from_slice(&repositories.response.body).unwrap();
     body["repositories"].as_array_mut().unwrap().reverse();
     repositories.response.body = serde_json::to_vec(&body).unwrap();
-    expectations.push(repositories); // Only the first submission may consult GitHub.
-    let state = AppState::new(
+    expectations.extend([
+        repositories,
+        repo_identity(10, "octocat/api", 42),
+        repo_identity(11, "octocat/web", 42),
+    ]); // Subsequent submissions reuse bounded identity evidence.
+    let state = crate::common::sign_in::app_state(
         storage,
         Arc::new(MockTransport::scripted(expectations)),
         authority.client(),
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        console_config(),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
     let cookie = sign_in(&app).await;
@@ -334,7 +362,7 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
         Utc::now().timestamp()
     );
     let fields = format!(
-        "csrf_token={csrf}&description=Recovery+fixture&permission=pull&repo_ids=10&repo_ids=11&expires_in_days=2"
+        "csrf_token={csrf}&description=Recovery+fixture&permission=pull&repo_ids=10&repo_grants=10:pull&repo_ids=11&repo_grants=11:maintain&expires_in_days=2"
     );
     let response = post(&app, &cookie, &action, &fields).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -343,6 +371,22 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     assert!(html.contains(&url));
     assert!(html.contains(&format!("/console/accounts/octocat/links/{id}")));
     let original = authority.received::<CreateLink>("create")[0].clone();
+    assert_eq!(
+        original.targets.repos[1].grant,
+        ghinvite_core::targets::RepoRole::Maintain
+    );
+    for helper in ["apply_all", "reload_repos"] {
+        let before = authority.calls();
+        let response = post(&app, &cookie, &action, &format!("{fields}&{helper}=true")).await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert!(response_html(response).await.contains(&url));
+        assert_eq!(
+            authority.calls(),
+            before,
+            "helper must not replay retained creation"
+        );
+    }
+
     let response = identity_request(
         &app,
         &cookie,
@@ -358,7 +402,11 @@ async fn creation_recovery_retains_canonical_input_before_eligibility_and_projec
     // The authority confirms it created the link from the canonical input.
     let mut confirmed = snapshot(&recovery_link(id));
     confirmed.creation = original.clone();
-    confirmed.creation.repos.sort_by_key(|repo| repo.repo_id);
+    confirmed
+        .creation
+        .targets
+        .repos
+        .sort_by_key(|repo| repo.repo_id);
     authority.seed(confirmed);
     assert_eq!(
         identity_request(&app, &cookie, "GET", &url.to_lowercase())
@@ -418,11 +466,11 @@ async fn recovered_revocation_retry_flashes_once_on_the_link_detail_page() {
         &app,
         &cookie,
         &format!("{detail}/revoke"),
-        &format!("csrf_token={csrf}"),
+        &format!("csrf_token={csrf}&operation_id={id}"),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
+    let url = format!("/console/accounts/octocat/attempts/revoke-{id}-{id}");
     let html = response_html(identity_request(&app, &cookie, "GET", &url).await).await;
     assert!(html.contains("Invitation link stopped accepting new invitation requests."));
     let response = post(&app, &cookie, &url, &format!("csrf_token={csrf}")).await;
@@ -452,7 +500,7 @@ async fn rejected_creation_retry_starts_a_fresh_form_with_an_error() {
             "/console/accounts/octocat/links?link_id={id}&anchor={}",
             Utc::now().timestamp()
         ),
-        &format!("csrf_token={csrf}&description=Recovery+fixture&permission=pull&repo_ids=10"),
+        &format!("csrf_token={csrf}&description=Recovery+fixture&permission=pull&repo_ids=10&repo_grants=10:pull"),
     )
     .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -518,7 +566,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
         .await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
         assert_eq!(response.headers()["location"], url);
-        assert_eq!(authority.calls().len(), 1);
+        assert_eq!(authority.received::<DecideRequest>("decide").len(), 1);
         let latest = response_html(
             identity_request(&app, &cookie, "GET", "/console/accounts/octocat/attempts").await,
         )
@@ -544,7 +592,15 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
             .status(),
             StatusCode::BAD_GATEWAY
         );
-        assert_eq!(authority.calls()[1..], ["decision_status", "decide"]);
+        assert_eq!(
+            authority
+                .calls()
+                .iter()
+                .filter(|m| m.as_str() != "link_status")
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["decide", "decision_status", "decide"]
+        );
         assert_eq!(authority.received::<DecideRequest>("decide")[1], original);
         let (same, opposite) = if action == "approve" {
             (Approved, Declined)
@@ -560,8 +616,10 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
             let receipt = DecisionReceipt {
                 outcome,
                 request: RequestSnapshot {
+                    domain_evidence: None,
                     request_id: request,
-                    link_id: link,
+                    link_id: Some(link),
+                    batch: None,
                     account_id: 42,
                     requester_id: 99,
                     justification: None,
@@ -578,7 +636,10 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
             assert!(html.contains(expected));
             assert!(html.contains(&state.to_string()));
             assert!(!html.contains("Retry original attempt"));
-            assert_eq!(authority.calls()[before..], ["decision_status"]);
+            assert_eq!(
+                authority.calls()[before..],
+                ["link_status", "decision_status"]
+            );
         }
     }
 }
@@ -587,6 +648,7 @@ async fn decision_recovery_reads_original_receipt_and_retries_identical_input() 
 async fn recovery_requires_current_account_authority_session_ownership_and_csrf() {
     let authority = FakeLinkAuthority::start().await;
     let id = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(id));
     authority.fail("revoke", 503);
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -594,23 +656,23 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
             .unwrap(),
     );
     let account = identity_account(42, "octocat", AccountType::User);
-    storage.insert_installation(&account).await.unwrap();
-    let state = AppState::new(
+    storage.seed_console_installation(&account).await.unwrap();
+    let state = crate::common::sign_in::app_state(
         storage.clone(),
         Arc::new(BrowserGithub),
         authority.client(),
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        console_config(),
     );
     let app = build_app(state, protected_store().await);
     let cookie = sign_in(&app).await;
     let csrf = common::csrf_token(&app, &cookie).await;
-    let url = format!("/console/accounts/octocat/attempts/revoke-{id}");
+    let url = format!("/console/accounts/octocat/attempts/revoke-{id}-{id}");
     assert_eq!(
         post(
             &app,
             &cookie,
             &format!("/console/accounts/octocat/links/{id}/revoke"),
-            &format!("csrf_token={csrf}")
+            &format!("csrf_token={csrf}&operation_id={id}")
         )
         .await
         .status(),
@@ -632,7 +694,7 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
         StatusCode::FORBIDDEN
     );
     storage
-        .mark_installation_uninstalled(account.installation_id, Utc::now())
+        .uninstall_console_installation(account.installation_id, Utc::now())
         .await
         .unwrap();
     assert!(
@@ -642,7 +704,10 @@ async fn recovery_requires_current_account_authority_session_ownership_and_csrf(
     );
     let mut replacement = identity_account(999, "octocat", AccountType::User);
     replacement.installation_id = 999;
-    storage.insert_installation(&replacement).await.unwrap();
+    storage
+        .seed_console_installation(&replacement)
+        .await
+        .unwrap();
     assert_eq!(
         identity_request(&app, &cookie, "GET", &url).await.status(),
         StatusCode::NOT_FOUND
@@ -665,24 +730,29 @@ async fn protected_store()
         sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
     );
     backend.migrate().await.unwrap();
-    ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32])
+    ghinvite_web::session_store::ProtectedStore::new(backend, console_config().keyring)
 }
 
 struct BrowserGithub;
-#[async_trait::async_trait]
 impl ghinvite_github::HttpTransport for BrowserGithub {
     async fn send(
         &self,
-        request: ghinvite_github::transport::Request,
-    ) -> ghinvite_github::Result<Response> {
-        if request.url.contains("/repositories?") {
-            return Ok(installation_repos_expectation().response);
+        request: ghinvite_github::Request,
+    ) -> std::result::Result<Response, ghinvite_github::TransportError> {
+        let mut repos = installation_repos_expectation();
+        let mut value: serde_json::Value = serde_json::from_slice(&repos.response.body).unwrap();
+        for (i, name) in ["api", "web"].iter().enumerate() {
+            value["repositories"][i]["full_name"] = serde_json::json!(format!("octocat/{name}"));
+            value["repositories"][i]["owner"] = serde_json::json!({"id":42,"login":"octocat"});
         }
-        Ok(oauth_expectations(OCTOCAT)
-            .into_iter()
-            .find(|e| e.url == request.url)
-            .expect("known GitHub fixture request")
-            .response)
+        repos.response.body = serde_json::to_vec(&value).unwrap();
+        let mut expectations = oauth_expectations(OCTOCAT);
+        expectations.extend([
+            repos,
+            repo_identity(10, "octocat/api", 42),
+            repo_identity(11, "octocat/web", 42),
+        ]);
+        MockTransport::scripted(expectations).send(request).await
     }
 }
 
@@ -702,7 +772,7 @@ async fn mutation_recovery_browser_server() {
             .unwrap(),
     );
     storage
-        .insert_installation(&identity_account(42, "octocat", AccountType::User))
+        .seed_console_installation(&identity_account(42, "octocat", AccountType::User))
         .await
         .unwrap();
     for (id, login) in [(42, "octocat"), (99, "requester")] {
@@ -711,6 +781,7 @@ async fn mutation_recovery_browser_server() {
                 user_id: id,
                 login: login.into(),
                 avatar_url: None,
+                github_created_at: None,
                 last_seen_at: Utc::now(),
             })
             .await
@@ -720,8 +791,10 @@ async fn mutation_recovery_browser_server() {
     authority.seed(link.clone());
     let requests = (0..2)
         .map(|_| RequestSnapshot {
+            domain_evidence: None,
             request_id: ghinvite_core::RequestId::new(),
-            link_id: link.link_id,
+            link_id: Some(link.link_id),
+            batch: None,
             account_id: 42,
             requester_id: 99,
             justification: None,
@@ -747,6 +820,7 @@ async fn mutation_recovery_browser_server() {
         storage
             .apply_request(
                 &ghinvite_core::storage::projection::RequestProjectionEnvelope {
+                    approval: None,
                     request,
                     events: vec![],
                 },
@@ -755,11 +829,11 @@ async fn mutation_recovery_browser_server() {
             .unwrap();
     }
     let app = build_app(
-        AppState::new(
+        crate::common::sign_in::app_state(
             storage,
             Arc::new(BrowserGithub),
             authority.client(),
-            WebConfig::for_local_dev_with_secret([7; 32]),
+            console_config(),
         ),
         protected_store().await,
     );
@@ -818,4 +892,128 @@ async fn mutation_recovery_browser_server() {
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn manual_pause_resume_retains_exact_actions_and_survives_lost_acknowledgements() {
+    let authority = FakeLinkAuthority::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    authority.seed_link(&recovery_link(id));
+    let (app, cookie) = recovery_app(&authority).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let base = format!("/console/accounts/octocat/links/{id}");
+    let op = ghinvite_core::RequestId::new();
+    let fields = format!("csrf_token={csrf}&operation_id={op}");
+    assert_eq!(
+        post(
+            &app,
+            &cookie,
+            &format!("{base}/pause"),
+            &format!("operation_id={op}")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    assert!(authority.applied().is_empty());
+    authority.lose_acknowledgements("pause");
+    let response = post(&app, &cookie, &format!("{base}/pause"), &fields).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let attempt = format!("/console/accounts/octocat/attempts/lifecycle-{id}-{op}");
+    assert!(response_html(response).await.contains(&attempt));
+    let paused = authority.link(id).unwrap();
+    assert!(paused.pause.is_some());
+    assert_eq!(paused.uses, 0);
+    let html = response_html(identity_request(&app, &cookie, "GET", &base).await).await;
+    assert!(html.contains("Resume invitation link"));
+    assert!(html.contains("Existing requests and GitHub invitations continue."));
+    assert!(
+        html.contains(&format!("{base}/revoke")),
+        "paused links remain revocable"
+    );
+    let before = authority.applied();
+    let html = response_html(identity_request(&app, &cookie, "GET", &attempt).await).await;
+    assert!(html.contains("Retry this retained operation"));
+    assert_eq!(authority.applied(), before, "status GET never mutates");
+    assert_eq!(
+        post(&app, &cookie, &format!("{base}/resume"), &fields)
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    authority.recover("pause");
+    assert_eq!(
+        post(&app, &cookie, &attempt, &format!("csrf_token={csrf}"))
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(authority.applied(), ["pause"]);
+    let resume_fields = format!(
+        "csrf_token={csrf}&operation_id={}",
+        ghinvite_core::RequestId::new()
+    );
+    assert_eq!(
+        post(&app, &cookie, &format!("{base}/resume"), &resume_fields)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert!(authority.link(id).unwrap().pause.is_none());
+    // An old successful pause receipt cannot pause the link again after resume.
+    assert_eq!(
+        post(&app, &cookie, &attempt, &format!("csrf_token={csrf}"))
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert!(authority.link(id).unwrap().pause.is_none());
+    assert_eq!(authority.applied(), ["pause", "resume"]);
+    let (_, other_cookie) = recovery_app(&authority).await;
+    assert_eq!(
+        identity_request(&app, &other_cookie, "GET", &attempt)
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
+#[tokio::test]
+async fn manual_resume_guardrail_refusal_is_definitive_and_never_extends_expiry() {
+    let authority = FakeLinkAuthority::start().await;
+    let id = ghinvite_core::InvitationLinkId::new();
+    let mut link = recovery_link(id);
+    link.expires_at = Some(Utc::now() - Duration::hours(1));
+    link.pause = Some(ghinvite_core::link_lifecycle::LinkPause {
+        epoch: 2,
+        at: Utc::now() - Duration::hours(2),
+        by: Some(42),
+        reason: ghinvite_core::link_lifecycle::PauseReason::Manual,
+    });
+    authority.seed_link(&link);
+    let (app, cookie) = recovery_app(&authority).await;
+    let csrf = common::csrf_token(&app, &cookie).await;
+    let base = format!("/console/accounts/octocat/links/{id}");
+    let html = response_html(identity_request(&app, &cookie, "GET", &base).await).await;
+    assert!(!html.contains("Resume invitation link"));
+    assert!(html.contains("Resuming cannot override"));
+    let response = post(
+        &app,
+        &cookie,
+        &format!("{base}/resume"),
+        &format!(
+            "csrf_token={csrf}&operation_id={}",
+            ghinvite_core::RequestId::new()
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = response_html(response).await;
+    assert!(html.contains("expired or reached its maximum uses"));
+    assert!(!html.contains("Retry original attempt"));
+    assert!(authority.applied().is_empty());
+    assert_eq!(
+        authority.link(id).unwrap().creation.expires_at,
+        link.expires_at
+    );
 }

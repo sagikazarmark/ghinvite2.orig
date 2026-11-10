@@ -23,7 +23,7 @@ of the hosted-job execution work in #52; local passes do not prove hosted jobs r
   esbuild **0.27.3**.
 - Miniflare **4.20260302.0** / workerd **2026-03-02** via the npm lockfile;
   compatibility date **2024-09-23** and `nodejs_compat` match Wrangler.
-- Restate **1.7.9**, pinned by digest in `compose.yaml`; Rust SDK and dependencies
+- Restate **1.8.1**, pinned by digest in `compose.yaml`; Rust SDK and dependencies
   are pinned in `Cargo.lock`. Packaging uses Python **3.12.9** in CI (local Python
   **3.11+** is needed for `tomllib`); the installation runner also needs Docker
   Compose, Python 3 and host-gateway networking.

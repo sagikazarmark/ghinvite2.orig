@@ -83,6 +83,7 @@ ulid_newtype!(InvitationLinkId);
 ulid_newtype!(RequestId);
 ulid_newtype!(GithubInvitationId);
 ulid_newtype!(AuditEventId);
+ulid_newtype!(BulkBatchId);
 
 #[cfg(test)]
 mod tests {

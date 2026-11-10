@@ -1,0 +1,154 @@
+{
+  "limit_observations": {},
+  "limit_coverage_started_at": 2000,
+  "limit_overflow_until": null,
+  "unclassified_limit_until": null,
+  "ledger": {
+    "state": {
+      "buckets": {
+        "content": {
+          "spec": {
+            "id": "content",
+            "windows": [
+              [
+                80,
+                60
+              ],
+              [
+                500,
+                3600
+              ]
+            ],
+            "min_spacing_secs": 1
+          },
+          "closed_until": null
+        },
+        "repo:11": {
+          "spec": {
+            "id": "repo:11",
+            "windows": [
+              [
+                50,
+                86400
+              ]
+            ],
+            "min_spacing_secs": 0
+          },
+          "closed_until": null
+        }
+      },
+      "slots": {
+        "1": {
+          "refunded": [
+            "repo:10"
+          ],
+          "buckets": [
+            "content"
+          ],
+          "tag": null,
+          "at": 2000
+        },
+        "2": {
+          "refunded": [],
+          "buckets": [
+            "content",
+            "repo:11"
+          ],
+          "tag": "01J0000000000000000000000C",
+          "at": 2001
+        }
+      },
+      "holds": {},
+      "reservations": {
+        "put": {
+          "at": 2000,
+          "value": {
+            "Granted": {
+              "slot": 1
+            }
+          }
+        },
+        "second": {
+          "at": 2001,
+          "value": {
+            "Granted": {
+              "slot": 2
+            }
+          }
+        }
+      },
+      "hold_keys": {},
+      "commits": {},
+      "watermark": 2001,
+      "next_id": 2
+    }
+  },
+  "revision": 1,
+  "next_slot": 2,
+  "now": 2001,
+  "confirmed_established": false,
+  "cap_policy": null,
+  "shares": {},
+  "link_policy_bound": false,
+  "receipts": {
+    "put": {
+      "at": 2000,
+      "input": {
+        "request_key": "put",
+        "kind": {
+          "kind": "repo_invite",
+          "repo_id": 10
+        },
+        "link_id": null
+      },
+      "result": {
+        "kind": "granted",
+        "slot_id": 1
+      }
+    },
+    "second": {
+      "at": 2001,
+      "input": {
+        "request_key": "second",
+        "kind": {
+          "kind": "repo_invite",
+          "repo_id": 11
+        },
+        "link_id": "01J0000000000000000000000C"
+      },
+      "result": {
+        "kind": "granted",
+        "slot_id": 2
+      }
+    }
+  },
+  "policy_receipts": {},
+  "slots": {
+    "1": {
+      "ledger_slot": 1,
+      "invitation_refunded": true,
+      "at": 2000,
+      "bucket": {
+        "kind": "repo",
+        "repo_id": 10
+      },
+      "link_id": null
+    },
+    "2": {
+      "ledger_slot": 2,
+      "invitation_refunded": false,
+      "at": 2001,
+      "bucket": {
+        "kind": "repo",
+        "repo_id": 11
+      },
+      "link_id": "01J0000000000000000000000C"
+    }
+  },
+  "buckets": [
+    {
+      "kind": "repo",
+      "repo_id": 11
+    }
+  ]
+}

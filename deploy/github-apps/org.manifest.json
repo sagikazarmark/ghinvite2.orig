@@ -1,0 +1,20 @@
+{
+  "name": "P1 org",
+  "url": "https://p1.example.com",
+  "hook_attributes": {
+    "active": true,
+    "url": "https://p1.example.com/webhooks/org"
+  },
+  "public": true,
+  "default_permissions": {
+    "members": "write",
+    "metadata": "read"
+  },
+  "default_events": [
+    "organization",
+    "membership"
+  ],
+  "request_oauth_on_install": false,
+  "setup_url": "https://p1.example.com/setup/org",
+  "setup_on_update": true
+}

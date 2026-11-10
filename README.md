@@ -83,19 +83,19 @@ You need a GitHub App before the service can authenticate users or send invitati
 2. Fill in:
    - **Homepage URL**: `http://127.0.0.1:8787` (or your public URL)
    - **Callback URL**: `http://127.0.0.1:8787/oauth/callback`
-   - **Setup URL**: `http://127.0.0.1:8787/setup/github` (or `{GHINVITE_BASE_URL}/setup/github` in production)
+   - **Setup URL**: `http://127.0.0.1:8787/setup/repo` (or `https://{P1_HOST}/setup/repo` in production)
    - Enable **Redirect on update** so repository-selection changes return to ghinvite
-   - **Webhook URL**: `http://<public-url>/webhooks/github` (use [ngrok](https://ngrok.com) for local dev)
+   - **Webhook URL**: `http://<public-url>/webhooks/repo` (use [ngrok](https://ngrok.com) for local dev)
    - **Webhook secret**: any random string — set it as `GHINVITE_WEBHOOK_SECRET`
 3. **Repository permissions**: Administration → Read & write, Metadata → Read-only
 4. For webhook acceptance, enable **Organization permissions: Members → Read-only** and subscribe to **Member** (`member`, action `added`). GitHub sends `installation` and `installation_repositories` to GitHub Apps by default. See [supported webhook evidence and subscription requirements](docs/invitation-settlement.md#member-added-webhooks), including personal-account availability and legacy compatibility.
-5. After creating: note the **App ID** (`GHINVITE_GITHUB_APP_ID`) and generate a **private key** (`.pem` file, `GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE`)
-6. Under **OAuth** in the app settings: note the **Client ID** and generate a **Client secret** (`GHINVITE_GITHUB_CLIENT_ID` / `GHINVITE_GITHUB_CLIENT_SECRET`)
+5. For the workflow repo App, record its actual **App ID** (`GH_REPO_APP_ID`) and **Client ID** (`GH_REPO_CLIENT_ID`), then generate a private key. The workflow uses the `GH_REPO_PRIVATE_KEYS` PKCS#8 rotation list described below; web signs in through the separate sign-in App (`GH_SIGNIN_CLIENT_ID` / `GH_SIGNIN_CLIENT_SECRET`).
+6. For sign-in, use the sign-in App ([manifests](deploy/github-apps/README.md)): note its **Client ID** and generate a **Client secret** (`GH_SIGNIN_CLIENT_ID` / `GH_SIGNIN_CLIENT_SECRET`); its callback URL is `http://127.0.0.1:8787/oauth/callback` locally
 7. Install the app on your org or personal account and note the install URL: `https://github.com/apps/<your-app-name>/installations/new`
 
 ### Troubleshooting GitHub App setup
 
-- **No redirect after install**: confirm the GitHub App **Setup URL** is `{GHINVITE_BASE_URL}/setup/github` and **Redirect on update** is enabled.
+- **No redirect after install**: confirm the GitHub App **Setup URL** is `https://{P1_HOST}/setup/repo` and **Redirect on update** is enabled.
 - **`missing installation_id`**: GitHub did not return through the Setup URL. Recheck the Setup URL and install the app from the app installation URL again.
 - **`installation is not visible to signed-in user`**: sign out of ghinvite, sign in with the GitHub user that installed or can administer the app installation, then retry the GitHub App install/update.
 - **`Restate error` or setup returns 502**: make sure Restate is running, the `Installation` service is registered, and `GHINVITE_RESTATE_INGRESS` points at the active Restate ingress.
@@ -157,14 +157,21 @@ Wait for: `Restate is ready`
 **Terminal 2 — restate-svc**
 
 ```bash
-GHINVITE_GITHUB_APP_ID=<your-app-id> \
-GHINVITE_GITHUB_APP_PRIVATE_KEY_FILE=path/to/private-key.pem \
+P1_HOST=localhost \
+GH_REPO_APP_ID="<your-repo-app-id>" \
+GH_REPO_CLIENT_ID="<your-repo-app-client-id>" \
+GH_REPO_PRIVATE_KEYS="<kid:base64-PKCS8-PEM>" \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
 GHINVITE_LISTEN_ADDR=0.0.0.0:9080 \
-cargo run -p ghinvite-workflows-server
+cargo run -p ghinvite-workflows-server -- --local-unsigned
 ```
 
-On first run (or after `rm dev.sqlite`), migrations are applied automatically. You can also pass the PEM inline via `GHINVITE_GITHUB_APP_PRIVATE_KEY` instead of a file path. GitHub App keys work as downloaded, whether they start with `BEGIN RSA PRIVATE KEY` or `BEGIN PRIVATE KEY`. Without either, the binary starts but GitHub API calls will fail at runtime.
+The explicit `--local-unsigned` flag is for this local Restate container. Native
+production startup requires `RESTATE_IDENTITY_KEYS`, a comma/whitespace-separated
+list of `publickeyv1_…` verification keys, and omits that flag. Invalid or missing
+keys stop startup before opening SQL. The Worker always requires the key list.
+
+On first run (or after `rm dev.sqlite`), migrations are applied automatically. All four app variables above are required; missing or malformed values fail before storage startup. `GH_REPO_PRIVATE_KEYS` is a semicolon-separated `kid:base64(PKCS#8 PEM)` list, first entry signs. Convert downloaded PKCS#1 keys with `openssl pkcs8 -topk8 -nocrypt` before encoding. Supply the list through your secret manager or shell environment without committing it. There is no dummy-key or old-variable fallback. Tests use their own explicit fixtures.
 
 After it starts, register it with Restate once:
 
@@ -186,19 +193,19 @@ secret manager). Both native and Worker deployments require exactly 64 hex
 characters; there is no built-in development key.
 
 ```bash
-export GHINVITE_SESSION_SECRET="$(openssl rand -hex 32)"
+export P1_KEYRING="$(akr new p1)"
 ```
 
 ```bash
-GHINVITE_GITHUB_CLIENT_ID=<your-oauth-client-id> \
-GHINVITE_GITHUB_CLIENT_SECRET=<your-oauth-client-secret> \
+GH_SIGNIN_CLIENT_ID=<sign-in-app-client-id> \
+GH_SIGNIN_CLIENT_SECRET=<sign-in-app-client-secret> \
 GHINVITE_GITHUB_INSTALL_URL=https://github.com/apps/<your-app-name>/installations/new \
 GHINVITE_DATABASE_PATH=./dev.sqlite \
 GHINVITE_RESTATE_AUTH=local-unauthenticated \
-cargo run -p ghinvite-web-server
+cargo run -p ghinvite-web-server -- --local-dev
 ```
 
-App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. OAuth login requires a real GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
+App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. Sign-in requires a real sign-in GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
 
 ### Option B — Wrangler dev (production-equivalent)
 
@@ -249,8 +256,6 @@ crates/
   ghinvite-core/         — domain types, audit events, Storage trait + conformance suite
   ghinvite-storage-sqlx/ — SqlxStorage: Storage impl for native dev/tests
   ghinvite-storage-d1/   — D1Storage: Storage impl for wasm32/production
-  ghinvite-github/       — GitHub API clients (OAuth + installation tokens);
-                           examples/stub.rs is the API stub for integration tests
   ghinvite-workflows/    — Restate handler logic (runtime-agnostic, tested without Workers)
   ghinvite-workflows-server/ — native entry point wiring workflows + SqlxStorage
   ghinvite-workflows-worker/ — wasm32 entry point wiring workflows + D1
@@ -266,6 +271,13 @@ docs/
   deploy.md        — production deployment guide
   local-testing.md — integration test procedure
 ```
+
+GitHub access is split between the octoauth crates (sibling
+`../octoauth`: `octoauth`/`octotoken` for App authentication and installation
+tokens, `octologin` for sign-in, `octoscrub` for redaction, `octoevents` for
+webhooks) and `crates/ghinvite-github`, ghinvite's own REST client: transport
+(native and Worker), typed endpoints and fixtures. Its `examples/stub.rs`
+supplies the GitHub API fixture for integration tests.
 
 ## CI
 

@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url));
@@ -29,10 +30,18 @@ if (!assets.has('/assets/ghinvite-island.js')) {
   throw new Error('Run scripts/build-island.sh before browser tests');
 }
 
+// Compile once, then render every page with that exact executable. Re-entering
+// Cargo per page can interleave shared-workspace builds and stall the fixture.
+execFileSync('cargo', ['build', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture'],
+  { cwd: root, stdio: ['ignore', 'pipe', 'inherit'] });
+const fixture = resolve(root, process.env.CARGO_TARGET_DIR || 'target', 'debug/examples/ssr_fixture');
 const pages = new Map();
 // Fixture authority travels through the real SSR context, props, and form.
 const csrfToken = randomBytes(32).toString('base64url');
 for (const [path, args] of [
+  ['/organization', ['--organization']],
+  ['/access-removal', ['--access-removal']],
+  ['/eligibility', ['--eligibility']],
   ['/', []], ['/failed', ['--with-errors']], ['/preserved', ['--preserved-values']],
   ['/permission-invalid', ['--permission-only-invalid']],
   ['/permission-empty', ['--permission-only-invalid', '--empty-permission']],
@@ -45,9 +54,7 @@ for (const [path, args] of [
   ['/rejection-form', ['--browser-rejection', '--form-only']],
   ['/multiline-description', ['--multiline-description']],
 ]) {
-  pages.set(path, execFileSync('cargo', [
-    'run', '--quiet', '-p', 'ghinvite-island', '--example', 'ssr_fixture', '--', ...args,
-  ], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
+  pages.set(path, execFileSync(fixture, args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
     env: { ...process.env, GHINVITE_FIXTURE_CSRF: csrfToken } }));
 }
 
@@ -72,6 +79,10 @@ createServer(async (request, response) => {
     }
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(JSON.stringify({ entries: [...new URLSearchParams(body)] }));
+  } else if (request.method === 'GET' && path === '/console/accounts/acme/links/new/selection') {
+    const id = new URL(request.url, 'http://127.0.0.1:4173').searchParams.get('repo_id');
+    if (!['10', '11', '12'].includes(id)) { response.writeHead(404).end(); return; }
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ allowed: true }));
   } else if (request.method === 'GET' && pages.has(path)) {
     response.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',

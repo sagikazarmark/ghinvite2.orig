@@ -64,8 +64,8 @@ A handler that owns a storage effect delegates it to a pure-async function
 (e.g. `create_logic`, `project_installation`). The
 `#[restate_sdk::object|service|workflow]` impl wraps that function inside
 `ctx.run(|| async {...}).name("step_name").await` so Restate captures it as a
-durable step. Pure functions take `&AppState` (`Arc<dyn WorkflowStorage>` +
-`Arc<InstallationClient>`) and return a failure their caller can classify —
+durable step. Pure functions take `&AppState` (`Arc<dyn WorkflowStorage>` plus the explicitly configured
+typed `RepositoryGithub` broker and REST environment) and return a failure their caller can classify —
 usually `Result<T, HandlerError>`. Unit tests call them directly, without a
 Restate runtime.
 

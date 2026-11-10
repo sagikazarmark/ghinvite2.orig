@@ -1,5 +1,6 @@
 use ghinvite_github::{
-    Error, HttpTransport,
+    HttpTransport,
+    transport::TransportError,
     transport::{Method, Request, ReqwestTransport},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -36,8 +37,14 @@ async fn native_default_deadline_bounds_stalled_headers_and_body() {
     .await;
     server.abort();
     let (headers, body) = result.expect("application deadline must precede watchdog");
-    assert!(matches!(headers, Err(Error::Transport(_))));
-    assert!(matches!(body, Err(Error::Transport(_))));
+    assert!(matches!(
+        headers,
+        Err(TransportError::SentNoResponse { timed_out: true })
+    ));
+    assert!(matches!(
+        body,
+        Err(TransportError::SentNoResponse { timed_out: true })
+    ));
     assert!(started.elapsed() >= std::time::Duration::from_secs(29));
 }
 
@@ -62,9 +69,45 @@ async fn a_transport_failure_never_renders_the_url_it_was_fetching() {
         .unwrap_err();
 
     let rendered = format!("{error} {error:?}");
-    assert!(matches!(error, Error::Transport(_)), "{rendered}");
+    assert!(matches!(error, TransportError::NotSent), "{rendered}");
     assert!(!rendered.contains(secret), "{rendered}");
     assert!(!rendered.contains(&address.to_string()), "{rendered}");
     // The classification is what triage actually reads.
-    assert!(rendered.contains("could not connect"), "{rendered}");
+    assert!(rendered.contains("gh:transport:not_sent"), "{rendered}");
+}
+
+#[tokio::test]
+async fn default_transport_never_repeats_a_write_after_a_redirect() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let destination = format!("{base}/redirected");
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 8192];
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
+            seen.fetch_add(1, Ordering::SeqCst);
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: {destination}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let response = ReqwestTransport::new()
+        .unwrap()
+        .send(
+            Request::new(Method::Put, format!("{base}/write"))
+                .header("authorization", "Bearer ghs_test_marker"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status, 307);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    server.abort();
 }

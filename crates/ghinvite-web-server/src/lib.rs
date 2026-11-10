@@ -7,6 +7,7 @@
 //! `ghinvite-web` is what lets that crate stay free of tokio, sqlx and
 //! `tower-http/fs`.
 
+pub mod daily_digest;
 mod session_sqlite;
 
 pub use session_sqlite::SqliteBackend;

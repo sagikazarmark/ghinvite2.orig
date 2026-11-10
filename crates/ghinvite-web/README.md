@@ -1,7 +1,7 @@
 # crates/ghinvite-web
 
 axum-based web server for ghinvite. Three Dioxus 0.7 SSR layouts (Home /
-Dashboard / Invitation), OAuth login + install flow consuming `crates/ghinvite-github`,
+Dashboard / Invitation), token-free sign-in (octologin) + install flow, GitHub reads through `ghinvite-github`,
 Restate ingress client for state-changing actions.
 
 This crate is **library + native binary in Plan 4**. Plan 5 fills in dashboard
@@ -62,9 +62,10 @@ cargo run -p ghinvite-web-server
 ```
 
 The server binds `127.0.0.1:8787`. Hit `http://127.0.0.1:8787` to see the home
-page. `/login` redirects to GitHub OAuth — set `GHINVITE_GITHUB_CLIENT_ID` and
-`GHINVITE_GITHUB_CLIENT_SECRET` in your environment to point at a real GitHub
-App, otherwise the redirect lands on GitHub's "App not found" page.
+page. `/login` starts token-free sign-in (PKCE) — set `GH_SIGNIN_CLIENT_ID` and
+`GH_SIGNIN_CLIENT_SECRET` to a real sign-in GitHub App (callback
+`http://127.0.0.1:8787/oauth/callback`) and run with `--local-dev`; without
+them `/login` answers that sign-in is unavailable.
 
 Run it from the repo root so `/assets/*` resolves to `dist/public/assets`
 (see [Island assets](#island-assets)); without the island bundle the new

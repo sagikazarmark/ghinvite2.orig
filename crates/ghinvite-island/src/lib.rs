@@ -50,7 +50,8 @@ use dioxus::prelude::*;
 use ghinvite_ui::field::ControlHandlers;
 use ghinvite_ui::link_form::{
     CreateLinkForm, LinkFormErrors, LinkFormIslandProps, LinkFormValues, SUMMARY_MESSAGE,
-    parse_expires_in_days, parse_max_uses, register_validators,
+    parse_abuse_threshold_per_hour, parse_budget_share_pct, parse_expires_in_days,
+    parse_invitation_lifetime_hours, parse_max_uses, register_target_validators,
 };
 use ghinvite_ui::links::{LinkCreateForm, LinkFormHandlers, RepositoryScopeHandlers};
 
@@ -72,10 +73,17 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
     // not dioform's derived ones, so no id namespace is configured.
     let form = use_form_config(form_config(&props));
 
+    let email_domains = form.text(fields.email_domains());
     let description = form.text(fields.description());
     let internal_note = form.textarea(fields.internal_note());
     let permission = form.select(fields.permission());
     let approval_required = form.checkbox(fields.approval_required());
+    let expiration_timestamp = form.text(fields.expiration_timestamp());
+    let access_lifetime_hours = form.text(fields.access_lifetime_hours());
+    let invitation_lifetime_seconds = form.text(fields.invitation_lifetime_seconds());
+    let never_expires = form.checkbox(fields.never_expires());
+    let include_organization = form.checkbox(fields.include_organization());
+    let team_ids = use_multi_select(&form, fields.team_ids());
     let max_uses = use_number_with(&form, fields.max_uses(), parse_max_uses, format_count);
     let expires_in_days = use_number_with(
         &form,
@@ -83,7 +91,26 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
         parse_expires_in_days,
         format_count,
     );
+    let invitation_lifetime_hours = use_number_with(
+        &form,
+        fields.invitation_lifetime_hours(),
+        parse_invitation_lifetime_hours,
+        format_count,
+    );
+    let abuse_threshold_per_hour = use_number_with(
+        &form,
+        fields.abuse_threshold_per_hour(),
+        parse_abuse_threshold_per_hour,
+        format_count,
+    );
+    let budget_share_pct = use_number_with(
+        &form,
+        fields.budget_share_pct(),
+        parse_budget_share_pct,
+        format_count,
+    );
     let repo_ids = use_multi_select(&form, fields.repo_ids());
+    let repo_grants = use_multi_select(&form, fields.repo_grants());
     let submit = form.progressive_submit();
     let browser = form.browser_submit(props.action.clone());
 
@@ -93,19 +120,33 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
     // render's clones stay valid.
     let handlers = {
         let submit = submit.clone();
+        let email_domains = email_domains.clone();
         let description = description.clone();
         let internal_note = internal_note.clone();
         let permission = permission.clone();
         let approval_required = approval_required.clone();
+        let expiration_timestamp = expiration_timestamp.clone();
+        let access_lifetime_hours = access_lifetime_hours.clone();
+        let invitation_lifetime_seconds = invitation_lifetime_seconds.clone();
+        let never_expires = never_expires.clone();
+        let include_organization = include_organization.clone();
+        let team_ids = team_ids.clone();
         let max_uses = max_uses.clone();
         let expires_in_days = expires_in_days.clone();
+        let invitation_lifetime_hours = invitation_lifetime_hours.clone();
+        let abuse_threshold_per_hour = abuse_threshold_per_hour.clone();
+        let budget_share_pct = budget_share_pct.clone();
         let repo_ids = repo_ids.clone();
+        let repo_grants = repo_grants.clone();
+        let offered_repos = props.repos.clone();
+        let helper_permission = permission.clone();
         use_hook(move || LinkFormHandlers {
             onsubmit: Some(EventHandler::new(move |event: FormEvent| {
                 // Allowed → the browser POSTs natively; Blocked → dioform has
                 // already cancelled the event and made the errors visible.
                 let _ = submit.on_submit(event);
             })),
+            email_domains: Some(commit_on_focus_exit(email_domains.into())),
             description: Some(commit_on_focus_exit(description.into())),
             internal_note: ControlHandlers {
                 oninput: Some(EventHandler::new(internal_note.oninput())),
@@ -118,8 +159,69 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
                 onchange: Some(EventHandler::new(approval_required.onchange())),
                 onblur: Some(EventHandler::new(approval_required.onblur())),
             },
+            expiration_timestamp: Some(commit_on_focus_exit(expiration_timestamp.into())),
+            access_lifetime_hours: Some(commit_on_focus_exit(access_lifetime_hours.into())),
+            invitation_lifetime_seconds: Some(commit_on_focus_exit(
+                invitation_lifetime_seconds.into(),
+            )),
+            never_expires: ControlHandlers {
+                oninput: None,
+                onchange: Some(EventHandler::new(never_expires.onchange())),
+                onblur: Some(EventHandler::new(never_expires.onblur())),
+            },
+            include_organization: ControlHandlers {
+                oninput: None,
+                onchange: Some(EventHandler::new(include_organization.onchange())),
+                onblur: Some(EventHandler::new(include_organization.onblur())),
+            },
+            teams: RepositoryScopeHandlers {
+                onchange: Some(EventHandler::new({
+                    let ids = team_ids.clone();
+                    move |(id, checked)| ids.on_change(id, checked)
+                })),
+                onblur: Some(EventHandler::new(move |_| {
+                    team_ids.on_commit();
+                    team_ids.on_focus_exit();
+                })),
+            },
             max_uses: Some(commit_on_focus_exit(max_uses.into())),
             expires_in_days: Some(commit_on_focus_exit(expires_in_days.into())),
+            invitation_lifetime_hours: Some(commit_on_focus_exit(invitation_lifetime_hours.into())),
+            abuse_threshold_per_hour: Some(commit_on_focus_exit(abuse_threshold_per_hour.into())),
+            budget_share_pct: Some(commit_on_focus_exit(budget_share_pct.into())),
+            repo_grant: Some(EventHandler::new({
+                let repo_grants = repo_grants.clone();
+                move |(id, value): (u64, String)| {
+                    for old in repo_grants.value() {
+                        if old
+                            .split_once(':')
+                            .is_some_and(|(key, _)| key.parse::<u64>() == Ok(id))
+                        {
+                            repo_grants.on_change(old, false);
+                        }
+                    }
+                    repo_grants.on_change(value, true);
+                    repo_grants.on_commit();
+                }
+            })),
+            repo_grant_blur: Some(EventHandler::new({
+                let repo_grants = repo_grants.clone();
+                move |_event: FocusEvent| {
+                    repo_grants.on_commit();
+                    repo_grants.on_focus_exit();
+                }
+            })),
+            set_all: Some(EventHandler::new(move |event: MouseEvent| {
+                event.prevent_default();
+                let permission = helper_permission.value();
+                for old in repo_grants.value() {
+                    repo_grants.on_change(old, false);
+                }
+                for repo in &offered_repos {
+                    repo_grants.on_change(format!("{}:{permission}", repo.id), true);
+                }
+                repo_grants.on_commit();
+            })),
             repo_scope: RepositoryScopeHandlers {
                 onchange: Some(EventHandler::new({
                     let repo_ids = repo_ids.clone();
@@ -154,26 +256,58 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
             parse.message().to_string(),
         );
     }
+    if let Some(parse) = invitation_lifetime_hours.parse_error() {
+        errors.attach(
+            Some(&fields.invitation_lifetime_hours().identity()),
+            parse.message().to_string(),
+        );
+    }
+    if let Some(parse) = abuse_threshold_per_hour.parse_error() {
+        errors.attach(
+            Some(&fields.abuse_threshold_per_hour().identity()),
+            parse.message().to_string(),
+        );
+    }
+    if let Some(parse) = budget_share_pct.parse_error() {
+        errors.attach(
+            Some(&fields.budget_share_pct().identity()),
+            parse.message().to_string(),
+        );
+    }
     for error in form.visible_validation_errors() {
         errors.attach(error.field_identity().as_ref(), error.error().clone());
     }
     let values = LinkFormValues {
+        email_domains: email_domains.value(),
         description: description.value(),
         permission: permission.value(),
         approval_required: approval_required.checked(),
+        expiration_timestamp: expiration_timestamp.value(),
+        access_lifetime_hours: access_lifetime_hours.value(),
+        invitation_lifetime_seconds: invitation_lifetime_seconds.value(),
+        never_expires: never_expires.checked(),
+        include_organization: include_organization.checked(),
+        selected_team_ids: team_ids.value(),
         // Raw text while it fails to parse, the formatted value otherwise.
         max_uses: max_uses.value(),
         expires_in_days: expires_in_days.value(),
+        invitation_lifetime_hours: invitation_lifetime_hours.value(),
+        abuse_threshold_per_hour: abuse_threshold_per_hour.value(),
+        budget_share_pct: budget_share_pct.value(),
         internal_note: internal_note.value(),
         selected_repo_ids: repo_ids.value(),
+        repo_grants: repo_grants.value(),
         errors,
     };
 
     rsx! {
         LinkCreateForm {
+            access_removal_enabled: props.access_removal_enabled,
             action: browser.action().to_string(),
             form: values,
             repos: props.repos.clone(),
+            organization: props.organization.clone(),
+            eligibility: props.eligibility.clone(),
             handlers: handlers,
         }
     }
@@ -182,10 +316,11 @@ pub fn LinkFormIsland(props: LinkFormIslandProps) -> Element {
 /// Configure a fresh page once; hook rerenders do not restore the response again.
 fn form_config(props: &LinkFormIslandProps) -> FormConfig<CreateLinkForm> {
     let repos = props.repos.clone();
+    let organization = props.organization.clone();
     let now = props.now;
     let mut config = FormConfig::new(props.values.to_model().0)
         .validation_mode(ValidationMode::on_commit())
-        .register_core(move |core| register_validators(core, &repos, now));
+        .register_core(move |core| register_target_validators(core, &repos, &organization, now));
     if !props.values.errors.is_empty() || has_raw_numeric(&props.values) {
         let values = props.values.clone();
         config = config.browser_rejection((), move |_| browser_rejection(&values));
@@ -204,6 +339,9 @@ fn form_config(props: &LinkFormIslandProps) -> FormConfig<CreateLinkForm> {
 fn has_raw_numeric(values: &LinkFormValues) -> bool {
     parse_max_uses(&values.max_uses).is_err()
         || parse_expires_in_days(&values.expires_in_days).is_err()
+        || parse_invitation_lifetime_hours(&values.invitation_lifetime_hours).is_err()
+        || parse_abuse_threshold_per_hour(&values.abuse_threshold_per_hour).is_err()
+        || parse_budget_share_pct(&values.budget_share_pct).is_err()
 }
 
 /// Preserve commit-on-blur for registry controls, including unchanged fields.
@@ -241,6 +379,21 @@ fn browser_rejection(values: &LinkFormValues) -> BrowserRejection<CreateLinkForm
     if parse_expires_in_days(&values.expires_in_days).is_err() {
         rejection = rejection.raw_field(fields.expires_in_days(), values.expires_in_days.clone());
     }
+    if parse_invitation_lifetime_hours(&values.invitation_lifetime_hours).is_err() {
+        rejection = rejection.raw_field(
+            fields.invitation_lifetime_hours(),
+            values.invitation_lifetime_hours.clone(),
+        );
+    }
+    if parse_abuse_threshold_per_hour(&values.abuse_threshold_per_hour).is_err() {
+        rejection = rejection.raw_field(
+            fields.abuse_threshold_per_hour(),
+            values.abuse_threshold_per_hour.clone(),
+        );
+    }
+    if parse_budget_share_pct(&values.budget_share_pct).is_err() {
+        rejection = rejection.raw_field(fields.budget_share_pct(), values.budget_share_pct.clone());
+    }
     rejection
 }
 
@@ -269,6 +422,57 @@ fn submit_errors_from(errors: &LinkFormErrors) -> Vec<SubmitError<CreateLinkForm
             message.clone(),
         ));
     }
+    if let Some(message) = &errors.repo_grants {
+        submit_errors.push(SubmitError::field(fields.repo_grants(), message.clone()));
+    }
+    if let Some(message) = &errors.invitation_lifetime_hours {
+        submit_errors.push(SubmitError::field(
+            fields.invitation_lifetime_hours(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.abuse_threshold_per_hour {
+        submit_errors.push(SubmitError::field(
+            fields.abuse_threshold_per_hour(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.budget_share_pct {
+        submit_errors.push(SubmitError::field(
+            fields.budget_share_pct(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.email_domains {
+        submit_errors.push(SubmitError::field(fields.email_domains(), message.clone()));
+    }
+    if let Some(message) = &errors.expiration_timestamp {
+        submit_errors.push(SubmitError::field(
+            fields.expiration_timestamp(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.access_lifetime_hours {
+        submit_errors.push(SubmitError::field(
+            fields.access_lifetime_hours(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.invitation_lifetime_seconds {
+        submit_errors.push(SubmitError::field(
+            fields.invitation_lifetime_seconds(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.organization {
+        submit_errors.push(SubmitError::field(
+            fields.include_organization(),
+            message.clone(),
+        ));
+    }
+    if let Some(message) = &errors.teams {
+        submit_errors.push(SubmitError::field(fields.team_ids(), message.clone()));
+    }
     if let Some(message) = &errors.repo_scope {
         submit_errors.push(SubmitError::field(fields.repo_ids(), message.clone()));
     }
@@ -292,6 +496,9 @@ mod tests {
         check: impl Fn(&FormHandle<CreateLinkForm>, [(String, Option<String>); 2]) + Clone + 'static,
     ) {
         let props = LinkFormIslandProps {
+            access_removal_enabled: false,
+            eligibility: Default::default(),
+            organization: Default::default(),
             csrf_token: None,
             action: "/console/accounts/acme/links".into(),
             values,
@@ -369,6 +576,16 @@ mod tests {
         let server_error = "A link with this description already exists.";
         check_mounted_config(
             LinkFormValues {
+                access_lifetime_hours: String::new(),
+                email_domains: String::new(),
+                expiration_timestamp: String::new(),
+                invitation_lifetime_seconds: String::new(),
+                include_organization: false,
+                selected_team_ids: vec![],
+                invitation_lifetime_hours: "168".into(),
+                abuse_threshold_per_hour: String::new(),
+                budget_share_pct: "50".into(),
+                never_expires: false,
                 description: "  Workshop  ".into(),
                 permission: "push".into(),
                 approval_required: true,
@@ -376,6 +593,7 @@ mod tests {
                 expires_in_days: "00".into(),
                 internal_note: "Keep this note".into(),
                 selected_repo_ids: vec![10],
+                repo_grants: vec!["10:push".into()],
                 errors: LinkFormErrors {
                     summary: vec![SUMMARY_MESSAGE.into()],
                     description: Some(server_error.into()),
@@ -388,6 +606,16 @@ mod tests {
                 assert_eq!(
                     form.snapshot(),
                     CreateLinkForm {
+                        access_lifetime_hours: String::new(),
+                        email_domains: String::new(),
+                        expiration_timestamp: String::new(),
+                        invitation_lifetime_seconds: String::new(),
+                        include_organization: false,
+                        team_ids: vec![],
+                        invitation_lifetime_hours: Some(168),
+                        abuse_threshold_per_hour: None,
+                        budget_share_pct: Some(50),
+                        never_expires: false,
                         description: "  Workshop  ".into(),
                         internal_note: "Keep this note".into(),
                         permission: "push".into(),
@@ -395,6 +623,7 @@ mod tests {
                         max_uses: None,
                         expires_in_days: None,
                         repo_ids: vec![10],
+                        repo_grants: vec!["10:push".into()],
                     }
                 );
                 assert_eq!(form.submit_attempt_count(), 1);
@@ -429,6 +658,7 @@ mod tests {
             LinkFormValues {
                 description: "Workshop".into(),
                 selected_repo_ids: vec![10],
+                repo_grants: vec!["10:push".into()],
                 max_uses: "0".into(),
                 ..LinkFormValues::default()
             },
@@ -437,7 +667,7 @@ mod tests {
                     numbers,
                     [
                         ("0".into(), Some(MAX_USES_NOT_POSITIVE.into())),
-                        ("30".into(), None),
+                        ("14".into(), None),
                     ]
                 );
                 assert!(
@@ -455,7 +685,7 @@ mod tests {
         check_mounted_config(LinkFormValues::default(), |form, numbers| {
             assert_eq!(form.submit_attempt_count(), 0);
             assert_eq!(form.last_submit_status(), None);
-            assert_eq!(numbers, [(String::new(), None), ("30".into(), None)]);
+            assert_eq!(numbers, [(String::new(), None), ("14".into(), None)]);
             assert!(form.parse_errors().is_empty());
             assert!(form.visible_validation_errors().is_empty());
         });
@@ -471,6 +701,15 @@ mod tests {
     fn submit_errors_map_slots_to_fields_and_extra_summary_lines_to_the_form() {
         let fields = CreateLinkForm::fields();
         let errors = LinkFormErrors {
+            access_lifetime_hours: None,
+            email_domains: None,
+            expiration_timestamp: None,
+            invitation_lifetime_seconds: None,
+            organization: None,
+            teams: None,
+            invitation_lifetime_hours: None,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: None,
             internal_note: None,
             summary: vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()],
             description: Some("d".to_string()),
@@ -478,6 +717,7 @@ mod tests {
             max_uses: Some("m".to_string()),
             expires_in_days: None,
             repo_scope: Some("r".to_string()),
+            repo_grants: None,
         };
 
         let mapped = submit_errors_from(&errors);
@@ -502,7 +742,7 @@ mod tests {
 
     /// Every field of the model, as the island addresses it when it attaches a
     /// message.
-    fn every_field() -> [dioform::advanced::FieldIdentity; 7] {
+    fn every_field() -> [dioform::advanced::FieldIdentity; 8] {
         let fields = CreateLinkForm::fields();
         [
             fields.description().identity(),
@@ -512,6 +752,7 @@ mod tests {
             fields.max_uses().identity(),
             fields.expires_in_days().identity(),
             fields.repo_ids().identity(),
+            fields.repo_grants().identity(),
         ]
     }
 
@@ -557,7 +798,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(slotted.len(), 6, "six fields carry a message slot");
+        assert_eq!(slotted.len(), 7, "seven fields carry a message slot");
     }
 
     /// Every slot at once, spelled out without `..` so a seventh slot fails to
@@ -565,6 +806,15 @@ mod tests {
     #[test]
     fn every_slot_filled_at_once_round_trips() {
         let errors = LinkFormErrors {
+            access_lifetime_hours: None,
+            email_domains: None,
+            expiration_timestamp: None,
+            invitation_lifetime_seconds: None,
+            organization: None,
+            teams: None,
+            invitation_lifetime_hours: None,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: None,
             summary: vec![SUMMARY_MESSAGE.to_string(), "whole form".to_string()],
             description: Some("d".to_string()),
             internal_note: Some("n".to_string()),
@@ -572,6 +822,7 @@ mod tests {
             max_uses: Some("m".to_string()),
             expires_in_days: Some("e".to_string()),
             repo_scope: Some("r".to_string()),
+            repo_grants: Some("g".to_string()),
         };
         assert_eq!(round_trip(&errors), errors);
     }

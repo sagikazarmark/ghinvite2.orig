@@ -1,3 +1,13 @@
+> P1 implementation update (2026-10-17): installed-app setup and webhook routes
+> are app-scoped: `/setup/repo`, `/setup/org`, `/webhooks/repo`, and
+> `/webhooks/org`. Setup verifies the installation with the selected app's JWT;
+> webhooks verify that app's HMAC. Unscoped legacy `/setup` and `/webhooks` routes
+> are absent. Sign-in is token-free (typed, PKCE) and is the only sign-in path
+> since GM-09: legacy OAuth and `GH_SIGNIN_ENABLED` are gone. Local
+> implementation does not satisfy the live SP-19/SP-19a gates.
+> Old owner keys and retained invocations require compatible pinned endpoints or
+> draining. This guide does not authorize a deployment.
+
 # ghinvite Deployment Guide
 
 ## Rollout status and order
@@ -40,7 +50,7 @@ and [rollback](#rollback) before any upgrade.
 - Cloudflare account with Workers paid plan (or free tier for testing)
 - Node.js 20.20.2 or a compatible supported Node release.
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) **4.71.0**: `npm install -g wrangler@4.71.0` (command-validation baseline for this guide).
-- Restate CLI **1.7.9**: `npm install -g @restatedev/restate@1.7.9`; configure the target environment's Admin URL and admin credential using the CLI/secret manager. Admin credentials are separate from the web ingress key.
+- Restate CLI **1.8.x**: `npm install -g @restatedev/restate@1.8`; configure the target environment's Admin URL and admin credential using the CLI/secret manager. Admin credentials are separate from the web ingress key.
 - [`worker-build`](https://crates.io/crates/worker-build) **0.8.1** installed: `cargo install worker-build --version 0.8.1 --locked`
 - wasm-bindgen CLI **0.2.120**, matching `Cargo.lock`: `cargo install wasm-bindgen-cli --version 0.2.120 --locked`.
   Export `WASM_BINDGEN_BIN=$(command -v wasm-bindgen)` when invoking Wrangler so
@@ -62,8 +72,8 @@ authoritative reads and mutations. This is separate from endpoint identity signi
 
 | Credential | Secret binding | Direction / purpose |
 |---|---|---|
-| Restate Cloud environment ingress API key | `GHINVITE_RESTATE_API_KEY` on **web** | Web → Restate; authorizes invoking services |
-| Restate endpoint identity key | `RESTATE_IDENTITY_KEY` on **restate-svc** | Restate → workflow Worker; verifies signed runtime requests |
+| Restate Cloud environment ingress API key | `RESTATE_INGRESS_TOKEN` on **web** | Web → Restate; authorizes invoking services |
+| Restate endpoint identity key | `RESTATE_IDENTITY_KEYS` on **restate-svc** | Restate → workflow Worker; verifies signed runtime requests |
 
 Neither replaces the other. Do not expose ingress API keys to browsers or put them
 in URLs, UI props, assets, `[vars]`, tracked configuration, or diagnostic logs.
@@ -113,67 +123,89 @@ done
 ```
 
 Expect no unapplied migrations and ledger entries matching every SQL file in
-`migrations/` for the release (currently only `0001_initial.sql`). Compare the returned schema
-definitions with those migrations, including projection columns, delivery fences,
-settlement/member-webhook receipts, and the `attempt_continuations_expiry` index. Expect
+`migrations/` for the exact release; this checkout currently contains `0001` through
+`0027_requester_profile.sql`. Compare the returned schema definitions with those
+migrations, including projection columns, delivery fences, settlement and
+organization-webhook receipts, and the `attempt_continuations_expiry` index. The
+obsolete repository-member `webhook_receipts` table must be absent after `0022`.
+Before `0022`/`0023`, inventory and drain or route away incompatible serving and
+pinned writers; endpoint pinning does not protect a writer from a shared-schema
+drop. Follow the [migration-specific compatibility requirements](../migrations/README.md#retired-repository-member-event-matching),
+including the canonical-delivery identity preflight, without changing previously
+applied migration files. Fresh prelaunch replacement is not an arbitrary deployed
+state import. Expect
 no foreign-key violations. Stop on missing/mismatched schema, migration errors or
 an unexpected UUID in Wrangler output. Apply migrations only via the web config,
 which declares `migrations_dir`; the workflow config is used here for readback.
 
 > **Important:** Do not run `sqlx migrate run` against D1. sqlx manages the local SQLite dev database; Wrangler manages D1. The same SQL files in `migrations/` are shared, but tracking is separate.
 
-### 4. Create KV namespace for sessions
+### 4. Create KV namespaces for sessions and authority evidence
 
 ```bash
 wrangler kv namespace create "SESSIONS" --config wrangler/web.toml
+wrangler kv namespace create "AUTHZ_CACHE" --config wrangler/web.toml
 ```
 
-Copy the `id` into `wrangler/web.toml` under `[[kv_namespaces]]`.
+Copy each `id` into its matching `[[kv_namespaces]]` entry in
+`wrangler/web.toml`. `AUTHZ_CACHE` contains read-only authority observations,
+partitioned by app, installation, user and repository. It never contains GitHub
+credentials or Link Secrets. Entries have a 300-second cleanup TTL, and each read
+independently rejects evidence aged 300 seconds or with a future timestamp.
+
+The web Worker also requires `AUTHZ_RL` with 10 reads per 60 seconds, keyed by
+app and installation, alongside the public `RL_IP` and `RL_USER` bindings.
+Missing cache or rate-limit bindings fail startup closed. Native hosting uses a
+shared bounded in-memory cache and process-local rate limits; it does not provide
+a cross-process global limit. Worker limits are approximate and per location.
 
 ### 5. Update wrangler config vars
 
 Complete [GitHub App Setup](#github-app-setup) first, then return here with the install URL, App ID, OAuth credentials, and webhook secret.
 
 In `wrangler/web.toml`, update `[vars]`:
-- `GHINVITE_BASE_URL` — your public domain (e.g. `https://ghinvite.example.com`)
-- `GHINVITE_RESTATE_INGRESS` — your Restate Cloud ingress URL
-- `GHINVITE_RESTATE_AUTH` — keep `bearer` in production (also the default if omitted)
-- `GHINVITE_GITHUB_INSTALL_URL` — GitHub App installation URL
+- `P1_HOST` — your bare canonical DNS host (e.g. `ghinvite.example.com`); no scheme, port or path
+- `RESTATE_INGRESS_URL` — your HTTPS Restate Cloud ingress URL; no credentials, query or fragment
+- `GHINVITE_GITHUB_INSTALL_URL` — repository GitHub App installation URL
+- `GH_REPO_APP_ID` and `GH_REPO_CLIENT_ID` — numeric App ID and client ID of that repository app
 
 ### 6. Set secrets
 
 ```bash
-# Session secret (32 random bytes as 64-char hex):
-openssl rand -hex 32 | wrangler secret put GHINVITE_SESSION_SECRET --config wrangler/web.toml
+# Local keyring descriptor (install the companion anykms `akr` CLI):
+akr new p1 | wrangler secret put P1_KEYRING --config wrangler/web.toml
 
-# GitHub OAuth (from GitHub App settings):
-wrangler secret put GHINVITE_GITHUB_CLIENT_ID --config wrangler/web.toml
-wrangler secret put GHINVITE_GITHUB_CLIENT_SECRET --config wrangler/web.toml
+# Sign-in App (from its GitHub App settings; the client ID may be a var):
+wrangler secret put GH_SIGNIN_CLIENT_ID --config wrangler/web.toml
+wrangler secret put GH_SIGNIN_CLIENT_SECRET --config wrangler/web.toml
 
-# GitHub webhook secret:
-wrangler secret put GHINVITE_WEBHOOK_SECRET --config wrangler/web.toml
+# Repository app private-key list and rotated webhook-secret list:
+wrangler secret put GH_REPO_PRIVATE_KEYS --config wrangler/web.toml
+wrangler secret put GH_REPO_WEBHOOK_SECRETS --config wrangler/web.toml
 
 # Web -> Restate: provision an ingress API key for the target environment in
 # Restate Cloud, then paste it at Wrangler's secret prompt (no Bearer prefix):
-wrangler secret put GHINVITE_RESTATE_API_KEY --config wrangler/web.toml
+wrangler secret put RESTATE_INGRESS_TOKEN --config wrangler/web.toml
 
-# Restate service — GitHub App private key PEM as downloaded (base64-encoded for safe storage):
-# Linux:
-base64 -w0 private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
-# macOS:
-base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
+# Restate service — paste the repo App's rotation list:
+# kid:base64(PKCS#8 PEM);previous-kid:base64(PKCS#8 PEM)
+# Convert downloaded PKCS#1 with openssl pkcs8 -topk8 -nocrypt before encoding.
+wrangler secret put GH_REPO_PRIVATE_KEYS --config wrangler/restate-svc.toml
 
-# GitHub App ID is a var, not a secret — update GHINVITE_GITHUB_APP_ID in wrangler/restate-svc.toml [vars] directly.
+# Set P1_HOST, GH_REPO_APP_ID and GH_REPO_CLIENT_ID in restate-svc.toml [vars].
+# Use the actual repo App numeric ID and client ID; neither is inferred/defaulted.
 
-# Restate verification public key (Cloud → Developers → Security → HTTP endpoints):
-wrangler secret put RESTATE_IDENTITY_KEY --config wrangler/restate-svc.toml
+# Set RESTATE_IDENTITY_KEYS in restate-svc.toml [vars] to the comma-separated
+# verification public keys from Cloud → Developers → Security → HTTP endpoints.
 ```
 
 Configure both secret sets before creating the final release versions. The
-workflow Worker currently accepts unsigned requests when its identity binding is
-absent: a successful upload is not proof that request identity is enforced. Verify
-the exact version URL below. `RESTATE_IDENTITY_KEY` contains the verification
-**public** key; Restate retains the signing private key.
+workflow Worker refuses startup when RESTATE_IDENTITY_KEYS is absent, empty or
+invalid. Discovery and invocation requests must be signed by one of the listed
+keys. Verify the exact version URL below. These are verification **public** keys;
+Restate retains the signing private keys. For rotation, deploy old and new keys
+together before changing the signer, then remove the retired key after the
+pinned versions and runtime have finished their transition.
 
 ### 7. Build the island bundle
 
@@ -263,7 +295,7 @@ already-issued GitHub request. Retire a deployment only after every pinned
 invocation and uncertain effect is accounted for; never repoint its URL at new code.
 
 Provision the ingress key in the same Restate Cloud environment as
-`GHINVITE_RESTATE_INGRESS`, with permission to invoke the web application's services.
+`RESTATE_INGRESS_URL`, with permission to invoke the web application's services.
 For self-hosted production, provide an HTTPS ingress gateway that enforces the same
 Bearer contract and prevents direct access to the unprotected runtime ports.
 Use the exact ingress URL; do not rely on redirecting gateways for authentication.
@@ -280,7 +312,7 @@ export WEB_BASE_URL=https://YOUR_WEB_HOST
 curl --fail-with-body --max-time 20 "$WEB_BASE_URL/health" # → ok
 curl --fail-with-body --max-time 20 "$WEB_BASE_URL/"       # → HTML
 curl -sS --max-time 20 -o /dev/null -w "%{http_code}" \
-  -X POST "$WEB_BASE_URL/webhooks/github" \
+  -X POST "$WEB_BASE_URL/webhooks/repo" \
   -d '{}'                                             # → 401
 curl -sS --max-time 20 -o /dev/null -w "%{http_code}" \
   "$WEB_BASE_URL/assets/ghinvite-island.js"             # → 200 (island loader)
@@ -300,29 +332,41 @@ affirmative or blocked verdict before live producers are reopened.
 
 ### 1. Set up `.dev.vars`
 
-Use `.dev.vars` for local Worker secrets. Generate your own session key with
-`openssl rand -hex 32` and set `GHINVITE_SESSION_SECRET` there, along with local
-GitHub OAuth app credentials when testing OAuth. Keep this file out of version control.
+Use `.dev.vars` for local Worker secrets. Generate a descriptor with `akr new p1`
+and set `P1_KEYRING` to its complete `akr1;name=...` output; native development
+reads the same descriptor from the environment. Keep this file out of version
+control. Missing or malformed descriptors fail startup, with no default key or
+legacy hex-key fallback. The keyring is immutable for the Worker isolate's life.
+Set `P1_OPERATOR_IDS` to comma-separated positive numeric GitHub user IDs to
+allow operator fingerprint inspection; omitted/empty denies everyone.
 
-`GHINVITE_SESSION_SECRET` must be exactly 64 hexadecimal characters (32 bytes when
-decoded). Native development reads the same format from the environment. Missing,
-invalid, short, and oversized values are rejected; there is no default key.
+Production web configuration always requires `P1_HOST`, `RESTATE_INGRESS_URL`
+and the `RESTATE_INGRESS_TOKEN` secret. This applies to the Worker under local
+Wrangler as well: use an HTTPS ingress with bearer authentication. Missing
+configuration, HTTP URLs (including loopback), credentials in URLs, query strings,
+fragments and malformed secrets fail closed before serving. Legacy host/ingress
+aliases and `GHINVITE_RESTATE_AUTH=local-unauthenticated` cannot disable this.
 
-For a credential-free **local runtime**, explicitly set these non-secret values
-in your ignored `.dev.vars` beside the Wrangler config (native: environment):
+For a credential-free **native development runtime**, opt in explicitly:
 
-```dotenv
-GHINVITE_RESTATE_INGRESS=http://127.0.0.1:8080
-GHINVITE_RESTATE_AUTH=local-unauthenticated
+```bash
+GHINVITE_RESTATE_INGRESS=http://127.0.0.1:8080 \
+GHINVITE_RESTATE_AUTH=local-unauthenticated \
+cargo run -p ghinvite-web-server -- --local-dev
 ```
 
-Leave `GHINVITE_RESTATE_API_KEY` absent in this mode; supplying both local mode
-and a key is an error. Never use local mode with production ingress. For local
-testing against Restate Cloud, use `bearer` and supply the API key as a secret.
-Native boot and Worker configuration use the same parser: omitted auth mode
-requires a key; missing/empty/malformed keys and unknown modes fail configuration.
-Native reads `GHINVITE_RESTATE_API_KEY` from its server process environment;
-Workers read it with `env.secret`, never from serialized application data.
+This mode still requires `P1_KEYRING` and the explicit repository-app registry.
+Leave `GHINVITE_RESTATE_API_KEY` absent in this development mode; a supplied key
+conflicts with unsigned mode. Native startup without `--local-dev` uses the same
+canonical production parser as the Worker. Native hosting still uses its documented
+SQLite and process-local cache/limit adapters; this does not establish remote
+Worker deployment parity.
+
+Production web requires the sign-in App's `GH_SIGNIN_CLIENT_ID` and
+`GH_SIGNIN_CLIENT_SECRET`. `--local-dev` reads the same two names and calls back to
+`{GHINVITE_BASE_URL}/oauth/callback`; without them `/login` answers that sign-in
+is unavailable. Canonical host/ingress validation does not claim the final
+production binding inventory is complete.
 
 ### 2. Apply migrations to local D1 simulation
 
@@ -368,7 +412,7 @@ development state, not replay compatibility across production releases.
 
 1. Create a replacement environment ingress API key in Restate Cloud (or the
    self-hosted ingress gateway). Keep the current key active during normal rotation.
-2. Update the web secret using `wrangler secret put GHINVITE_RESTATE_API_KEY
+2. Update the web secret using `wrangler secret put RESTATE_INGRESS_TOKEN
    --config wrangler/web.toml`; for native, update the secret-manager-injected
    environment and restart every serving process. Do not pass keys in CLI arguments.
 3. Verify all serving versions/bindings use the replacement, including alternate
@@ -381,43 +425,48 @@ development state, not replay compatibility across production releases.
 If compromised, revoke first and accept temporary ingress unavailability while
 replacing the key. A denied/failed ingress operation must not be reported as
 successful; recover uncertain mutations using the original operation identity.
-Rotate `RESTATE_IDENTITY_KEY` separately using Restate's endpoint-signing procedure.
+Rotate `RESTATE_IDENTITY_KEYS` separately using Restate's endpoint-signing procedure.
 
-### Session secret
+### Session keyring
 
-Session records are encrypted with XChaCha20-Poly1305 under the single configured
-application key. The ID cookie is a bearer reference, not an encrypted token
-container. Cloudflare-managed at-rest encryption is additional provider protection.
+Sessions and attempt continuations use the anykms v1 envelope under `P1_KEYRING`.
+The session cookie remains a bearer ID. Session AAD is `purpose=session` plus the
+requested KV session ID; continuation AAD is `purpose=attempt-continuation` plus
+the stored plaintext scope and binding columns. No legacy XChaCha decoder exists.
+Existing PoC sessions and continuations require fresh sign-in/recovery.
 
-Replacing `GHINVITE_SESSION_SECRET` rejects old-key sessions **on deployments
-using the new key**. An old-key deployment can still accept old sessions, so
-updating a secret alone is not proof that global invalidation has completed.
+Routine rotation must use the companion `akr` CLI and private descriptor files:
+add a generation, deploy it as readable with the old current version, verify every
+serving deployment, then promote it in a second rollout. Keep old generations
+readable until every consumer completion gate is satisfied after the **last
+possible old-generation write**, including pinned older deployments. For session
+KV, wait at least 30 days plus one hour after the verified Promote boundary;
+every session write sets a TTL no longer than 30 days. For D1 continuations,
+perform the [verified CAS sweep and separate full scan](continuation-keyring-rotation.md)
+with zero old and zero bad rows, including retained expired rows. Session lifetime
+or opportunistic cleanup does not substitute for that full scan. Run `akr diff
+OLD NEW` before deployment. Never reuse a version or change its root bytes.
+Never lower the current version or roll back across Promote.
 
-Emergency cutover:
+`GET /console/keyring` returns only the keyring fingerprint for signed-in numeric
+IDs in `P1_OPERATOR_IDS`; all others receive 404. Compare it with the fingerprint
+logged once per isolate and the expected `akr show` result, including every
+serving version, before promoting or retiring generations. A newer unknown
+version returns HTTP 503 and preserves the cookie and record. A removed generation
+or corrupted ciphertext confers no session authority. A KCV/configuration mismatch
+returns HTTP 500 and logs an operator alert, never an anonymous-session fallback.
 
-1. Close web traffic at the ingress, including alternate Worker URLs, so no new
-   session-dependent requests reach old-key deployments.
-2. Stop routing to old versions and allow their in-flight requests to drain.
-   Include requests awaiting GitHub or Restate; previously authorized operations
-   are not retroactively cancelled by session invalidation.
-3. Generate and install a fresh server-only key, then deploy the protected web
-   code with that key. Do not use a gradual old/new-key traffic split.
+For suspected key compromise, close ingress, drain old deployments/in-flight
+requests, replace all exposed generations with a fresh higher generation, and
+invalidate sessions and continuations. Confirm old cookies fail and fresh sign-in
+works before reopening. Retain the new descriptor during code rollback. Merely
+rewrapping is not recovery from a leaked KEK; any retained encrypted data needs
+full decryption and encryption with fresh DEKs, and underlying credential rotation
+where applicable. Already-authorized operations are not retroactively cancelled.
 
-```bash
-openssl rand -hex 32 | wrangler secret put GHINVITE_SESSION_SECRET --config wrangler/web.toml
-```
-
-4. Verify all serving versions use the new key, an old browser cookie cannot
-   reach an authenticated page, and a fresh GitHub login succeeds. Resume traffic.
-   Only now declare global session invalidation complete.
-5. Retain the new key during any code rollback. Never restore a retired key or
-   roll back to code that accepts unprotected session records.
-
-Existing plaintext sessions are rejected on the first protected deployment;
-users must sign in again and pending OAuth flows must restart. Wrong-key,
-unknown-format, malformed, and tampered records grant no authority and are left
-for expiration cleanup. They are not deleted or revoked merely because a reader
-cannot decrypt them: they may belong to an overlapping new-key deployment.
+Unreadable records are never deleted or revoked just because decryption failed;
+they remain for expiration cleanup. Only explicit sign-out writes revocations.
+The envelope review and complete P1 sign-in prerequisite remain production gates.
 
 ### Session lifetime and individual sign-out
 
@@ -458,21 +507,28 @@ See [ADR 0002](adr/0002-session-protection-and-invalidation.md) and
 
 ### GitHub private key
 
-Provision the replacement before uploading/registering the next workflow version:
+Provision the replacement before uploading/registering the next workflow version.
+Prepend a new `kid:base64(PKCS#8 PEM)` entry to the existing rotation list (the
+first entry signs), preserving the old valid entry during the overlap:
 
 ```bash
-# Linux:
-base64 -w0 new-private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
-# macOS:
-base64 new-private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
+wrangler secret put GH_REPO_PRIVATE_KEYS --config wrangler/restate-svc.toml
 ```
 
 Existing pinned version bindings must also retain working credentials until their
-approved drain completes. A secret update on the current deployment does not prove
+approved drain completes. Older artifacts still require their legacy binding
+names; provisioning `GH_REPO_PRIVATE_KEYS` does not rewrite those artifacts. A secret update on the current deployment does not prove
 older version URLs use that replacement. Inventory and rehearse credential rotation
 for retained versions under #61; if a key must be revoked immediately, isolate and
 account for affected work using the
 [recovery procedure](admission-v1.md#recovery-and-audit-retention).
+
+## Native fallback
+
+The [native fallback package and switch-readiness runbook](native-fallback.md)
+describes CI artifacts and the current shared-storage blocker. Native binaries
+are not a hot replacement for the D1-backed workflow Worker. The web Worker
+stays on Workers under ADR0010; no production host or migration is selected.
 
 ## Rollback
 
@@ -505,8 +561,8 @@ evidence and historical audit archives as specified in
 Command syntax was checked on 2026-09-18–19 with Wrangler **4.71.0**, Restate CLI
 **1.7.9**, and Node **20.20.2**, using CLI help for D1 `migrations list/apply`,
 `execute`, Worker `deploy`, `versions upload/list`, `rollback`, secrets, and
-Restate `deployments register/list`. The repository pins Restate runtime 1.7.9,
-SDK 0.12 with its Cargo patch, worker-build 0.8.1 and wasm-bindgen 0.2.120; use
+Restate `deployments register/list`. The repository pins Restate runtime 1.8.1,
+SDK 0.13 with its Cargo patch (fork `wasm` branch), worker-build 0.8.1 and wasm-bindgen 0.2.120; use
 [the Worker gate's version inventory](worker-admission-gate.md#reproduce).
 
 References: [Cloudflare version-specific preview URLs](https://developers.cloudflare.com/workers/configuration/previews/),
@@ -534,24 +590,167 @@ These remote actions have **not** been executed by this documentation change.
 
 ## GitHub App Setup
 
-1. Create a GitHub App at https://github.com/settings/apps/new
-2. Set **Homepage URL** to your `GHINVITE_BASE_URL`
-3. Set **Callback URL** to `{GHINVITE_BASE_URL}/oauth/callback`
-4. Set **Setup URL** to `{GHINVITE_BASE_URL}/setup/github`
-5. Enable **Redirect on update**
-6. Set **Webhook URL** to `{GHINVITE_BASE_URL}/webhooks/github`
-7. Set repository permissions: **Administration** → **Read & write**, **Metadata** → **Read-only**
-8. Enable organization permission **Members → Read-only** and subscribe to **Member** for repository invitation acceptance (`member.added`). `installation` and `installation_repositories` are sent to GitHub Apps by default. See [webhook evidence and subscription requirements](invitation-settlement.md#member-added-webhooks) before enabling acceptance in a deployment.
-9. Generate and download a private key (used for `GHINVITE_GITHUB_APP_PRIVATE_KEY`)
-10. Note the **App ID** (used for `GHINVITE_GITHUB_APP_ID`)
-11. Note the **Client ID** and generate a **Client Secret** (used for OAuth vars)
-12. Generate a **Webhook Secret** (used for `GHINVITE_WEBHOOK_SECRET`)
+Use the three checked-in [registration manifests](../deploy/github-apps/README.md)
+as the permission and callback source of truth. Replace the example host and
+review the exact resulting files before any operator-owned registration.
+
+- **Sign-in:** `emails: read`, no repository/organization permissions, no webhook,
+  and `/oauth/callback`. Set token expiry manually and record SP-19a evidence.
+- **Repo:** `administration: write` and `metadata: read`, `/setup/repo` and
+  `/webhooks/repo`, no organization permissions or member-event subscription.
+  Repository acceptance is observed by reconciliation; authenticated legacy
+  member/repository-invitation events do not settle deliveries.
+- **Org:** `members: write` and `metadata: read`, `/setup/org` and `/webhooks/org`,
+  organization/membership events as declared by its manifest.
+
+All manifests disable automatic OAuth on installation. Store each installed app's
+numeric App ID, actual Client ID, signing keys and webhook secrets under its
+matching `GH_REPO_*` or `GH_ORG_*` configuration. The sign-in client secret belongs
+only to the web host. Do not add repo-app Members permission to restore removed
+member-webhook behavior. Registration and provider behavior remain live gates.
 
 ### Troubleshooting GitHub App setup
 
-- **No redirect after install**: confirm the GitHub App **Setup URL** is `{GHINVITE_BASE_URL}/setup/github` and **Redirect on update** is enabled.
+- **No redirect after install**: confirm the GitHub App **Setup URL** is `https://{P1_HOST}/setup/repo` and **Redirect on update** is enabled.
 - **`missing installation_id`**: GitHub did not return through the Setup URL. Recheck the Setup URL and install the app from the app installation URL again.
 - **`installation is not visible to signed-in user`**: sign out of ghinvite, sign in with the GitHub user that installed or can administer the app installation, then retry the GitHub App install/update.
-- **`Restate error` or setup returns 502**: check registration/routing and the target environment's `GHINVITE_RESTATE_API_KEY`. HTTP 401/403 indicates rejected ingress access, not a browser login problem. Confirm `GHINVITE_RESTATE_AUTH=bearer`; `RESTATE_IDENTITY_KEY` cannot authorize web-to-ingress traffic. Errors deliberately omit upstream bodies and transport details; use redacted runtime invocation metadata for diagnosis.
+- **`Restate error` or setup returns 502**: check registration/routing and the target environment's `RESTATE_INGRESS_TOKEN`. HTTP 401/403 indicates rejected ingress access, not a browser login problem. Confirm the required `RESTATE_INGRESS_TOKEN` is current; `RESTATE_IDENTITY_KEYS` cannot authorize web-to-ingress traffic. Errors deliberately omit upstream bodies and transport details; use redacted runtime invocation metadata for diagnosis.
 - **Repository picker is empty after a selected-repository install**: reopen the GitHub App installation settings, verify repository access, and use **Update** so GitHub redirects back to ghinvite with `setup_action=update`.
 - **Permission failures when inviting collaborators**: confirm repository permissions are **Administration: Read & write** and **Metadata: Read-only**.
+
+## P1 app split configuration
+
+The three [app manifests](../deploy/github-apps/README.md) and the pure
+`ghinvite_config::apps` parser implement a reviewable configuration seam
+(`ghinvite_web::config::apps` remains a compatibility re-export).
+Both workflow composition roots parse the explicitly selected registry stage and construct
+the typed repository broker plus the transitional installation read client from
+that same registry. They require `P1_HOST`, `GH_REPO_APP_ID`,
+`GH_REPO_CLIENT_ID` and `GH_REPO_PRIVATE_KEYS`, with no legacy-variable or dummy-key
+fallback. Web startup uses the same stage for installed-app setup, webhook and
+authority registries. Web always requires complete `GH_SIGNIN_CLIENT_ID/SECRET`
+and runs PKCE login/callback with durable encrypted pending state and token-free
+sessions; there is no switch. Live SP-19/SP-19a remain separate unpassed gates.
+
+**Legacy OAuth removal (GM-09).** Before deploying a build without legacy OAuth:
+set `GH_SIGNIN_CLIENT_ID`/`GH_SIGNIN_CLIENT_SECRET` (callback URL
+`https://{P1_HOST}/oauth/callback` on the sign-in App), and delete
+`GHINVITE_GITHUB_CLIENT_ID`, `GHINVITE_GITHUB_CLIENT_SECRET` and
+`GH_SIGNIN_ENABLED`, which nothing reads any more. Sessions signed in through
+legacy OAuth stay signed in until their fixed deadline: they carry the same
+identity, the stored user token is never read, and the next write of each
+record drops it. Sign-ins in flight across the deploy fail once ("no sign-in in
+progress") and restart. Tokens legacy OAuth issued were never revoked by
+ghinvite; revoke them in the legacy OAuth App's settings if wanted. See
+[ADR0002](adr/0002-session-protection-and-invalidation.md).
+An unknown pending-state key generation returns503 without consuming the exact
+pending row or exchanging its code, allowing the same callback to retry after
+keyring rollout. KCV/configuration failures return500 with the fixed operator alert.
+
+
+Deployment decision, 2026-10-16: the installed-app registry needs both an actual
+numeric App ID and an actual client ID. P1 §20.1 now explicitly includes
+`GH_REPO_CLIENT_ID` and `GH_ORG_CLIENT_ID` on both Workers. Never derive a client
+ID from an App ID or supply a placeholder default. The sign-in registry entry
+has `app_id: None`: it needs only `GH_SIGNIN_CLIENT_ID` and
+`GH_SIGNIN_CLIENT_SECRET`, and neither a signing key nor a webhook secret.
+
+Both native and Worker composition roots read `P1_APP_STAGE`: absent or exact
+`repo` selects the repository registry; exact `repo-and-org` additionally requires
+`GH_ORG_APP_ID`, `GH_ORG_CLIENT_ID` and `GH_ORG_PRIVATE_KEYS`, plus
+`GH_ORG_WEBHOOK_SECRETS` on web. Empty, unknown or noncanonical stage values fail
+with the fixed `P1_APP_STAGE` field; incomplete org configuration fails closed.
+Default Wrangler templates explicitly retain `repo`. The stage enables the org
+registry for read-only installation/owner authority. Organization targets and
+deliveries additionally require `GH_ORG_DELIVERY_ENABLED=true` on both web and
+workflow runtimes; absent or exact `false` keeps them disabled. Other values fail
+startup, and `true` requires `P1_APP_STAGE=repo-and-org` and its complete registry.
+The workflow setting binds the organization owner, the real invitation budget,
+and cancellation capability; web uses the same setting for fresh target selection
+and submission. Existing record authorization still checks current authority.
+This explicit composition setting does not satisfy the remaining M1/live gates
+or authorize a deployment. See ID-40, ID-50 and
+[org observation verification](org-observation-verification.md). `parse_web_apps` requires the
+sign-in credentials plus installed-app signing keys and rotated webhook lists.
+`parse_mint_apps` requests only `P1_HOST` and the installed apps' IDs, client IDs
+and signing keys. The small `ghinvite-config` crate is shared by native and
+Worker composition roots and has no web, storage or Restate dependency.
+
+Bulk issuance is a separate opt-in: `GH_BULK_ENABLED=true` enables the Console
+capability and standard BulkInviteBatch owner; absent or exact `false` disables
+it, and every other value fails startup. Configure both web and workflow
+runtimes consistently. Repository-only bulk needs no mailbox key. Bulk with
+`GH_ORG_DELIVERY_ENABLED=true` also requires `P1_EMAIL_KEYRING`, an `akr1`
+descriptor whose ring name is exactly `p1-email`. Use the same current and
+retained generations in web and workflow deployments, with the normal staged
+key rollout; do not reuse the `p1` web-session descriptor. Its key check value and
+shape are verified before startup, and diagnostics name only the field. The
+web stages encrypted, fully bound mailbox records; only the email delivery's
+fenced write run can load an activated record. Both owners use the real shared
+invitation budget. These local capability flags do not establish SP-07/SP-18
+live behavior or authorize deployment. See ID-61 and
+[email delivery verification](email-delivery-verification.md).
+
+`P1_HOST` is a canonical lower-case ASCII DNS host (IDNs in A-label form), with
+no scheme, port, credentials, path or trailing dot. URLs use HTTPS. Numeric IDs
+are positive canonical decimals; signing lists are
+`kid:base64(PKCS#8 PEM);kid:base64(PKCS#8 PEM)` (first signs), and webhook lists
+are nonempty distinct semicolon-separated secrets. Errors contain fixed binding
+names only. Input copies returned by the source are zeroized for secrets; a
+native/Worker source adapter must also protect and validate its original input,
+including non-Unicode environment failures. Registry parsing does not validate
+KV/D1/rate-limit bindings, ingress credentials or the session keyring; their
+existing/future startup validators remain required by B0-22.
+
+
+Workflow startup validates app configuration before opening native storage or
+building the Worker endpoint. Each incoming Worker request creates the broker,
+JWT source and transports together, so in-flight mint I/O cannot cross request
+contexts. `InstallationClient::from_registry` is a transitional bridge for
+unmigrated availability/read paths: its signer internally clones the registry's
+primary key and uses the actual client-ID issuer. It exposes no raw key accessor.
+This does not claim that all legacy client paths have gained typed-broker
+permission restrictions or secret-handling guarantees. Existing request-identity
+validation requirements and remote rollout gates remain unchanged.
+
+Local verification of this startup transition: `registry_legacy_bridge` verifies
+the RS256 signature and actual client-ID issuer; the native `startup` tests
+exercise rejection before SQL plus real HTTP/2 discovery.
+`tests/worker/workflow-startup.mjs` exercises actual Worker `/discover` for valid,
+legacy-only, missing-client-ID and malformed configurations, with no GitHub calls
+and no secret-marker disclosure. It runs with the shared D1 suite in
+`npm run test:storage`. These local checks do not replace deployed registration,
+permission or request-identity verification.
+
+
+Access removal is a separate opt-in capability: set `GH_ACCESS_REMOVAL_ENABLED=true`
+in both web and workflow deployments only after validating the AccessGrant gates.
+The default is false. Installed app configuration and the real InviteBudget binding
+remain required; organization/team targets also need the organization stage.
+A disabled web rejects a submitted finite access lifetime and preserves its raw value.
+A disabled workflow refuses a new lifetime-bearing creation, while exact creation
+receipts remain recoverable. Pin old invocation versions or drain their scheduled
+AccessGrant work before disabling/removing its service; changing the flag does not
+cancel retained removal obligations. Live removal safety evidence remains a release
+gate, independent of local fixture tests.
+
+
+### Administrator reissue
+
+`GH_REISSUE_ENABLED` defaults to `false` and accepts only the literal values
+`true` and `false`. Set it consistently on web and workflow deployments. The web
+setting exposes protected confirmation controls; the workflow setting binds
+reissue with the real invitation budget, old-invitation cancellation and
+AccessGrant removal barriers. Repository-only reissue does not require an
+organization installation. Organization targets require the separately enabled
+organization delivery composition.
+
+A reissue creates a new generation from the retained approved target, preserves
+the original approval and source, and charges the administrator account budget
+without the source link's share. Unknown old deletion or removal work blocks
+reissue. Enabling the setting does not satisfy live GitHub activation probes or
+retained endpoint migration gates.
+
+### Continuation keyring rotation
+
+Use the [verified CAS sweep and separate full-pass completion gate](continuation-keyring-rotation.md). Retained expired D1 rows are included; the session KV TTL rule does not substitute for this gate.

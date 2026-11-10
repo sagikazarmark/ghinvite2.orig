@@ -1,10 +1,15 @@
-import { initSync, fetch as workerFetch } from './.generated/index.js';
+import { initSync, fetch as workerFetch, scheduled as workerScheduled } from './.generated/index.js';
 import wasmModule from './.generated/index_bg.wasm';
 
 initSync({ module: wasmModule });
 
 export default {
+  scheduled: workerScheduled,
   async fetch(request, env, ctx) {
+    // Test-only seam: a successful isolate must keep its immutable keyring.
+    if (request.headers.has('x-test-keyring-descriptor')) {
+      env = { ...env, P1_KEYRING: request.headers.get('x-test-keyring-descriptor') };
+    }
     if (request.headers.has('x-test-observe-d1')) {
       let queries = 0;
       let rowsRead = 0;

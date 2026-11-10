@@ -1,9 +1,25 @@
-//! Account-keyed installation convergence. Never owns link or request history.
-use crate::{
-    AppState,
-    installation::{OnboardInput, UninstallInput},
+//! App-scoped retained installation facts. Setup cannot name an installer.
+mod audit;
+mod deletion;
+mod org_observation;
+#[cfg(feature = "integration")]
+#[derive(Default)]
+pub struct InstallationAuditFault {
+    pub armed: std::sync::atomic::AtomicBool,
+    pub paused: std::sync::atomic::AtomicUsize,
+}
+use crate::{AppState, installation::UninstallInput};
+pub use deletion::WebhookOutcome;
+use ghinvite_core::account::{
+    AccountInstallationRef, AccountSettings, App, DelegationRefusal, Installation,
+    InstallationFacts, InstallationWebhookAction, InstallationWebhookInput, OnboardInput,
+    SetDelegationInput,
 };
+use ghinvite_core::audit::{ActorKind, AuditEvent, EventType, TargetKind};
+pub use ghinvite_core::installation_audit::InstallationChange;
+use ghinvite_core::installation_audit::{InstallationAuditFact, InstallationAuditKind};
 use ghinvite_core::{Account, SelectedRepos, admission::Rejection};
+pub use org_observation::OrgAuthority;
 use restate_sdk::{
     context::{
         ContextClient, ContextReadState, ContextSideEffects, ContextWriteState, ObjectContext,
@@ -20,7 +36,6 @@ pub struct Scope {
     pub account_id: u64,
     pub repo_ids: Vec<u64>,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Eligibility {
@@ -28,13 +43,11 @@ pub enum Eligibility {
     Unavailable { reason: Rejection },
     Unknown,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct AdmissionEvidence {
     pub eligibility: Eligibility,
     pub valid_until: chrono::DateTime<chrono::Utc>,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Observation {
@@ -42,45 +55,45 @@ pub enum Observation {
     Unavailable,
     Unknown,
 }
-
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct InstallationStatus {
+    /// Transitional account-only response for retained delivery contexts.
     pub account: Option<Account>,
+    pub installation: Option<Installation>,
+    pub repo_admin_delegation: bool,
     pub observation: Observation,
-    /// When GitHub was read for `observation`. Absent before observation
-    /// and after retirement by uninstall.
-    #[serde(default)]
     pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
-
-/// One reading of an installation's availability, and when it was taken.
+impl InstallationStatus {
+    fn empty() -> Self {
+        Self {
+            account: None,
+            installation: None,
+            repo_admin_delegation: false,
+            observation: Observation::Unknown,
+            observed_at: None,
+        }
+    }
+    fn set_installation(&mut self, value: Installation) {
+        self.account = value
+            .account
+            .uninstalled_at
+            .is_none()
+            .then(|| value.account.clone());
+        self.installation = Some(value);
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Observed {
     observation: Observation,
     at: chrono::DateTime<chrono::Utc>,
 }
-
 pub struct AccountInstallation {
     pub state: AppState,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum InstallationChange {
-    Onboard {
-        input: OnboardInput,
-    },
-    Repos {
-        input: crate::installation::ReposChangedInput,
-    },
-    Uninstall {
-        input: UninstallInput,
-    },
 }
 pub struct InstallationProjection {
     pub state: AppState,
 }
-
 #[restate_sdk::object]
 impl InstallationProjection {
     #[handler]
@@ -89,270 +102,330 @@ impl InstallationProjection {
         ctx: ObjectContext<'_>,
         Json(input): Json<InstallationChange>,
     ) -> Result<(), TerminalError> {
-        let account_id: u64 = ctx.key().parse().map_err(|_| invalid())?;
-        // Retained before the projection runs, so a retry replays the event the
-        // first attempt minted instead of minting a second one for the same
-        // transition.
-        let Json(event) = ctx
-            .run(|| async {
-                Ok::<_, HandlerError>(Json(installation_audit(
-                    account_id,
-                    &input,
-                    ghinvite_core::AuditEventId::new(),
-                    chrono::Utc::now(),
-                    ctx.invocation_id().to_string(),
-                )))
-            })
-            .name("retain_installation_audit")
-            .await?;
-        ctx.run(|| async {
-            project_installation(&self.state, &input)
-                .await
-                .map_err(HandlerError::from)
-        })
-        .name("project_installation")
-        .await?;
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        input.events(key).map_err(|_| invalid())?;
         ctx.run(|| async {
             self.state
                 .storage
-                .audit(&event)
+                .project_installation_change(key, &input)
                 .await
-                .map_err(|error| HandlerError::from(ProjectionFailure::Storage(error)))
+                .map_err(storage_error)
         })
-        .name("project_installation_audit")
+        .name("project_installation")
         .await
     }
 }
-
-/// The audit event one installation transition retains, independent of whether
-/// storage has taken the transition yet.
-fn installation_audit(
-    account_id: u64,
-    input: &InstallationChange,
-    id: ghinvite_core::AuditEventId,
-    occurred_at: chrono::DateTime<chrono::Utc>,
-    request_id: String,
-) -> ghinvite_core::audit::AuditEvent {
-    use ghinvite_core::audit::{ActorKind, AuditEvent, EventType, TargetKind};
-    let (installation_id, event_type, actor_id, metadata) = match input {
-        InstallationChange::Onboard { input } => (
-            input.installation_id,
-            EventType::InstallationCreated,
-            Some(input.actor_user_id),
-            serde_json::json!({
-                "account_login": input.account_login,
-                "account_type": input.account_type.to_string(),
-            }),
-        ),
-        // Always a subset: a refresh retains exact repository IDs even for an
-        // installation configured for all repositories, so there is no `all`
-        // selection left to report (docs/installation-availability.md).
-        InstallationChange::Repos { input } => (
-            input.installation_id,
-            EventType::InstallationReposChanged,
-            None,
-            serde_json::json!({"selected_repos_kind": "subset"}),
-        ),
-        InstallationChange::Uninstall { input } => (
-            input.installation_id,
-            EventType::InstallationUninstalled,
-            None,
-            serde_json::json!({"uninstalled_at": input.uninstalled_at.to_rfc3339()}),
-        ),
-    };
-    AuditEvent {
-        id,
-        account_id,
-        occurred_at,
-        event_type,
-        // Only an installing user names themselves; GitHub owns every other
-        // installation transition.
-        actor_kind: if actor_id.is_some() {
-            ActorKind::User
-        } else {
-            ActorKind::Github
-        },
-        actor_id,
-        target_kind: TargetKind::Installation,
-        target_id: installation_id.to_string(),
-        metadata,
-        request_id: Some(request_id),
-    }
-}
-
-/// Why one installation transition did not reach storage.
-#[derive(Debug)]
-enum ProjectionFailure {
-    /// A replayed onboarding names facts the stored installation does not have,
-    /// so no retry converges and the projection is refused outright.
-    IdentityConflict,
-    /// Storage refused the write or could not answer. Which of the two it was
-    /// decides whether Restate retries, so the crate's own classification
-    /// settles it rather than the SDK's retry-everything default.
-    Storage(ghinvite_core::storage::Error),
-}
-
-impl From<ProjectionFailure> for HandlerError {
-    fn from(failure: ProjectionFailure) -> Self {
-        // `Classified` is this crate's error, not the SDK's `HandlerError` this
-        // returns: only it knows which storage failures are worth a retry.
-        use crate::error::HandlerError as Classified;
-        match failure {
-            ProjectionFailure::IdentityConflict => {
-                TerminalError::new_with_code(409, "installation projection conflict").into()
-            }
-            ProjectionFailure::Storage(error) => {
-                crate::error::to_sdk_handler_error(Classified::Storage(error))
-            }
-        }
-    }
-}
-
-/// Take one installation transition into storage. Idempotent: replaying a
-/// transition already applied leaves the installation as it stands.
+#[cfg(test)]
 async fn project_installation(
     state: &AppState,
     input: &InstallationChange,
-) -> std::result::Result<(), ProjectionFailure> {
-    use ghinvite_core::storage::{ConflictKind, Error as StorageError};
-    match input {
-        InstallationChange::Onboard { input } => {
-            let account = Account {
-                installation_id: input.installation_id,
-                account_id: input.account_id,
-                account_login: input.account_login.clone(),
-                account_type: input.account_type,
-                installed_at: input.installed_at,
-                uninstalled_at: None,
-                selected_repos: input.selected_repos.clone(),
-            };
-            match state.storage.insert_installation(&account).await {
-                Ok(()) => Ok(()),
-                Err(StorageError::Conflict(ConflictKind::DuplicateId)) => {
-                    let stored = state
-                        .storage
-                        .get_installation(input.installation_id)
-                        .await
-                        .map_err(ProjectionFailure::Storage)?;
-                    if stored.as_ref() == Some(&account) {
-                        Ok(())
-                    } else {
-                        Err(ProjectionFailure::IdentityConflict)
-                    }
-                }
-                Err(error) => Err(ProjectionFailure::Storage(error)),
-            }
-        }
-        InstallationChange::Repos { input } => state
-            .storage
-            .update_installation_repos(input.installation_id, &input.selected_repos)
-            .await
-            .map_err(ProjectionFailure::Storage),
-        InstallationChange::Uninstall { input } => {
-            match state
-                .storage
-                .mark_installation_uninstalled(input.installation_id, input.uninstalled_at)
-                .await
-            {
-                // An installation ghinvite never projected is already as
-                // uninstalled as this transition can make it.
-                Ok(()) | Err(StorageError::NotFound) => Ok(()),
-                Err(error) => Err(ProjectionFailure::Storage(error)),
-            }
-        }
+) -> Result<(), HandlerError> {
+    let owner = AccountInstallationRef {
+        app: input
+            .installation
+            .as_ref()
+            .map(|v| v.app)
+            .unwrap_or(App::Repo),
+        account_id: input
+            .installation
+            .as_ref()
+            .map(|v| v.account.account_id)
+            .or_else(|| input.event.as_ref().map(|e| e.account_id))
+            .expect("test identity"),
+    };
+    state
+        .storage
+        .project_installation_change(owner, input)
+        .await
+        .map_err(storage_error)
+}
+fn storage_error(error: ghinvite_core::storage::Error) -> HandlerError {
+    crate::error::to_sdk_handler_error(crate::error::HandlerError::Storage(error))
+}
+/// The `ghinvite_github` slot of an installed app.
+fn github_slot(app: App) -> ghinvite_github::AppSlot {
+    match app {
+        App::Repo => ghinvite_github::AppSlot::Repo,
+        App::Org => ghinvite_github::AppSlot::Org,
     }
 }
+fn invalid() -> TerminalError {
+    TerminalError::new_with_code(400, "invalid installation identity")
+}
+fn conflict() -> TerminalError {
+    TerminalError::new_with_code(409, "installation operation conflict")
+}
+fn next_revision(current: u64) -> Result<u64, TerminalError> {
+    current
+        .checked_add(1)
+        .filter(|value| *value <= ghinvite_core::storage::integer::MAX_EXACT)
+        .ok_or_else(|| TerminalError::new("installation revision exhausted"))
+}
+fn retired_key(id: u64) -> String {
+    format!("retired/{id}")
+}
+const RECHECK_SLOT: &str = "recheck_scheduled";
+const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-async fn project(ctx: &ObjectContext<'_>, input: InstallationChange) -> Result<(), TerminalError> {
-    ctx.object_client::<InstallationProjectionClient>(ctx.key())
-        .apply(Json(input))
-        .send()
-        .await?;
-    Ok(())
+/// Why the app-authenticated installation read has no answer.
+enum InstallationReadFailure {
+    /// Refused here or by GitHub: the app is unavailable, or the answer names
+    /// another installation.
+    Refused(TerminalError),
+    /// The read failed; `transient` when a retry may succeed.
+    Failed { transient: bool },
 }
 
 impl AccountInstallation {
     async fn load(&self, ctx: &ObjectContext<'_>) -> Result<InstallationStatus, TerminalError> {
-        if let Some(Json(status)) = ctx.get("installation").await? {
-            return Ok(status);
-        }
-        let account_id: u64 = ctx.key().parse().map_err(|_| invalid())?;
-        if account_id == 0 {
-            return Err(invalid());
-        }
-        Ok(InstallationStatus {
-            account: None,
-            observation: Observation::Unknown,
-            observed_at: None,
-        })
+        let _: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        audit::flush(ctx).await?;
+        Ok(audit::status(ctx)
+            .await?
+            .map(|Json(v)| v)
+            .unwrap_or_else(InstallationStatus::empty))
     }
-
-    async fn observe(&self, account: &Account) -> Observation {
-        match self
-            .state
-            .github
-            .get_installation(account.installation_id)
+    fn apps(&self) -> Result<&crate::state::RepositoryGithub, TerminalError> {
+        self.state
+            .github_apps
+            .as_deref()
+            .ok_or_else(|| TerminalError::new_with_code(503, "installed app runtime unavailable"))
+    }
+    /// The installed app for `app`.
+    fn github_app(&self, app: App) -> Result<ghinvite_github::GithubApp, TerminalError> {
+        self.apps()?
+            .apps
+            .app(github_slot(app))
+            .map_err(|_| invalid())
+    }
+    /// The installation as GitHub reports it to the app (app-authenticated).
+    /// Journaled by `verify_onboard_identity`: the result keeps
+    /// `GhAppInstallation`'s serde shape (PD-9).
+    async fn github_installation(
+        &self,
+        app: App,
+        id: u64,
+    ) -> Result<Option<ghinvite_github::payloads::GhAppInstallation>, TerminalError> {
+        self.read_installation(app, id)
             .await
-        {
-            Ok(Some(installation))
-                if installation.id == account.installation_id
-                    && installation.account.id == account.account_id
-                    && installation.suspended_at.is_none() => {}
+            .map_err(|failure| match failure {
+                InstallationReadFailure::Refused(error) => error,
+                InstallationReadFailure::Failed { .. } => TerminalError::new_with_code(
+                    503,
+                    "installation identity could not be confirmed",
+                ),
+            })
+    }
+    /// [`Self::github_installation`], telling a failure worth retrying apart.
+    async fn read_installation(
+        &self,
+        app: App,
+        id: u64,
+    ) -> Result<Option<ghinvite_github::payloads::GhAppInstallation>, InstallationReadFailure> {
+        let app = self
+            .github_app(app)
+            .map_err(InstallationReadFailure::Refused)?;
+        let credential = app.app_rest().map_err(|_| {
+            InstallationReadFailure::Refused(TerminalError::new_with_code(
+                503,
+                "app authentication unavailable",
+            ))
+        })?;
+        match ghinvite_github::endpoints::get_installation(&credential.rest(), id).await {
+            Ok(value) => {
+                if value.id != id || value.app_id != app.id().get() {
+                    return Err(InstallationReadFailure::Refused(invalid()));
+                }
+                Ok(Some(value))
+            }
+            Err(ghinvite_github::ApiError::NotFound) => Ok(None),
+            Err(error) => Err(InstallationReadFailure::Failed {
+                // A read is safe to repeat.
+                transient: error.is_transient_for_retry_safe(true),
+            }),
+        }
+    }
+    async fn observe(&self, app: App, account: &Account) -> Observation {
+        match self.github_installation(app, account.installation_id).await {
+            Ok(Some(value))
+                if value.account.id == account.account_id
+                    && value.suspended_at.is_none()
+                    && (app == App::Repo
+                        || (value.account.account_type.as_deref() == Some("Organization")
+                            && value.permissions.contains_key("members"))) => {}
             Ok(_) => return Observation::Unavailable,
             Err(_) => return Observation::Unknown,
         }
-        match self
-            .state
-            .github
-            .all_installation_repo_ids(account.installation_id)
+        if app == App::Org {
+            return self.observe_org(account).await;
+        }
+        let Ok(github) = self.github_app(app) else {
+            return Observation::Unknown;
+        };
+        match github
+            .read(
+                account.installation_id,
+                &ghinvite_github::profiles::REPO_READ,
+                |handle| async move {
+                    ghinvite_github::endpoints::list_installation_repos(&handle.rest())
+                        .await
+                        .map_err(ghinvite_github::CallError::<std::convert::Infallible>::Api)
+                },
+            )
             .await
         {
-            Ok(repo_ids) => Observation::Available { repo_ids },
-            Err(error) if error.status() == Some(404) => Observation::Unavailable,
+            Ok(repos) => Observation::Available {
+                repo_ids: repos.into_iter().map(|r| r.id).collect(),
+            },
+            Err(ghinvite_github::TokenCallError::Call(ghinvite_github::CallError::Api(
+                ghinvite_github::ApiError::NotFound,
+            ))) => Observation::Unavailable,
             Err(_) => Observation::Unknown,
         }
     }
-
+    async fn event(
+        ctx: &ObjectContext<'_>,
+        installation: Option<Installation>,
+        settings: Option<AccountSettings>,
+        kind: EventType,
+        actor: Option<u64>,
+    ) -> Result<AuditEvent, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        let at = crate::clock::now(ctx, "installation_event_time").await?;
+        let target = installation
+            .as_ref()
+            .map(|v| format!("{}:{}", v.app.as_str(), v.account.installation_id))
+            .unwrap_or_else(|| ctx.key().to_owned());
+        let metadata = serde_json::json!({"app":key.app,"revision":installation.as_ref().map(|v|v.revision),"repo_admin_delegation":settings.as_ref().map(|v|v.repo_admin_delegation)});
+        let invocation = ctx.invocation_id().to_string();
+        let Json(event) = ctx
+            .run(move || {
+                let target = target.clone();
+                let metadata = metadata.clone();
+                let invocation = invocation.clone();
+                async move {
+                    Ok::<_, HandlerError>(Json(AuditEvent {
+                        id: ghinvite_core::AuditEventId::new(),
+                        account_id: key.account_id,
+                        occurred_at: at,
+                        event_type: kind,
+                        actor_kind: if actor.is_some() {
+                            ActorKind::User
+                        } else {
+                            ActorKind::Github
+                        },
+                        actor_id: actor,
+                        target_kind: TargetKind::Installation,
+                        target_id: target,
+                        metadata,
+                        request_id: Some(invocation),
+                    }))
+                }
+            })
+            .name("retain_installation_audit")
+            .await?;
+        Ok(event)
+    }
+    async fn project(
+        &self,
+        ctx: &ObjectContext<'_>,
+        installation: Option<Installation>,
+        settings: Option<AccountSettings>,
+        kind: EventType,
+        actor: Option<u64>,
+    ) -> Result<(), TerminalError> {
+        self.project_receipted(ctx, installation, settings, kind, actor, None)
+            .await
+    }
+    async fn project_receipted(
+        &self,
+        ctx: &ObjectContext<'_>,
+        installation: Option<Installation>,
+        settings: Option<AccountSettings>,
+        kind: EventType,
+        actor: Option<u64>,
+        receipt: Option<(String, serde_json::Value)>,
+    ) -> Result<(), TerminalError> {
+        let event = Self::event(ctx, installation.clone(), settings.clone(), kind, actor).await?;
+        let mut status = audit::status(ctx)
+            .await?
+            .map(|v| v.0)
+            .unwrap_or_else(InstallationStatus::empty);
+        if let Some(settings) = &settings {
+            status.repo_admin_delegation = settings.repo_admin_delegation;
+        }
+        let mut facts = vec![];
+        if let Some(value) = &installation {
+            if let Some(suspended_at) = value.suspended_at
+                && status
+                    .installation
+                    .as_ref()
+                    .filter(|old| old.account.installation_id == value.account.installation_id)
+                    .and_then(|old| old.suspended_at)
+                    != Some(suspended_at)
+            {
+                facts.push(InstallationAuditFact::V1 {
+                    revision: value.revision,
+                    fact: InstallationAuditKind::Suspended { suspended_at },
+                });
+            }
+            status.set_installation(value.clone());
+        }
+        audit::commit(
+            ctx,
+            &self.state,
+            status,
+            InstallationChange {
+                installation,
+                settings,
+                event: Some(event),
+                audit_facts: facts,
+            },
+            None,
+            receipt,
+        )
+        .await
+    }
     async fn refresh_status(
         &self,
         ctx: &ObjectContext<'_>,
         mut status: InstallationStatus,
     ) -> Result<InstallationStatus, TerminalError> {
-        if let Some(account) = &mut status.account {
+        if let Some(mut value) = status
+            .installation
+            .clone()
+            .filter(|v| v.account.uninstalled_at.is_none())
+        {
             let retired = ctx
-                .get::<bool>(&retired_key(account.installation_id))
+                .get::<bool>(&retired_key(value.account.installation_id))
                 .await?
                 .is_some();
-            // The reading and the time it was taken are one journal entry, so
-            // a replay never dates an observation by when it was replayed.
             let Json(observed) = ctx
                 .run(|| async {
-                    let observation = if retired {
-                        Observation::Unavailable
-                    } else {
-                        self.observe(account).await
-                    };
                     Ok::<_, HandlerError>(Json(Observed {
-                        observation,
+                        observation: if retired {
+                            Observation::Unavailable
+                        } else {
+                            self.observe(value.app, &value.account).await
+                        },
                         at: chrono::Utc::now(),
                     }))
                 })
                 .name("refresh_github_scope")
                 .await?;
-            let Observed { observation, at } = observed;
-            let refresh = Refresh::of(account, &observation);
+            let refresh = Refresh::of(&value.account, &observed.observation);
             if let Some(selected) = refresh.selected_repos {
-                project(
+                value.account.selected_repos = selected;
+                value.revision = next_revision(value.revision)?;
+                self.project(
                     ctx,
-                    InstallationChange::Repos {
-                        input: crate::installation::ReposChangedInput {
-                            installation_id: account.installation_id,
-                            selected_repos: selected.clone(),
-                        },
-                    },
+                    Some(value.clone()),
+                    None,
+                    EventType::InstallationReposChanged,
+                    None,
                 )
                 .await?;
-                account.selected_repos = selected;
+                status.set_installation(value);
             }
             if refresh.recheck && ctx.get::<bool>(RECHECK_SLOT).await?.is_none() {
                 ctx.set(RECHECK_SLOT, true);
@@ -361,45 +434,47 @@ impl AccountInstallation {
                     .send_after(RECHECK_INTERVAL)
                     .await?;
             }
-            status.observation = observation;
-            status.observed_at = Some(at);
+            status.observation = observed.observation;
+            status.observed_at = Some(observed.at);
         } else {
             status.observation = Observation::Unavailable;
             status.observed_at = None;
         }
-        ctx.set("installation", Json(status.clone()));
+        audit::save_status(ctx, status.clone()).await?;
         Ok(status)
     }
-
-    /// Retire the exact installation even if its onboarding has not arrived.
     async fn continue_uninstall(
         &self,
         ctx: &ObjectContext<'_>,
         input: UninstallInput,
     ) -> Result<(), TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != input.app {
+            return Err(invalid());
+        }
         let mut status = self.load(ctx).await?;
         ctx.set(&retired_key(input.installation_id), true);
-        if status
-            .account
-            .as_ref()
-            .is_some_and(|a| a.installation_id == input.installation_id)
-        {
-            project(ctx, InstallationChange::Uninstall { input }).await?;
-            status.account = None;
+        if let Some(mut value) = status.installation.clone().filter(|v| {
+            v.account.installation_id == input.installation_id && v.account.uninstalled_at.is_none()
+        }) {
+            value.account.uninstalled_at = Some(input.uninstalled_at);
+            value.revision = next_revision(value.revision)?;
+            self.project(
+                ctx,
+                Some(value.clone()),
+                None,
+                EventType::InstallationUninstalled,
+                None,
+            )
+            .await?;
+            status.set_installation(value);
             status.observation = Observation::Unavailable;
             status.observed_at = None;
-            ctx.set("installation", Json(status));
+            audit::save_status(ctx, status).await?;
         }
         Ok(())
     }
 }
-
-/// The state key marking an installation identity retired. A retired
-/// identity is never onboarded again and observes as unavailable.
-fn retired_key(installation_id: u64) -> String {
-    format!("retired/{installation_id}")
-}
-
 /// What a refresh does with an observation of the current installation.
 #[derive(Debug)]
 struct Refresh {
@@ -465,176 +540,66 @@ fn retained_eligibility(
         ))
     .then_some(Eligibility::Available)
 }
-
-fn invalid() -> TerminalError {
-    TerminalError::new_with_code(400, "invalid installation identity")
-}
-
-/// Steady-state cadence of the durable observation recheck, and the state key
-/// reserving its single scheduled invocation.
-const RECHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
-const RECHECK_SLOT: &str = "refresh_scheduled";
-
 /// How long an observation stays recent enough to admit on its own. Access lost
 /// inside this window is not an admission error: it surfaces as blocked
 /// delivery, exactly as a change made after any observation does (ADR 0004).
 const RECENT_OBSERVATION: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
-#[restate_sdk::object]
 impl AccountInstallation {
-    #[handler]
-    async fn admission_evidence(
+    async fn adopt(
         &self,
-        ctx: SharedObjectContext<'_>,
-        Json(scope): Json<Scope>,
-    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
-        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
-            return Err(invalid());
-        }
-        if let Some(Json(status)) = ctx.get::<Json<InstallationStatus>>("installation").await? {
-            let Json(now) = ctx
-                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
-                .name("evidence_time")
-                .await?;
-            if let Some(answer) = retained_eligibility(&status, &scope, now) {
-                return Ok(Json(AdmissionEvidence {
-                    eligibility: answer,
-                    valid_until: status.observed_at.unwrap() + chrono::Duration::minutes(5),
-                }));
-            }
-        }
-        ctx.object_client::<AccountInstallationClient>(ctx.key())
-            .observe_admission_evidence(Json(scope))
-            .call()
-            .await
-    }
-
-    #[handler]
-    async fn observe_admission_evidence(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(scope): Json<Scope>,
-    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
-        if ctx.key() != scope.account_id.to_string() || scope.account_id == 0 {
-            return Err(invalid());
-        }
-        if ctx
-            .get::<Json<InstallationStatus>>("installation")
-            .await?
-            .is_none()
+        ctx: &ObjectContext<'_>,
+        facts: InstallationFacts,
+        refresh_scope: bool,
+    ) -> Result<InstallationStatus, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != facts.app
+            || key.account_id != facts.account.account_id
+            || facts.account.installation_id == 0
         {
-            return Err(TerminalError::new_with_code(
-                503,
-                "installation authority unavailable",
-            ));
-        }
-        let status = self.load(&ctx).await?;
-        let status = self.refresh_status(&ctx, status).await?;
-        let Json(now) = ctx
-            .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
-            .name("evidence_time")
-            .await?;
-        let answer = eligibility(&status.observation, &scope);
-        // Negative answers are never cached for admission. Allow only the short
-        // live handoff; an interrupted caller must obtain a new observation.
-        let allowance = if matches!(answer, Eligibility::Available) {
-            chrono::Duration::minutes(5)
-        } else {
-            chrono::Duration::seconds(1)
-        };
-        Ok(Json(AdmissionEvidence {
-            eligibility: answer,
-            valid_until: status.observed_at.unwrap_or(now) + allowance,
-        }))
-    }
-    /// Small, retained-only delivery context. Missing authority is uncertainty;
-    /// a known uninstall is a known missing prerequisite. Neither reads SQL.
-    #[handler]
-    async fn current_installation(
-        &self,
-        ctx: SharedObjectContext<'_>,
-    ) -> Result<Json<Option<Account>>, TerminalError> {
-        let Json(status) = ctx
-            .get::<Json<InstallationStatus>>("installation")
-            .await?
-            .ok_or_else(|| {
-                TerminalError::new_with_code(503, "retained installation context unavailable")
-            })?;
-        Ok(Json(status.account))
-    }
-
-    #[handler]
-    async fn recheck(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
-        ctx.clear(RECHECK_SLOT);
-        if ctx
-            .get::<Json<InstallationStatus>>("installation")
-            .await?
-            .is_none()
-        {
-            return Ok(());
-        }
-        let status = self.load(&ctx).await?;
-        self.refresh_status(&ctx, status).await?;
-        Ok(())
-    }
-    #[handler]
-    async fn onboard(
-        &self,
-        ctx: ObjectContext<'_>,
-        Json(mut input): Json<OnboardInput>,
-    ) -> Result<(), TerminalError> {
-        if ctx.key() != input.account_id.to_string() || input.installation_id == 0 {
             return Err(invalid());
         }
-        let mut status = self.load(&ctx).await?;
+        let mut status = self.load(ctx).await?;
         if ctx
-            .get::<bool>(&retired_key(input.installation_id))
+            .get::<bool>(&retired_key(facts.account.installation_id))
             .await?
             .is_some()
         {
-            return Ok(());
-        }
-        if status
-            .account
-            .as_ref()
-            .is_some_and(|a| a.installation_id == input.installation_id)
-        {
-            self.refresh_status(&ctx, status).await?;
-            return Ok(());
+            return Ok(status);
         }
         let Json(verified) = ctx
             .run(|| async {
-                match self
-                    .state
-                    .github
-                    .get_installation(input.installation_id)
+                self.github_installation(facts.app, facts.account.installation_id)
                     .await
-                {
-                    Ok(value) => Ok::<_, HandlerError>(Json(value)),
-                    Err(_) => Err(TerminalError::new_with_code(
-                        503,
-                        "installation identity could not be confirmed",
-                    )
-                    .into()),
-                }
+                    .map(Json)
+                    .map_err(HandlerError::from)
             })
             .name("verify_onboard_identity")
             .await?;
         let Some(verified) = verified else {
-            ctx.set(&retired_key(input.installation_id), true);
-            return Ok(());
+            let at = crate::clock::now(ctx, "uninstall_time").await?;
+            self.continue_uninstall(
+                ctx,
+                UninstallInput {
+                    app: facts.app,
+                    installation_id: facts.account.installation_id,
+                    uninstalled_at: at,
+                },
+            )
+            .await?;
+            return self.load(ctx).await;
         };
-        if verified.id != input.installation_id || verified.account.id != input.account_id {
+        if verified.account.id != facts.account.account_id {
             return Err(invalid());
         }
-        if let Some(old) = &status.account {
-            // A current replacement is never chosen using mutable login or event time.
-            // GitHub must confirm the prior installation identity no longer exists.
+        let previous = status.installation.clone();
+        if let Some(mut old) = previous.clone().filter(|v| {
+            v.account.installation_id != facts.account.installation_id
+                && v.account.uninstalled_at.is_none()
+        }) {
             ctx.run(|| async {
                 match self
-                    .state
-                    .github
-                    .get_installation(old.installation_id)
+                    .github_installation(old.app, old.account.installation_id)
                     .await
                 {
                     Ok(None) => Ok(()),
@@ -646,48 +611,433 @@ impl AccountInstallation {
             })
             .name("verify_replacement")
             .await?;
-            let Json(now) = ctx
-                .run(|| async { Ok::<_, HandlerError>(Json(chrono::Utc::now())) })
-                .name("replacement_time")
-                .await?;
-            project(
-                &ctx,
-                InstallationChange::Uninstall {
-                    input: UninstallInput {
-                        installation_id: old.installation_id,
-                        uninstalled_at: now,
-                    },
-                },
+            old.account.uninstalled_at = Some(crate::clock::now(ctx, "replacement_time").await?);
+            old.revision = next_revision(old.revision)?;
+            self.project(
+                ctx,
+                Some(old.clone()),
+                None,
+                EventType::InstallationUninstalled,
+                None,
             )
             .await?;
-            ctx.set(&retired_key(old.installation_id), true);
+            ctx.set(&retired_key(old.account.installation_id), true);
         }
-        input.account_login = verified.account.login;
-        input.account_type = verified
+        let same = previous
+            .as_ref()
+            .filter(|v| v.account.installation_id == facts.account.installation_id);
+        let mut value = facts.into_snapshot(same.map(|v| v.revision).unwrap_or(0));
+        value.account.account_login = verified.account.login;
+        value.account.account_type = verified
             .account
             .account_type
             .as_deref()
             .ok_or_else(invalid)?
             .parse()
             .map_err(|_| invalid())?;
-        input.selected_repos = SelectedRepos::Subset(vec![]);
-        project(
-            &ctx,
-            InstallationChange::Onboard {
-                input: input.clone(),
-            },
-        )
-        .await?;
-        status.account = Some(Account {
-            installation_id: input.installation_id,
-            account_id: input.account_id,
-            account_login: input.account_login,
-            account_type: input.account_type,
-            installed_at: input.installed_at,
-            uninstalled_at: None,
-            selected_repos: input.selected_repos,
-        });
-        self.refresh_status(&ctx, status).await?;
+        value.account.installed_at = verified.created_at;
+        value.account.uninstalled_at = None;
+        value.account.selected_repos = same
+            .map(|v| v.account.selected_repos.clone())
+            .unwrap_or(SelectedRepos::Subset(vec![]));
+        value.permissions = verified
+            .permissions
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k,
+                    match v {
+                        ghinvite_github::payloads::GhInstallationPermission::Read => {
+                            ghinvite_core::account::InstallationPermission::Read
+                        }
+                        ghinvite_github::payloads::GhInstallationPermission::Write => {
+                            ghinvite_core::account::InstallationPermission::Write
+                        }
+                    },
+                )
+            })
+            .collect();
+        value.suspended_at = verified.suspended_at;
+        if value.suspended_at.is_some() {
+            value.account.selected_repos = SelectedRepos::Subset(vec![]);
+        }
+
+        if let Some(old) = same {
+            value.installed_by_user_id = old.installed_by_user_id;
+            value.installed_by_login = old.installed_by_login.clone();
+        }
+        if same != Some(&value) {
+            value.revision = next_revision(value.revision)?;
+            self.project(
+                ctx,
+                Some(value.clone()),
+                None,
+                if same.is_none() {
+                    EventType::InstallationCreated
+                } else {
+                    EventType::InstallationReposChanged
+                },
+                None,
+            )
+            .await?;
+        }
+        status.set_installation(value);
+        audit::save_status(ctx, status.clone()).await?;
+        if key.app == App::Repo
+            || (key.app == App::Org && self.state.organization_delivery.is_some())
+        {
+            ctx.object_client::<crate::sweep_schedule::SweepScheduleClient>(ctx.key())
+                .ensure_scheduled()
+                .send()
+                .await?;
+        }
+        if refresh_scope {
+            self.refresh_status(ctx, status).await
+        } else {
+            Ok(status)
+        }
+    }
+}
+
+#[restate_sdk::object]
+impl AccountInstallation {
+    #[handler]
+    async fn onboard(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<OnboardInput>,
+    ) -> Result<(), TerminalError> {
+        let receipt = format!("onboard/{}", String::from(input.operation_id.clone()));
+        if let Some(Json(old)) = ctx.get::<Json<OnboardInput>>(&receipt).await? {
+            return if old == input {
+                Ok(())
+            } else {
+                Err(conflict())
+            };
+        }
+        self.adopt(&ctx, input.verified.clone(), true).await?;
+        ctx.set(&receipt, Json(input));
+        Ok(())
+    }
+    /// Answers `None` (an empty body, as the former `()` answer) unless an
+    /// `installation.deleted` delivery was not confirmed (PD-8).
+    #[handler]
+    async fn onboard_webhook(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<InstallationWebhookInput>,
+    ) -> Result<Option<Json<WebhookOutcome>>, TerminalError> {
+        if input.delivery_id.len() != 64
+            || !input
+                .delivery_id
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+            || input.sender_id == 0
+            || input.sender_login.is_empty()
+            || input.sender_login.len() > 100
+            || input.sender_login.chars().any(char::is_control)
+        {
+            return Err(invalid());
+        }
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != input.verified.app || key.account_id != input.verified.account.account_id {
+            return Err(invalid());
+        }
+        audit::flush(&ctx).await?;
+        let receipt = format!("webhook/{}", input.delivery_id);
+        let now = self.webhook_time(&ctx).await?;
+        if let Some(Json(expires_at)) = ctx
+            .get::<Json<chrono::DateTime<chrono::Utc>>>(&receipt)
+            .await?
+        {
+            if now < expires_at {
+                return Ok(None);
+            }
+            ctx.clear(&receipt);
+        }
+        let installation_id = input.verified.account.installation_id;
+        let changes_owner = matches!(
+            input.action,
+            InstallationWebhookAction::Created | InstallationWebhookAction::NewPermissionsAccepted
+        );
+        let source = audit::source(&ctx, installation_id).await?;
+        let fresh_source = source
+            .as_ref()
+            .is_none_or(|source| input.updated_at > source.updated_at);
+        if changes_owner && let Some(source) = source.as_ref() {
+            if input.updated_at < source.updated_at {
+                return self
+                    .retain_webhook(&ctx, input.delivery_id, now)
+                    .await
+                    .map(|()| None);
+            }
+            if input.updated_at == source.updated_at && source.sender_id != input.sender_id {
+                return Err(conflict());
+            }
+        }
+
+        let mut outcome = None;
+        if matches!(input.action, InstallationWebhookAction::Deleted) {
+            // PD-8: the signed payload alone never retires an installation.
+            if let Some(at) = self
+                .confirm_deletion(&ctx, key.app, installation_id)
+                .await?
+            {
+                self.continue_uninstall(
+                    &ctx,
+                    UninstallInput {
+                        app: key.app,
+                        installation_id,
+                        uninstalled_at: at,
+                    },
+                )
+                .await?;
+            } else {
+                tracing::warn!(
+                    app = key.app.as_str(),
+                    installation_id,
+                    "installation.deleted not confirmed: GitHub still reports the installation; delivery ignored"
+                );
+                outcome = Some(Json(WebhookOutcome::DeletionNotConfirmed));
+            }
+        } else if ctx
+            .get::<bool>(&retired_key(installation_id))
+            .await?
+            .is_none()
+        {
+            let mut status = self.adopt(&ctx, input.verified.clone(), true).await?;
+            if let Some(mut value) = status
+                .installation
+                .clone()
+                .filter(|v| v.account.installation_id == installation_id)
+            {
+                if changes_owner && fresh_source {
+                    let owner_changed = value.installed_by_user_id != Some(input.sender_id)
+                        || value.installed_by_login.as_deref() != Some(&input.sender_login);
+                    let permissions = matches!(
+                        input.action,
+                        InstallationWebhookAction::NewPermissionsAccepted
+                    );
+                    let source = audit::SourceWatermark {
+                        installation_id,
+                        updated_at: input.updated_at,
+                        sender_id: input.sender_id,
+                    };
+                    if owner_changed || permissions {
+                        value.installed_by_user_id = Some(input.sender_id);
+                        value.installed_by_login = Some(input.sender_login.clone());
+                        value.revision = next_revision(value.revision)?;
+                        let event = if owner_changed {
+                            Some(
+                                Self::event(
+                                    &ctx,
+                                    Some(value.clone()),
+                                    None,
+                                    EventType::InstallationOwnerRecorded,
+                                    Some(input.sender_id),
+                                )
+                                .await?,
+                            )
+                        } else {
+                            None
+                        };
+                        let facts = if permissions {
+                            vec![InstallationAuditFact::V1 {
+                                revision: value.revision,
+                                fact: InstallationAuditKind::PermissionsAccepted {
+                                    source_updated_at: input.updated_at,
+                                    payload_sha256: input.delivery_id.clone(),
+                                    sender_id: input.sender_id,
+                                },
+                            }]
+                        } else {
+                            vec![]
+                        };
+                        status.set_installation(value.clone());
+                        audit::commit(
+                            &ctx,
+                            &self.state,
+                            status,
+                            InstallationChange {
+                                installation: Some(value),
+                                settings: None,
+                                event,
+                                audit_facts: facts,
+                            },
+                            Some(source),
+                            None,
+                        )
+                        .await?;
+                    } else {
+                        audit::save_source(&ctx, status, source).await?;
+                    }
+                }
+                self.refresh_credentials(&ctx, key.app, installation_id)
+                    .await?;
+            }
+        }
+        self.retain_webhook(&ctx, input.delivery_id, now).await?;
+        Ok(outcome)
+    }
+    #[handler]
+    async fn expire_webhook(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<WebhookExpiry>,
+    ) -> Result<(), TerminalError> {
+        let _: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if !valid_payload_hash(&input.payload_sha256) {
+            return Err(invalid());
+        }
+        let key = format!("webhook/{}", input.payload_sha256);
+        let current = ctx
+            .get::<Json<chrono::DateTime<chrono::Utc>>>(&key)
+            .await?
+            .map(|Json(v)| v);
+        if current != Some(input.expires_at) {
+            return Ok(());
+        }
+        let now = self.webhook_time(&ctx).await?;
+        if now >= input.expires_at {
+            ctx.clear(&key);
+        } else {
+            ctx.object_client::<AccountInstallationClient>(ctx.key())
+                .expire_webhook(Json(input.clone()))
+                .send_after((input.expires_at - now).to_std().map_err(|_| invalid())?)
+                .await?;
+        }
+        Ok(())
+    }
+    #[handler]
+    async fn set_org_cap(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ghinvite_core::budget::SetOrgCap>,
+    ) -> Result<Json<ghinvite_core::budget::OrgCapOutcome>, TerminalError> {
+        crate::account_budget::set(&ctx, &self.state, input)
+            .await
+            .map(Json)
+    }
+    #[handler]
+    async fn org_cap_policy(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<ghinvite_core::budget::OrgCapView>, TerminalError> {
+        let owner: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if owner.app != App::Repo {
+            return Err(invalid());
+        }
+        Ok(Json(ghinvite_core::budget::OrgCapView {
+            enabled: self.state.invite_budget.is_some(),
+            policy: ctx
+                .get::<Json<ghinvite_core::budget::OrgCapPolicy>>(crate::account_budget::POLICY)
+                .await?
+                .map(|p| p.0),
+        }))
+    }
+    #[handler]
+    async fn set_delegation(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<SetDelegationInput>,
+    ) -> Result<Json<Result<(), DelegationRefusal>>, TerminalError> {
+        audit::flush(&ctx).await?;
+        let receipt = format!("delegation/{}", String::from(input.operation_id.clone()));
+        if let Some(Json((old, result))) = ctx
+            .get::<Json<(SetDelegationInput, Result<(), DelegationRefusal>)>>(&receipt)
+            .await?
+        {
+            return if old == input {
+                Ok(Json(result))
+            } else {
+                Err(conflict())
+            };
+        }
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        let mut status = self.load(&ctx).await?;
+        // One account settings sequence lives at repo:<account>, including
+        // org-only installations. The org owner supplies evidence, never writes
+        // this setting or calls back into the repo owner.
+        let result = if key.app != App::Repo {
+            Err(DelegationRefusal::OrgAppRequired)
+        } else {
+            let Json(authority) = ctx
+                .object_client::<AccountInstallationClient>(format!("org:{}", key.account_id))
+                .org_authority(Json(input.actor_user_id))
+                .call()
+                .await?;
+            match authority {
+                OrgAuthority::Owner => Ok(()),
+                OrgAuthority::Unavailable => {
+                    return Err(TerminalError::new_with_code(
+                        503,
+                        "organization authority unavailable",
+                    ));
+                }
+                OrgAuthority::NonOwner | OrgAuthority::Denied => Err(DelegationRefusal::NotOwner),
+                OrgAuthority::Absent => match &status.installation {
+                    Some(value)
+                        if value.app == App::Repo
+                            && value.account.account_id == key.account_id
+                            && value.account.uninstalled_at.is_none()
+                            && value.suspended_at.is_none()
+                            && value.account.account_type
+                                == ghinvite_core::AccountType::Organization
+                            && value.installed_by_user_id == Some(input.actor_user_id) =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(DelegationRefusal::NotOwner),
+                },
+            }
+        };
+        if result.is_ok() {
+            let old = audit::delegation(&ctx).await?;
+            let value = AccountSettings {
+                account_id: key.account_id,
+                revision: next_revision(old.as_ref().map(|v| v.revision).unwrap_or(0))?,
+                repo_admin_delegation: input.on,
+                changed_by: input.actor_user_id,
+                changed_at: crate::clock::now(&ctx, "delegation_time").await?,
+            };
+            self.project_receipted(
+                &ctx,
+                None,
+                Some(value.clone()),
+                EventType::RepositoryAdminDelegationChanged,
+                Some(input.actor_user_id),
+                Some((
+                    receipt.clone(),
+                    serde_json::to_value((&input, &result)).expect("typed receipt"),
+                )),
+            )
+            .await?;
+            status.repo_admin_delegation = input.on;
+            audit::save_status(&ctx, status).await?;
+        }
+        ctx.set(&receipt, Json((input, result)));
+        Ok(Json(result))
+    }
+    #[handler]
+    async fn recheck_permissions(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(id): Json<u64>,
+    ) -> Result<(), TerminalError> {
+        let status = self.load(&ctx).await?;
+        if let Some(value) = status
+            .installation
+            .filter(|v| v.account.installation_id == id && v.account.uninstalled_at.is_none())
+        {
+            let facts = InstallationFacts {
+                app: value.app,
+                account: value.account,
+                suspended_at: value.suspended_at,
+                permissions: value.permissions,
+            };
+            self.adopt(&ctx, facts, false).await?;
+            self.refresh_credentials(&ctx, value.app, id).await?;
+        }
         Ok(())
     }
     #[handler]
@@ -700,7 +1050,7 @@ impl AccountInstallation {
         if status
             .account
             .as_ref()
-            .is_some_and(|account| account.installation_id == id)
+            .is_some_and(|a| a.installation_id == id)
         {
             self.refresh_status(&ctx, status).await?;
         }
@@ -715,366 +1065,237 @@ impl AccountInstallation {
         self.continue_uninstall(&ctx, input).await
     }
     #[handler]
+    async fn recheck(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
+        ctx.clear(RECHECK_SLOT);
+        let _: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        let Some(Json(status)) = audit::status(&ctx).await? else {
+            // A stale timer has no evidence of an installation or its deletion.
+            return Ok(());
+        };
+        self.refresh_status(&ctx, status).await?;
+        Ok(())
+    }
+    #[handler]
     async fn status(
         &self,
         ctx: ObjectContext<'_>,
     ) -> Result<Json<InstallationStatus>, TerminalError> {
         self.load(&ctx).await.map(Json)
     }
+    /// Canonical retained evidence for advisory eligibility. Unlike the
+    /// transitional account-only view this includes suspension and permissions.
+    #[handler]
+    async fn eligibility_installation(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<Option<Installation>>, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != App::Org {
+            return Err(invalid());
+        }
+        let Json(value) = audit::shared_status(&ctx).await?.ok_or_else(|| {
+            TerminalError::new_with_code(503, "retained installation context unavailable")
+        })?;
+        Ok(Json(value.installation))
+    }
+    #[handler]
+    async fn current_installation(
+        &self,
+        ctx: SharedObjectContext<'_>,
+    ) -> Result<Json<Option<Account>>, TerminalError> {
+        let _: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        let Json(value) = audit::shared_status(&ctx).await?.ok_or_else(|| {
+            TerminalError::new_with_code(503, "retained installation context unavailable")
+        })?;
+        Ok(Json(value.account))
+    }
+    /// Read-only org authority. Absent means confirmed no current org app;
+    /// suspension, pending membership and unreadable evidence never fall back
+    /// to the repository app's historical installer.
+    #[handler]
+    async fn org_authority(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(user_id): Json<u64>,
+    ) -> Result<Json<OrgAuthority>, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != App::Org || user_id == 0 {
+            return Err(invalid());
+        }
+        let status = audit::shared_status(&ctx).await?;
+        let Some(installation) = status.and_then(|Json(s)| s.installation) else {
+            return Ok(Json(OrgAuthority::Absent));
+        };
+        if installation.account.uninstalled_at.is_some() {
+            return Ok(Json(OrgAuthority::Absent));
+        }
+        if installation.app != App::Org || installation.account.account_id != key.account_id {
+            return Ok(Json(OrgAuthority::Denied));
+        }
+        ctx.run(|| async {
+            Ok::<_, HandlerError>(Json(self.org_owner_evidence(&installation, user_id).await))
+        })
+        .name("organization_actor_authority")
+        .await
+    }
+    /// Coarse account boundary only. Trusted ingress still verifies each target.
+    /// The cross-owner read is acyclic: org_authority never calls the repo owner.
+    #[handler]
+    async fn decision_authority(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(user_id): Json<u64>,
+    ) -> Result<Json<bool>, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.app != App::Repo || user_id == 0 {
+            return Ok(Json(false));
+        }
+        let status = audit::shared_status(&ctx).await?;
+        let status = status
+            .map(|Json(s)| s)
+            .unwrap_or_else(InstallationStatus::empty);
+        let live_repo = status.installation.as_ref().filter(|installation| {
+            installation.app == App::Repo
+                && installation.account.account_id == key.account_id
+                && installation.account.uninstalled_at.is_none()
+                && installation.suspended_at.is_none()
+        });
+        if let Some(installation) = live_repo
+            && installation.account.account_type == ghinvite_core::AccountType::User
+        {
+            return Ok(Json(user_id == key.account_id));
+        }
+        let Json(authority) = ctx
+            .object_client::<AccountInstallationClient>(format!("org:{}", key.account_id))
+            .org_authority(Json(user_id))
+            .call()
+            .await?;
+        let allowed = match authority {
+            OrgAuthority::Owner => true,
+            OrgAuthority::Unavailable => {
+                return Err(TerminalError::new_with_code(
+                    503,
+                    "organization authority unavailable",
+                ));
+            }
+            OrgAuthority::Denied => false,
+            OrgAuthority::NonOwner => live_repo.is_some() && status.repo_admin_delegation,
+            OrgAuthority::Absent => live_repo.is_some_and(|installation| {
+                installation.account.account_type == ghinvite_core::AccountType::Organization
+                    && (installation.installed_by_user_id == Some(user_id)
+                        || status.repo_admin_delegation)
+            }),
+        };
+        Ok(Json(allowed))
+    }
+    #[handler]
+    async fn admission_evidence(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.account_id != scope.account_id {
+            return Err(invalid());
+        }
+        if let Some(Json(status)) = audit::shared_status(&ctx).await? {
+            let now = crate::clock::now(&ctx, "evidence_time").await?;
+            if let Some(answer) = retained_eligibility(&status, &scope, now) {
+                return Ok(Json(AdmissionEvidence {
+                    eligibility: answer,
+                    valid_until: status.observed_at.unwrap() + chrono::Duration::minutes(5),
+                }));
+            }
+        }
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
+            .observe_admission_evidence(Json(scope))
+            .call()
+            .await
+    }
+    #[handler]
+    async fn observe_admission_evidence(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(scope): Json<Scope>,
+    ) -> Result<Json<AdmissionEvidence>, TerminalError> {
+        let key: AccountInstallationRef = ctx.key().parse().map_err(|_| invalid())?;
+        if key.account_id != scope.account_id {
+            return Err(invalid());
+        }
+        if audit::status(&ctx).await?.is_none() {
+            return Err(TerminalError::new_with_code(
+                503,
+                "installation authority unavailable",
+            ));
+        }
+        let status = self.load(&ctx).await?;
+        let status = self.refresh_status(&ctx, status).await?;
+        let now = crate::clock::now(&ctx, "evidence_time").await?;
+        let answer = eligibility(&status.observation, &scope);
+        let allowance = if matches!(answer, Eligibility::Available) {
+            chrono::Duration::minutes(5)
+        } else {
+            chrono::Duration::seconds(1)
+        };
+        Ok(Json(AdmissionEvidence {
+            eligibility: answer,
+            valid_until: status.observed_at.unwrap_or(now) + allowance,
+        }))
+    }
+}
+impl AccountInstallation {
+    async fn refresh_credentials(
+        &self,
+        ctx: &ObjectContext<'_>,
+        app: App,
+        id: u64,
+    ) -> Result<(), TerminalError> {
+        ctx.run(|| async {
+            // adopt/onboard_webhook has retained the refreshed facts and
+            // durably queued their monotonic projection. SQL completion must
+            // not hold this owner and prevent uninstall/replacement progress.
+            let github = self.github_app(app)?;
+            // A still-unapproved permission remains a blocked prerequisite. Its
+            // negative result is retained; no repeated mint loop is introduced.
+            let unavailable = refresh_tokens(&github, app, id).await;
+            if unavailable {
+                return Err(HandlerError::from(std::io::Error::other(
+                    "installation credential refresh unavailable",
+                )));
+            }
+            Ok::<_, HandlerError>(())
+        })
+        .name("refresh_installation_credentials")
+        .await
+    }
+}
+
+/// Replace the cached token of every scope `app`'s installation `id` is used
+/// with (`GithubApp::refresh` is per scope; gh-toolkit invalidated them all),
+/// the write scope first. Whether a refresh failed transiently, the only
+/// failure worth retrying.
+async fn refresh_tokens(github: &ghinvite_github::GithubApp, app: App, id: u64) -> bool {
+    use ghinvite_github::profiles::{ORG_INVITE, ORG_READ, REPO_INVITE, REPO_READ};
+    let scopes = match app {
+        App::Repo => [&REPO_INVITE, &REPO_READ],
+        App::Org => [&ORG_INVITE, &ORG_READ],
+    };
+    let mut unavailable = false;
+    for scope in scopes {
+        let result = github.refresh(id, scope).await;
+        unavailable |= matches!(
+            result.as_ref().map_err(ghinvite_github::apps::github_error),
+            Err(Some(octotoken::octoauth::Error::Transient { .. }))
+        );
+    }
+    unavailable
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    use crate::test_support::dt;
     use ghinvite_core::AccountType;
-    use ghinvite_core::audit::{ActorKind, EventType, TargetKind};
-    use ghinvite_core::storage::{ConflictKind, Error as StorageError};
-
-    fn onboarding() -> InstallationChange {
-        InstallationChange::Onboard {
-            input: onboarding_input(),
-        }
-    }
-
-    fn onboarding_input() -> OnboardInput {
-        OnboardInput {
-            installation_id: 1,
-            actor_user_id: 7,
-            account_id: 100,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            selected_repos: SelectedRepos::All,
-            installed_at: dt("2026-05-04T12:00:00Z"),
-        }
-    }
-
-    async fn observed_installation(response: ghinvite_github::mocks::Expectation) -> Observation {
-        let mock = ghinvite_github::mocks::MockTransport::scripted(vec![response]);
-        let installation = AccountInstallation {
-            state: crate::test_support::fixture_state_with_transport(std::sync::Arc::new(
-                mock.clone(),
-            ))
-            .await,
-        };
-        let account = Account {
-            installation_id: 9,
-            account_id: 100,
-            account_login: "acme".into(),
-            account_type: AccountType::Organization,
-            installed_at: dt("2026-05-04T12:00:00Z"),
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        };
-        let observation = installation.observe(&account).await;
-        mock.assert_exhausted();
-        observation
-    }
-
-    #[tokio::test]
-    async fn an_installation_github_no_longer_holds_is_unavailable() {
-        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
-            ghinvite_github::Method::Get,
-            "https://api.github.test/app/installations/9",
-            404,
-        ))
-        .await;
-        assert!(
-            matches!(observation, Observation::Unavailable),
-            "{observation:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_installation_github_would_not_answer_for_is_unknown() {
-        let observation = observed_installation(ghinvite_github::mocks::Expectation::status(
-            ghinvite_github::Method::Get,
-            "https://api.github.test/app/installations/9",
-            502,
-        ))
-        .await;
-        assert!(
-            matches!(observation, Observation::Unknown),
-            "{observation:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn onboarding_writes_the_installation_it_names() {
-        let state = fixture_state().await;
-
-        project_installation(&state, &onboarding()).await.unwrap();
-
-        let account = state.storage.get_installation(1).await.unwrap().unwrap();
-        assert_eq!(account.account_id, 100);
-        assert_eq!(account.account_login, "acme");
-        assert!(account.uninstalled_at.is_none());
-    }
-
-    #[tokio::test]
-    async fn replayed_onboarding_keeps_the_installation_it_already_wrote() {
-        let state = fixture_state().await;
-        let input = onboarding();
-        project_installation(&state, &input).await.unwrap();
-
-        project_installation(&state, &input)
-            .await
-            .expect("a replayed onboarding is the same onboarding");
-
-        let account = state.storage.get_installation(1).await.unwrap().unwrap();
-        assert_eq!(account.installed_at, dt("2026-05-04T12:00:00Z"));
-    }
-
-    #[tokio::test]
-    async fn onboarding_refuses_an_installation_that_names_different_facts() {
-        let state = fixture_state().await;
-        project_installation(&state, &onboarding()).await.unwrap();
-
-        let mut renamed = onboarding_input();
-        renamed.account_login = "someone-else".into();
-        let failure = project_installation(&state, &InstallationChange::Onboard { input: renamed })
-            .await
-            .expect_err("the same installation cannot have been onboarded twice over");
-
-        assert!(matches!(failure, ProjectionFailure::IdentityConflict));
-    }
-
-    #[tokio::test]
-    async fn onboarding_a_second_active_installation_for_one_account_conflicts() {
-        let state = fixture_state().await;
-        project_installation(&state, &onboarding()).await.unwrap();
-
-        let mut second = onboarding_input();
-        second.installation_id = 2;
-        let failure = project_installation(&state, &InstallationChange::Onboard { input: second })
-            .await
-            .expect_err("an account has at most one active installation");
-
-        // Retrying cannot converge while the first installation is active, so
-        // the crate's own classification has to settle it rather than the SDK's
-        // retry-everything default.
-        assert!(matches!(
-            failure,
-            ProjectionFailure::Storage(StorageError::Conflict(
-                ConflictKind::DuplicateActiveInstallation
-            ))
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_repository_change_replaces_the_selected_repositories() {
-        let state = fixture_state().await;
-        project_installation(&state, &onboarding()).await.unwrap();
-
-        project_installation(
-            &state,
-            &InstallationChange::Repos {
-                input: crate::installation::ReposChangedInput {
-                    installation_id: 1,
-                    selected_repos: SelectedRepos::Subset(vec![10, 20]),
-                },
-            },
-        )
-        .await
-        .unwrap();
-
-        let account = state.storage.get_installation(1).await.unwrap().unwrap();
-        assert_eq!(account.selected_repos, SelectedRepos::Subset(vec![10, 20]));
-    }
-
-    #[tokio::test]
-    async fn a_repository_change_for_an_unknown_installation_is_refused() {
-        let state = fixture_state().await;
-
-        let failure = project_installation(
-            &state,
-            &InstallationChange::Repos {
-                input: crate::installation::ReposChangedInput {
-                    installation_id: 999,
-                    selected_repos: SelectedRepos::Subset(vec![10]),
-                },
-            },
-        )
-        .await
-        .expect_err("repositories cannot change on an installation that was never projected");
-
-        assert!(matches!(
-            failure,
-            ProjectionFailure::Storage(StorageError::NotFound)
-        ));
-    }
-
-    #[tokio::test]
-    async fn uninstalling_stamps_the_time_the_installation_ended() {
-        let state = fixture_state().await;
-        project_installation(&state, &onboarding()).await.unwrap();
-        let uninstalled_at = dt("2026-05-05T00:00:00Z");
-
-        project_installation(
-            &state,
-            &InstallationChange::Uninstall {
-                input: UninstallInput {
-                    installation_id: 1,
-                    uninstalled_at,
-                },
-            },
-        )
-        .await
-        .unwrap();
-
-        let account = state.storage.get_installation(1).await.unwrap().unwrap();
-        assert_eq!(account.uninstalled_at, Some(uninstalled_at));
-    }
-
-    #[tokio::test]
-    async fn uninstalling_an_installation_that_was_never_projected_succeeds() {
-        let state = fixture_state().await;
-
-        project_installation(
-            &state,
-            &InstallationChange::Uninstall {
-                input: UninstallInput {
-                    installation_id: 999,
-                    uninstalled_at: dt("2026-05-05T00:00:00Z"),
-                },
-            },
-        )
-        .await
-        .expect("an installation ghinvite never held cannot be left installed");
-
-        assert!(state.storage.get_installation(999).await.unwrap().is_none());
-    }
-
-    fn audit_for(input: &InstallationChange) -> ghinvite_core::audit::AuditEvent {
-        installation_audit(
-            100,
-            input,
-            ghinvite_core::AuditEventId::new(),
-            dt("2026-05-04T12:00:00Z"),
-            "inv-1".into(),
-        )
-    }
-
-    #[test]
-    fn an_onboarding_audit_names_the_user_who_installed() {
-        let event = audit_for(&onboarding());
-
-        assert_eq!(event.event_type, EventType::InstallationCreated);
-        assert_eq!(event.actor_kind, ActorKind::User);
-        assert_eq!(event.actor_id, Some(7));
-        assert_eq!(event.target_kind, TargetKind::Installation);
-        assert_eq!(event.target_id, "1");
-        assert_eq!(event.request_id.as_deref(), Some("inv-1"));
-        assert_eq!(
-            event.metadata.get("account_login"),
-            Some(&serde_json::json!("acme"))
-        );
-        assert_eq!(
-            event.metadata.get("account_type"),
-            Some(&serde_json::json!("Organization"))
-        );
-    }
-
-    #[test]
-    fn a_repository_change_audit_is_attributed_to_github() {
-        let event = audit_for(&InstallationChange::Repos {
-            input: crate::installation::ReposChangedInput {
-                installation_id: 1,
-                selected_repos: SelectedRepos::Subset(vec![10, 20]),
-            },
-        });
-
-        assert_eq!(event.event_type, EventType::InstallationReposChanged);
-        // No GitHub user asked for this; the refresh observed it.
-        assert_eq!(event.actor_kind, ActorKind::Github);
-        assert_eq!(event.actor_id, None);
-        assert_eq!(event.target_id, "1");
-        assert_eq!(
-            event.metadata.get("selected_repos_kind"),
-            Some(&serde_json::json!("subset"))
-        );
-    }
-
-    #[test]
-    fn an_uninstall_audit_records_when_the_installation_ended() {
-        let uninstalled_at = dt("2026-05-05T00:00:00Z");
-        let event = audit_for(&InstallationChange::Uninstall {
-            input: UninstallInput {
-                installation_id: 1,
-                uninstalled_at,
-            },
-        });
-
-        assert_eq!(event.event_type, EventType::InstallationUninstalled);
-        assert_eq!(event.actor_kind, ActorKind::Github);
-        assert_eq!(event.actor_id, None);
-        assert_eq!(event.target_id, "1");
-        assert_eq!(
-            event.metadata.get("uninstalled_at"),
-            Some(&serde_json::json!(uninstalled_at.to_rfc3339()))
-        );
-    }
-
-    #[tokio::test]
-    async fn a_replayed_installation_audit_leaves_one_event_behind() {
-        let (state, storage) = fixture_state_with_storage().await;
-        project_installation(&state, &onboarding()).await.unwrap();
-        let event = installation_audit(
-            100,
-            &onboarding(),
-            ghinvite_core::AuditEventId::new(),
-            dt("2026-05-04T12:00:00Z"),
-            "inv-1".into(),
-        );
-
-        // A retry replays the event the first attempt retained rather than
-        // minting a second one, so writing it again has to be the same write.
-        // This is what keeps one onboarding to one audit event now that the
-        // projection audits unconditionally.
-        state.storage.audit(&event).await.unwrap();
-        state.storage.audit(&event).await.unwrap();
-
-        let created = storage
-            .debug_list_audit(100)
-            .await
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.event_type == EventType::InstallationCreated)
-            .count();
-        assert_eq!(created, 1);
-    }
-
-    /// Restate's `HandlerError` keeps its classification private; the error it
-    /// renders is the only place a caller reads it back.
-    fn rendered(failure: ProjectionFailure) -> String {
-        let error = HandlerError::from(failure);
-        <HandlerError as AsRef<dyn std::error::Error>>::as_ref(&error).to_string()
-    }
-
-    #[test]
-    fn a_conflicting_identity_is_refused_rather_than_retried() {
-        assert_eq!(
-            rendered(ProjectionFailure::IdentityConflict),
-            "Terminal error [409]: installation projection conflict"
-        );
-    }
-
-    #[test]
-    fn a_storage_conflict_no_retry_converges_on_is_terminal() {
-        let rendered = rendered(ProjectionFailure::Storage(StorageError::Conflict(
-            ConflictKind::DuplicateActiveInstallation,
-        )));
-        assert!(rendered.starts_with("Terminal error"), "{rendered}");
-    }
-
-    #[test]
-    fn a_storage_outage_is_left_for_restate_to_retry() {
-        let rendered = rendered(ProjectionFailure::Storage(StorageError::Database(
-            "fixture: connection lost".into(),
-        )));
-        assert!(rendered.starts_with("Retryable error"), "{rendered}");
-    }
-
     fn account_selecting(selected_repos: SelectedRepos) -> Account {
         Account {
             installation_id: 1,
@@ -1183,6 +1404,8 @@ mod tests {
     fn observed(observation: Observation, observed_at: Option<&str>) -> InstallationStatus {
         InstallationStatus {
             account: Some(account_selecting(SelectedRepos::Subset(vec![10, 11]))),
+            installation: None,
+            repo_admin_delegation: false,
             observation,
             observed_at: observed_at.map(dt),
         }
@@ -1253,9 +1476,292 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn credential_refresh_replaces_every_scope_and_retries_only_transient_failures() {
+        use ghinvite_github::{
+            AppSlot, GithubApps,
+            mocks::{FixedTokens, MockTransport},
+            profiles::{ORG_INVITE, ORG_READ, REPO_INVITE, REPO_READ},
+        };
+        use octotoken::{TokenError, octoauth::Error as GitHub};
+        let repo = FixedTokens::new(123);
+        let org = FixedTokens::new(456);
+        let mock = MockTransport::scripted(vec![]);
+        let apps = GithubApps::for_tests(
+            &mock,
+            [(AppSlot::Repo, repo.clone()), (AppSlot::Org, org.clone())],
+        );
+        let github = |slot| apps.app(slot).unwrap();
+
+        assert!(!refresh_tokens(&github(AppSlot::Repo), App::Repo, 1).await);
+        assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
+        for (tokens, installation, scope) in [
+            (&repo, 1, &REPO_INVITE),
+            (&repo, 1, &REPO_READ),
+            (&org, 2, &ORG_INVITE),
+            (&org, 2, &ORG_READ),
+        ] {
+            assert_eq!(tokens.generation(installation, scope), 2);
+        }
+        assert_eq!(repo.generation(2, &ORG_READ), 0);
+
+        // A refused scope is retained as is; the other scope is still refreshed.
+        org.fail_next_token(TokenError::GitHub(GitHub::PermissionsNotGranted));
+        assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
+        assert_eq!(org.generation(2, &ORG_INVITE), 2);
+        assert_eq!(org.generation(2, &ORG_READ), 3);
+        // Neither are rate limits retried here (gh-toolkit's `Transient` only).
+        org.fail_next_token(TokenError::GitHub(GitHub::RateLimited {
+            scope: ghinvite_github::error::RateLimitScope::Secondary,
+            retry_after: None,
+        }));
+        assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
+        // A transient failure of either scope fails the step, after both ran.
+        org.fail_next_replace(TokenError::GitHub(GitHub::Transient {
+            kind: octotoken::octoauth::TransientKind::NoResponse,
+        }));
+        assert!(refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
+        assert_eq!(org.generation(2, &ORG_READ), 5);
+        mock.assert_exhausted();
+    }
+
     #[test]
     fn retired_identities_have_one_key_each() {
         assert_eq!(retired_key(1), "retired/1");
         assert_ne!(retired_key(1), retired_key(2));
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use crate::test_support::{dt, fixture_state, fixture_state_with_storage};
+    fn transition() -> InstallationChange {
+        let at = dt("2026-01-01T00:00:00Z");
+        InstallationChange {
+            installation: Some(
+                InstallationFacts {
+                    app: App::Repo,
+                    account: Account {
+                        installation_id: 1,
+                        account_id: 100,
+                        account_login: "acme".into(),
+                        account_type: ghinvite_core::AccountType::Organization,
+                        installed_at: at,
+                        uninstalled_at: None,
+                        selected_repos: SelectedRepos::Subset(vec![10]),
+                    },
+                    suspended_at: None,
+                    permissions: Default::default(),
+                }
+                .into_snapshot(1),
+            ),
+            settings: None,
+            audit_facts: vec![],
+            event: Some(AuditEvent {
+                id: ghinvite_core::AuditEventId::new(),
+                account_id: 100,
+                occurred_at: at,
+                event_type: EventType::InstallationCreated,
+                actor_kind: ActorKind::Github,
+                actor_id: None,
+                target_kind: TargetKind::Installation,
+                target_id: "repo:1".into(),
+                metadata: serde_json::json!({"app":"repo"}),
+                request_id: Some("inv-1".into()),
+            }),
+        }
+    }
+    #[tokio::test]
+    async fn onboarding_writes_the_verified_installation_it_names() {
+        let state = fixture_state().await;
+        let change = transition();
+        project_installation(&state, &change).await.unwrap();
+        let stored = state
+            .storage
+            .app_installation(App::Repo, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some(stored), change.installation);
+    }
+    #[tokio::test]
+    async fn replayed_onboarding_keeps_the_same_snapshot() {
+        let state = fixture_state().await;
+        let change = transition();
+        project_installation(&state, &change).await.unwrap();
+        project_installation(&state, &change).await.unwrap();
+        assert_eq!(
+            state.storage.app_installation(App::Repo, 1).await.unwrap(),
+            change.installation
+        );
+    }
+    #[tokio::test]
+    async fn equal_revision_changed_identity_is_retained_for_repair() {
+        let state = fixture_state().await;
+        let mut change = transition();
+        project_installation(&state, &change).await.unwrap();
+        change.installation.as_mut().unwrap().account.account_login = "different".into();
+        let error = project_installation(&state, &change).await.unwrap_err();
+        assert!(
+            <HandlerError as AsRef<dyn std::error::Error>>::as_ref(&error)
+                .to_string()
+                .starts_with("Retryable error")
+        );
+    }
+    #[tokio::test]
+    async fn another_active_installation_for_same_app_account_conflicts() {
+        let state = fixture_state().await;
+        let mut change = transition();
+        project_installation(&state, &change).await.unwrap();
+        change
+            .installation
+            .as_mut()
+            .unwrap()
+            .account
+            .installation_id = 2;
+        assert!(project_installation(&state, &change).await.is_err());
+    }
+    #[tokio::test]
+    async fn repository_refresh_and_uninstall_project_full_revisions() {
+        let state = fixture_state().await;
+        let mut change = transition();
+        project_installation(&state, &change).await.unwrap();
+        let value = change.installation.as_mut().unwrap();
+        value.revision = 2;
+        value.account.selected_repos = SelectedRepos::Subset(vec![10, 20]);
+        project_installation(&state, &change).await.unwrap();
+        assert_eq!(
+            state
+                .storage
+                .app_installation(App::Repo, 1)
+                .await
+                .unwrap()
+                .unwrap()
+                .account
+                .selected_repos,
+            SelectedRepos::Subset(vec![10, 20])
+        );
+        let value = change.installation.as_mut().unwrap();
+        value.revision = 3;
+        value.account.uninstalled_at = Some(dt("2026-01-02T00:00:00Z"));
+        project_installation(&state, &change).await.unwrap();
+        assert!(
+            state
+                .storage
+                .active_app_installation(App::Repo, 100)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stale = transition();
+        project_installation(&state, &stale).await.unwrap();
+        assert!(
+            state
+                .storage
+                .active_app_installation(App::Repo, 100)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[tokio::test]
+    async fn retained_installation_audit_replay_keeps_one_event() {
+        let (state, storage) = fixture_state_with_storage().await;
+        let change = transition();
+        project_installation(&state, &change).await.unwrap();
+        state
+            .storage
+            .audit(change.event.as_ref().unwrap())
+            .await
+            .unwrap();
+        state
+            .storage
+            .audit(change.event.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(storage.debug_list_audit(100).await.unwrap().len(), 1);
+    }
+    #[test]
+    fn revision_cannot_exceed_portable_storage_domain() {
+        assert_eq!(next_revision(1).unwrap(), 2);
+        assert!(next_revision(ghinvite_core::storage::integer::MAX_EXACT).is_err());
+    }
+    /// GM-00 (PD-9): the `verify_onboard_identity` run journals gh-toolkit's
+    /// `Option<GhAppInstallation>` with its own serde derive. A replay decodes
+    /// the journaled bytes, so the shape must survive the migration.
+    #[test]
+    fn golden_verify_onboard_identity_journal() {
+        use ghinvite_github::payloads::GhAppInstallation;
+        // As `get_installation` decodes GitHub's response.
+        let wire = serde_json::json!({
+            "id": 77, "app_id": 123, "target_type": "Organization",
+            "created_at": "2026-05-20T11:50:00Z", "updated_at": "2026-05-21T08:00:00Z",
+            "suspended_at": "2026-06-01T00:00:00Z",
+            "account": {"id": 9001, "login": "acme", "type": "Organization",
+                "avatar_url": "https://avatars.githubusercontent.com/u/9001?v=4"},
+            "repository_selection": "selected",
+            "permissions": {"administration": "write", "members": "read", "metadata": "read"}
+        });
+        let installation: GhAppInstallation = serde_json::from_value(wire).unwrap();
+        let decoded =
+            crate::test_support::golden::json("verify_onboard_identity.json", &Some(installation))
+                .unwrap();
+        assert_eq!(decoded.account.id, 9001);
+        assert_eq!(decoded.permissions.len(), 3);
+        crate::test_support::golden::json::<Option<GhAppInstallation>>(
+            "verify_onboard_identity_absent.json",
+            &None,
+        );
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct WebhookExpiry {
+    pub payload_sha256: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+fn valid_payload_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+}
+impl AccountInstallation {
+    async fn webhook_time(
+        &self,
+        ctx: &ObjectContext<'_>,
+    ) -> Result<chrono::DateTime<chrono::Utc>, TerminalError> {
+        #[cfg(feature = "integration")]
+        if let Some(clock) = &self.state.installation_clock {
+            let clock = clock.clone();
+            return crate::clock::with_clock(ctx, "webhook_receipt_time", move || {
+                chrono::DateTime::from_timestamp_millis(
+                    clock.load(std::sync::atomic::Ordering::SeqCst),
+                )
+                .expect("fixture clock")
+            })
+            .await;
+        }
+        crate::clock::now(ctx, "webhook_receipt_time").await
+    }
+    async fn retain_webhook(
+        &self,
+        ctx: &ObjectContext<'_>,
+        payload_sha256: String,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), TerminalError> {
+        let expires_at = now
+            .checked_add_signed(chrono::Duration::days(7))
+            .ok_or_else(invalid)?;
+        ctx.set(&format!("webhook/{payload_sha256}"), Json(expires_at));
+        ctx.object_client::<AccountInstallationClient>(ctx.key())
+            .expire_webhook(Json(WebhookExpiry {
+                payload_sha256,
+                expires_at,
+            }))
+            .send_after(std::time::Duration::from_secs(7 * 24 * 60 * 60))
+            .await?;
+        Ok(())
     }
 }

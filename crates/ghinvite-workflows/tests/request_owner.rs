@@ -6,15 +6,9 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn initialization_binds_context_and_verdict_survives_deadline() {
-    let ingress =
-        std::env::var("RESTATE_INGRESS_URL").expect("bash scripts/test-restate.sh request_owner");
-    let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
-    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .unwrap();
+    let harness = ghinvite_e2e::Harness::start().await;
+    let ingress = harness.restate.ingress_url().to_owned();
+    let client = harness.client.clone();
     let faults = std::sync::Arc::new(ghinvite_workflows::request_owner::Faults::default());
     let storage = std::sync::Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -26,24 +20,7 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
     let endpoint = ghinvite_workflows::request_owner::bind_with_faults(builder, faults.clone())
         .bind(ghinvite_workflows::request_owner::AdmissionProtocol)
         .build();
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        restate_sdk::http_server::HttpServer::new(endpoint)
-            .serve(listener)
-            .await;
-    });
-    let response = client
-        .post(format!("{admin}/deployments"))
-        .json(&json!({"uri":format!("http://{host}:{port}")}))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "{}",
-        response.text().await.unwrap()
-    );
+    harness.restate.deploy(endpoint).await;
     let request_id = ghinvite_core::RequestId::new();
     let link_id = ghinvite_core::InvitationLinkId::new();
     let deadline = chrono::Utc::now() + chrono::Duration::seconds(3);
@@ -52,8 +29,8 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
             "requester_id":8,"justification":null,"state":"pending",
             "admitted_at":deadline - chrono::Duration::days(7),
             "decision_deadline":deadline,"revision":1},
-        "installation_id":1,"repos":[{"repo_id":10,"repo_full_name":"acme/api"}],
-        "permission":"push","approval_required":true
+        "installation_id":1,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]},
+        "approval_required":true
     });
     let call = |method: &str, input: Value| {
         let target = if matches!(method, "initialize" | "eligibility") {
@@ -86,7 +63,37 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
         "initialize: {}",
         response.text().await.unwrap()
     );
-    let verdict_input = json!({"request_id":request_id,"attempt":{
+    let owned: Value = call(
+        "requester_status",
+        json!({"request_id":request_id,"requester_id":8}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(owned["request"]["request_id"], json!(request_id));
+    assert_eq!(owned["request"]["state"], "pending");
+    assert_eq!(owned["targets"], input["targets"]);
+    assert_eq!(owned["repositories"], json!([]));
+    assert!(owned["organization"].is_null());
+    for foreign in [0, 9] {
+        assert_eq!(
+            call(
+                "requester_status",
+                json!({"request_id":request_id,"requester_id":foreign}),
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+            reqwest::StatusCode::NOT_FOUND
+        );
+    }
+    let verdict_input = json!({"request_id":request_id,"attempt":{"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,
         "link_id":link_id,"operation_id":ghinvite_core::RequestId::new(),"requester_id":8}});
     *faults.stage.lock().unwrap() = Some("verdict-recorded".into());
     faults.reached.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -131,6 +138,20 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
         .unwrap();
     assert_eq!(fresh["blocking"], false);
     assert_eq!(fresh["state"], "expired");
+    let owned: Value = call(
+        "requester_status",
+        json!({"request_id":request_id,"requester_id":8}),
+    )
+    .send()
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(owned["request"]["state"], "expired");
+    assert_eq!(owned["targets"], input["targets"]);
     assert!(
         call("initialize", input.clone())
             .send()
@@ -154,7 +175,7 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
         "initialization cannot reset terminal state"
     );
     let mut changed = input;
-    changed["permission"] = json!("pull");
+    changed["targets"]["repos"][0]["grant"] = json!("read");
     assert_eq!(
         call("initialize", changed).send().await.unwrap().status(),
         409
@@ -165,5 +186,5 @@ async fn initialization_binds_context_and_verdict_survives_deadline() {
         call("eligibility", changed).send().await.unwrap().status(),
         409
     );
-    server.abort();
+    harness.finish().await;
 }

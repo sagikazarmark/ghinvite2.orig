@@ -7,6 +7,10 @@ main = "../crates/ghinvite-web-worker/build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
+[triggers]
+# First successful run records the UTC daily summary; hourly retries recover outages.
+crons = ["5 * * * *"]
+
 [build]
 command = "worker-build crates/ghinvite-web-worker --release -- --locked"
 
@@ -44,16 +48,46 @@ migrations_dir = "../migrations"
 binding = "SESSIONS"
 id = "REPLACE_WITH_WRANGLER_KV_CREATE_OUTPUT"
 
+[[kv_namespaces]]
+binding = "AUTHZ_CACHE"
+id = "REPLACE_WITH_WRANGLER_AUTHZ_KV_CREATE_OUTPUT"
+
 # Non-secret config vars
 [vars]
-GHINVITE_BASE_URL           = "https://ghinvite.workers.dev"
-GHINVITE_RESTATE_INGRESS    = "https://ACCOUNT_ID.restate.cloud"
-GHINVITE_RESTATE_AUTH       = "bearer" # production requires protected ingress
+# Explicit registry stage; org delivery/target release gates remain separate.
+P1_APP_STAGE = "repo"
+# Matched web/workflow capability. Keep off until AccessGrant acceptance gates pass.
+GH_ACCESS_REMOVAL_ENABLED = "false"
+P1_HOST                    = "ghinvite.workers.dev"
+RESTATE_INGRESS_URL    = "https://ACCOUNT_ID.restate.cloud"
 GHINVITE_GITHUB_INSTALL_URL = "https://github.com/apps/YOUR_APP_NAME/installations/new"
 
 # Secrets (set via `wrangler secret put`; never commit these values):
-# GHINVITE_SESSION_SECRET       - generate: openssl rand -hex 32
-# GHINVITE_RESTATE_API_KEY      - Restate Cloud ingress API key (web -> Restate)
-# GHINVITE_GITHUB_CLIENT_ID     - from GitHub App settings
-# GHINVITE_GITHUB_CLIENT_SECRET - from GitHub App settings
-# GHINVITE_WEBHOOK_SECRET       - from GitHub App settings
+# P1_KEYRING                    - generate descriptor: akr new p1
+# P1_OPERATOR_IDS (var)         - comma-separated numeric operator IDs; empty denies all
+# RESTATE_INGRESS_TOKEN      - Restate Cloud ingress API key (web -> Restate)
+# GH_SIGNIN_CLIENT_ID           - sign-in App client ID (var)
+# GH_SIGNIN_CLIENT_SECRET       - sign-in App client secret
+# GH_REPO_APP_ID               - numeric repository App ID (var)
+# GH_REPO_CLIENT_ID            - repository App client ID (var)
+# GH_REPO_PRIVATE_KEYS         - kid:base64(PKCS#8 PEM), primary first; semicolon separated
+# GH_REPO_WEBHOOK_SECRETS      - current;previous webhook secrets (repo route only)
+# Sign-in is token-free (PKCE, callback {P1_HOST}/oauth/callback); it is the
+# only sign-in path and its two names are required.
+# Setup and webhooks require the explicit repository registry; no legacy fallback.
+
+# Approximate per-location platform buckets; missing bindings fail startup closed.
+[[ratelimits]]
+name = "RL_IP"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "RL_USER"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "AUTHZ_RL"
+namespace_id = "1003"
+simple = { limit = 10, period = 60 }

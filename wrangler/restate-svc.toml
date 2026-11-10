@@ -19,10 +19,21 @@ database_id = "REPLACE_WITH_SAME_ID_AS_WEB_TOML"
 # Migrations are managed via wrangler/web.toml — do not apply here.
 
 [vars]
-GHINVITE_GITHUB_APP_ID = "REPLACE_WITH_GITHUB_APP_NUMERIC_ID"
+# Explicit registry stage; org delivery/target release gates remain separate.
+P1_APP_STAGE = "repo"
+# Matched web/workflow capability. Keep off until AccessGrant acceptance gates pass.
+GH_ACCESS_REMOVAL_ENABLED = "false"
+P1_HOST = "p1.example.com"
+GH_REPO_APP_ID = "REPLACE_WITH_REPO_APP_NUMERIC_ID"
+GH_REPO_CLIENT_ID = "REPLACE_WITH_REPO_APP_CLIENT_ID"
+RESTATE_IDENTITY_KEYS = "REPLACE_WITH_RESTATE_PUBLICKEYV1_KEYS"
 
 # Secrets (set via `wrangler secret put`):
-# GHINVITE_GITHUB_APP_PRIVATE_KEY - base64-encoded GitHub App private key PEM:
-#   Linux:  base64 -w0 private-key.pem | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
-#   macOS:  base64 private-key.pem | tr -d '\n' | wrangler secret put GHINVITE_GITHUB_APP_PRIVATE_KEY --config wrangler/restate-svc.toml
-# RESTATE_IDENTITY_KEY            - from Restate Cloud console (Deployments → Identity key)
+# GH_REPO_PRIVATE_KEYS - kid:base64(PKCS#8 PEM);kid:...; first entry signs.
+#   Convert a downloaded PKCS#1 key with openssl pkcs8 -topk8 -nocrypt first.
+#   Provision the exact list through the Wrangler secret prompt; never put it in vars.
+# RESTATE_IDENTITY_KEYS is a required comma/whitespace-separated public-key list.
+# Add the new key alongside the old one before Restate switches signers; remove
+# the old key after pinned invocations no longer require it. Missing/invalid keys
+# fail startup. The production Worker has no unsigned-development bypass.
+# M0 explicitly selects the repo app only. No sign-in/webhook/session secrets here.

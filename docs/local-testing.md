@@ -1,5 +1,26 @@
 # Local Integration Testing
 
+## Console authority and selection checks
+
+```bash
+cargo test -p ghinvite-web --test console_authority --test console_delegation
+cargo test -p ghinvite-web --lib authority
+cd tests/browser
+npx playwright test --config repository-selection.config.mjs
+```
+
+The route tests exercise real scoped SQL, typed installation-token HTTP and the
+concrete Restate ingress seam. The browser tests exercise the shipped shared
+script: pending/denied authority prevents submission, deselection clears its
+blocker, and stale responses cannot authorize a replacement form. Creation
+independently checks all selected repositories; browser feedback is not a grant.
+
+`AUTHZ_CACHE` evidence is session-independent and expires logically at 300 seconds.
+Outage fixtures age actual observed evidence before expecting upstream failure;
+a fresh cached observation is intentionally reusable. The actual Worker cache
+and rate-binding gates are `tests/worker/authority-cache.mjs` and
+`tests/worker/rate-limit.mjs`. Run them after building the matching Worker bundle.
+
 ## Workspace tests (no Docker/wrangler required)
 
 ```bash
@@ -12,8 +33,9 @@ compatibility or container networking.
 
 ### Restate ingress authentication
 
-Public invitation links use `/i/<26-character-ULID>`; the Console displays this
-same value as the Invitation Code. Test authenticated creation, opening and
+Public invitation links use `/i#<LinkSecret>`; the Console shows the fragment
+URL once after creation or rotation. The internal ULID is not an Invitation
+Code and legacy `/i/<ULID>` routes return a neutral 404. Test authenticated creation, opening and
 submission before projection with `bash scripts/test-restate.sh canonical_link`.
 The authoritative-admission gate also verifies creation interruption, concurrent
 replay and retained receipts after actual invocation cleanup.
@@ -37,53 +59,47 @@ Remote deployment/binding verification belongs to the
 
 ### GitHub webhooks
 
-`POST /webhooks/github` uses `octoevents` for signature verification, header
-validation, and event dispatch, without `octocrab`. Set a nonempty
-`GHINVITE_WEBHOOK_SECRET` for local webhook delivery; an unset or empty secret
-disables the endpoint with 503.
+`POST /webhooks/{repo|org}` uses the selected app's current/previous HMAC
+secrets from the installed-app registry. `GH_REPO_WEBHOOK_SECRETS` is required
+for the repository app; legacy `GHINVITE_WEBHOOK_SECRET` is not a fallback.
+Unknown app scopes return 404 and an absent registry fails closed with 503.
 
-Deliveries require `Content-Type: application/json`, `X-GitHub-Event`,
-`X-GitHub-Delivery`, and `X-Hub-Signature-256`. Sign the exact request bytes with
-HMAC-SHA256. Successful deliveries (including ping and unhandled events/actions)
-return 204. Missing or mismatched signatures return 401; malformed signatures,
-missing event/delivery headers, and unsupported content types return 400.
-Bodies above 2 MiB return 413. Matched payload decoding or downstream command
-failures return an empty 500 response, with details in tracing logs.
+Deliveries require JSON content type, `X-GitHub-Event`, `X-GitHub-Delivery`, and
+`X-Hub-Signature-256`. Sign the exact request bytes. The receipt identity is the
+signed payload hash, never the unsigned delivery header. Missing/mismatched
+signatures return 401; missing event/delivery headers and malformed consumed
+payloads return 400; bodies over 2 MiB return 413.
 
-Routes handle `repository_invitation.accepted/declined`, `installation.deleted`,
-and `installation_repositories.added/removed`. GitHub does not automatically
-redeliver failures; redelivery must be requested separately.
-
-Repository-selection deliveries require `repository_selection` (`all` or
-`selected`) and both repository arrays, as specified by
-[GitHub's payload contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation_repositories).
-Each repository must have an unsigned integer `id`; unrelated extra fields are
-ignored. Missing or malformed consumed fields fail decoding instead of being
-silently defaulted or skipped.
-
-The signed HTTP and event-to-command tests run without GitHub or Restate:
+Authenticated installation created/deleted/suspend/unsuspend/accepted-permission
+and repository-selection events dispatch canonical app-scoped commands and return
+202. Setup facts contain no installer; only an authenticated installation sender
+can establish the Installing Owner. Unknown actions and obsolete member or
+repository-invitation events return 202 without delivery dispatch. Settlement
+uses verified reconciliation reads. No live webhook delivery claim follows from
+these local boundary tests.
 
 ```bash
-cargo test -p ghinvite-web --test route_smoke webhook
+cargo test -p ghinvite-web --test app_webhooks
 cargo test -p ghinvite-web --lib commands::tests
+node tests/worker/app-routes.mjs
 ```
 
 ### OAuth sessions
 
 HTTP regression tests exercise OAuth state validation, ID rotation, old-cookie
 invalidation, return destinations, and session-store failures. Console tests
-verify that both same-user sign-in and switching GitHub users discard cached
-organization authority and use the new access token:
+verify user-bound installation authority independently of the session. Same-user
+sign-in may reuse fresh evidence; switching users cannot reuse another user's permission observations:
 
 ```bash
 cargo test -p ghinvite-web --test oauth_flow
 cargo test -p ghinvite-web --test session_protection
-cargo test -p ghinvite-web --test console_flow oauth_signin_discards
+cargo test -p ghinvite-web --test console_flow oauth_signin_keeps_user_bound
 cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
 ```
 
 Successful OAuth uses tower-sessions' `cycle_id()` to revoke the prior session
-ID, replaces session data with fresh credentials and empty authorization caches,
+ID and replaces session identity and CSRF state,
 and lets the session middleware persist the new record and send its cookie.
 Revocation or persistence failure returns HTTP 500 instead of a login redirect.
 Validated OAuth state is persisted as consumed before contacting GitHub, so a
@@ -184,7 +200,7 @@ Prerequisites:
   firewalls must allow traffic from the Docker bridge to that test listener.
   No GitHub App credentials, separately started GitHub stub, Wrangler, or dev stack is needed.
 
-`compose.yaml` pins Restate **1.7.9** by image digest; the dev stack and smoke
+`compose.yaml` pins Restate **1.8.1** by image digest; the dev stack and smoke
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
 script. To upgrade Restate, update the shared image pin and rerun these commands.
 

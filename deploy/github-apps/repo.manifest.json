@@ -1,0 +1,17 @@
+{
+  "name": "P1 repo",
+  "url": "https://p1.example.com",
+  "hook_attributes": {
+    "active": true,
+    "url": "https://p1.example.com/webhooks/repo"
+  },
+  "public": true,
+  "default_permissions": {
+    "administration": "write",
+    "metadata": "read"
+  },
+  "default_events": [],
+  "request_oauth_on_install": false,
+  "setup_url": "https://p1.example.com/setup/repo",
+  "setup_on_update": true
+}

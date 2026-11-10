@@ -35,19 +35,22 @@ fn main() {
     } else if args.iter().any(|arg| arg == "--permission-only-invalid") {
         LinkFormValues {
             description: "Permission workshop".into(),
-            permission: if args.iter().any(|arg| arg == "--empty-permission") {
-                ""
-            } else {
-                "owner"
-            }
-            .into(),
+            repo_grants: vec![format!(
+                "10:{}",
+                if args.iter().any(|arg| arg == "--empty-permission") {
+                    ""
+                } else {
+                    "owner"
+                }
+            )],
             selected_repo_ids: vec![10],
+
             errors: if args.iter().any(|arg| arg == "--unvalidated") {
                 LinkFormErrors::default()
             } else {
                 LinkFormErrors {
                     summary: vec![SUMMARY_MESSAGE.into()],
-                    permission: Some(ghinvite_ui::link_form::PERMISSION_UNSUPPORTED.into()),
+                    repo_grants: Some(ghinvite_ui::link_form::REPO_GRANT_REQUIRED.into()),
                     ..LinkFormErrors::default()
                 }
             },
@@ -58,6 +61,7 @@ fn main() {
         let mut form = LinkFormValues {
             description: "Numeric workshop".into(),
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             ..LinkFormValues::default()
         };
         form.errors.summary = vec![SUMMARY_MESSAGE.into()];
@@ -78,6 +82,7 @@ fn main() {
         LinkFormValues {
             description: "Workshop\nsecond line".into(),
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             errors: LinkFormErrors {
                 summary: vec![SUMMARY_MESSAGE.into()],
                 description: Some(ghinvite_ui::link_form::DESCRIPTION_SINGLE_LINE.into()),
@@ -92,7 +97,50 @@ fn main() {
     } else {
         LinkFormValues::default()
     };
+    let organization = if args.iter().any(|arg| arg == "--organization") {
+        ghinvite_ui::link_form::OrganizationOffer::Available(
+            ghinvite_ui::link_form::OrganizationChoice {
+                id: 9001,
+                login: "acme".into(),
+                teams: vec![
+                    ghinvite_ui::link_form::TeamChoice {
+                        id: 7,
+                        slug: "learners".into(),
+                        name: "Learners".into(),
+                        externally_managed: false,
+                    },
+                    ghinvite_ui::link_form::TeamChoice {
+                        id: 8,
+                        slug: "managed".into(),
+                        name: "Managed team".into(),
+                        externally_managed: true,
+                    },
+                ],
+            },
+        )
+    } else {
+        Default::default()
+    };
+    let access_removal_enabled = args.iter().any(|arg| arg == "--access-removal");
     let now = Utc::now();
+    let eligibility = if args.iter().any(|arg| arg == "--eligibility") {
+        ghinvite_ui::organization_eligibility::Eligibility::Known(
+            ghinvite_ui::organization_eligibility::Facts {
+                account_id: 9001,
+                installation_id: 88,
+                observed_at: now,
+                seats: Some(ghinvite_ui::organization_eligibility::Seats {
+                    capacity: 10,
+                    used: 10,
+                }),
+                two_factor_required: Some(true),
+                base_permission: Some(ghinvite_ui::organization_eligibility::BasePermission::Read),
+                managed_enterprise: None,
+            },
+        )
+    } else {
+        Default::default()
+    };
 
     let mut vdom = VirtualDom::new_with_props(
         move || {
@@ -103,6 +151,9 @@ fn main() {
                     flash: None,
                     account_login: "acme".to_string(),
                     repos: repos(),
+                    organization: organization.clone(),
+                    access_removal_enabled,
+                    eligibility: eligibility.clone(),
                     form: form.clone(),
                     now,
                 }
@@ -131,6 +182,7 @@ fn transport_rejection(parse_blocked: bool, expiration: bool, form_only: bool) -
         expires_in_days: "45".into(),
         internal_note: "Preserved transport note".into(),
         selected_repo_ids: vec![10],
+        repo_grants: vec!["10:push".into()],
         errors: LinkFormErrors {
             summary: vec![
                 SUMMARY_MESSAGE.into(),
@@ -163,6 +215,16 @@ fn transport_rejection(parse_blocked: bool, expiration: bool, form_only: bool) -
 /// mounting and correcting one field do not reset the other controls.
 fn preserved_submission() -> LinkFormValues {
     LinkFormValues {
+        access_lifetime_hours: String::new(),
+        email_domains: String::new(),
+        expiration_timestamp: String::new(),
+        invitation_lifetime_seconds: String::new(),
+        include_organization: false,
+        selected_team_ids: vec![],
+        invitation_lifetime_hours: "168".into(),
+        abuse_threshold_per_hour: String::new(),
+        budget_share_pct: "50".into(),
+        never_expires: false,
         description: "   ".to_string(),
         permission: "push".to_string(),
         approval_required: true,
@@ -170,6 +232,7 @@ fn preserved_submission() -> LinkFormValues {
         expires_in_days: "45".to_string(),
         internal_note: "Keep this note & its <literal> markup".to_string(),
         selected_repo_ids: vec![11, 12],
+        repo_grants: vec!["11:push".into(), "12:push".into()],
         errors: LinkFormErrors {
             summary: vec![SUMMARY_MESSAGE.to_string()],
             description: Some(ghinvite_ui::link_form::DESCRIPTION_REQUIRED.to_string()),
@@ -204,6 +267,16 @@ fn failed_submission() -> LinkFormValues {
         PERMISSION_UNSUPPORTED, REPO_SCOPE_REQUIRED,
     };
     LinkFormValues {
+        access_lifetime_hours: String::new(),
+        email_domains: String::new(),
+        expiration_timestamp: String::new(),
+        invitation_lifetime_seconds: String::new(),
+        include_organization: false,
+        selected_team_ids: vec![],
+        invitation_lifetime_hours: "168".into(),
+        abuse_threshold_per_hour: String::new(),
+        budget_share_pct: "50".into(),
+        never_expires: false,
         description: "   ".to_string(),
         permission: "owner".to_string(),
         approval_required: true,
@@ -211,7 +284,22 @@ fn failed_submission() -> LinkFormValues {
         expires_in_days: "0".to_string(),
         internal_note: "Keep this note".to_string(),
         selected_repo_ids: vec![999],
+        repo_grants: vec![
+            "10:pull".into(),
+            "11:pull".into(),
+            "12:pull".into(),
+            "999:push".into(),
+        ],
         errors: LinkFormErrors {
+            access_lifetime_hours: None,
+            email_domains: None,
+            expiration_timestamp: None,
+            invitation_lifetime_seconds: None,
+            organization: None,
+            teams: None,
+            invitation_lifetime_hours: None,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: None,
             internal_note: None,
             summary: vec![SUMMARY_MESSAGE.to_string()],
             description: Some(DESCRIPTION_REQUIRED.to_string()),
@@ -219,6 +307,7 @@ fn failed_submission() -> LinkFormValues {
             max_uses: Some(MAX_USES_NOT_POSITIVE.to_string()),
             expires_in_days: Some(EXPIRES_IN_DAYS_NOT_POSITIVE.to_string()),
             repo_scope: Some(REPO_SCOPE_REQUIRED.to_string()),
+            repo_grants: None,
         },
     }
 }

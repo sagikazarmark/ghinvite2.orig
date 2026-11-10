@@ -1,7 +1,9 @@
 //! Test-only access to the public storage boundary inside workerd.
+use ghinvite_core::storage::AppInstallationReadStorage as _;
+use ghinvite_core::storage::blocked_digest::DailyDigestStorage;
 use ghinvite_core::storage::{
-    ConsoleStorage, DeliveryStorage, RecordStorage, WebhookStorage, projection::ProjectionStorage,
-    test_suite,
+    ConsoleStorage, DeliveryStorage, OperationalReadStorage, RecordStorage,
+    projection::ProjectionStorage, test_suite,
 };
 use http_body_util::BodyExt;
 use worker::{Body, Env, HttpRequest, wasm_bindgen::JsValue};
@@ -12,32 +14,19 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
     let input: serde_json::Value = serde_json::from_slice(&bytes).map_err(super::worker_err)?;
     let storage = ghinvite_storage_d1::D1Storage::new(env.d1("DB")?);
     let result = match path.as_str() {
-        "/__fixture/installation" => storage
-            .get_installation(serde_json::from_value(input).map_err(super::worker_err)?)
-            .await
-            .map(|value| serde_json::to_value(value).unwrap()),
-        "/__fixture/member-binding" => {
-            let (digest, invitation): (String, Option<ghinvite_core::GithubInvitationId>) =
+        "/__fixture/delivery-run-losses" => Ok(serde_json::json!(
+            ghinvite_workflows::delivery_run_fixture::losses()
+        )),
+        "/__fixture/app-installation" => {
+            let (app, id): (ghinvite_core::account::App, u64) =
                 serde_json::from_value(input).map_err(super::worker_err)?;
             storage
-                .bind_member_webhook(&digest, invitation)
+                .app_installation(app, id)
                 .await
                 .map(|value| serde_json::to_value(value).unwrap())
         }
-        "/__fixture/member-candidates" => {
-            let (account, repo, requester): (u64, u64, u64) =
-                serde_json::from_value(input).map_err(super::worker_err)?;
-            storage
-                .member_invitation_candidates(account, repo, requester)
-                .await
-                .map(|value| serde_json::to_value(value).unwrap())
-        }
-        "/__fixture/insert_invitation" => storage
-            .insert_github_invitation(&serde_json::from_value(input).map_err(super::worker_err)?)
-            .await
-            .map(|_| serde_json::Value::Null),
-        "/__fixture/invitation" => storage
-            .get_github_invitation(serde_json::from_value(input).map_err(super::worker_err)?)
+        "/__fixture/delivery-by-key" => storage
+            .get_delivery(&serde_json::from_value::<String>(input).map_err(super::worker_err)?)
             .await
             .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/storage-suite" => Ok(serde_json::json!(test_suite::SCENARIOS)),
@@ -54,6 +43,20 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<http::Response
             }
             Ok(serde_json::Value::Null)
         }
+        "/__fixture/repository-telemetry" => storage
+            .project_repository_telemetry(
+                &serde_json::from_value(input).map_err(super::worker_err)?,
+            )
+            .await
+            .map(|_| serde_json::Value::Null),
+        "/__fixture/record-blocked-digest" => storage
+            .record_blocked_digest(serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|_| serde_json::Value::Null),
+        "/__fixture/delivery-signals" => storage
+            .delivery_signals(serde_json::from_value(input).map_err(super::worker_err)?)
+            .await
+            .map(|value| serde_json::to_value(value).unwrap()),
         "/__fixture/delivery" => storage
             .project_delivery(&serde_json::from_value(input).map_err(super::worker_err)?)
             .await

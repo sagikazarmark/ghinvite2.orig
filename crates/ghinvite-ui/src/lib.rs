@@ -14,8 +14,10 @@
 
 pub mod attempts;
 pub mod audit;
+pub mod bulk;
 pub mod components;
 pub mod console;
+pub mod daily_digest;
 pub mod document;
 pub mod field;
 pub mod flash;
@@ -27,10 +29,16 @@ pub mod link_form;
 pub mod link_list;
 pub mod links;
 pub mod not_found;
+pub mod onboarding;
+pub mod organization_delivery;
+pub mod organization_eligibility;
 pub mod problem;
 pub mod request_form;
 pub mod request_history;
+pub mod request_preview;
+pub mod requester_profile;
 pub mod requests;
+pub mod revocation;
 pub mod settings;
 
 /// Test-only SSR helper so the rendered-markup tests in this crate can assert
@@ -50,3 +58,5 @@ pub(crate) mod testing {
     }
 }
 pub mod csrf;
+
+pub mod invitation_expiry;

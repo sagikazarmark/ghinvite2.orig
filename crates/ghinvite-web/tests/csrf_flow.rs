@@ -7,22 +7,22 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use common::authority_http_fixture::FakeLinkAuthority;
-use common::sign_in::{OCTOCAT, oauth_expectations, sign_in};
+use common::build_app;
+use common::sign_in::{
+    ConsoleInstallationFixture, ConsoleTransport, OCTOCAT, console_config, oauth_expectations,
+    repo_identity, sign_in,
+};
 use ghinvite_core::admission::Admit;
 use ghinvite_core::invitation_link::CreateLink;
 use ghinvite_core::request_lifecycle::DecideRequest;
 use ghinvite_core::request_lifecycle::RequestSnapshot;
+use ghinvite_core::storage::RecordStorage;
 use ghinvite_core::storage::projection::fixture::Seed;
-use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos,
 };
-use ghinvite_github::{
-    mocks::{Expectation, MockTransport},
-    transport::Method,
-};
-use ghinvite_web::{AppState, WebConfig, build_app};
+use ghinvite_github::{Method, mocks::Expectation};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -46,7 +46,7 @@ impl Browser {
                 .unwrap(),
         );
         storage
-            .insert_installation(&Account {
+            .seed_console_installation(&Account {
                 installation_id: 77,
                 account_id: 42,
                 account_login: "octocat".into(),
@@ -63,66 +63,90 @@ impl Browser {
                     user_id,
                     login: format!("user{user_id}"),
                     avatar_url: None,
+                    github_created_at: None,
                     last_seen_at: Utc::now(),
                 })
                 .await
                 .unwrap();
         }
         let link = InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: InvitationLinkId::new(),
+            organization_installation_id: None,
             installation_id: 77,
             account_id: 42,
             created_by: 42,
             created_at: Utc::now(),
             expires_at: None,
             max_uses: None,
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 0,
-            permission: Permission::Pull,
+            secret: common::capability::state(),
             approval_required: true,
             description: "Workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![InvitationLinkRepo {
-                repo_id: 10,
-                repo_full_name: "octocat/api".into(),
-            }],
+            pause: None,
+            targets: ghinvite_core::targets::Targets {
+                repos: vec![InvitationLinkRepo {
+                    repo_id: 10,
+                    repo_full_name: "octocat/api".into(),
+                }]
+                .into_iter()
+                .map(|repo| ghinvite_core::targets::RepoTarget {
+                    repo_id: repo.repo_id,
+                    repo_full_name: repo.repo_full_name,
+                    grant: Permission::Pull.into(),
+                })
+                .collect(),
+                ..Default::default()
+            },
         };
         storage.seed_link(&link).await.unwrap();
+        common::capability::register(&*storage, &link).await;
         authority.seed_link(&link);
         let request_id = RequestId::new();
         storage
             .seed_request(&InvitationRequest {
+                domain_evidence: None,
                 id: request_id,
-                invitation_link_id: link.id,
+                invitation_link_id: Some(link.id),
+                batch: None,
                 requester_id: 99,
                 justification: None,
                 state: RequestState::Pending,
                 decided_by: None,
                 decided_at: None,
+                cancellation_reason: None,
                 decline_reason: None,
+                requester_message: None,
                 decision_deadline: None,
                 created_at: Utc::now(),
             })
             .await
             .unwrap();
         authority.seed_request(pending(&link, request_id));
-        let mut expectations = oauth_expectations(OCTOCAT.with_access_token("user-token"));
-        for _ in 0..8 {
-            expectations.push(Expectation::ok_json(Method::Get,
-                "https://api.github.com/user/installations/77/repositories?per_page=100",
-                serde_json::json!({"total_count":1, "repositories":[{"id":10,"full_name":"octocat/api","private":true}]})));
-        }
+        let mut expectations = oauth_expectations(OCTOCAT.with_token("user-token"));
+        expectations.push(Expectation::ok_json(Method::Get,
+            "https://api.github.com/installation/repositories?per_page=100",
+            serde_json::json!({"total_count":1,"repositories":[{"id":10,"full_name":"octocat/api","owner":{"id":42,"login":"octocat"}}]})));
+        expectations.push(repo_identity(10, "octocat/api", 42));
         let app = build_app(
-            AppState::new(
+            crate::common::sign_in::app_state(
                 storage,
-                Arc::new(MockTransport::scripted(expectations)),
+                Arc::new(ConsoleTransport::scripted(expectations)),
                 authority.client(),
-                WebConfig::for_local_dev_with_secret([7; 32]),
+                console_config(),
             ),
             tower_sessions::MemoryStore::default(),
         );
         let cookie = sign_in(&app).await;
+        let cookie = common::capability::select(&app, Some(&cookie)).await;
         Self {
             app,
             cookie,
@@ -164,7 +188,10 @@ impl Browser {
 }
 
 async fn html(response: Response) -> String {
-    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    assert!(matches!(
+        response.headers()["cache-control"].to_str().unwrap(),
+        "no-store" | "private, no-store"
+    ));
     String::from_utf8(
         response
             .into_body()
@@ -180,8 +207,10 @@ async fn html(response: Response) -> String {
 /// The authority's record of an invitation request on `link` awaiting review.
 fn pending(link: &InvitationLink, request_id: RequestId) -> RequestSnapshot {
     RequestSnapshot {
+        domain_evidence: None,
         request_id,
-        link_id: link.id,
+        link_id: Some(link.id),
+        batch: None,
         account_id: link.account_id,
         requester_id: 99,
         justification: None,
@@ -217,7 +246,7 @@ async fn create_service_failure_keeps_the_attempt_and_token_and_allows_retry() {
         Utc::now().timestamp()
     );
     let body = format!(
-        "csrf_token={token}&description=Keep+workshop&internal_note=Keep+note&permission=push&repo_ids=10&max_uses=7&expires_in_days=45"
+        "csrf_token={token}&description=Keep+workshop&internal_note=Keep+note&permission=push&repo_ids=10&repo_grants=10:push&max_uses=7&expires_in_days=45"
     );
     let response = browser.post(&uri, body.clone()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
@@ -266,9 +295,8 @@ async fn requester_service_failure_preserves_justification_operation_id_and_toke
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let id = RequestId::new();
     let body = format!("csrf_token={token}&operation_id={id}&justification=Keep+my+context");
-    let code = &browser.link.id.to_string();
-    let path_ = format!("/i/{code}");
-    let response = browser.post(&path_, body.clone()).await;
+    let path_ = "/join";
+    let response = browser.post(path_, body.clone()).await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let page = html(response).await;
     for value in [
@@ -285,11 +313,11 @@ async fn requester_service_failure_preserves_justification_operation_id_and_toke
     }
     assert!(!page.contains("Please try again"), "{page}");
     // Retrying the same attempt recovers the retained receipt.
-    let response = browser.post(&path_, body).await;
+    let response = browser.post(path_, body).await;
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         response.headers()["location"],
-        format!("/i/{code}?operation_id={id}")
+        format!("/join?operation_id={id}")
     );
     let prepared = browser.authority.received::<Admit>("prepare_attempt");
     assert_eq!(prepared.len(), 2);
@@ -305,13 +333,16 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
     let token = common::csrf_token(&browser.app, &browser.cookie).await;
     let base = "/console/accounts/octocat";
     let detail = format!("{base}/links/{}", browser.link.id);
-    let request = format!("/i/{}", browser.link.id);
+    let request = "/join".to_string();
     for path in [
         format!("{base}/links/new"),
         format!("{detail}/edit"),
+        format!("{detail}/revoke"),
         detail.clone(),
         format!("{base}/requests"),
         request.clone(),
+        "/i".into(),
+        "/code".into(),
         "/".into(),
         "/missing".into(),
     ] {
@@ -319,7 +350,7 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         let mut forms = 0;
         for form in page.split("<form").skip(1) {
             let form = form.split("</form>").next().unwrap();
-            if !form.starts_with(" method=\"post\"") {
+            if !form.split('>').next().unwrap().contains("method=\"post\"") {
                 continue;
             }
             forms += 1;
@@ -336,6 +367,15 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         }
         assert!(forms > 0, "{path}");
     }
+    let confirmation = html(browser.get(&format!("{detail}/revoke")).await).await;
+    let revoke_operation = confirmation
+        .split("name=\"operation_id\" value=\"")
+        .nth(1)
+        .expect("confirmation carries an immutable operation")
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(revoke_operation.parse::<RequestId>().is_ok());
     // Rendering read the authority; forgeries must not reach it at all.
     let reads = browser.authority.calls().len();
     let paths = [
@@ -350,6 +390,9 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         format!("{base}/requests/{}/decline", browser.request_id),
         request,
         "/logout".into(),
+        format!("{detail}/rotate"),
+        "/i".into(),
+        "/code".into(),
     ];
     for path in &paths {
         for body in [
@@ -391,7 +434,10 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         )
     };
     for (path, body) in [
-        (paths[2].clone(), format!("csrf_token={token}")),
+        (
+            paths[2].clone(),
+            format!("csrf_token={token}&operation_id={revoke_operation}"),
+        ),
         (paths[3].clone(), lifecycle()),
         (format!("{base}/requests/{declined}/decline"), lifecycle()),
     ] {
@@ -403,7 +449,14 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
     }
     assert_eq!(
         browser.authority.calls()[reads..],
-        ["revoke", "decide", "decide"]
+        [
+            "link_status",
+            "revoke",
+            "link_status",
+            "decide",
+            "link_status",
+            "decide"
+        ]
     );
     let decided: Vec<_> = browser
         .authority
@@ -412,6 +465,15 @@ async fn every_browser_form_carries_authority_and_forgery_dispatches_nothing() {
         .map(|command| command.request_id)
         .collect();
     assert_eq!(decided, [browser.request_id, declined]);
+    let revocations = browser
+        .authority
+        .received::<ghinvite_core::revocation::RevokeCommand>("revoke");
+    assert_eq!(revocations.len(), 1);
+    assert_eq!(
+        String::from(revocations[0].operation_id.clone()),
+        revoke_operation
+    );
+    assert!(!revocations[0].cascade.any());
     assert_eq!(
         browser.authority.request(declined).unwrap().state,
         RequestState::Declined

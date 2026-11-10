@@ -14,17 +14,17 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use common::authority_http_fixture::FakeLinkAuthority;
-use common::sign_in::sign_in;
+use common::build_app;
+use common::sign_in::{ConsoleInstallationFixture, console_config, sign_in};
 use ghinvite_core::admission::RequesterPage;
 use ghinvite_core::request_lifecycle::RequestSnapshot;
+use ghinvite_core::storage::RecordStorage;
 use ghinvite_core::storage::projection::fixture::Seed;
-use ghinvite_core::storage::{InstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, User,
 };
-use ghinvite_github::transport::{HttpTransport, Method, Request as GithubRequest, Response};
-use ghinvite_web::{AppState, WebConfig, build_app};
+use ghinvite_github::{HttpTransport, Method, Request as GithubRequest, Response};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -33,19 +33,13 @@ use tower::ServiceExt;
 mod common;
 
 /// The signed-in GitHub user, who also owns the personal account the Console
-/// pages below belong to (`check_admin` derives personal authority from the
+/// pages below belong to (numeric identity derives personal authority from the
 /// user ID, so those pages need no GitHub call).
 const USER_ID: u64 = 42;
 const USER_LOGIN: &str = "octocat";
 const ORG_ID: u64 = 9001;
 const ORG_LOGIN: &str = "acme";
 
-/// An active invitation link with no invitation request from the signed-in
-/// user, so `/i/{code}` renders the invitation request form.
-const FORM_CODE: &str = FORM_LINK_ID;
-/// An active invitation link the signed-in user already has a pending
-/// invitation request on, so `/i/{code}` renders its status, not the form.
-const STATUS_CODE: &str = STATUS_LINK_ID;
 /// Fixed link IDs, so the Console detail and edit paths are the same here and
 /// in `tests/browser/document.spec.mjs`.
 const FORM_LINK_ID: &str = "01JQRFRM000000000000000000";
@@ -67,12 +61,17 @@ fn document_paths() -> Vec<(String, StatusCode)> {
             format!("{console}/links/{FORM_LINK_ID}/edit"),
             StatusCode::OK,
         ),
+        (
+            format!("{console}/links/{FORM_LINK_ID}/revoke"),
+            StatusCode::OK,
+        ),
         (format!("{console}/requests"), StatusCode::OK),
         (format!("{console}/audit"), StatusCode::OK),
         (format!("{console}/settings"), StatusCode::OK),
         (format!("{console}/nowhere"), StatusCode::NOT_FOUND),
-        (format!("/i/{FORM_CODE}"), StatusCode::OK),
-        (format!("/i/{STATUS_CODE}"), StatusCode::OK),
+        ("/i".into(), StatusCode::OK),
+        ("/code".into(), StatusCode::OK),
+        ("/join".into(), StatusCode::OK),
         ("/i/not-a-code".into(), StatusCode::NOT_FOUND),
         ("/nowhere".into(), StatusCode::NOT_FOUND),
     ]
@@ -119,7 +118,7 @@ async fn every_signed_in_page_is_one_standards_mode_document() {
     }
 }
 
-/// The public surface a signed-out visitor sees. `/console` and `/i/{code}`
+/// The public surface a signed-out visitor sees. `/console` and `/join`
 /// redirect to sign-in, so only the home page renders a document here.
 #[tokio::test]
 async fn the_signed_out_home_page_is_one_standards_mode_document() {
@@ -139,7 +138,7 @@ async fn the_signed_out_home_page_is_one_standards_mode_document() {
     );
 }
 
-/// The two `/i/{code}` documents above are the same route; without this, a
+/// The two `/join` documents above are the same route; without this, a
 /// fixture that stopped seeding the pending invitation request would serve two
 /// form pages and every shape assertion would still pass. The pending status
 /// page is also the only document here that reloads itself, so this is where
@@ -148,11 +147,11 @@ async fn the_signed_out_home_page_is_one_standards_mode_document() {
 async fn the_two_invitation_request_documents_are_the_form_and_its_refreshing_status() {
     let (app, cookie) = document_fixture().await;
 
-    let form = invitation_request_page(&app, &cookie, FORM_CODE).await;
+    let form = invitation_request_page(&app, &cookie, FORM_LINK_ID).await;
     assert!(form.contains("Submit request"), "no submit control");
     assert!(!form.contains("http-equiv=\"refresh\""));
 
-    let status = invitation_request_page(&app, &cookie, STATUS_CODE).await;
+    let status = invitation_request_page(&app, &cookie, STATUS_LINK_ID).await;
     assert!(status.contains("Awaiting review"), "not the status page");
     assert!(!status.contains("Submit request"));
     let head = status.split_once("</head>").expect("a <head>").0;
@@ -162,12 +161,18 @@ async fn the_two_invitation_request_documents_are_the_form_and_its_refreshing_st
     );
 }
 
-async fn invitation_request_page(app: &axum::Router, cookie: &str, code: &str) -> String {
+async fn invitation_request_page(app: &axum::Router, cookie: &str, link_id: &str) -> String {
+    let cookie = common::capability::select_secret(
+        app,
+        Some(cookie),
+        &common::capability::secret_for(link_id.parse().unwrap()),
+    )
+    .await;
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{code}"))
+                .uri("/join")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -175,7 +180,9 @@ async fn invitation_request_page(app: &axum::Router, cookie: &str, code: &str) -
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    body_text(response).await
+    let html = body_text(response).await;
+    assert_one_standards_mode_document(&html);
+    html
 }
 
 /// Playwright drives this real router through `document.config.mjs`.
@@ -222,35 +229,28 @@ async fn document_browser_server() {
 #[derive(Clone, Default)]
 struct FixtureGithub;
 
-#[async_trait::async_trait]
 impl HttpTransport for FixtureGithub {
-    async fn send(&self, request: GithubRequest) -> ghinvite_github::Result<Response> {
+    async fn send(
+        &self,
+        request: GithubRequest,
+    ) -> std::result::Result<Response, ghinvite_github::TransportError> {
         let body = match (request.method, request.url.as_str()) {
             (Method::Post, "https://github.com/login/oauth/access_token") => serde_json::json!({
-                "access_token": "u_xxx", "token_type": "bearer", "scope": "read:user read:org"
+                "access_token": "ghu_xxx", "token_type": "bearer"
             }),
+            // Sign-in revokes the token it obtained.
+            (Method::Delete, "https://api.github.com/applications/Iv1.signin/token") => {
+                return Ok(Response {
+                    status: 204,
+                    headers: BTreeMap::new(),
+                    body: Vec::new(),
+                });
+            }
             (Method::Get, "https://api.github.com/user") => {
                 serde_json::json!({"id": USER_ID, "login": USER_LOGIN})
             }
-            (
-                Method::Get,
-                "https://api.github.com/user/installations/77/repositories?per_page=100",
-            ) => {
-                serde_json::json!({"total_count": 0, "repositories": []})
-            }
-            (Method::Get, "https://api.github.com/user/installations?per_page=100") => {
-                serde_json::json!({"total_count": 2, "installations": [
-                    {"id": 77, "account": {"id": USER_ID, "login": USER_LOGIN, "type": "User"},
-                     "repository_selection": "all", "target_type": "User", "target_id": USER_ID},
-                    {"id": 78, "account": {"id": ORG_ID, "login": ORG_LOGIN, "type": "Organization"},
-                     "repository_selection": "all", "target_type": "Organization", "target_id": ORG_ID},
-                ]})
-            }
-            (Method::Get, url)
-                if url == format!("https://api.github.com/user/memberships/orgs/{ORG_LOGIN}") =>
-            {
-                serde_json::json!({"role": "admin", "state": "active",
-                    "organization": {"id": ORG_ID, "login": ORG_LOGIN}})
+            (Method::Get, "https://api.github.com/installation/repositories?per_page=100") => {
+                serde_json::json!({"total_count":0,"repositories":[]})
             }
             (method, url) => panic!("unexpected GitHub call: {} {url}", method.as_str()),
         };
@@ -277,7 +277,7 @@ async fn document_fixture() -> (axum::Router, String) {
         (78, ORG_ID, ORG_LOGIN, AccountType::Organization),
     ] {
         storage
-            .insert_installation(&Account {
+            .seed_console_installation(&Account {
                 installation_id,
                 account_id,
                 account_login: login.into(),
@@ -294,6 +294,7 @@ async fn document_fixture() -> (axum::Router, String) {
             user_id: USER_ID,
             login: USER_LOGIN.into(),
             avatar_url: None,
+            github_created_at: None,
             last_seen_at: Utc::now(),
         })
         .await
@@ -301,23 +302,28 @@ async fn document_fixture() -> (axum::Router, String) {
     // The authority answers link and invitation request reads; SQL holds the
     // projection the Console lists.
     let authority = FakeLinkAuthority::start().await;
-    for (code, link_id) in [(FORM_CODE, FORM_LINK_ID), (STATUS_CODE, STATUS_LINK_ID)] {
+    for link_id in [FORM_LINK_ID, STATUS_LINK_ID] {
         let link = active_link(link_id);
         storage.seed_link(&link).await.unwrap();
+        common::capability::register(&*storage, &link).await;
         authority.seed_link(&link);
-        if code == STATUS_CODE {
+        if link_id == STATUS_LINK_ID {
             let request = RequestId::new();
             authority.set_requester_page(pending_page(&link, request));
             storage
                 .seed_request(&InvitationRequest {
+                    batch: None,
+                    domain_evidence: None,
                     id: request,
-                    invitation_link_id: link.id,
+                    invitation_link_id: Some(link.id),
                     requester_id: USER_ID,
                     justification: None,
                     state: RequestState::Pending,
                     decided_by: None,
                     decided_at: None,
+                    cancellation_reason: None,
                     decline_reason: None,
+                    requester_message: None,
                     created_at: Utc::now(),
                     decision_deadline: Some(Utc::now() - chrono::Duration::minutes(1)),
                 })
@@ -328,37 +334,61 @@ async fn document_fixture() -> (axum::Router, String) {
 
     let storage: Arc<dyn ghinvite_web::WebStorage> = storage;
     let restate = authority.client();
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage,
         Arc::new(FixtureGithub),
         restate,
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        console_config(),
     );
     let app = build_app(state, tower_sessions::MemoryStore::default());
     let cookie = sign_in(&app).await;
+    let cookie = common::capability::select_secret(
+        &app,
+        Some(&cookie),
+        &common::capability::secret_for(FORM_LINK_ID.parse().unwrap()),
+    )
+    .await;
     (app, cookie)
 }
 
 fn active_link(link_id: &str) -> InvitationLink {
     InvitationLink {
+        batch_source: None,
+        access_lifetime_seconds: None,
+        email_domains: vec![],
         id: link_id.parse::<InvitationLinkId>().unwrap(),
+        organization_installation_id: None,
         installation_id: 77,
         account_id: USER_ID,
         created_by: USER_ID,
         created_at: Utc::now(),
         expires_at: None,
         max_uses: None,
+        invitation_lifetime_seconds: 604800,
+        abuse_threshold_per_hour: None,
+        budget_share_pct: 50,
         uses_count: 0,
-        permission: Permission::Pull,
+        secret: common::capability::state_for(link_id.parse().unwrap()),
         approval_required: true,
         description: "AI coding workshop".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: format!("{USER_LOGIN}/{}", "r".repeat(60)),
-        }],
+        pause: None,
+        targets: ghinvite_core::targets::Targets {
+            repos: vec![InvitationLinkRepo {
+                repo_id: 10,
+                repo_full_name: format!("{USER_LOGIN}/{}", "r".repeat(60)),
+            }]
+            .into_iter()
+            .map(|repo| ghinvite_core::targets::RepoTarget {
+                repo_id: repo.repo_id,
+                repo_full_name: repo.repo_full_name,
+                grant: Permission::Pull.into(),
+            })
+            .collect(),
+            ..Default::default()
+        },
     }
 }
 
@@ -366,15 +396,20 @@ fn active_link(link_id: &str) -> InvitationLink {
 /// review, so no fresh attempt is offered.
 fn pending_page(link: &InvitationLink, request: RequestId) -> RequesterPage {
     RequesterPage {
+        two_factor_required: None,
+        email_domains: vec![],
+        rerequest_after: None,
+        paused: false,
         link_id: link.id,
-        repos: link.repos.clone(),
-        permission: link.permission,
+        targets: link.targets.clone(),
         approval_required: link.approval_required,
         can_start_fresh: false,
         attempt: None,
         request: Some(RequestSnapshot {
+            batch: None,
+            domain_evidence: None,
             request_id: request,
-            link_id: link.id,
+            link_id: Some(link.id),
             account_id: link.account_id,
             requester_id: USER_ID,
             justification: None,

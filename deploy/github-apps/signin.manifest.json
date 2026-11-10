@@ -1,0 +1,16 @@
+{
+  "name": "P1 signin",
+  "url": "https://p1.example.com",
+  "hook_attributes": {
+    "active": false
+  },
+  "public": true,
+  "default_permissions": {
+    "emails": "read"
+  },
+  "default_events": [],
+  "request_oauth_on_install": false,
+  "callback_urls": [
+    "https://p1.example.com/oauth/callback"
+  ]
+}

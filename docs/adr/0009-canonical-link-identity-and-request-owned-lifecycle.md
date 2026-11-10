@@ -28,3 +28,66 @@ The maintainer confirmed that nothing runs in production and accepted a clean pr
 This supersedes the link-owned request lifecycle/dispatch and workflow-notification arrangement in ADR 0003, the split create/settlement ownership in ADR 0004 and ADR 0006, and the `InvitationCode` routing described in ADR 0008. It preserves their replay, external-effect ambiguity, distinct delivery/settlement evidence, and concrete HTTP ingress principles. Earlier ADRs describe the existing implementation until the replacement tickets land.
 
 Verification uses authenticated web routes through real Restate owners with a GitHub HTTP stub, focused real-Restate replay/concurrency scenarios, and the shared conformance suites against SQLx and actual D1. The maintainer confirmed these seams.
+
+
+## P1 capability and target amendment (2026-10-16)
+
+The initial public-ULID decision is superseded: Link ID is internal, and `/i#secret`
+is an independent capability. The edge immediately erases the fragment, submits
+it with anonymous-session CSRF, and stores only its hash/generation for `/join`.
+Sign-in rotation preserves that selection while clearing identity-bound state.
+Old public-ID paths return neutral 404 without echo or sign-in redirects.
+
+Link creation, projections, requester pages and request initialization now carry
+canonical Targets, including each repository's own grant. Delivery commands still
+carry one local permission. Organization/team delivery remains a separate M1 gate;
+M0 refuses those targets instead of silently dropping grants.
+
+Fresh admission validates current hash/generation before eligibility, and consumes
+caller-supplied scope evidence without GitHub or installation-authority I/O. Fresh
+negative evidence may refuse; stale/missing evidence does not. Exact attempt
+replays preserve their original input and result across rotation and revocation.
+These changed journal paths and payloads require the immutable deployment policy
+above; no cross-release replay compatibility is claimed.
+
+
+## P1 Lapsed request amendment (2026-10-16)
+
+The rule suppressing repeat requests after every approval is superseded narrowly
+by P1 §5.2. The request owner derives Lapsed from its exact approved target and
+generation set only when all targets are final, at least one invitation lapsed,
+and none was satisfied. Delivery notifications carry identity only; the owner
+reads retained snapshots and verifies their commands before accepting final facts.
+Original approval decisions, create receipts and admission results remain immutable.
+
+The link permits a fresh request after Lapsed under current guardrails. Accepted
+re-requests consume a use and establish a durable seven-day limit. Declining or
+expiring the new request does not erase that limit. An invitation lifetime shorter
+than seven days forces re-requests to Pending even on an auto-approve link.
+Operation replay preserves the earlier result and never consumes another use.
+
+A Lapsed projection carries its retained original approval as predecessor proof.
+Both snapshots and their audit events apply in one SQLx/D1 transaction. Requiring
+a separate earlier approval invocation would risk deadlock in the exclusive
+projector if the later snapshot arrived first. Raw SQL still cannot transition
+a Pending row directly to Lapsed; the transaction first applies the proved approval.
+Migration0010 and immutable endpoint versioning precede activation. These journal
+and schema changes make no cross-release replay or flag-only rollback claim.
+
+
+## P1 email-domain admission amendment (2026-10-17)
+
+Email rules are immutable link guardrails. Domain evidence is part of the exact
+admission attempt, so a changed proof under the same operation ID conflicts.
+The owner checks link binding, matching domains and an inclusive ten-minute
+window against `admission_time` before use consumption. Preparing an attempt
+confers no freshness lease. A retained successful admission carries the original
+evidence through initialization and projection without checking it against a
+later wall clock; retries cannot turn the committed acceptance into a stale-proof
+refusal. Unrestricted request snapshots omit evidence.
+
+Public default-empty/default-absent fields preserve legacy unrestricted wire
+content, but changed handler paths still require endpoint pinning or draining
+under ID-21. The explicit sign-in composition collects minimal verified evidence
+and replaces it on account changes; deployment activation remains separate from
+local implementation evidence.

@@ -120,6 +120,25 @@ batch: named CHECK failures abort the entire application, and successful batches
 remove the assertion rows before commit.
 See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 
+### Approved request completion
+
+Migration `0010_request_lapsed.sql` permits an approved request to become
+`lapsed` without replacing its approval decision. It rejects direct raw
+pending/missing-to-lapsed writes, reopening, approval actor/time changes, and
+revision regression. The owner supplies its retained original approved
+projection as `RequestProjectionEnvelope.approval`; both adapters apply that
+predecessor and the completion in one atomic batch. Completion-first delivery
+therefore repairs projection order without waiting for a message queued behind
+an exclusive projector invocation. A late SQL failure rolls back both snapshots
+and audit writes. Original approval replay after Lapsed cannot reopen the row.
+
+Delivery `final_result` columns use the same typed completion classifier as the
+request owner. They distinguish `declined`, `lapsed_invite`, `unfulfillable` and
+`satisfied`; unfinished targets remain null. Existing deployment data from an
+older classifier needs a separately verified derived-column backfill before
+upgrade: fresh-schema tests do not constitute that migration evidence, and an
+unchanged organization receipt is not automatically reprojected.
+
 ## Adding a new migration
 
 1. Choose the next `NNNN`.
@@ -127,3 +146,93 @@ See [projection repair](../docs/admission-v1.md#inspection-repair-and-redrive).
 3. **Avoid altering existing CHECK constraints** — SQLite cannot do this without a 12-step `ALTER TABLE` recreate. If unavoidable, write the recreate dance in plain SQL inside the migration file.
 4. Run `cargo test -p ghinvite-storage-sqlx` locally to verify migrations apply cleanly to a fresh in-memory DB.
 5. Rehearse `wrangler d1 migrations apply DB --local --config wrangler/web.toml`, then the disposable remote D1 gate before the operator-owned production procedure.
+
+
+`0011_email_domains.sql` validates and freezes the existing nullable domain-policy
+and evidence columns. Earlier unrestricted rows keep NULL policy (equivalent to
+`[]`) and no evidence. Restricted requests require matched-domain evidence bound
+to the original admission time; later approval/completion never refreshes it.
+The typed core validates IDNA and exact timestamps; raw SQL guards add bounded
+JSON shape, parent-rule matching and immutability. This local fresh-schema proof
+is not a verified upgrade of arbitrary previously populated domain columns.
+
+`0012_delivery_audit_version.sql` adds validation and immutability triggers to
+`delivery_outcomes`. Missing versions remain Legacy; existing rows are neither
+rewritten nor reinterpreted. Valid explicit versions are `legacy` and
+`canonical_v1`; null, unknown and non-string values are rejected. The typed
+projection also rejects version changes in stale envelopes that would otherwise
+skip an SQL update. New owners select the canonical version only before their
+first retained state. This local migration does not replace endpoint draining or
+a rehearsal against a populated deployed database.
+
+0013_organization_telemetry.sql adds per-organization/team observation storage
+without changing repository telemetry or receipt JSON. Its operational view
+exposes each independent step. Historical blocked-digest items are copied
+unchanged into the new (day,delivery_key,step) identity as repo steps, including
+their exact original day/account/reason. The native upgrade fixture applies all
+prior migrations before this change; fresh SQLite and actual D1 run the same
+schema and unified report/digest scenarios. Apply the migration before deploying
+the new reader or scheduled recorder. This is local upgrade evidence, not a
+rehearsal against a populated deployed database.
+
+### Retired repository member-event matching
+
+`0022_remove_member_webhook_facade.sql` drops only the unused `webhook_receipts`
+table. Current repository webhook ingress ignores member and repository-invitation
+events; retained owner reconciliation supplies settlement evidence. The independent
+`organization_webhook_receipts` table, delivery ULID bridge, fences, and audit
+identities are unchanged. Existing migration contents/checksums are preserved;
+this additive local migration does not claim a deployed rollout.
+
+Before applying0022 to any deployed database, operators must inventory every
+serving and pinned endpoint version sharing that database. Older web/workflow
+artifacts that still issue member-receipt SQL must be drained or routed away
+before the table is dropped; absence of callers in this checkout does not prove
+absence in deployed versions. Endpoint pinning alone does not make a shared
+schema drop safe. This removes obsolete routing/deduplication receipts, not Audit
+Log history: `audit_events` and organization webhook receipts are preserved.
+Legacy private delivery handler wires remain a separate compatibility surface.
+No remote migration, drain, reset, or deployment was executed for this change.
+
+### Canonical delivery identity
+
+`0023_canonical_delivery_identity.sql` rebuilds `deliveries` without its
+transitional invitation-ULID column and removes the old ULID expression indexes
+on write fences. It copies every other delivery column directly, preserves
+child rows and receipt/audit/fence JSON, and reinstates the existing delivery
+guards, organization parent guard and operational view. The stored physical
+delivery key and upstream numeric GitHub invitation ID keep their meanings.
+Legacy audit targets that already contain a physical delivery key remain valid;
+old ULID targets resolve through the exact retained receipt compatibility field.
+
+The preflight refuses a bridge-only legacy audit binding without that exact
+receipt. Recover the original receipt through its compatible retained owner
+before retrying; do not invent or backfill an invitation identity. This refusal
+runs before the source table is dropped. Apply the complete migration in one
+transaction, as in SQLx migrations or a D1 transactional batch, with deferred
+foreign-key enforcement. The final guard checks all foreign keys before closing
+deferral. See [SQLite rebuild ordering](https://www.sqlite.org/lang_altertable.html)
+and [D1 foreign keys](https://developers.cloudflare.com/d1/sql-api/foreign-keys/).
+
+ADR0011 requires inventorying and draining or routing away every older web,
+workflow, delayed producer and pinned endpoint that still accesses the shared
+column or old handlers before applying the cutover. Immutable endpoint pinning
+alone cannot protect an old shared-schema reader. New readers/producers, fence
+bindings, audit-version guards and the migration are one coordinated boundary.
+The local raw D1 proof is included in `test:storage`; typed shared-adapter and
+owner replay gates remain separate. No deployed migration or drain is implied.
+
+`0024_delivery_audit_v2.sql` adds the new retained receipt contract after the
+physical-key cutover. `canonical_v2` requires the old `invitation_id` property to
+be absent; Legacy and CanonicalV1 require its original valid ULID. A receipt's
+version remains immutable. Historical receipt identity uniqueness is retained
+through an index over the exact immutable JSON compatibility field, rather than
+an operational identity column. New repository audit targets use
+`repository_delivery` and the physical key. Legacy/V1 payload IDs, targets and
+metadata are not rewritten. This migration belongs to the same coordinated
+producer/endpoint/shared-schema boundary as 0023; it does not authorize replaying
+old invocation histories through changed handlers.
+
+### Continuation rotation epoch (0028)
+
+The additive singleton epoch and INSERT/UPDATE/DELETE triggers invalidate operator scan cursors on every continuation mutation. Bounded scans include expired retained rows. Exact old-ciphertext/context/retention CAS rewrites only payload; successful updates advance the epoch. Direct-row `RETURNING rowid` establishes CAS success because D1 change metadata also counts trigger writes. Read-only verification must finish at a stable epoch with zero old and zero bad rows. The integer overflow guard rolls back the original write atomically. D1 scan/epoch reads explicitly use primary sessions. See [the rotation runbook](../docs/continuation-keyring-rotation.md); do not reset the epoch or disable triggers during a pass.

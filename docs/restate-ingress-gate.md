@@ -14,9 +14,9 @@ remain under #61.
    Follow [remote migration/readback](deploy.md#3-apply-and-verify-remote-database-migrations)
    through both `DB` bindings, recording the account and shared database UUID.
 2. Follow [credential provisioning](deploy.md#6-set-secrets). Set web
-   `GHINVITE_RESTATE_AUTH=bearer`, `GHINVITE_RESTATE_API_KEY` as a Worker secret,
-   and `GHINVITE_RESTATE_INGRESS` to the environment's HTTPS ingress. Configure
-   `RESTATE_IDENTITY_KEY` separately before uploading the workflow Worker version.
+   `P1_HOST` to its canonical public DNS host, `RESTATE_INGRESS_TOKEN` as a Worker secret,
+   and `RESTATE_INGRESS_URL` to the environment's HTTPS ingress. Configure
+   `RESTATE_IDENTITY_KEYS` separately before uploading the workflow Worker version.
    Register its [immutable version URL](deploy.md#9-register-with-restate-cloud),
    retaining the URL, full Worker version ID and Restate deployment ID together.
 3. Verify deployment discovery and signed Restate → workflow requests independently;

@@ -5,6 +5,65 @@ date: 2026-09-12
 
 # Application-key session protection with eventual individual sign-out
 
+## P1 amendment (2026-10-16)
+
+P1 spec §11.3 replaces the single XChaCha key and strict hex variable below with
+an immutable anykms keyring loaded from the `P1_KEYRING` akr1 descriptor. Sessions
+use envelope v1 with registered `session` context derived from the requested KV
+ID. All session KV writes have TTL ≤30 days. Add/read/promote/retire generation
+rollouts preserve old sessions until expiry; an unknown newer version returns503
+without sign-out, removed/corrupt ciphertext invalidates, and configuration/KCV
+mismatch returns500 with an operator alert. Fingerprints are logged once/isolate
+and exposed only to numeric `P1_OPERATOR_IDS` members at `/console/keyring`.
+The historical single-key/global-rotation text below is superseded only on these
+points; fixed lifetimes, independent revocations, nondestructive reads, and explicit
+sign-out failure reporting remain binding. No legacy format fallback is provided.
+The explicit token-free composition and its remaining live gate are described in
+the cutover amendment below.
+
+## Legacy OAuth removal (GM-09, 2026-10-21)
+
+Supersedes the cutover amendment below. Typed, token-free sign-in is the only
+sign-in path; there is no `GH_SIGNIN_ENABLED` and no token-free store policy to
+select. Sessions signed in through legacy OAuth **remain valid** until their
+original fixed deadline: they carry the same GitHub identity, CSRF authority
+and lifetime as typed sessions, and nothing depends on the user token they
+hold. The `Session` type no longer has `access_token` or `oauth_csrf`; unknown
+fields are ignored when a record loads, and the protected store re-serializes
+the session payload on every write, so the token leaves storage with the
+record's next write, whatever that write changes, and otherwise at expiry. A
+legacy record is not rewritten merely because it was read (KV write limits).
+No upstream revocation of tokens issued by legacy OAuth is performed. Rollback
+to a pre-GM-09 build in legacy mode would again accept those records until
+their deadline.
+
+## Explicit token-free session cutover (2026-10-17)
+
+`GH_SIGNIN_ENABLED=true` selects both the typed OAuth routes and token-free
+session storage in native and Worker composition. The default remains false;
+SP19a remains a hard live-activation gate. New typed session records omit the
+legacy credential field entirely. Credential-bearing records from a previous
+legacy deployment confer no identity on a typed deployment. Create/save rejects
+those snapshots even if a stale caller assigns a fresh ID. Empty transitional
+fields can be removed without changing the original fixed deadline.
+
+Rejection is nondestructive: the typed reader does not delete ciphertext or
+write a revocation marker. Existing records expire at their original deadline;
+there is no automatic identity migration, lifetime renewal, or legacy fallback.
+This follows the existing overlap rule and avoids an old or misconfigured
+reader destroying another deployment's valid record. A successful fresh OAuth
+callback rotates the session ID and establishes a new authenticated lifetime.
+
+An operator cutover must deploy the typed policy to every serving instance and
+drain legacy instances and in-flight requests before declaring old credentials
+unusable application-wide. Rollback must retain typed session enforcement; a
+rollback to legacy mode would accept still-live old records. This is not GitHub
+token revocation: existing upstream authorizations need their own retirement
+procedure. No production activation or upstream revocation is implied by local
+verification. Pending-sign-in generation lag returns503, keeps the exact
+ciphertext/expiry and cookie, and allows the original callback to retry after
+keyring rollout; configuration failures remain500 with the existing fixed alert.
+
 During the design interview for [#42](https://github.com/sagikazarmark/ghinvite2.orig/issues/42), we chose application-key protection for complete stored session records and accepted eventual individual sign-out in exchange for retaining Workers KV, using separate revocation markers and fixed lifetimes to prevent lasting session resurrection. The maintainer confirmed the complete contract and concluded the design session on 2026-09-12. This records the approved decisions, not an assertion that they are implemented.
 
 ## Protection and lifetime

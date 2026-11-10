@@ -13,7 +13,10 @@ async fn sqlite_records_are_protected_and_bound_to_the_requested_session() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend, [7; 32]);
+    let store = ProtectedStore::new(
+        backend,
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let mut record = Record {
         id: Id::default(),
         data: [(
@@ -52,7 +55,10 @@ async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destro
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend.clone(), [7; 32]);
+    let store = ProtectedStore::new(
+        backend.clone(),
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let session = tower_sessions::Session::new(None, std::sync::Arc::new(store.clone()), None);
     ghinvite_web::session::set_flash(&session, flash("private message"))
         .await
@@ -61,11 +67,13 @@ async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destro
     let id = session.id().unwrap();
     let raw = backend.get(&id).await.unwrap().unwrap();
     assert!(
-        ProtectedStore::new(backend.clone(), [8; 32])
-            .load(&id)
-            .await
-            .unwrap()
-            .is_none()
+        ProtectedStore::new(
+            backend.clone(),
+            ghinvite_web::WebConfig::for_local_dev_with_secret([8; 32]).keyring
+        )
+        .load(&id)
+        .await
+        .is_err()
     );
     assert_eq!(backend.get(&id).await.unwrap().unwrap(), raw);
 
@@ -91,7 +99,12 @@ async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destro
             )
             .await
             .unwrap();
-        assert!(store.load(&id).await.unwrap().is_none());
+        assert!(
+            store
+                .load(&id)
+                .await
+                .map_or(true, |record| record.is_none())
+        );
         assert_eq!(backend.get(&id).await.unwrap().unwrap(), invalid);
         assert!(!backend.is_revoked(&id).await.unwrap());
     }
@@ -102,7 +115,10 @@ async fn revocation_denies_a_late_write_even_when_the_session_record_is_recreate
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend.clone(), [7; 32]);
+    let store = ProtectedStore::new(
+        backend.clone(),
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let session = tower_sessions::Session::new(None, std::sync::Arc::new(store.clone()), None);
     ghinvite_web::session_store::establish_authenticated_lifetime(&session)
         .await
@@ -111,7 +127,6 @@ async fn revocation_denies_a_late_write_even_when_the_session_record_is_recreate
         &session,
         &ghinvite_web::session::Session {
             login: "octocat".into(),
-            access_token: "secret-token".into(),
             csrf_token: Some("csrf".into()),
             ..Default::default()
         },
@@ -168,7 +183,10 @@ async fn writes_refresh_nonces_but_do_not_extend_absolute_lifetimes() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool);
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend.clone(), [7; 32]);
+    let store = ProtectedStore::new(
+        backend.clone(),
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let session = tower_sessions::Session::new(None, std::sync::Arc::new(store.clone()), None);
     ghinvite_web::session::set_flash(&session, flash("hello"))
         .await
@@ -207,7 +225,10 @@ async fn revocation_failure_is_reported_but_cleanup_failure_after_revocation_is_
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend.clone(), [7; 32]);
+    let store = ProtectedStore::new(
+        backend.clone(),
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     let id = Id::default();
     sqlx::query("DROP TABLE protected_sessions")
         .execute(&pool)
@@ -232,7 +253,10 @@ async fn expired_snapshots_cannot_be_loaded_or_saved_even_if_backend_retains_the
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     let backend = SqliteBackend::new(pool.clone());
     backend.migrate().await.unwrap();
-    let store = ProtectedStore::new(backend.clone(), [7; 32]);
+    let store = ProtectedStore::new(
+        backend.clone(),
+        ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+    );
     // A valid historical anonymous session with two seconds left. Exercise the
     // authenticated absolute deadline independently of Tower/backend expiry.
     let issued_at = OffsetDateTime::now_utc().unix_timestamp() - 1798;

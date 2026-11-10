@@ -1,0 +1,34 @@
+[package]
+name = "octologin"
+description = "Sign in with GitHub for GitHub Apps: authorization with state and PKCE, code exchange, user identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+octoauth.workspace = true
+
+base64.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+# `getrandom` 0.2 draws the state and PKCE verifier; its `js` feature selects
+# `crypto.getRandomValues` on Workers and is inert elsewhere.
+getrandom_02.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+# No reqwest `stream` feature on wasm32: see octoauth's manifest.
+
+[dev-dependencies]
+static_assertions.workspace = true
+tokio.workspace = true
+wiremock.workspace = true

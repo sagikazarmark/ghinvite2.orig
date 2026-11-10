@@ -20,8 +20,11 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 axum = { workspace = true, features = ["tokio"] }
 ghinvite-core.workspace = true
+ghinvite-config.workspace = true
+ghinvite-email-vault.workspace = true
 ghinvite-github.workspace = true
 ghinvite-storage-sqlx.workspace = true
 ghinvite-web.workspace = true

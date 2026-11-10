@@ -1,3 +1,5 @@
+import { seedPersonalInstallation } from './installation-fixture.mjs';
+import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -10,19 +12,21 @@ let loseAcknowledgement = false;
 const decisions = [];
 const mf = new Miniflare({
   log: new Log(LogLevel.ERROR), modules: true,
-  scriptPath: fileURLToPath(new URL('./worker.mjs', import.meta.url)),
+  scriptPath: fileURLToPath(new URL('./decision-queue-worker.mjs', import.meta.url)),
   modulesRules: [{ type: 'CompiledWasm', include: ['**/*.wasm'] }],
   compatibilityDate: '2024-09-23', compatibilityFlags: ['nodejs_compat'],
-  kvNamespaces: ['SESSIONS'], d1Databases: ['DB'],
+  ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
+  kvNamespaces: ['SESSIONS', 'AUTHZ_CACHE'], d1Databases: ['DB'],
   bindings: {
-    GHINVITE_BASE_URL: 'https://queue.test',
-    GHINVITE_SESSION_SECRET: '07'.repeat(32), GHINVITE_RESTATE_INGRESS: 'https://restate.test',
-    GHINVITE_RESTATE_AUTH: 'local-unauthenticated',
+    P1_HOST: 'queue.test',
+    P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29', RESTATE_INGRESS_URL: 'https://restate.test',
+    RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-    GHINVITE_GITHUB_CLIENT_ID: 'dummy', GHINVITE_GITHUB_CLIENT_SECRET: 'dummy', GHINVITE_WEBHOOK_SECRET: 'dummy',
+    ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',
   },
   async outboundService(request) {
     if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
+    const revoked = signinRevocation(request); if (revoked) return revoked;
     if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
     if (/^https:\/\/restate.test\/InvitationRequest\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
@@ -31,6 +35,15 @@ const mf = new Miniflare({
       return Response.json(receipt);
     }
     if (request.url.endsWith('/decision_status')) return Response.json(receipt);
+    if (/^https:\/\/restate.test\/InvitationLink\/[A-Z0-9]+\/link_status$/.test(request.url)) {
+      const {link_id,admin} = await request.json();
+      assert.deepEqual(admin,{account_id:42,user_id:42});
+      return Response.json({link_id,creation:{link_id,account_id:42,installation_id:1,admin,
+        description:'Deadline fixture',approval_required:true,secret_sha256:'2a'.repeat(32),
+        targets:{organization:null,teams:[],repos:[{repo_id:10,repo_full_name:'octocat/api',grant:'read'}]}},
+        secret:{secret_generation:1,sha256:'2a'.repeat(32)},created_at:'2026-01-01T00:00:00Z',uses:1,revision:1,
+        revoked_at:null,revoked_by:null});
+    }
     throw new Error(`unexpected outbound ${request.url}`);
   },
 });
@@ -38,22 +51,22 @@ const mf = new Miniflare({
 try {
   const db = await mf.getD1Database('DB');
   for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
-    await db.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8').replace(/^--.*$/gm, '').replaceAll('\n', ' '));
+    await db.exec(readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8').replace(/^[ \t]*--.*$/gm, '').replaceAll('\n', ' '));
   }
-  await db.prepare("INSERT INTO installations VALUES (1,42,'octocat','User','2026-01-01T00:00:00Z',NULL,'[]')").run();
-  for (const user of [42, 99]) await db.prepare("INSERT INTO users VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
+  await seedPersonalInstallation(db);
+  for (const user of [42, 99]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   const link = '01ARZ3NDEKTSV4RRFFQ69G5FAV';
   let request = '01ARZ3NDEKTSV4RRFFQ69G5FAW';
-  await db.prepare(`INSERT INTO invitation_links (id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
-    VALUES (?,1,42,42,'2026-01-01T00:00:00Z','pull',1,'Deadline fixture',1,'{}')`).bind(link).run();
-  await db.prepare("INSERT INTO invitation_link_repos VALUES (?,10,'octocat/api')").bind(link).run();
+  await db.prepare(`INSERT INTO invitation_links (id,installation_id,account_id,created_by,created_at,approval_required,description,projection_revision,projection_content,secret_generation,secret_sha256)
+    VALUES (?,1,42,42,'2026-01-01T00:00:00Z',1,'Deadline fixture',1,'{}',1,'2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a')`).bind(link).run();
+  await db.prepare("INSERT INTO invitation_link_targets VALUES (?,'repo',10,'octocat/api','read')").bind(link).run();
   await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline,projection_revision)
     VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z',1)`).bind(request, link).run();
 
   const login = await mf.dispatchFetch('https://queue.test/login', { redirect: 'manual' });
   const state = new URL(login.headers.get('location')).searchParams.get('state');
   let cookie = login.headers.get('set-cookie').split(';')[0];
-  const callback = await mf.dispatchFetch(`https://queue.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie }, redirect: 'manual' });
+  const callback = await mf.dispatchFetch(`https://queue.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie, 'CF-Connecting-IP':'192.0.2.30' }, redirect: 'manual' });
   assert.equal(callback.status, 303, await callback.clone().text());
   cookie = callback.headers.get('set-cookie').split(';')[0];
   const queue = async () => {
@@ -163,8 +176,17 @@ try {
   const page = async (path = '/console/accounts/octocat/requests') => {
     const response = await mf.dispatchFetch(`https://queue.test${path}`, { headers: { cookie, 'x-test-observe-d1': '1' } });
     assert.equal(response.status, 200, await response.clone().text());
-    assert.equal(Number(response.headers.get('x-test-d1-queries')), 2, 'one authorization lookup + one queue statement, never N+1');
-    assert.ok(Number(response.headers.get('x-test-d1-rows-read')) < 350, 'bounded page work');
+    const statements = JSON.parse(response.headers.get('x-test-d1-classes'));
+    assert.deepEqual(statements.map(s => s.kind), [
+      'installation_login:repo', 'installation_login:org',
+      'installation_authority:repo', 'installation_authority:org',
+      'pending_badge', 'queue_page',
+    ], 'exact app-scoped discovery/authority, one scoped badge and one queue page; no per-row reads');
+    assert.equal(Number(response.headers.get('x-test-d1-queries')), statements.length);
+    assert.equal(Number(response.headers.get('x-test-d1-rows-read')), statements.reduce((sum, s) => sum + s.rows_read, 0));
+    // The navigation badge counts all scoped pending rows; only the seek page
+    // has a cardinality-independent bound. Observe them separately.
+    assert.ok(statements.find(s => s.kind === 'queue_page').rows_read < 350, 'bounded page work');
     const plans = JSON.parse(response.headers.get('x-test-d1-plans')).join('\n');
     assert.match(plans, /SEARCH r USING INDEX idx_pending_queue_seek \(queue_account_id=\?/);
     if (path.includes('?after=')) assert.ok(plans.includes('<expr>>?'), plans);
@@ -178,8 +200,9 @@ try {
   assert.ok(first.html.includes('>Deadline fixture</a>'));
   // Work stays page-bounded as another account and terminal history grow.
   const otherLink = '01ARZ3NDEKTSV4RRFFQ69G5FD0';
-  await db.prepare(`INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
-    VALUES(?,1,777,42,'2026-01-01T00:00:00Z','pull',1,'Private other account',1,'{}')`).bind(otherLink).run();
+  await seedPersonalInstallation(db, { installationId: 2, accountId: 777, login: 'other', repoId: 11 });
+  await db.prepare(`INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,approval_required,description,projection_revision,projection_content,secret_generation,secret_sha256)
+    VALUES(?,2,777,42,'2026-01-01T00:00:00Z',1,'Private other account',1,'{}',1,'2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a')`).bind(otherLink).run();
   await db.batch(Array.from({ length: 500 }, (_, i) => db.prepare(
     `INSERT INTO invitation_requests(id,invitation_link_id,requester_id,state,created_at,projection_revision)
      VALUES(?,?,99,?,'2025-01-01T00:00:00Z',1)`
@@ -216,15 +239,17 @@ try {
   assert.ok(mixed.html.indexOf(`/${id(3)}/approve`) < mixed.html.indexOf(`/${id(1)}/approve`));
   const boundary = Buffer.from(JSON.stringify({ created_at: '2026-01-01T00:00:00Z', request_id: id(3) })).toString('base64url');
   assert.equal(((await page(`/console/accounts/octocat/requests?after=${boundary}`)).html.match(/Approve request/g) ?? []).length, 1);
-  await db.prepare('DELETE FROM invitation_link_repos WHERE invitation_link_id=?').bind(link).run();
+  await db.prepare('DELETE FROM invitation_link_targets WHERE link_id=?').bind(link).run();
   const missingRepos = await page();
   assert.ok(missingRepos.html.includes('Repository details unavailable'));
   assert.ok(!missingRepos.html.includes('Approve request'));
-  await db.prepare("UPDATE invitation_links SET permission='corrupt' WHERE id=?").bind(link).run();
+  // Corrupt a decoded timestamp after removing target rows; malformed data
+  // must fail the page rather than look like an empty queue.
+  await db.prepare("UPDATE invitation_requests SET created_at='corrupt' WHERE id=?").bind(id(1)).run();
   const corrupt = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', { headers: { cookie } });
   assert.equal(corrupt.status, 500);
   assert.ok(!(await corrupt.text()).includes('No pending requests'));
-  await db.prepare("UPDATE invitation_links SET permission='pull' WHERE id=?").bind(link).run();
+  await db.prepare("UPDATE invitation_requests SET created_at='2026-01-01T00:00:00.000000001Z' WHERE id=?").bind(id(1)).run();
   await db.prepare("UPDATE invitation_requests SET state='expired'").run();
   const stale = await page(first.next);
   assert.ok(stale.html.includes('No more pending requests on this page'));
@@ -235,8 +260,8 @@ try {
     db.prepare('PRAGMA defer_foreign_keys=ON'),
     db.prepare('DELETE FROM invitation_links WHERE id=?').bind(link),
     db.prepare('UPDATE invitation_requests SET queue_account_id=NULL WHERE invitation_link_id=?').bind(link),
-    db.prepare(`INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
-      VALUES(?,1,42,42,'2026-01-01T00:00:00Z','pull',1,'Restored',1,'{}')`).bind(link),
+    db.prepare(`INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,approval_required,description,projection_revision,projection_content,secret_generation,secret_sha256)
+      VALUES(?,1,42,42,'2026-01-01T00:00:00Z',1,'Restored',1,'{}',1,'2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a')`).bind(link),
   ]);
   assert.ok((await page()).html.includes('>Restored</a>'));
   const failed = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', {

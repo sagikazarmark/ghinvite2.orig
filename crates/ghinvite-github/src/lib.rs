@@ -1,42 +1,61 @@
-//! GitHub-touching code paths for ghinvite. Two facade clients on top of one
-//! transport: [`oauth::UserApiClient`] (user-token, used by the web binary) and
-//! [`installation::InstallationClient`] (App-JWT → installation token, used by
-//! the Restate Service Worker). Webhook reception lives in the web crate.
+//! ghinvite's GitHub REST client, moved from gh-toolkit and trimmed to what
+//! ghinvite uses.
 //!
-//! Every HTTP call funnels through [`transport::HttpTransport`] so impls can be
-//! swapped (production, native and Cloudflare Workers:
-//! [`transport::ReqwestTransport`]; tests: [`mocks::MockTransport`] behind the
-//! `test-mock` feature).
+//! - [`transport`]: the [`HttpTransport`] seam. `transport::ReqwestTransport`
+//!   natively and `worker::WorkerFetchTransport` (wasm32 only) on Cloudflare
+//!   Workers never follow redirects and report whether a failed request
+//!   provably never left ([`TransportError::NotSent`]) or may have reached
+//!   GitHub.
+//! - [`credential`]: the sealed [`Credential`] family,
+//!   built from octoauth's installation tokens and app credentials. This crate
+//!   never mints or caches a token.
+//! - [`rest`]: [`Rest`](rest::Rest) and [`RestEnv`](rest::RestEnv), one HTTP
+//!   attempt per call, and exhaustive `Link` pagination that fails rather than
+//!   returning a prefix.
+//! - [`endpoints`]: the typed endpoints ghinvite calls, with their metadata.
+//! - [`error`]: secret-free [`ApiError`] classification.
+//! - [`apps`]: [`GithubApps`], the installed apps with their token caches
+//!   (octotoken providers), and the operations ghinvite calls GitHub with.
+//! - [`profiles`]: the token scopes ghinvite requests.
+//!
+//! Tests use `mocks::MockTransport` (feature `test-mock`) or the native
+//! `stub` HTTP fixture (feature `test-stub`).
 
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod apps;
+pub mod avatar;
+pub mod credential;
+pub mod email_invitation;
+pub mod endpoints;
 pub mod error;
-pub mod installation;
-pub mod jwt;
-pub mod oauth;
+pub mod ids;
 mod pagination;
 pub mod payloads;
-mod redact;
-pub mod token_cache;
+pub mod profiles;
+pub mod rest;
+pub mod roles;
 pub mod transport;
-mod util;
+
+/// Cloudflare Workers `fetch` transport (wasm32 only).
+#[cfg(target_arch = "wasm32")]
+pub mod worker;
 
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mocks;
 
-#[cfg(feature = "test-stub")]
+#[cfg(all(feature = "test-stub", not(target_arch = "wasm32")))]
 pub mod stub;
 
-#[cfg(target_arch = "wasm32")]
-pub mod wasm_smoke;
-
-// Re-exports filled in as each module gains its public types:
-pub use error::{Error, RateLimit, RateLimitScope, Result};
-pub use installation::{
-    CollaboratorAddition, CollaboratorRole, InstallationClient, InvitationDeletion,
+pub use apps::{
+    AppSlot, AppUnavailable, GithubApp, GithubApps, InstallationRest, InstalledApp, TokenCallError,
+    TokenSource,
 };
-pub use oauth::{AuthorizeUrl, OAuthConfig, OrgMembership, UserApiClient};
-// `redact` itself stays private — bodies are summarised inside this crate —
-// but the rule for bounding an upstream-supplied code is needed by the web
-// crate too, which reads the same kind of value off GitHub's callback query
-// string and off the installations it lists.
-pub use redact::{OAUTH_ERROR_CODES, UNRECOGNIZED, bounded_upstream_code};
-pub use transport::{HttpTransport, Method, Request, Response};
+pub use credential::{AppCredential, Credential, InstallationCredential};
+pub use error::{ApiError, CallError};
+pub use roles::RepoRole;
+pub use transport::{HttpTransport, HttpTransportDyn, Method, Request, Response, TransportError};
+
+/// A boxed `Send` future, as returned by object-safe adapters.
+pub type BoxFut<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;

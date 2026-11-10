@@ -104,3 +104,19 @@ asking for the same attempt again.
 Unchanged: uncertainty is never a rejection, the periodic recheck still drives
 unavailable and unknown observations back to available, and an acceptance resting
 on a recent observation consumes its use and retains its receipt like any other.
+
+## P1 amendment (2026-10-16): known-invitation withdrawal credentials
+
+Cancellation uses the same explicit app registry and broker as delivery. Before
+deleting a known owned invitation it verifies the current installation's numeric
+App ID and account ID with the App JWT, then verifies the repository's numeric
+ID, owner ID and expected full name with the read-only repository profile.
+Only after those checks does it obtain the repository-invite write profile and
+call the typed DELETE endpoint. There is no unrestricted legacy token fallback.
+
+Only a 204 confirms this cancellation. A 404 does not establish its cause;
+uncertain results remain unsettled and read-only reconciliation determines the
+upstream state. Foreign invitations still stop local tracking without DELETE.
+Focused native tests exercise profile separation, transferred/replaced identity,
+suspension, wrong app/account, and 204/404/503 outcomes. Actual owner/runtime
+regressions remain a separate gate from those HTTP-boundary tests.

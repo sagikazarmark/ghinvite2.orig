@@ -73,6 +73,7 @@ fn render_both(values: LinkFormValues, repos: Vec<RepositoryChoice>) -> (String,
     let island = render(move || {
         rsx! {
             LinkFormIsland {
+                eligibility: Default::default(),
                 action: ACTION.to_string(),
                 values: values.clone(),
                 repos: repos.clone(),
@@ -105,6 +106,16 @@ fn over_long_note() -> String {
 
 fn failed_submission() -> LinkFormValues {
     LinkFormValues {
+        access_lifetime_hours: String::new(),
+        email_domains: String::new(),
+        expiration_timestamp: String::new(),
+        invitation_lifetime_seconds: String::new(),
+        include_organization: false,
+        selected_team_ids: vec![],
+        invitation_lifetime_hours: "168".into(),
+        abuse_threshold_per_hour: String::new(),
+        budget_share_pct: "50".into(),
+        never_expires: false,
         description: "   ".to_string(),
         permission: "owner".to_string(),
         approval_required: true,
@@ -112,7 +123,17 @@ fn failed_submission() -> LinkFormValues {
         expires_in_days: "0".to_string(),
         internal_note: over_long_note(),
         selected_repo_ids: vec![999],
+        repo_grants: vec!["999:push".into()],
         errors: LinkFormErrors {
+            access_lifetime_hours: None,
+            email_domains: None,
+            expiration_timestamp: None,
+            invitation_lifetime_seconds: None,
+            organization: None,
+            teams: None,
+            invitation_lifetime_hours: None,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: None,
             internal_note: Some(link_form::INTERNAL_NOTE_TOO_LONG.to_string()),
             summary: vec![link_form::SUMMARY_MESSAGE.to_string()],
             description: Some(link_form::DESCRIPTION_REQUIRED.to_string()),
@@ -120,6 +141,7 @@ fn failed_submission() -> LinkFormValues {
             max_uses: Some(link_form::MAX_USES_NOT_POSITIVE.to_string()),
             expires_in_days: Some(link_form::EXPIRES_IN_DAYS_NOT_POSITIVE.to_string()),
             repo_scope: Some(link_form::REPO_SCOPE_REQUIRED.to_string()),
+            repo_grants: None,
         },
     }
 }
@@ -151,6 +173,7 @@ fn numeric_guardrails_preserve_raw_values_and_metadata_on_the_first_pass() {
         let values = LinkFormValues {
             description: "Workshop".into(),
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             max_uses: raw.into(),
             expires_in_days: raw.into(),
             errors: LinkFormErrors {
@@ -195,7 +218,13 @@ fn assert_numeric_input(html: &str, name: &str, raw: &str, error: Option<&str>) 
     ] {
         assert!(input.contains(&attribute), "missing {attribute}: {input}");
     }
-    assert!(!input.contains(" max="));
+    if name == "budget_share_pct" {
+        assert!(input.contains(" max=\"100\""));
+    } else if name == "invitation_lifetime_hours" {
+        assert!(input.contains(" max=\"168\""));
+    } else {
+        assert!(!input.contains(" max="));
+    }
     assert!(!input.contains(" required="));
     let descriptions = if error.is_some() {
         format!("{name}-help {name}-error")
@@ -244,6 +273,7 @@ fn every_permission_and_display_fallback_renders_identically_on_the_first_pass()
             description: "Workshop".into(),
             permission: raw.into(),
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             errors: if supported {
                 LinkFormErrors::default()
             } else {
@@ -312,6 +342,16 @@ fn server_only_errors_render_identically() {
     // rather than rely on its own validators, and a summary-only message
     // must land in the alert.
     let values = LinkFormValues {
+        access_lifetime_hours: String::new(),
+        email_domains: String::new(),
+        expiration_timestamp: String::new(),
+        invitation_lifetime_seconds: String::new(),
+        include_organization: false,
+        selected_team_ids: vec![],
+        invitation_lifetime_hours: "168".into(),
+        abuse_threshold_per_hour: String::new(),
+        budget_share_pct: "50".into(),
+        never_expires: false,
         description: "AI coding workshop".to_string(),
         permission: "push".to_string(),
         approval_required: true,
@@ -319,6 +359,7 @@ fn server_only_errors_render_identically() {
         expires_in_days: "45".to_string(),
         internal_note: String::new(),
         selected_repo_ids: vec![10, 12],
+        repo_grants: vec!["10:push".into(), "12:push".into()],
         errors: LinkFormErrors {
             summary: vec![
                 link_form::SUMMARY_MESSAGE.to_string(),
@@ -343,6 +384,16 @@ fn client_validation_failures_do_not_drop_server_only_diagnostics_on_first_rende
         "Contact an account administrator before retrying.",
     ];
     let values = LinkFormValues {
+        access_lifetime_hours: String::new(),
+        email_domains: String::new(),
+        expiration_timestamp: String::new(),
+        invitation_lifetime_seconds: String::new(),
+        include_organization: false,
+        selected_team_ids: vec![],
+        invitation_lifetime_hours: "168".into(),
+        abuse_threshold_per_hour: String::new(),
+        budget_share_pct: "50".into(),
+        never_expires: false,
         description: "   ".into(),
         permission: "admin".into(),
         approval_required: true,
@@ -350,7 +401,17 @@ fn client_validation_failures_do_not_drop_server_only_diagnostics_on_first_rende
         expires_in_days: "45".into(),
         internal_note: "Preserve the rejected request".into(),
         selected_repo_ids: vec![999],
+        repo_grants: vec!["999:push".into()],
         errors: LinkFormErrors {
+            access_lifetime_hours: None,
+            email_domains: None,
+            expiration_timestamp: None,
+            invitation_lifetime_seconds: None,
+            organization: None,
+            teams: None,
+            invitation_lifetime_hours: None,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: None,
             internal_note: None,
             summary: summary.map(str::to_string).to_vec(),
             description: Some(link_form::DESCRIPTION_REQUIRED.into()),
@@ -358,6 +419,7 @@ fn client_validation_failures_do_not_drop_server_only_diagnostics_on_first_rende
             max_uses: Some(max_uses_error.into()),
             expires_in_days: None,
             repo_scope: Some(link_form::REPO_SCOPE_REQUIRED.into()),
+            repo_grants: None,
         },
     };
 
@@ -411,6 +473,7 @@ fn raw_parse_failures_coexist_with_server_only_diagnostics_on_first_render() {
             max_uses: max_uses.into(),
             expires_in_days: expires_in_days.into(),
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             errors: LinkFormErrors {
                 summary: vec![link_form::SUMMARY_MESSAGE.into(), form_error.into()],
                 description: Some(description_error.into()),
@@ -444,6 +507,7 @@ fn form_level_rejection_without_field_errors_renders_identically() {
     let values = LinkFormValues {
         description: "Workshop".into(),
         selected_repo_ids: vec![10],
+        repo_grants: vec!["10:push".into()],
         errors: LinkFormErrors {
             summary: vec![link_form::SUMMARY_MESSAGE.into(), message.into()],
             ..LinkFormErrors::default()
@@ -551,6 +615,9 @@ fn island_props_from_the_page_blob_round_trip_into_the_component() {
     // `LinkFormIslandProps`; make sure a blob produced by the page code
     // renders to the same markup as the typed props.
     let props = LinkFormIslandProps {
+        access_removal_enabled: false,
+        eligibility: Default::default(),
+        organization: Default::default(),
         csrf_token: None,
         action: ACTION.to_string(),
         values: failed_submission(),
@@ -563,4 +630,203 @@ fn island_props_from_the_page_blob_round_trip_into_the_component() {
 
     let (server, island) = render_both(parsed.values, parsed.repos);
     assert_eq!(island, server);
+}
+
+#[test]
+fn heterogeneous_grants_and_raw_grant_refusals_have_ssr_island_parity() {
+    for grants in [
+        vec!["10:triage", "11:maintain"],
+        vec!["10:owner", "11:maintain"],
+        vec!["10:pull", "10:push", "11:admin"],
+        vec!["11:pull"],
+    ] {
+        let values = LinkFormValues {
+            description: "Mixed grants".into(),
+            selected_repo_ids: vec![10, 11],
+            repo_grants: grants.iter().map(|value| (*value).into()).collect(),
+            errors: if grants[0] == "10:triage" {
+                Default::default()
+            } else {
+                LinkFormErrors {
+                    summary: vec![link_form::SUMMARY_MESSAGE.into()],
+                    repo_grants: Some(link_form::REPO_GRANT_REQUIRED.into()),
+                    ..Default::default()
+                }
+            },
+            ..Default::default()
+        };
+        assert_parity(values, acme_repos());
+    }
+}
+
+#[test]
+fn lifetime_and_threshold_server_island_rendering_preserves_defaults_and_rejections() {
+    for (lifetime, threshold, lifetime_error, threshold_error) in [
+        ("168", "", None, None),
+        ("1", "4294967295", None, None),
+        (
+            "169",
+            "0",
+            Some(link_form::INVITATION_LIFETIME_INVALID),
+            Some(link_form::ABUSE_THRESHOLD_INVALID),
+        ),
+        (
+            "1.5",
+            "1e2",
+            Some(link_form::INVITATION_LIFETIME_INVALID),
+            Some(link_form::ABUSE_THRESHOLD_INVALID),
+        ),
+    ] {
+        let values = LinkFormValues {
+            invitation_lifetime_hours: lifetime.into(),
+            abuse_threshold_per_hour: threshold.into(),
+            errors: LinkFormErrors {
+                summary: if lifetime_error.is_some() {
+                    vec![link_form::SUMMARY_MESSAGE.into()]
+                } else {
+                    vec![]
+                },
+                invitation_lifetime_hours: lifetime_error.map(str::to_owned),
+                abuse_threshold_per_hour: threshold_error.map(str::to_owned),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (server, island) = render_both(values, acme_repos());
+        assert_eq!(island, server);
+        assert_numeric_input(
+            &island,
+            "invitation_lifetime_hours",
+            lifetime,
+            lifetime_error,
+        );
+        assert_numeric_input(
+            &island,
+            "abuse_threshold_per_hour",
+            threshold,
+            threshold_error,
+        );
+    }
+}
+
+#[test]
+fn budget_share_server_island_rendering_preserves_defaults_and_rejections() {
+    for (raw, error) in [
+        ("50", None),
+        ("1", None),
+        ("100", None),
+        ("", None),
+        ("0", Some(link_form::BUDGET_SHARE_INVALID)),
+        ("101", Some(link_form::BUDGET_SHARE_INVALID)),
+        ("1.5", Some(link_form::BUDGET_SHARE_INVALID)),
+    ] {
+        let values = LinkFormValues {
+            budget_share_pct: raw.into(),
+            errors: LinkFormErrors {
+                summary: if error.is_some() {
+                    vec![link_form::SUMMARY_MESSAGE.into()]
+                } else {
+                    vec![]
+                },
+                budget_share_pct: error.map(str::to_owned),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (server, island) = render_both(values, acme_repos());
+        assert_eq!(island, server, "share {raw}");
+        assert_numeric_input(&island, "budget_share_pct", raw, error);
+    }
+}
+
+#[test]
+fn organization_team_and_mixed_form_parity_including_preserved_refusals() {
+    use ghinvite_ui::link_form::{OrganizationChoice, OrganizationOffer, TeamChoice};
+    let available = OrganizationOffer::Available(OrganizationChoice {
+        id: 100,
+        login: "acme".into(),
+        teams: vec![
+            TeamChoice {
+                id: 7,
+                slug: "learners".into(),
+                name: "Learners".into(),
+                externally_managed: false,
+            },
+            TeamChoice {
+                id: 8,
+                slug: "managed".into(),
+                name: "Managed".into(),
+                externally_managed: true,
+            },
+        ],
+    });
+    for organization in [
+        available,
+        OrganizationOffer::MissingApp,
+        OrganizationOffer::Unavailable,
+    ] {
+        for mixed in [false, true] {
+            let values = LinkFormValues {
+                description: "Workshop".into(),
+                include_organization: true,
+                selected_team_ids: vec![7],
+                approval_required: true,
+                selected_repo_ids: if mixed { vec![10, 11] } else { vec![] },
+                repo_grants: vec!["10:pull".into(), "11:maintain".into()],
+                errors: if matches!(organization, OrganizationOffer::Available(_)) {
+                    Default::default()
+                } else {
+                    LinkFormErrors {
+                        organization: Some(link_form::ORGANIZATION_UNAVAILABLE.into()),
+                        teams: Some(link_form::TEAM_SELECTION_INVALID.into()),
+                        summary: vec![link_form::SUMMARY_MESSAGE.into()],
+                        ..Default::default()
+                    }
+                },
+                ..Default::default()
+            };
+            let server_values = values.clone();
+            let server_org = organization.clone();
+            let server = render(
+                move || rsx! {LinkCreateForm {action:ACTION,form:server_values.clone(),repos:acme_repos(),organization:server_org.clone()}},
+            );
+            let island_org = organization.clone();
+            let island = render(
+                move || rsx! {LinkFormIsland {eligibility:Default::default(),action:ACTION,values:values.clone(),repos:acme_repos(),organization:island_org.clone(),now:now()}},
+            );
+            assert_eq!(server, island);
+            assert!(server.contains("Invitation preview"));
+        }
+    }
+}
+
+#[test]
+fn exact_duplicate_guardrails_have_first_frame_parity() {
+    for (expiration, lifetime, error) in [
+        ("2027-04-05T12:34:56.123456789+02:00", "3601", false),
+        ("2020-01-01T00:00:00Z", "3599", true),
+    ] {
+        let values = LinkFormValues {
+            description: "Duplicate".into(),
+            expiration_timestamp: expiration.into(),
+            invitation_lifetime_seconds: lifetime.into(),
+            selected_repo_ids: vec![10],
+            repo_grants: vec!["10:pull".into()],
+            errors: if error {
+                LinkFormErrors {
+                    summary: vec![link_form::SUMMARY_MESSAGE.into()],
+                    expiration_timestamp: Some(link_form::EXACT_EXPIRATION_INVALID.into()),
+                    invitation_lifetime_seconds: Some(link_form::EXACT_LIFETIME_INVALID.into()),
+                    ..Default::default()
+                }
+            } else {
+                Default::default()
+            },
+            ..Default::default()
+        };
+        let (server, island) = render_both(values, acme_repos());
+        assert_eq!(server, island);
+        assert!(server.contains(expiration));
+        assert!(server.contains(lifetime));
+    }
 }

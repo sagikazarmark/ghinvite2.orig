@@ -1,0 +1,84 @@
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+tests:
+  - name: source failure becomes unavailable, not healthy
+    interval: 1m
+    input_series:
+      - series: 'p1_source_available{source="journals"}'
+        values: '0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: P1SourceUnavailable
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: P1SourceUnavailable
+        exp_alerts:
+          - exp_labels: {source: journals, severity: warning}
+            exp_annotations: {summary: "A P1 operational source is incomplete, stale, overflowing or unavailable"}
+  - name: sustained signature failure only
+    interval: 1m
+    input_series:
+      - series: 'p1_webhook_signature_failure_window{app="repo",reason="invalid"}'
+        values: '1 1 1 1 1 1'
+      - series: 'p1_log_window_seconds'
+        values: '60 60 60 60 60 60'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: P1WebhookSignatureFailures
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: P1WebhookSignatureFailures
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: "Sustained P1 webhook signature rejection"}
+  - name: typed report has already applied one-hour unknown threshold
+    interval: 1m
+    input_series:
+      - series: 'p1_delivery_over_threshold{state="unknown"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: P1OutcomeUnknown
+        exp_alerts:
+          - exp_labels: {state: unknown, severity: warning}
+            exp_annotations: {summary: "P1 delivery has remained OutcomeUnknown beyond one hour"}
+  - name: baseline comparison requires matching clock and evidence
+    interval: 1m
+    input_series:
+      - series: 'p1_admission_latency_p95_seconds{clock="worker_host"}'
+        values: '2 2'
+      - series: 'p1_baseline_admission_latency_p95_seconds{clock="native_monotonic"}'
+        values: '1 1'
+    promql_expr_test:
+      - expr: 'p1_admission_latency_p95_seconds > on(clock) p1_baseline_admission_latency_p95_seconds * 1.2'
+        eval_time: 1m
+        exp_samples: []
+  - name: old failure in a long window cannot pretend to be sustained new failures
+    interval: 1m
+    input_series:
+      - series: 'p1_webhook_signature_failure_window{app="repo",reason="invalid"}'
+        values: '1 1 1 1 1 1'
+      - series: 'p1_log_window_seconds'
+        values: '3600 3600 3600 3600 3600 3600'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: P1WebhookSignatureFailures
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: P1SignatureWindowUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: "P1 log window is too wide to establish sustained signature failures"}
+  - name: a first-day positive spam restriction alerts despite incomplete full-day coverage
+    interval: 1m
+    input_series:
+      - series: 'p1_source_available{source="budget_limits"}'
+        values: '0'
+      - series: 'p1_budget_spammed_observed{app="org",account_id="8"}'
+        values: '1'
+    alert_rule_test:
+      - eval_time: 0m
+        alertname: P1Spammed
+        exp_alerts:
+          - exp_labels: {severity: warning, app: org, account_id: '8'}
+            exp_annotations: {summary: "P1 observed a positive spam restriction in its retained observation window"}

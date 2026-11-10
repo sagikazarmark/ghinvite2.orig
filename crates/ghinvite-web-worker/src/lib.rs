@@ -8,8 +8,12 @@
 //! `--target wasm32-unknown-unknown`.
 #![cfg(target_arch = "wasm32")]
 
+mod authority_cache;
+mod daily_digest;
+mod rate_limit;
+
 use ghinvite_web::session_store::{Backend, ProtectedStore};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tower_sessions::{cookie::time::Duration, session::Id, session_store};
 use worker::{Context, Env, HttpRequest, event};
 
@@ -78,8 +82,14 @@ impl Backend for KvSessionStore {
             let put = self.kv.put_bytes(&key, payload).map_err(|_| kv_error())?;
             // KV requires >=60s retention, even when logical validity is shorter.
             // ProtectedStore enforces the authenticated deadline independently.
-            let unix = expires_at.max(chrono::Utc::now().timestamp() + 61) as u64;
-            put.expiration(unix).execute().await.map_err(|_| kv_error())
+            let ttl = ghinvite_web::session_store::session_ttl(
+                expires_at,
+                chrono::Utc::now().timestamp(),
+            );
+            put.expiration_ttl(ttl)
+                .execute()
+                .await
+                .map_err(|_| kv_error())
         })
         .await
     }
@@ -133,44 +143,29 @@ fn kv_error() -> session_store::Error {
 }
 
 fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
-    use ghinvite_github::oauth::OAuthConfig;
-
-    let base_url = env.var("GHINVITE_BASE_URL")?.to_string();
-
-    let secret_str = env.secret("GHINVITE_SESSION_SECRET")?.to_string();
-    let session_secret =
-        ghinvite_web::config::parse_session_secret(&secret_str).map_err(worker_err)?;
-    let restate_mode = env.var("GHINVITE_RESTATE_AUTH").ok().map(|v| v.to_string());
-    let restate_api_key = env
-        .secret("GHINVITE_RESTATE_API_KEY")
-        .ok()
-        .map(|v| v.to_string());
-    let restate_auth = ghinvite_web::restate_client::RestateAuth::from_config(
-        restate_mode.as_deref(),
-        restate_api_key.as_deref(),
+    ghinvite_web::link_secret_entropy::configure(
+        env.var("P1_LINK_SECRET_FIXTURE")
+            .ok()
+            .map(|v| v.to_string())
+            .as_deref(),
     )
     .map_err(worker_err)?;
-
-    Ok(ghinvite_web::WebConfig {
-        base_url: base_url.clone(),
-        session_secret,
-        restate_ingress: env.var("GHINVITE_RESTATE_INGRESS")?.to_string(),
-        restate_auth,
-        oauth: OAuthConfig {
-            client_id: env.secret("GHINVITE_GITHUB_CLIENT_ID")?.to_string(),
-            client_secret: env.secret("GHINVITE_GITHUB_CLIENT_SECRET")?.to_string(),
-            redirect_uri: format!("{base_url}/oauth/callback"),
-        },
-        github_install_url: env.var("GHINVITE_GITHUB_INSTALL_URL")?.to_string(),
-        cookie_secure: true,
-        webhook_secret: env
-            .secret("GHINVITE_WEBHOOK_SECRET")?
-            .to_string()
-            .into_bytes(),
-        // Cloudflare Static Assets serve `/assets/*` before the Worker is
-        // invoked (`[assets]` in wrangler/web.toml); no in-Worker route.
-        island_assets_dir: None,
+    // A successful configuration is immutable for this isolate. Failed
+    // initialization publishes nothing and never falls back to unsigned ingress.
+    static CONFIG: OnceLock<ghinvite_web::WebConfig> = OnceLock::new();
+    if let Some(config) = CONFIG.get() {
+        return Ok(config.clone());
+    }
+    let config = ghinvite_web::WebConfig::for_production(|field| {
+        env.secret(field)
+            .ok()
+            .map(|v| v.to_string())
+            .or_else(|| env.var(field).ok().map(|v| v.to_string()))
     })
+    .map_err(worker_err)?;
+    tracing::info!(fingerprint = %config.keyring.fingerprint(), "P1 keyring loaded");
+    let _ = CONFIG.set(config);
+    Ok(CONFIG.get().expect("configuration initialized").clone())
 }
 
 /// Map web/storage/etc errors into `worker::Error` for the fetch entry point.
@@ -196,9 +191,16 @@ impl std::io::Write for ConsoleWriter {
 #[cfg(feature = "runtime-tests")]
 mod fixture;
 
+#[cfg(feature = "runtime-tests")]
+mod broker_fixture;
+#[cfg(feature = "runtime-tests")]
+mod email_review_fixture;
+#[cfg(feature = "runtime-tests")]
+mod email_vault_fixture;
+
 #[event(fetch)]
 async fn fetch(
-    req: HttpRequest,
+    mut req: HttpRequest,
     env: Env,
     _ctx: Context,
 ) -> worker::Result<axum::response::Response> {
@@ -212,16 +214,119 @@ async fn fetch(
         .try_init();
 
     #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/rate-limit/") {
+        return Ok(rate_limit::fixture(req, &env).await);
+    }
+
+    #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/broker/") {
+        return broker_fixture::fetch(req).await;
+    }
+
+    #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/email-review/") {
+        return email_review_fixture::fetch(req, &env).await;
+    }
+    #[cfg(feature = "runtime-tests")]
+    if req.uri().path().starts_with("/__fixture/email-vault/") {
+        return email_vault_fixture::fetch(req, &env).await;
+    }
+
+    #[cfg(feature = "runtime-tests")]
     if req.uri().path().starts_with("/__fixture/") {
         return fixture::fetch(req, &env).await;
     }
 
-    let config = config_from_env(&env)?;
+    let config = match config_from_env(&env) {
+        Ok(config) => config,
+        Err(error) => {
+            // All configuration parsers return fixed field names and bounded
+            // diagnostics, never their input values or parser source chains.
+            tracing::error!(
+                alert = "p1_configuration",
+                configuration = %error,
+                "Web startup configuration invalid"
+            );
+            use axum::response::IntoResponse;
+            return Ok((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Service configuration unavailable",
+            )
+                .into_response());
+        }
+    };
+    let email_enabled = config.bulk_enabled && config.organization_delivery_enabled;
+    let email_ring = match ghinvite_config::bulk::email_keyring(
+        email_enabled,
+        env.secret("P1_EMAIL_KEYRING").ok().map(|v| v.to_string()),
+    ) {
+        Ok(ring) => ring,
+        Err(error) => {
+            tracing::error!(alert="p1_configuration",configuration=%error,"Web startup configuration invalid");
+            use axum::response::IntoResponse;
+            return Ok((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Service configuration unavailable",
+            )
+                .into_response());
+        }
+    };
+    let edge_limits = match rate_limit::WorkerRateLimiter::from_env(&env) {
+        Ok(limiter) => Arc::new(limiter),
+        Err(_) => {
+            use axum::response::IntoResponse;
+            tracing::error!(
+                alert = "p1_configuration",
+                "Required rate-limit bindings unavailable"
+            );
+            return Ok((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Service configuration unavailable",
+            )
+                .into_response());
+        }
+    };
+    if let Some(ip) = rate_limit::client_ip(&req) {
+        req.extensions_mut().insert(ip);
+    }
+    let authority_cache = match authority_cache::KvAuthorityCache::from_env(&env) {
+        Ok(cache) => Arc::new(cache),
+        Err(_) => {
+            use axum::response::IntoResponse;
+            tracing::error!(
+                alert = "p1_configuration",
+                "Required authority cache binding unavailable"
+            );
+            return Ok((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "Service configuration unavailable",
+            )
+                .into_response());
+        }
+    };
     let db = env.d1("DB")?;
-    let storage: Arc<dyn ghinvite_web::WebStorage> =
-        Arc::new(ghinvite_storage_d1::D1Storage::new(db));
-    let transport: Arc<dyn ghinvite_github::HttpTransport> =
-        Arc::new(ghinvite_github::transport::ReqwestTransport::new().map_err(worker_err)?);
+    let storage = Arc::new(ghinvite_storage_d1::D1Storage::new(db));
+    // Built per request: the apps' installation-token caches are
+    // isolate-scope statics inside `GithubApps` (PD-4).
+    let github = match ghinvite_web::WebGithub::new(
+        Arc::new(ghinvite_github::worker::WorkerFetchTransport::new()),
+        config.github_apps.clone(),
+    ) {
+        Ok(github) => github,
+        Err(error) => {
+            tracing::error!(
+                alert = "p1_configuration",
+                code = error.code(),
+                "GitHub client configuration invalid"
+            );
+            use axum::response::IntoResponse;
+            return Ok((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Service configuration unavailable",
+            )
+                .into_response());
+        }
+    };
     let restate = Arc::new(
         ghinvite_web::RestateClient::with_auth(
             &config.restate_ingress,
@@ -229,8 +334,22 @@ async fn fetch(
         )
         .map_err(worker_err)?,
     );
-    let session_store = ProtectedStore::new(KvSessionStore::from_env(&env)?, config.session_secret);
-    let state = ghinvite_web::AppState::new(storage, transport, restate, config);
+    let session_store =
+        ProtectedStore::new(KvSessionStore::from_env(&env)?, config.keyring.clone());
+    let email_vault = email_ring.filter(|_| email_enabled).map(|ring| {
+        Arc::new(
+            ghinvite_email_vault::EmailVault::new(storage.clone(), ring)
+                .with_review_storage(storage.clone()),
+        )
+    });
+    let state = ghinvite_web::AppState::new(storage, github, restate, config)
+        .with_edge_limits(edge_limits)
+        .with_authority_cache(authority_cache);
+    let state = if let Some(vault) = email_vault {
+        state.with_bulk_email_vault(vault)
+    } else {
+        state
+    };
     let app = ghinvite_web::build_app(state, session_store);
 
     // `worker::axum::run` does not exist in worker 0.8. The axum `Router`

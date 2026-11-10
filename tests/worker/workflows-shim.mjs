@@ -20,12 +20,26 @@ export default {
 
 async function execute(request, env, ctx) {
     if (request.headers.has('x-test-lose-audit-ack')) {
-      // Lose a successful installation-created audit write at the binding seam.
-      // Other installation events remain free to drain before replacement.
+      // Lose only the acknowledgement of a committed installation-created
+      // transaction. Preserve the old standalone-audit path for retained tests.
       let lost = 0;
+      const originals = new WeakMap();
+      const creates = new WeakSet();
+      const creation = args => {
+        if (args[3] === 'installation.created') return true;
+        if (typeof args[0] !== 'string') return false;
+        try { return JSON.parse(args[0]).events?.some(event => event.event_type === 'installation.created') === true; }
+        catch { return false; }
+      };
       const statement = target => new Proxy(target, { get(target, key) {
         if (key === 'constructor') return target.constructor;
-        if (key === 'bind') return (...args) => args[3] === 'installation.created' ? statement(target.bind(...args)) : target.bind(...args);
+        if (key === 'bind') return (...args) => {
+          const bound = target.bind(...args);
+          if (!creation(args)) return bound;
+          const proxy = statement(bound);
+          originals.set(proxy,bound); creates.add(proxy);
+          return proxy;
+        };
         if (key === 'run') return async (...args) => {
           await target.run(...args);
           lost++;
@@ -37,6 +51,12 @@ async function execute(request, env, ctx) {
       const db = new Proxy(env.DB, { get(target, key) {
         if (key === 'constructor') return target.constructor;
         if (key === 'prepare') return sql => /INSERT INTO audit_events/i.test(sql) ? statement(target.prepare(sql)) : target.prepare(sql);
+        if (key === 'batch') return async statements => {
+          const shouldLose = statements.some(statement=>creates.has(statement));
+          const result = await target.batch(statements.map(statement=>originals.get(statement)??statement));
+          if (shouldLose) { lost++; throw new Error('fixture: committed installation batch acknowledgement lost'); }
+          return result;
+        };
         const value = target[key];
         return typeof value === 'function' ? value.bind(target) : value;
       } });

@@ -1,0 +1,170 @@
+{
+  "state": {
+    "buckets": {
+      "content": {
+        "spec": {
+          "id": "content",
+          "windows": [
+            [
+              80,
+              60
+            ],
+            [
+              500,
+              3600
+            ]
+          ],
+          "min_spacing_secs": 1
+        },
+        "closed_until": null
+      },
+      "org": {
+        "spec": {
+          "id": "org",
+          "windows": [
+            [
+              500,
+              86400
+            ]
+          ],
+          "min_spacing_secs": 0
+        },
+        "closed_until": 5000
+      },
+      "repo:10": {
+        "spec": {
+          "id": "repo:10",
+          "windows": [
+            [
+              50,
+              86400
+            ]
+          ],
+          "min_spacing_secs": 0
+        },
+        "closed_until": null
+      }
+    },
+    "slots": {
+      "1": {
+        "refunded": [],
+        "buckets": [
+          "content",
+          "org"
+        ],
+        "tag": "01J0000000000000000000000A",
+        "at": 1000
+      },
+      "2": {
+        "refunded": [
+          "repo:10"
+        ],
+        "buckets": [
+          "content"
+        ],
+        "tag": null,
+        "at": 1001
+      },
+      "3": {
+        "refunded": [],
+        "buckets": [
+          "content",
+          "org"
+        ],
+        "tag": "01J0000000000000000000000A",
+        "at": 1003
+      },
+      "5": {
+        "refunded": [],
+        "buckets": [
+          "repo:10"
+        ],
+        "tag": null,
+        "at": 1004
+      }
+    },
+    "holds": {
+      "4": {
+        "charge": {
+          "refunded": [],
+          "buckets": [
+            "org"
+          ],
+          "tag": null,
+          "at": 1003
+        },
+        "expires_at": 1303
+      }
+    },
+    "reservations": {
+      "reserve-1": {
+        "at": 1000,
+        "value": {
+          "Granted": {
+            "slot": 1
+          }
+        }
+      },
+      "reserve-2": {
+        "at": 1000,
+        "value": {
+          "RetryAt": 1001
+        }
+      },
+      "reserve-3": {
+        "at": 1000,
+        "value": {
+          "UnknownBucket": "unknown"
+        }
+      },
+      "reserve-4": {
+        "at": 1001,
+        "value": {
+          "Granted": {
+            "slot": 2
+          }
+        }
+      }
+    },
+    "hold_keys": {
+      "hold-1": {
+        "at": 1002,
+        "value": {
+          "Held": {
+            "hold": {
+              "id": 3,
+              "expires_at": 1122
+            },
+            "expires_at": 1122
+          }
+        }
+      },
+      "hold-2": {
+        "at": 1003,
+        "value": {
+          "Held": {
+            "hold": {
+              "id": 4,
+              "expires_at": 1303
+            },
+            "expires_at": 1303
+          }
+        }
+      },
+      "hold-3": {
+        "at": 1003,
+        "value": {
+          "RetryAt": 1004
+        }
+      }
+    },
+    "commits": {
+      "3": {
+        "at": 1003,
+        "value": 3
+      }
+    },
+    "watermark": 1004,
+    "next_id": 6
+  }
+}

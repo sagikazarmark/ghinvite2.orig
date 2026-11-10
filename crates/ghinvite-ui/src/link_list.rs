@@ -126,6 +126,8 @@ pub fn select_links<'a>(
 
 #[derive(Clone, PartialEq, Props)]
 pub struct LinkListPageProps {
+    #[props(default)]
+    pub authority_pending: bool,
     pub signed_in_login: Option<String>,
     pub flash: Option<crate::flash::Flash>,
     pub account_login: String,
@@ -150,6 +152,10 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
             active_nav: Some("links".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
+                if props.authority_pending {
+                    p { role: "status", class: "mb-4", "Checking access… Some results are unavailable while GitHub is busy. Try again in a minute." }
+                }
+
                 header { class: "mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between",
                     div {
                         h1 { class: "text-xl font-semibold tracking-tight", "Invitation links" }
@@ -218,7 +224,11 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
                                                 tr {
                                                     td {
                                                         a { class: "link link-primary font-medium", href: "{base}/{link.id}", "{link.description}" }
-                                                        p { class: "mt-0.5 text-xs text-muted", "Invitation code: ", span { class: "font-mono", "{link.id}" } }
+                                                        p { class: "mt-0.5 text-xs text-muted", "Link ID: ", span { class: "font-mono", "{link.id}" } }
+                                                        p { class: "text-xs text-muted", "Secret generation: {link.secret.secret_generation}" }
+                                                        for repo in &link.targets.repos {
+                                                            p { class: "text-xs text-muted", "{repo.repo_full_name}: {crate::invitation::repo_grant_label(repo.grant)}" }
+                                                        }
                                                     }
                                                     td { span { class: "{badge}", "{status}" } }
                                                     td { class: "whitespace-nowrap tabular-nums", "{link.uses_count} / {max}" }
@@ -253,7 +263,7 @@ pub fn LinkListPage(props: LinkListPageProps) -> Element {
 mod tests {
     use super::*;
     use chrono::{DateTime, Utc};
-    use ghinvite_core::{InvitationLink, Permission};
+    use ghinvite_core::InvitationLink;
 
     fn now() -> DateTime<Utc> {
         "2026-05-04T12:00:00Z".parse().unwrap()
@@ -261,21 +271,32 @@ mod tests {
 
     fn link(n: u32) -> InvitationLink {
         InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: format!("{n:026}").parse().unwrap(),
+            organization_installation_id: None,
             installation_id: 1,
             account_id: 2,
             created_by: 3,
             created_at: now() + chrono::Duration::seconds(n.into()),
             expires_at: None,
             max_uses: None,
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 0,
-            permission: Permission::Pull,
             approval_required: false,
             description: format!("Workshop {n:03}"),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![],
+            pause: None,
+            targets: Default::default(),
+            secret: ghinvite_core::LinkSecretState {
+                secret_generation: 1,
+                sha256: [17; 32].into(),
+            },
         }
     }
 
@@ -330,7 +351,7 @@ mod tests {
                 < html.find("font-mono\">00000000000000000000000001").unwrap()
         );
         for text in [
-            "Invitation code:",
+            "Link ID:",
             "active</span>",
             "inactive</span>",
             "0 / unlimited",

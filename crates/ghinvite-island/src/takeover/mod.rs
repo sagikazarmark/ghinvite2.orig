@@ -73,12 +73,20 @@ use ghinvite_ui::link_form::{CreateLinkForm, LinkFormValues};
 /// the permission `<select>`, the checkboxes — is carried verbatim.
 fn sanitiser_for(field: &FieldIdentity) -> Sanitiser {
     let fields = CreateLinkForm::fields();
-    if *field == fields.description().identity() {
+    if *field == fields.description().identity()
+        || *field == fields.email_domains().identity()
+        || *field == fields.expiration_timestamp().identity()
+        || *field == fields.access_lifetime_hours().identity()
+        || *field == fields.invitation_lifetime_seconds().identity()
+    {
         Sanitiser::Line
     } else if *field == fields.internal_note().identity() {
         Sanitiser::Text
     } else if *field == fields.max_uses().identity()
         || *field == fields.expires_in_days().identity()
+        || *field == fields.invitation_lifetime_hours().identity()
+        || *field == fields.abuse_threshold_per_hour().identity()
+        || *field == fields.budget_share_pct().identity()
     {
         Sanitiser::Number
     } else {
@@ -90,15 +98,27 @@ fn sanitiser_for(field: &FieldIdentity) -> Sanitiser {
 /// before the island replaces it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FormSnapshot {
+    pub access_lifetime_hours: ControlText,
+    pub email_domains: ControlText,
     pub description: ControlText,
     pub internal_note: ControlText,
     pub permission: ControlText,
+    pub repo_grants: Vec<(u64, ControlText)>,
     /// The approval checkbox's `checked` property. Read directly rather than
     /// through an edited/unchanged test: a boolean always round-trips, and the
     /// approval policy must never flip during mounting.
     pub approval_required: bool,
+    pub expiration_timestamp: ControlText,
+    pub invitation_lifetime_seconds: ControlText,
+    pub never_expires: bool,
+    pub include_organization: bool,
+    pub checked_team_ids: Vec<u64>,
+    pub default_team_ids: Vec<u64>,
     pub max_uses: ControlText,
     pub expires_in_days: ControlText,
+    pub invitation_lifetime_hours: ControlText,
+    pub abuse_threshold_per_hour: ControlText,
+    pub budget_share_pct: ControlText,
     /// Repository ids whose checkbox is checked, in DOM order.
     pub checked_repo_ids: Vec<u64>,
     /// Repository ids the server rendered as checked, in DOM order.
@@ -117,6 +137,38 @@ pub struct FormSnapshot {
 pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     let fields = CreateLinkForm::fields();
     let mut adopted = values.clone();
+    if dom.access_lifetime_hours.edited(Sanitiser::Line) {
+        adopted.access_lifetime_hours = dom.access_lifetime_hours.value.clone();
+        adopted
+            .errors
+            .retire(&fields.access_lifetime_hours().identity());
+    }
+    if dom.email_domains.edited(Sanitiser::Line) {
+        adopted.email_domains = dom.email_domains.value.clone();
+        adopted.errors.retire(&fields.email_domains().identity());
+    }
+    if dom.expiration_timestamp.edited(Sanitiser::Line) {
+        adopted.expiration_timestamp = dom.expiration_timestamp.value.clone();
+        adopted
+            .errors
+            .retire(&fields.expiration_timestamp().identity());
+    }
+    if dom.invitation_lifetime_seconds.edited(Sanitiser::Line) {
+        adopted.invitation_lifetime_seconds = dom.invitation_lifetime_seconds.value.clone();
+        adopted
+            .errors
+            .retire(&fields.invitation_lifetime_seconds().identity());
+    }
+    adopted.include_organization = dom.include_organization;
+    if dom.checked_team_ids != dom.default_team_ids {
+        adopted.selected_team_ids = dom.checked_team_ids.clone();
+        adopted.errors.retire(&fields.team_ids().identity());
+    }
+    if adopted.include_organization != values.include_organization {
+        adopted
+            .errors
+            .retire(&fields.include_organization().identity());
+    }
 
     if dom
         .description
@@ -139,7 +191,16 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
         adopted.permission = dom.permission.value.clone();
         adopted.errors.retire(&fields.permission().identity());
     }
+    for (id, control) in &dom.repo_grants {
+        if control.edited(Sanitiser::Plain)
+            && let Some((_, grant)) = control.value.split_once(':')
+        {
+            ghinvite_ui::link_form::set_repo_grant(&mut adopted.repo_grants, *id, grant);
+            adopted.errors.retire(&fields.repo_grants().identity());
+        }
+    }
     adopted.approval_required = dom.approval_required;
+    adopted.never_expires = dom.never_expires;
     if dom
         .max_uses
         .edited(sanitiser_for(&fields.max_uses().identity()))
@@ -153,6 +214,30 @@ pub fn adopt(values: &LinkFormValues, dom: &FormSnapshot) -> LinkFormValues {
     {
         adopted.expires_in_days = dom.expires_in_days.value.clone();
         adopted.errors.retire(&fields.expires_in_days().identity());
+    }
+    if dom.invitation_lifetime_hours.edited(sanitiser_for(
+        &fields.invitation_lifetime_hours().identity(),
+    )) {
+        adopted.invitation_lifetime_hours = dom.invitation_lifetime_hours.value.clone();
+        adopted
+            .errors
+            .retire(&fields.invitation_lifetime_hours().identity());
+    }
+    if dom
+        .abuse_threshold_per_hour
+        .edited(sanitiser_for(&fields.abuse_threshold_per_hour().identity()))
+    {
+        adopted.abuse_threshold_per_hour = dom.abuse_threshold_per_hour.value.clone();
+        adopted
+            .errors
+            .retire(&fields.abuse_threshold_per_hour().identity());
+    }
+    if dom
+        .budget_share_pct
+        .edited(sanitiser_for(&fields.budget_share_pct().identity()))
+    {
+        adopted.budget_share_pct = dom.budget_share_pct.value.clone();
+        adopted.errors.retire(&fields.budget_share_pct().identity());
     }
     if dom.checked_repo_ids != dom.default_repo_ids {
         adopted.selected_repo_ids = dom.checked_repo_ids.clone();
@@ -173,12 +258,50 @@ mod tests {
     /// A snapshot of the form as the server rendered it: nothing edited.
     fn untouched(values: &LinkFormValues) -> FormSnapshot {
         FormSnapshot {
+            access_lifetime_hours: ControlText::new(
+                &values.access_lifetime_hours,
+                &values.access_lifetime_hours,
+            ),
+            email_domains: ControlText::new(&*values.email_domains, &*values.email_domains),
             description: ControlText::new(&*values.description, &*values.description),
             internal_note: ControlText::new(&*values.internal_note, &*values.internal_note),
             permission: ControlText::new(&*values.permission, &*values.permission),
+            repo_grants: values
+                .repo_grants
+                .iter()
+                .filter_map(|raw| {
+                    raw.split_once(':')
+                        .and_then(|(id, _)| id.parse().ok())
+                        .map(|id| (id, ControlText::new(raw, raw)))
+                })
+                .collect(),
             approval_required: values.approval_required,
+            expiration_timestamp: ControlText::new(
+                &*values.expiration_timestamp,
+                &*values.expiration_timestamp,
+            ),
+            invitation_lifetime_seconds: ControlText::new(
+                &*values.invitation_lifetime_seconds,
+                &*values.invitation_lifetime_seconds,
+            ),
+            never_expires: values.never_expires,
+            include_organization: values.include_organization,
+            checked_team_ids: values.selected_team_ids.clone(),
+            default_team_ids: values.selected_team_ids.clone(),
             max_uses: ControlText::new(&*values.max_uses, &*values.max_uses),
             expires_in_days: ControlText::new(&*values.expires_in_days, &*values.expires_in_days),
+            invitation_lifetime_hours: ControlText::new(
+                &*values.invitation_lifetime_hours,
+                &*values.invitation_lifetime_hours,
+            ),
+            abuse_threshold_per_hour: ControlText::new(
+                &*values.abuse_threshold_per_hour,
+                &*values.abuse_threshold_per_hour,
+            ),
+            budget_share_pct: ControlText::new(
+                &*values.budget_share_pct,
+                &*values.budget_share_pct,
+            ),
             checked_repo_ids: values.selected_repo_ids.clone(),
             default_repo_ids: values.selected_repo_ids.clone(),
         }
@@ -186,6 +309,16 @@ mod tests {
 
     fn rejected() -> LinkFormValues {
         LinkFormValues {
+            access_lifetime_hours: String::new(),
+            email_domains: String::new(),
+            expiration_timestamp: String::new(),
+            invitation_lifetime_seconds: String::new(),
+            include_organization: false,
+            selected_team_ids: vec![],
+            invitation_lifetime_hours: "168".into(),
+            abuse_threshold_per_hour: String::new(),
+            budget_share_pct: "50".into(),
+            never_expires: false,
             description: "   ".into(),
             permission: "owner".into(),
             approval_required: true,
@@ -193,6 +326,7 @@ mod tests {
             expires_in_days: "30".into(),
             internal_note: "note".into(),
             selected_repo_ids: vec![999],
+            repo_grants: vec!["999:push".into()],
             errors: LinkFormErrors {
                 summary: vec![SUMMARY_MESSAGE.into(), "server said no".into()],
                 description: Some(DESCRIPTION_REQUIRED.into()),
@@ -201,6 +335,19 @@ mod tests {
                 ..LinkFormErrors::default()
             },
         }
+    }
+
+    #[test]
+    fn explicit_never_choice_survives_takeover_independently_of_days() {
+        let values = LinkFormValues::default();
+        let mut dom = untouched(&values);
+        dom.never_expires = true;
+        dom.expires_in_days = ControlText::new("", "14");
+        let adopted = adopt(&values, &dom);
+        assert!(adopted.never_expires);
+        assert_eq!(adopted.expires_in_days, "");
+        dom.never_expires = false;
+        assert!(!adopt(&adopted, &dom).never_expires);
     }
 
     #[test]
@@ -221,6 +368,18 @@ mod tests {
         let adopted = adopt(
             &values,
             &FormSnapshot {
+                access_lifetime_hours: Default::default(),
+                email_domains: Default::default(),
+                expiration_timestamp: Default::default(),
+                invitation_lifetime_seconds: Default::default(),
+                include_organization: false,
+                checked_team_ids: vec![],
+                default_team_ids: vec![],
+                invitation_lifetime_hours: ControlText::new("168", "168"),
+                abuse_threshold_per_hour: ControlText::new("", ""),
+                budget_share_pct: ControlText::new("", ""),
+                repo_grants: Vec::new(),
+                never_expires: false,
                 description: ControlText::new("Workshop", ""),
                 internal_note: ControlText::new("why", ""),
                 permission: ControlText::new("maintain", "pull"),
@@ -235,6 +394,16 @@ mod tests {
         assert_eq!(
             adopted,
             LinkFormValues {
+                access_lifetime_hours: String::new(),
+                email_domains: String::new(),
+                expiration_timestamp: String::new(),
+                invitation_lifetime_seconds: String::new(),
+                include_organization: false,
+                selected_team_ids: vec![],
+                invitation_lifetime_hours: "168".into(),
+                abuse_threshold_per_hour: String::new(),
+                budget_share_pct: "50".into(),
+                never_expires: false,
                 description: "Workshop".into(),
                 permission: "maintain".into(),
                 approval_required: true,
@@ -242,6 +411,7 @@ mod tests {
                 expires_in_days: String::new(),
                 internal_note: "why".into(),
                 selected_repo_ids: vec![10, 12],
+                repo_grants: vec![],
                 errors: LinkFormErrors::default(),
             }
         );
@@ -384,6 +554,7 @@ mod tests {
         let adopted = adopt(
             &values,
             &FormSnapshot {
+                repo_grants: Vec::new(),
                 description: ControlText::new("onetwo", "one\ntwo"),
                 ..untouched(&values)
             },
@@ -556,6 +727,7 @@ mod tests {
     fn unselecting_the_only_repository_is_an_edit() {
         let values = LinkFormValues {
             selected_repo_ids: vec![10],
+            repo_grants: vec!["10:push".into()],
             ..LinkFormValues::default()
         };
         let adopted = adopt(
@@ -581,6 +753,7 @@ mod tests {
                 LinkCreateForm {
                     action: "/console/accounts/acme/links".to_string(),
                     form: LinkFormValues::default(),
+                    organization: ghinvite_ui::link_form::OrganizationOffer::Available(ghinvite_ui::link_form::OrganizationChoice {id:1,login:"acme".into(),teams:vec![ghinvite_ui::link_form::TeamChoice{id:7,slug:"learners".into(),name:"Learners".into(),externally_managed:false}]}),
                     repos: vec![RepositoryChoice { id: 10, full_name: "acme/api".into() }],
                 }
             }
@@ -613,23 +786,46 @@ mod tests {
         let fields = CreateLinkForm::fields();
         // Each field's rendered name next to the identity `adopt` looks up.
         let by_name = [
+            fields.email_domains().field_name().to_string(),
+            fields.expiration_timestamp().field_name().to_string(),
+            fields
+                .invitation_lifetime_seconds()
+                .field_name()
+                .to_string(),
+            fields.include_organization().field_name().to_string(),
+            fields.team_ids().field_name().to_string(),
             fields.description().field_name().to_string(),
             fields.internal_note().field_name().to_string(),
             fields.permission().field_name().to_string(),
             fields.approval_required().field_name().to_string(),
+            fields.never_expires().field_name().to_string(),
             fields.max_uses().field_name().to_string(),
             fields.expires_in_days().field_name().to_string(),
+            fields.invitation_lifetime_hours().field_name().to_string(),
+            fields.abuse_threshold_per_hour().field_name().to_string(),
+            fields.budget_share_pct().field_name().to_string(),
             fields.repo_ids().field_name().to_string(),
+            fields.repo_grants().field_name().to_string(),
         ]
         .into_iter()
         .zip([
+            fields.email_domains().identity(),
+            fields.expiration_timestamp().identity(),
+            fields.invitation_lifetime_seconds().identity(),
+            fields.include_organization().identity(),
+            fields.team_ids().identity(),
             fields.description().identity(),
             fields.internal_note().identity(),
             fields.permission().identity(),
             fields.approval_required().identity(),
+            fields.never_expires().identity(),
             fields.max_uses().identity(),
             fields.expires_in_days().identity(),
+            fields.invitation_lifetime_hours().identity(),
+            fields.abuse_threshold_per_hour().identity(),
+            fields.budget_share_pct().identity(),
             fields.repo_ids().identity(),
+            fields.repo_grants().identity(),
         ])
         .collect::<Vec<_>>();
 
@@ -660,5 +856,77 @@ mod tests {
         for (name, _) in &by_name {
             assert!(seen.iter().any(|seen| seen == name), "{name} is rendered");
         }
+    }
+    #[test]
+    fn target_grants_preserve_raw_rejection_and_adopt_only_deliberate_changes() {
+        let values = LinkFormValues {
+            selected_repo_ids: vec![10, 11],
+            repo_grants: vec!["10:owner".into(), "11:maintain".into()],
+            ..Default::default()
+        };
+        let mut dom = untouched(&values);
+        dom.repo_grants = vec![
+            (10, ControlText::new("10:pull", "10:pull")),
+            (11, ControlText::new("11:admin", "11:maintain")),
+        ];
+        let adopted = adopt(&values, &dom);
+        assert_eq!(adopted.repo_grants, vec!["10:owner", "11:admin"]);
+        dom.repo_grants[0].1 = ControlText::new("10:triage", "10:pull");
+        let adopted = adopt(&values, &dom);
+        assert_eq!(adopted.repo_grants, vec!["10:triage", "11:admin"]);
+    }
+    #[test]
+    fn lifetime_and_threshold_edits_survive_takeover_and_retire_only_their_errors() {
+        let mut values = LinkFormValues::default();
+        values.errors.invitation_lifetime_hours = Some("old lifetime error".into());
+        values.errors.abuse_threshold_per_hour = Some("old threshold error".into());
+        values.errors.budget_share_pct = Some("old share error".into());
+        let mut dom = untouched(&values);
+        dom.invitation_lifetime_hours = ControlText::new("1", "168");
+        dom.abuse_threshold_per_hour = ControlText::new("25", "");
+        dom.budget_share_pct = ControlText::new("17", "50");
+        let adopted = adopt(&values, &dom);
+        assert_eq!(adopted.invitation_lifetime_hours, "1");
+        assert_eq!(adopted.abuse_threshold_per_hour, "25");
+        assert!(adopted.errors.invitation_lifetime_hours.is_none());
+        assert!(adopted.errors.abuse_threshold_per_hour.is_none());
+        assert_eq!(adopted.to_model().0.invitation_lifetime_hours, Some(1));
+        assert_eq!(adopted.to_model().0.abuse_threshold_per_hour, Some(25));
+        assert_eq!(adopted.budget_share_pct, "17");
+        assert!(adopted.errors.budget_share_pct.is_none());
+        assert_eq!(adopted.to_model().0.budget_share_pct, Some(17));
+    }
+    #[test]
+    fn email_domain_edits_survive_takeover_and_retire_only_their_error() {
+        let values = LinkFormValues {
+            email_domains: "EXAMPLE.com.".into(),
+            errors: LinkFormErrors {
+                email_domains: Some("old error".into()),
+                description: Some("still relevant".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut dom = untouched(&values);
+        dom.email_domains = ControlText::new("*.example.org", "EXAMPLE.com.");
+        let adopted = adopt(&values, &dom);
+        assert_eq!(adopted.email_domains, "*.example.org");
+        assert!(adopted.errors.email_domains.is_none());
+        assert!(adopted.errors.description.is_some());
+    }
+    #[test]
+    fn access_lifetime_takeover_preserves_rejected_exact_text_and_accepts_an_explicit_edit() {
+        let mut values = LinkFormValues {
+            access_lifetime_hours: "bad\nvalue".into(),
+            ..Default::default()
+        };
+        values.errors.access_lifetime_hours = Some("invalid".into());
+        let mut dom = untouched(&values);
+        dom.access_lifetime_hours.value = "badvalue".into();
+        assert_eq!(adopt(&values, &dom), values);
+        dom.access_lifetime_hours.value = "3601s".into();
+        let edited = adopt(&values, &dom);
+        assert_eq!(edited.access_lifetime_hours, "3601s");
+        assert!(edited.errors.access_lifetime_hours.is_none());
     }
 }

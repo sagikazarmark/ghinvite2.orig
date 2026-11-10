@@ -1,0 +1,63 @@
+# Snapshot/window series are gauges. Do not apply rate() to these series.
+groups:
+  - name: p1-availability
+    interval: 30s
+    rules:
+      - alert: P1CollectorUnavailable
+        expr: absent(p1_collector_observed_at_seconds) or time() - p1_collector_observed_at_seconds > 300
+        for: 2m
+        labels: {severity: warning}
+        annotations: {summary: "P1 collector is absent or stale; operational health is unknown"}
+      - alert: P1SourceUnavailable
+        expr: p1_source_available == 0
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "A P1 operational source is incomplete, stale, overflowing or unavailable"}
+  - name: p1-operational
+    interval: 30s
+    rules:
+      - alert: P1OutcomeUnknown
+        expr: p1_delivery_over_threshold{state="unknown"} > 0
+        labels: {severity: warning}
+        annotations: {summary: "P1 delivery has remained OutcomeUnknown beyond one hour"}
+      - alert: P1SentObservationOverdue
+        expr: p1_delivery_over_threshold{state="pending"} > 0
+        labels: {severity: warning}
+        annotations: {summary: "P1 pending invitation observation is older than twice its configured cadence"}
+      - alert: P1BudgetClosed
+        expr: p1_budget_closed_buckets > 0
+        labels: {severity: warning}
+        annotations: {summary: "P1 account budget is closed"}
+      - alert: P1Spammed
+        expr: p1_budget_spammed_observed > 0
+        labels: {severity: warning}
+        annotations: {summary: "P1 observed a positive spam restriction in its retained observation window"}
+      - alert: P1RemintRatio
+        expr: p1_remint_ratio > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Replacement installation mints exceed one percent of installation calls"}
+      - alert: P1WebhookSignatureFailures
+        expr: (sum(p1_webhook_signature_failure_window) > 0) and on() (p1_log_window_seconds <= 60)
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "Sustained P1 webhook signature rejection"}
+      - alert: P1SignatureWindowUnavailable
+        expr: p1_log_window_seconds > 60
+        for: 5m
+        labels: {severity: warning}
+        annotations: {summary: "P1 log window is too wide to establish sustained signature failures"}
+      - alert: P1AdmissionClockUnavailable
+        expr: sum(p1_admission_clock_invalid_window) > 0
+        labels: {severity: warning}
+        annotations: {summary: "P1 admission latency has invalid host-clock observations"}
+      - alert: P1AdmissionLatencyRegression
+        expr: p1_admission_latency_p95_seconds > on(clock) p1_baseline_admission_latency_p95_seconds * 1.2
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "P1 admission latency exceeds the same-clock recorded baseline by twenty percent"}
+      - alert: P1AdmissionJournalRegression
+        expr: p1_admit_journal_entries_p95 > p1_baseline_admit_journal_entries_p95 * 1.2
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Retained admission journal sample exceeds its recorded baseline by twenty percent"}

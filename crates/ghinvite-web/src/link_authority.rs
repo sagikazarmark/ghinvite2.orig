@@ -13,7 +13,9 @@ use ghinvite_core::admission::{
     AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, Admit, Attempt, AttemptQuery,
     RequesterPage, UpdateMetadata,
 };
-use ghinvite_core::invitation_link::{CreateLink, LinkSnapshot};
+use ghinvite_core::invitation_link::{
+    CreateLink, CreateLinkOutcome, LinkSnapshot, RotateSecret, SecretRotated,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
@@ -24,6 +26,8 @@ const LINK: &str = "InvitationLink";
 /// Why the authority did not answer with a result.
 #[derive(Debug, Error)]
 pub enum AuthorityError {
+    #[error("Console access could not be verified")]
+    AuthorizationUnavailable,
     /// The authority refused the command's input (400); nothing was applied.
     #[error("the authority rejected the command's input")]
     Invalid,
@@ -58,6 +62,7 @@ impl AuthorityError {
 impl From<AuthorityError> for WebError {
     fn from(error: AuthorityError) -> Self {
         match error {
+            AuthorityError::AuthorizationUnavailable => WebError::ConsoleAuthority,
             AuthorityError::Invalid => WebError::BadRequest("Invalid command.".into()),
             AuthorityError::Missing => WebError::NotFound,
             AuthorityError::Conflict => WebError::Conflict,
@@ -78,7 +83,7 @@ impl LinkAuthority {
         Self { client }
     }
 
-    pub async fn create(&self, command: CreateLink) -> Result<LinkSnapshot> {
+    pub async fn create(&self, command: CreateLink) -> Result<CreateLinkOutcome> {
         self.link(command.link_id, "create", &command).await
     }
 
@@ -86,8 +91,50 @@ impl LinkAuthority {
         self.link(command.link_id, "link_status", &command).await
     }
 
-    pub async fn revoke(&self, command: AdminLinkCommand) -> Result<LinkSnapshot> {
+    pub async fn prepare_access_removal(
+        &self,
+        command: ghinvite_core::revocation::PrepareAccessRemoval,
+    ) -> Result<ghinvite_core::revocation::AccessRemovalPreview> {
+        self.link(command.link_id, "prepare_access_removal", &command)
+            .await
+    }
+
+    pub async fn revoke(
+        &self,
+        command: ghinvite_core::revocation::RevokeCommand,
+    ) -> Result<ghinvite_core::revocation::RevokeOutcome> {
         self.link(command.link_id, "revoke", &command).await
+    }
+    pub async fn revoke_status(
+        &self,
+        command: ghinvite_core::revocation::RevokeCommand,
+    ) -> Result<Option<ghinvite_core::revocation::RevokeOutcome>> {
+        self.link(command.link_id, "revoke_status", &command).await
+    }
+    pub async fn cascade_progress(
+        &self,
+        command: AdminLinkCommand,
+    ) -> Result<Option<ghinvite_core::revocation::CascadeProgress>> {
+        self.link(command.link_id, "cascade_progress", &command)
+            .await
+    }
+
+    pub async fn pause(
+        &self,
+        command: ghinvite_core::link_lifecycle::LifecycleCommand,
+    ) -> Result<ghinvite_core::link_lifecycle::LifecycleOutcome> {
+        self.link(command.link_id, "pause", &command).await
+    }
+
+    pub async fn resume(
+        &self,
+        command: ghinvite_core::link_lifecycle::LifecycleCommand,
+    ) -> Result<ghinvite_core::link_lifecycle::LifecycleOutcome> {
+        self.link(command.link_id, "resume", &command).await
+    }
+
+    pub async fn rotate_secret(&self, command: RotateSecret) -> Result<SecretRotated> {
+        self.link(command.link_id, "rotate_secret", &command).await
     }
 
     pub async fn update_metadata(&self, command: UpdateMetadata) -> Result<LinkSnapshot> {
@@ -95,17 +142,35 @@ impl LinkAuthority {
             .await
     }
 
-    /// What the requester may see of the link `code` names, including the
+    /// What the capability authorizes the requester to see, including the
     /// attempt `operation_id` identifies when given.
+    pub async fn offer(
+        &self,
+        capability: &crate::session::PendingLink,
+    ) -> Result<ghinvite_core::admission::LinkOffer> {
+        self.link(
+            capability.link_id,
+            "offer",
+            &ghinvite_core::admission::OfferQuery {
+                link_id: capability.link_id,
+                secret_sha256: capability.secret_sha256,
+                secret_generation: capability.secret_generation,
+            },
+        )
+        .await
+    }
+
     pub async fn requester_page(
         &self,
-        code: &str,
+        capability: &crate::session::PendingLink,
         requester_id: u64,
         operation_id: Option<AdmissionOperationId>,
     ) -> Result<RequesterPage> {
-        let link_id = code.parse().map_err(|_| AuthorityError::Missing)?;
+        let link_id = capability.link_id;
         let query = AttemptQuery {
             link_id,
+            secret_sha256: capability.secret_sha256,
+            secret_generation: capability.secret_generation,
             requester_id,
             operation_id,
         };
@@ -120,7 +185,10 @@ impl LinkAuthority {
     }
 
     pub async fn admit(&self, command: Admit) -> Result<AdmissionReceipt> {
-        self.link(command.link_id, "admit", &command).await
+        let observation = crate::admission_telemetry::Observation::start();
+        let result = self.link(command.link_id, "admit", &command).await;
+        observation.complete(&result);
+        result
     }
 
     async fn link<I: Serialize, O: DeserializeOwned>(
@@ -152,7 +220,15 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    const CODE_VALUE: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+    const LINK_ID: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    fn capability() -> crate::session::PendingLink {
+        crate::session::PendingLink {
+            link_id: LINK_ID.parse().unwrap(),
+            secret_sha256: [42; 32].into(),
+            secret_generation: 7,
+        }
+    }
 
     async fn authority_answering(response: ResponseTemplate) -> (MockServer, LinkAuthority) {
         let ingress = MockServer::start().await;
@@ -172,10 +248,11 @@ mod tests {
             )
             .await;
             let error = authority
-                .requester_page(CODE_VALUE, 2, None)
+                .requester_page(&capability(), 2, None)
                 .await
                 .unwrap_err();
             let actual = match error {
+                AuthorityError::AuthorizationUnavailable => "AuthorizationUnavailable",
                 AuthorityError::Invalid => "Invalid",
                 AuthorityError::Missing => "Missing",
                 AuthorityError::Conflict => "Conflict",
@@ -193,7 +270,7 @@ mod tests {
             )
             .await;
             let error = authority
-                .requester_page(CODE_VALUE, 2, None)
+                .requester_page(&capability(), 2, None)
                 .await
                 .unwrap_err();
             let AuthorityError::Unknown(failure) = &error else {
@@ -213,7 +290,7 @@ mod tests {
         let (_ingress, authority) =
             authority_answering(ResponseTemplate::new(200).set_body_string("not json")).await;
         let error = authority
-            .requester_page(CODE_VALUE, 2, None)
+            .requester_page(&capability(), 2, None)
             .await
             .unwrap_err();
         assert!(
@@ -235,7 +312,7 @@ mod tests {
         drop(listener);
         let authority = LinkAuthority::new(Arc::new(RestateClient::new(url).unwrap()));
         let error = authority
-            .requester_page(CODE_VALUE, 2, None)
+            .requester_page(&capability(), 2, None)
             .await
             .unwrap_err();
         assert!(
@@ -247,22 +324,20 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_malformed_code_is_missing_without_asking_the_authority() {
-        let (ingress, authority) = authority_answering(ResponseTemplate::new(200)).await;
-        for code in ["not a code", "81ARZ3NDEKTSV4RRFFQ69G5FAV"] {
-            assert!(matches!(
-                authority.requester_page(code, 2, None).await,
-                Err(AuthorityError::Missing)
-            ));
+    #[test]
+    fn pending_capability_requires_hash_and_generation_in_serialized_input() {
+        let full = serde_json::to_value(capability()).unwrap();
+        for field in ["secret_sha256", "secret_generation"] {
+            let mut missing = full.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<crate::session::PendingLink>(missing).is_err());
         }
-        assert!(ingress.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn public_lookup_routes_textual_variants_directly_to_the_canonical_link() {
+    async fn capability_lookup_uses_canonical_internal_id_and_hash_body() {
         let ingress = MockServer::start().await;
-        let link: InvitationLinkId = CODE_VALUE.parse().unwrap();
+        let link: InvitationLinkId = LINK_ID.parse().unwrap();
         Mock::given(path(format!("/{LINK}/{link}/requester_page")))
             .respond_with(ResponseTemplate::new(404))
             .expect(1)
@@ -278,11 +353,22 @@ mod tests {
         .await;
         let authority = LinkAuthority::new(Arc::new(RestateClient::new(ingress.uri()).unwrap()));
         assert!(matches!(
-            authority
-                .requester_page(&CODE_VALUE.to_lowercase(), 2, None)
-                .await,
+            authority.requester_page(&capability(), 2, None).await,
             Err(AuthorityError::Missing)
         ));
+        let requests = ingress.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].url.path(),
+            format!("/{LINK}/{link}/requester_page")
+        );
+        assert!(requests[0].url.query().is_none());
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(body["link_id"], LINK_ID);
+        assert_eq!(body["secret_sha256"], "2a".repeat(32));
+        assert_eq!(body["secret_generation"], 7);
+        assert_eq!(body["requester_id"], 2);
+        assert!(body.get("secret").is_none());
         let command: ghinvite_core::request_lifecycle::DecideRequest =
             serde_json::from_value(serde_json::json!({
             "link_id": link, "request_id": request_id,

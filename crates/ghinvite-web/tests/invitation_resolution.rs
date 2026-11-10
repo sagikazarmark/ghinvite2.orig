@@ -1,20 +1,21 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
+use common::build_app;
 use ghinvite_core::admission::{
-    AdminLinkCommand, AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, AttemptQuery,
+    AdmissionOperationId, AdmissionReceipt, AdmissionResult, Admit, AttemptQuery,
 };
 use ghinvite_core::invitation_link::AccountAdmin;
 use ghinvite_core::request_lifecycle::RequestSnapshot;
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionAction, LifecycleOperationId};
 use ghinvite_core::storage::projection::fixture::Seed;
-use ghinvite_core::storage::{InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{AppInstallationStorage, RecordStorage};
 use ghinvite_core::{
     Account, AccountType, InvitationLink, InvitationLinkId, InvitationLinkRepo, InvitationRequest,
     Permission, RequestId, RequestState, SelectedRepos, User,
 };
 use ghinvite_github::mocks::MockTransport;
-use ghinvite_web::{AppState, LinkAuthority, WebConfig, build_app};
+use ghinvite_web::{LinkAuthority, WebConfig};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,12 @@ mod common;
 mod requester_delivery;
 
 use common::authority_http_fixture::FakeLinkAuthority;
-use common::sign_in::{GithubUser, oauth_expectations, sign_in};
+use common::sign_in::{GithubUser, oauth_expectations, sign_in as oauth_sign_in};
+
+async fn sign_in(app: &axum::Router) -> String {
+    let cookie = oauth_sign_in(app).await;
+    common::capability::select(app, Some(&cookie)).await
+}
 
 #[tokio::test]
 async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
@@ -51,12 +57,12 @@ async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
     let restate = Arc::new(
         RestateClient::with_auth(&config.restate_ingress, config.restate_auth.clone()).unwrap(),
     );
-    let state = AppState::new(
-        Arc::new(
-            ghinvite_storage_sqlx::SqlxStorage::in_memory()
-                .await
-                .unwrap(),
-        ),
+    let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
+        .await
+        .unwrap();
+    common::capability::register(&storage, &active_link(ACTIVE_SLUG)).await;
+    let state = crate::common::sign_in::app_state(
+        Arc::new(storage),
         Arc::new(MockTransport::scripted(oauth_expectations(
             GithubUser::new("octocat", REQUESTER_ID),
         ))),
@@ -67,7 +73,7 @@ async fn ingress_credentials_stay_out_of_html_props_and_browser_errors() {
     let cookie = sign_in(&app).await;
     for (uri, status) in [
         ("/".into(), StatusCode::OK),
-        (format!("/i/{ACTIVE_SLUG}"), StatusCode::BAD_GATEWAY),
+        ("/join".to_owned(), StatusCode::BAD_GATEWAY),
     ] {
         let response = app
             .clone()
@@ -121,7 +127,8 @@ async fn requester() -> Requester {
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
-    let state = AppState::new(
+    common::capability::register(&storage, &active_link(ACTIVE_SLUG)).await;
+    let state = crate::common::sign_in::app_state(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(
             oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))
@@ -154,8 +161,10 @@ fn seed_admitted(
     let admitted_at = Utc::now();
     let deadline = admitted_at + chrono::Duration::days(7);
     let request = RequestSnapshot {
+        batch: None,
+        domain_evidence: None,
         request_id: RequestId::new(),
-        link_id: link.id,
+        link_id: Some(link.id),
         account_id: link.account_id,
         requester_id: REQUESTER_ID,
         justification: justification.map(str::to_owned),
@@ -168,6 +177,10 @@ fn seed_admitted(
     authority.seed_request(request.clone());
     authority.seed_admission(
         Admit {
+            domain_evidence: None,
+            secret_sha256: link.secret.sha256,
+            secret_generation: link.secret.secret_generation,
+            scope_evidence: vec![],
             link_id: link.id,
             operation_id: AdmissionOperationId::try_from(operation_id.to_owned()).unwrap(),
             requester_id: REQUESTER_ID,
@@ -189,7 +202,7 @@ fn seed_admitted(
 async fn decide(authority: &FakeLinkAuthority, request: &RequestSnapshot, action: DecisionAction) {
     ghinvite_web::request_authority::RequestAuthority::new(authority.client())
         .decide(DecideRequest {
-            link_id: request.link_id,
+            link_id: request.link_id.expect("linked fixture"),
             request_id: request.request_id,
             operation_id: LifecycleOperationId::try_from(RequestId::new().to_string()).unwrap(),
             admin: ADMIN,
@@ -211,7 +224,7 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -222,13 +235,14 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
     assert!(html.contains("Signed in as"));
     assert!(html.contains("@octocat"));
     assert!(html.contains("Not you?"));
-    assert!(html.contains("Permission: Read (pull)"));
+    assert!(html.contains("Read (pull)"));
     assert!(html.contains("acme/api"));
     assert!(html.contains("Account admins review your request before access is approved."));
     assert!(html.contains("Optional, visible to account admins."));
-    assert!(html.contains("Maximum 16384 UTF-8 bytes"));
-    assert!(html.contains(&format!("name=\"return_to\" value=\"/i/{ACTIVE_SLUG}\"")));
+    assert!(html.contains("Maximum 500 characters"));
+    assert!(html.contains("name=\"return_to\" value=\"/join\""));
     let csrf = common::csrf_token(&app, &cookie).await;
+    let mut cookie = cookie;
     for (token, expected) in [
         ("wrong", StatusCode::FORBIDDEN),
         (csrf.as_str(), StatusCode::SEE_OTHER),
@@ -241,35 +255,32 @@ async fn authoritative_form_confirms_identity_and_wrong_account_return_destinati
                     .uri("/logout")
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
-                    .body(Body::from(format!(
-                        "csrf_token={token}&return_to=%2Fi%2F{ACTIVE_SLUG}"
-                    )))
+                    .body(Body::from(format!("csrf_token={token}&return_to=%2Fjoin")))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(response.status(), expected);
         if expected == StatusCode::SEE_OTHER {
-            assert_eq!(response.headers()["location"], format!("/i/{ACTIVE_SLUG}"));
+            assert_eq!(response.headers()["location"], "/join".to_owned());
+            cookie = common::sign_in::session_cookie(&response, Some(cookie));
         }
     }
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(
-        response.headers()["location"],
-        format!(
-            "/login?return_to={}",
-            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
-        )
-    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let offer = body_text(response).await;
+    assert!(offer.contains("Review this invitation"));
+    assert!(offer.contains("/login?return_to=%2Fjoin"));
+    assert!(!offer.contains("name=\"justification\""));
 }
 
 #[tokio::test]
@@ -285,7 +296,7 @@ async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -301,7 +312,7 @@ async fn local_unknown_attempt_can_start_fresh_after_ingress_recovers() {
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}&fresh={fresh}"))
+                    .uri(format!("/join?operation_id={id}&fresh={fresh}"))
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -339,7 +350,7 @@ async fn pending_authoritative_status_refreshes_until_terminal_without_projectio
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .uri("/join".to_owned())
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -370,7 +381,7 @@ async fn oversized_justification_is_editable_without_replacing_the_operation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                .uri(format!("/join?operation_id={id}"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -394,7 +405,7 @@ async fn oversized_justification_is_editable_without_replacing_the_operation() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -415,7 +426,8 @@ async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppres
         authority,
         mut link,
     } = requester().await;
-    link.repos = vec![InvitationLinkRepo {
+    link.targets.repos = vec![ghinvite_core::targets::RepoTarget {
+        grant: ghinvite_core::targets::RepoRole::Read,
         repo_id: 1,
         repo_full_name: "acme/private".into(),
     }];
@@ -443,7 +455,7 @@ async fn inactive_fresh_visits_are_concealed_and_blocked_fresh_forms_are_suppres
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/i/{ACTIVE_SLUG}?fresh=true"))
+                    .uri("/join?fresh=true")
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -475,7 +487,7 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -493,9 +505,9 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
     );
     assert!(html.contains("Outcome unknown"));
     for uri in [
-        format!("/i/{ACTIVE_SLUG}"),
-        format!("/i/{}", ACTIVE_SLUG.to_lowercase()),
-        format!("/i/{ACTIVE_SLUG}?operation_id={id}"),
+        "/join".to_owned(),
+        "/join".to_owned(),
+        format!("/join?operation_id={id}"),
     ] {
         let response = app
             .clone()
@@ -516,14 +528,17 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
     decide(
         &authority,
         &request,
-        DecisionAction::Decline { reason: None },
+        DecisionAction::Decline {
+            reason: None,
+            requester_message: None,
+        },
     )
     .await;
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}?fresh=true"))
+                .uri("/join?fresh=true")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -539,7 +554,7 @@ async fn lost_admission_acknowledgement_recovers_across_navigation_and_editing_i
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -576,7 +591,7 @@ async fn unresolved_local_attempt_keeps_exact_input_alongside_older_authority() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -593,7 +608,7 @@ async fn unresolved_local_attempt_keeps_exact_input_alongside_older_authority() 
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/i/{ACTIVE_SLUG}?fresh={fresh}"))
+                    .uri(format!("/join?fresh={fresh}"))
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -628,7 +643,7 @@ async fn prepared_uncertain_attempt_retries_with_original_whitespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body.clone()))
@@ -641,7 +656,7 @@ async fn prepared_uncertain_attempt_retries_with_original_whitespace() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                .uri(format!("/join?operation_id={id}"))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -653,7 +668,7 @@ async fn prepared_uncertain_attempt_retries_with_original_whitespace() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(body))
@@ -679,7 +694,10 @@ async fn fixture_state(
     let action = match query.get("status").map(String::as_str) {
         None => None,
         Some("approved") => Some(DecisionAction::Approve),
-        Some("declined") => Some(DecisionAction::Decline { reason: None }),
+        Some("declined") => Some(DecisionAction::Decline {
+            reason: None,
+            requester_message: None,
+        }),
         Some(_) => return StatusCode::BAD_REQUEST,
     };
     if let Some(action) = action {
@@ -692,11 +710,14 @@ async fn fixture_state(
     match query.get("revoked").map(String::as_str) {
         Some("true") => {
             LinkAuthority::new(authority.client())
-                .revoke(AdminLinkCommand {
+                .revoke(ghinvite_core::revocation::RevokeCommand {
                     link_id: link.id,
                     admin: ADMIN,
+                    operation_id: link.id.to_string().try_into().unwrap(),
+                    cascade: Default::default(),
                 })
                 .await
+                .unwrap()
                 .unwrap();
         }
         Some(_) => {
@@ -735,7 +756,7 @@ async fn admission_browser_server() {
                             "set-cookie",
                             format!("{cookie}; Path=/; HttpOnly; SameSite=Lax"),
                         )],
-                        axum::response::Redirect::to(&format!("/i/{ACTIVE_SLUG}")),
+                        axum::response::Redirect::to("/join"),
                     )
                         .into_response()
                 }
@@ -776,7 +797,8 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     let storage = ghinvite_storage_sqlx::SqlxStorage::in_memory()
         .await
         .unwrap();
-    let state = AppState::new(
+    common::capability::register(&storage, &active_link(ACTIVE_SLUG)).await;
+    let state = crate::common::sign_in::app_state(
         Arc::new(storage),
         Arc::new(MockTransport::scripted(oauth_expectations(
             GithubUser::new("octocat", REQUESTER_ID),
@@ -790,14 +812,17 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     backend.migrate().await.unwrap();
     let app = build_app(
         state,
-        ghinvite_web::session_store::ProtectedStore::new(backend, [7; 32]),
+        ghinvite_web::session_store::ProtectedStore::new(
+            backend,
+            ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32]).keyring,
+        ),
     );
     let cookie = sign_in(&app).await;
     let response = app
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -823,7 +848,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .uri("/join".to_owned())
                     .header("cookie", &cookie)
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Body::from(format!(
@@ -855,10 +880,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/i/{}?operation_id={operation}",
-                    ACTIVE_SLUG.to_lowercase()
-                ))
+                .uri(format!("/join?operation_id={operation}"))
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -876,7 +898,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     let post = |id: String, text: &str| {
         Request::builder()
             .method("POST")
-            .uri(format!("/i/{ACTIVE_SLUG}"))
+            .uri("/join".to_owned())
             .header("cookie", &cookie)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(format!(
@@ -898,16 +920,20 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
     );
     assert_eq!(a.unwrap().status(), StatusCode::BAD_GATEWAY);
     assert_eq!(b.unwrap().status(), StatusCode::BAD_GATEWAY);
-    for (id, text) in [
-        (operation, "original"),
-        (second, "second"),
-        (third, "third"),
+    // A fresh attempt first reads the link's current domain rules. With the
+    // authority unavailable that read fails, so neither new attempt was
+    // retained or prepared; only the original recovers.
+    assert_eq!(count(&authority, "prepare_attempt"), 1);
+    for (id, text, retained) in [
+        (operation, "original", true),
+        (second, "second", false),
+        (third, "third", false),
     ] {
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/i/{ACTIVE_SLUG}?operation_id={id}"))
+                    .uri(format!("/join?operation_id={id}"))
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),
@@ -915,7 +941,7 @@ async fn authoritative_native_form_validates_identity_and_preserves_unknown_inpu
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        assert!(body_text(response).await.contains(text));
+        assert_eq!(body_text(response).await.contains(text), retained, "{text}");
     }
 }
 
@@ -939,7 +965,7 @@ async fn request_submission_requires_the_rendered_session_token() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/i/{ACTIVE_SLUG}"))
+                    .uri("/join".to_owned())
                     .header("cookie", &cookie)
                     .header("origin", "https://evil.ghinvite.test")
                     .header("sec-fetch-site", "same-site")
@@ -966,7 +992,7 @@ async fn request_submission_requires_the_rendered_session_token() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
@@ -979,7 +1005,7 @@ async fn request_submission_requires_the_rendered_session_token() {
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert_eq!(
         response.headers()["location"],
-        format!("/i/{ACTIVE_SLUG}?operation_id={id}")
+        format!("/join?operation_id={id}")
     );
     let [command] = authority
         .received::<Admit>("prepare_attempt")
@@ -1015,7 +1041,7 @@ async fn submission_rejected_for_an_existing_request_is_final() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!("csrf_token={token}&operation_id={id}")))
@@ -1025,7 +1051,7 @@ async fn submission_rejected_for_an_existing_request_is_final() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
     let html = body_text(response).await;
-    assert!(html.contains("you already have a pending or approved request"));
+    assert!(html.contains("you already have a request awaiting review"));
     assert!(html.contains("result is final."));
     assert!(!html.contains("Submit request"));
     assert!(!html.contains("Retry same attempt"));
@@ -1064,30 +1090,49 @@ fn sample_user(user_id: u64, login: &str) -> User {
         user_id,
         login: login.into(),
         avatar_url: None,
+        github_created_at: None,
         last_seen_at: dt("2026-05-04T12:00:00Z"),
     }
 }
 
 fn active_link(slug: &str) -> InvitationLink {
     InvitationLink {
+        batch_source: None,
+        access_lifetime_seconds: None,
+        email_domains: vec![],
         id: slug.parse().unwrap(),
+        organization_installation_id: None,
         installation_id: 1,
         account_id: 9001,
         created_by: CREATOR_ID,
         created_at: dt("2026-05-04T12:00:00Z"),
         expires_at: None,
         max_uses: None,
+        invitation_lifetime_seconds: 604800,
+        abuse_threshold_per_hour: None,
+        budget_share_pct: 50,
         uses_count: 0,
-        permission: Permission::Pull,
+        secret: common::capability::state(),
         approval_required: true,
         description: "AI coding workshop".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: "acme/api".into(),
-        }],
+        pause: None,
+        targets: ghinvite_core::targets::Targets {
+            repos: vec![InvitationLinkRepo {
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+            }]
+            .into_iter()
+            .map(|repo| ghinvite_core::targets::RepoTarget {
+                repo_id: repo.repo_id,
+                repo_full_name: repo.repo_full_name,
+                grant: Permission::Pull.into(),
+            })
+            .collect(),
+            ..Default::default()
+        },
     }
 }
 
@@ -1098,14 +1143,18 @@ fn request_with_state(
     state: RequestState,
 ) -> InvitationRequest {
     InvitationRequest {
+        batch: None,
+        domain_evidence: None,
         id,
-        invitation_link_id: link,
+        invitation_link_id: Some(link),
         requester_id,
         justification: None,
         state,
         decided_by: None,
         decided_at: None,
+        cancellation_reason: None,
         decline_reason: None,
+        requester_message: None,
         decision_deadline: None,
         created_at: dt("2026-05-04T12:30:00Z"),
     }
@@ -1118,7 +1167,9 @@ async fn build_test_app(link: InvitationLink, mock: MockTransport) -> axum::Rout
         .await
         .unwrap();
     storage
-        .insert_installation(&sample_account())
+        .put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account()).clone(),
+        ))
         .await
         .unwrap();
     storage
@@ -1126,7 +1177,8 @@ async fn build_test_app(link: InvitationLink, mock: MockTransport) -> axum::Rout
         .await
         .unwrap();
     storage.seed_link(&link).await.unwrap();
-    let state = AppState::new(
+    common::capability::register(&storage, &active_link(ACTIVE_SLUG)).await;
+    let state = crate::common::sign_in::app_state(
         Arc::new(storage),
         Arc::new(mock),
         Arc::new(ghinvite_web::RestateClient::new("http://127.0.0.1:9").unwrap()),
@@ -1151,6 +1203,7 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
         &request,
         DecisionAction::Decline {
             reason: Some("Private admin context".into()),
+            requester_message: None,
         },
     )
     .await;
@@ -1158,7 +1211,7 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1178,170 +1231,14 @@ async fn requester_status_comes_from_the_authority_and_hides_the_decline_reason(
 }
 
 #[tokio::test]
-async fn landing_unauthenticated_redirects_to_login_for_active_slug() {
-    let app = build_test_app(active_link(ACTIVE_SLUG), MockTransport::scripted(vec![])).await;
+async fn landing_unauthenticated_shows_capability_bound_offer_without_requester_data() {
+    let Requester { app, .. } = requester().await;
+    let cookie = common::capability::select(&app, None).await;
 
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
-        )
-    );
-}
-
-#[tokio::test]
-async fn landing_unauthenticated_redirects_to_login_for_bad_or_inactive_slugs() {
-    let mut revoked = active_link(ACTIVE_SLUG);
-    revoked.revoked_at = Some(dt("2026-05-05T12:00:00Z"));
-    revoked.revoked_by = Some(CREATOR_ID);
-
-    let mut expired = active_link(ACTIVE_SLUG);
-    expired.expires_at = Some(Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap());
-
-    let mut exhausted = active_link(ACTIVE_SLUG);
-    exhausted.max_uses = Some(1);
-    exhausted.uses_count = 1;
-
-    for (link, uri, expected_return_to) in [
-        (
-            active_link(ACTIVE_SLUG),
-            "/i/not-a-valid-slug".to_string(),
-            "/i/not-a-valid-slug".to_string(),
-        ),
-        (
-            active_link(ACTIVE_SLUG),
-            format!("/i/{UNKNOWN_SLUG}"),
-            format!("/i/{UNKNOWN_SLUG}"),
-        ),
-        (
-            revoked,
-            format!("/i/{ACTIVE_SLUG}"),
-            format!("/i/{ACTIVE_SLUG}"),
-        ),
-        (
-            expired,
-            format!("/i/{ACTIVE_SLUG}"),
-            format!("/i/{ACTIVE_SLUG}"),
-        ),
-        (
-            exhausted,
-            format!("/i/{ACTIVE_SLUG}"),
-            format!("/i/{ACTIVE_SLUG}"),
-        ),
-    ] {
-        let app = build_test_app(link, MockTransport::scripted(vec![])).await;
-        let resp = app
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-        let location = resp.headers().get("location").unwrap().to_str().unwrap();
-        assert_eq!(
-            location,
-            format!(
-                "/login?return_to={}",
-                encoded_return_to(&expected_return_to)
-            )
-        );
-    }
-}
-
-#[tokio::test]
-async fn submit_unauthenticated_redirects_to_login_for_canonical_page() {
-    let app = build_test_app(active_link(ACTIVE_SLUG), MockTransport::scripted(vec![])).await;
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/i/{ACTIVE_SLUG}"))
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "request_id=01ARZ3NDEKTSV4RRFFQ69G5FAV&justification=ship",
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to(&format!("/i/{ACTIVE_SLUG}"))
-        )
-    );
-}
-
-#[tokio::test]
-async fn unsupported_nested_invitation_routes_authenticate_before_404() {
-    let app = build_test_app(
-        active_link(ACTIVE_SLUG),
-        MockTransport::scripted(oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))),
-    )
-    .await;
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to(&format!("/i/{ACTIVE_SLUG}/request"))
-        )
-    );
-
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request?foo=1&bar=2"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
-    let location = resp.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(
-        location,
-        format!(
-            "/login?return_to={}",
-            encoded_return_to(&format!("/i/{ACTIVE_SLUG}/request?foo=1&bar=2"))
-        )
-    );
-
-    let cookie = sign_in(&app).await;
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}/request"))
+                .uri("/join")
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1349,13 +1246,65 @@ async fn unsupported_nested_invitation_routes_authenticate_before_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let body = resp.into_body().collect().await.unwrap().to_bytes();
-    let text = String::from_utf8_lossy(&body);
-    assert!(text.contains("Page not found"));
-    assert!(text.contains("The link may be incorrect or no longer available."));
-    assert!(!text.contains("Request repository access"));
-    assert!(!text.contains("Submit request"));
+    assert_eq!(resp.status(), StatusCode::OK);
+    let offer = body_text(resp).await;
+    assert!(offer.contains("Review this invitation"));
+    assert!(offer.contains("/login?return_to=%2Fjoin"));
+    assert!(!offer.contains("name=\"justification\""));
+}
+
+#[tokio::test]
+async fn legacy_id_paths_are_neutral_404_without_signin_or_echo() {
+    let app = build_test_app(
+        active_link(ACTIVE_SLUG),
+        MockTransport::scripted(oauth_expectations(GithubUser::new("octocat", REQUESTER_ID))),
+    )
+    .await;
+    let cookie = oauth_sign_in(&app).await;
+    for cookie in [None, Some(cookie.as_str())] {
+        for path in [
+            format!("/i/{ACTIVE_SLUG}"),
+            "/i/not-a-valid-slug".into(),
+            format!("/i/{UNKNOWN_SLUG}/request?foo=1"),
+        ] {
+            for method in ["GET", "POST"] {
+                let mut request = Request::builder().method(method).uri(&path);
+                if let Some(cookie) = cookie {
+                    request = request.header("cookie", cookie);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                assert!(response.headers().get("location").is_none());
+                let html = body_text(response).await;
+                assert!(!html.contains(ACTIVE_SLUG));
+                assert!(!html.contains(UNKNOWN_SLUG));
+                assert!(!html.contains("not-a-valid-slug"));
+                assert!(!html.contains("Submit request"));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn submit_unauthenticated_redirects_to_login_for_session_join() {
+    let app = build_test_app(active_link(ACTIVE_SLUG), MockTransport::scripted(vec![])).await;
+    let cookie = common::capability::select(&app, None).await;
+    let response = app
+        .oneshot(
+            Request::post("/join")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("operation_id=invalid"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()["location"], "/login?return_to=%2Fjoin");
 }
 
 #[tokio::test]
@@ -1366,7 +1315,7 @@ async fn requester_form_carries_csp_and_only_external_script() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri(format!("/i/{ACTIVE_SLUG}"))
+                .uri("/join".to_owned())
                 .header("cookie", cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -1392,4 +1341,169 @@ async fn requester_form_carries_csp_and_only_external_script() {
         text.matches(external).count(),
         "invitation HTML contains an inline <script> block"
     );
+}
+
+#[tokio::test]
+async fn paused_requester_page_requires_current_capability_and_shows_no_new_request_form() {
+    for reason in [
+        ghinvite_core::link_lifecycle::PauseReason::Manual,
+        ghinvite_core::link_lifecycle::PauseReason::AbuseSuspected {
+            window_start: Utc::now(),
+        },
+    ] {
+        let Requester {
+            app,
+            authority,
+            mut link,
+        } = requester().await;
+        link.pause = Some(ghinvite_core::link_lifecycle::LinkPause {
+            epoch: 2,
+            at: Utc::now(),
+            by: Some(CREATOR_ID),
+            reason,
+        });
+        authority.seed_link(&link);
+        let cookie = sign_in(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/join")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_text(response).await;
+        assert!(html.contains("accepting requests right now"));
+        assert!(!html.contains("Submit request"));
+        assert!(!html.contains("AbuseSuspected"));
+        assert!(!html.contains("suspected abuse"));
+        // The same session's formerly valid capability becomes neutral after
+        // rotation, before any pause state can be disclosed.
+        link.secret.secret_generation += 1;
+        link.secret.sha256 = [99; 32].into();
+        authority.seed_link(&link);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/join")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            !body_text(response)
+                .await
+                .contains("accepting requests right now")
+        );
+    }
+}
+
+#[tokio::test]
+async fn cancelled_requester_status_explains_link_revocation_without_admin_context() {
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    let operation = RequestId::new().to_string();
+    let mut request = seed_admitted(&authority, &link, &operation, None, RequestState::Cancelled);
+    request.revision = 2;
+    request.decision = Some(ghinvite_core::request_lifecycle::TerminalDecision {
+        decision_id: format!("request.cancelled/{}", request.request_id),
+        decided_by: None,
+        effective_at: request.admitted_at,
+        evaluated_at: request.admitted_at,
+        decline_reason: None,
+        requester_message: None,
+        cancellation_reason: Some(ghinvite_core::RequestCancellationReason::LinkRevoked),
+    });
+    authority.seed_request(request);
+    let cookie = sign_in(&app).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/join?operation_id={operation}"))
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let html = body_text(response).await;
+    assert!(html.contains("Your request was cancelled because this invitation link was revoked."));
+    assert!(!html.contains("Decline reason"));
+}
+
+#[tokio::test]
+async fn explicit_decline_message_is_escaped_on_join_and_owned_request_page_only() {
+    let Requester {
+        app,
+        authority,
+        link,
+    } = requester().await;
+    let request = seed_admitted(
+        &authority,
+        &link,
+        &RequestId::new().to_string(),
+        None,
+        RequestState::Pending,
+    );
+    decide(
+        &authority,
+        &request,
+        DecisionAction::Decline {
+            reason: Some("PRIVATE_ADMIN_ONLY_CONTEXT".into()),
+            requester_message: Some("Please contact <script>the team</script>.".into()),
+        },
+    )
+    .await;
+    let cookie = sign_in(&app).await;
+    for path in [
+        "/join".to_owned(),
+        format!("/requests/{}", request.request_id),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&path)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let html = body_text(response).await;
+        assert!(html.contains("Message from the reviewer:"), "{html}");
+        assert!(
+            html.contains("Please contact &#60;script&#62;the team&#60;/script&#62;."),
+            "{path}: {html}"
+        );
+        assert!(!html.contains("PRIVATE_ADMIN_ONLY_CONTEXT"));
+        assert!(!html.contains("<script>the team</script>"));
+    }
+    let mut foreign = authority.request(request.request_id).unwrap();
+    foreign.requester_id += 1;
+    authority.seed_request(foreign);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/requests/{}", request.request_id))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!body_text(response).await.contains("Please contact"));
 }

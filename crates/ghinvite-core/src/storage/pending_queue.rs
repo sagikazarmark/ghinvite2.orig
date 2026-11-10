@@ -1,5 +1,5 @@
 //! Bounded account-local decision queue, shared by SQLite and D1.
-use crate::{InvitationLinkId, Permission, RequestId};
+use crate::{InvitationLinkId, RequestId, targets::Targets};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 
@@ -29,11 +29,12 @@ pub struct PendingRow {
     pub link_description: Option<String>,
     pub link_id: Option<InvitationLinkId>,
     pub requester_login: String,
+    pub requester_avatar_url: Option<String>,
+    pub requester_github_created_at: Option<DateTime<Utc>>,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
     pub decision_deadline: Option<DateTime<Utc>>,
-    pub permission: Option<Permission>,
-    pub repos: Vec<String>,
+    pub targets: Option<Targets>,
     pub expires_at: Option<DateTime<Utc>>,
     pub approval_required: Option<bool>,
 }
@@ -107,16 +108,20 @@ pub fn query(after: bool) -> String {
       WHERE r.queue_account_id = ?1 AND r.state = 'pending' {seek}
       ORDER BY {SEEK_KEY} LIMIT {limit}
     ), links AS MATERIALIZED (
-      SELECT l.id, l.description, l.permission, l.expires_at,
-        l.approval_required, COALESCE((SELECT json_group_array(repo_full_name) FROM
-        (SELECT repo_full_name FROM invitation_link_repos WHERE invitation_link_id = l.id ORDER BY repo_id)), '[]') AS repos
+      SELECT l.id,l.description,l.expires_at,l.approval_required,
+        CASE WHEN EXISTS(SELECT 1 FROM invitation_link_targets WHERE link_id=l.id) THEN json_object(
+          'organization',json((SELECT json_object('org_id',target_id,'org_login',display_name,'grant',grant) FROM invitation_link_targets WHERE link_id=l.id AND kind='org')),
+          'teams',json((SELECT json_group_array(json_object('team_id',target_id,'team_slug',display_name,'grant',grant)) FROM (SELECT * FROM invitation_link_targets WHERE link_id=l.id AND kind='team' ORDER BY target_id))),
+          'repos',json((SELECT json_group_array(json_object('repo_id',target_id,'repo_full_name',display_name,'grant',grant)) FROM (SELECT * FROM invitation_link_targets WHERE link_id=l.id AND kind='repo' ORDER BY target_id)))
+        ) ELSE NULL END AS targets
       FROM invitation_links l WHERE l.id IN (SELECT invitation_link_id FROM page)
     )
     SELECT json_object(
       'request_id', p.id, 'link_id', l.id,
       'link_description', l.description, 'requester_login', COALESCE(u.login, 'user-' || p.requester_id),
+      'requester_avatar_url', u.avatar_url, 'requester_github_created_at', u.github_created_at,
       'justification', p.justification, 'created_at', p.created_at, 'decision_deadline', p.decision_deadline,
-      'permission', l.permission, 'repos', json(COALESCE(l.repos, '[]')), 'expires_at', l.expires_at,
+      'targets', json(l.targets), 'expires_at', l.expires_at,
       'approval_required', json(CASE l.approval_required WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END)
     ) AS row_json FROM page p
     LEFT JOIN links l ON l.id = p.invitation_link_id

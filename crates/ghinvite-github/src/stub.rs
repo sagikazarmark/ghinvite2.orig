@@ -1,4 +1,9 @@
-//! Local HTTP fixture only. Never mount this router in a deployed application.
+//! Local HTTP fixtures only. Never mount these routers in a deployed application.
+//!
+//! [`router`] is a stateful fake GitHub with control routes (`/identity`,
+//! `/calls`, `/outcomes`, `/reset`, …) for ghinvite's integration tests. Its
+//! token route, `POST /app/installations/{id}/access_tokens`, answers in the
+//! shape octoauth parses (`token`, `expires_at`).
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -70,6 +75,7 @@ async fn configure_outcome(
 
 type SharedState = Arc<Mutex<StubState>>;
 
+/// Create an isolated local GitHub fixture with control routes; never expose it in a deployed service.
 pub fn router() -> Router {
     routes(Arc::new(Mutex::new(StubState::default())))
 }
@@ -81,7 +87,7 @@ fn routes(state: SharedState) -> Router {
             StatusCode::NO_CONTENT
         }))
         .route("/app/installations/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move {
-            Json(json!({"id":id,"account":state.lock().unwrap().installation_account.clone().unwrap_or(json!({"id":100,"login":"acme","type":"Organization"})),"suspended_at":null}))
+            Json(json!({"id":id,"account":state.lock().unwrap().installation_account.clone().unwrap_or(json!({"id":100,"login":"acme","type":"Organization"})),"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}))
         }))
         .route("/installation-repositories", post(|State(state): State<SharedState>, Json(input): Json<Vec<u64>>| async move {
             state.lock().unwrap().installation_repos = Some(input);
@@ -89,7 +95,7 @@ fn routes(state: SharedState) -> Router {
         }))
         .route("/installation/repositories", get(|State(state): State<SharedState>| async move {
             let repos = state.lock().unwrap().installation_repos.clone().unwrap_or_else(|| vec![10, 11]);
-            let repositories: Vec<_> = repos.iter().map(|id| json!({"id":id,"full_name":repo_full_name(*id),"private":true})).collect();
+            let repositories: Vec<_> = repos.iter().map(|id| json!({"id":id,"full_name":repo_full_name(*id),"private":true,"owner":{"id":100,"login":"acme"}})).collect();
             Json(json!({"total_count":repositories.len(),"repositories":repositories}))
         }))
         .route("/user/{id}", get(|Path(id): Path<u64>, State(state): State<SharedState>| async move { Json(json!({"id":id,"login":state.lock().unwrap().user_login.as_deref().unwrap_or("alice")})) }))
@@ -101,14 +107,15 @@ fn routes(state: SharedState) -> Router {
             state.access_role = input["role_name"].as_str().map(str::to_owned);
             StatusCode::NO_CONTENT
         }))
-        .route("/repos/{owner}/{repo}/collaborators/{user}/permission",get(|State(state): State<SharedState>| async move {
+        .route("/repos/{owner}/{repo}/collaborators/{user}/permission",get(|Path((_owner, _repo, user)): Path<(String, String, String)>, State(state): State<SharedState>| async move {
+            if user == "creator" { return (StatusCode::OK,Json(json!({"user":{"id":7,"login":"creator"},"role_name":"admin","permission":"admin"}))).into_response(); }
             let state = state.lock().unwrap();
             match &state.access_role {
                 Some(role) => (StatusCode::OK,Json(json!({"user":{"id":state.addressed_id.unwrap_or(8),"login":state.user_login.as_deref().unwrap_or("alice")},"role_name":role,"permission":if role=="triage" {"read"} else {"write"}}))).into_response(),
-                None => StatusCode::NOT_FOUND.into_response(),
+                None => (StatusCode::OK,Json(json!({"user":{"id":state.addressed_id.unwrap_or(8),"login":state.user_login.as_deref().unwrap_or("alice")},"role_name":"none","permission":"none"}))).into_response(),
             }
         }))
-        .route("/repos/{owner}/{repo}", get(|Path((owner, repo)): Path<(String, String)>| async move { Json(json!({"id":if repo == "api" {10} else {11},"full_name":format!("{owner}/{repo}"),"private":true})) }))
+        .route("/repos/{owner}/{repo}", get(|Path((owner, repo)): Path<(String, String)>| async move { Json(json!({"id":if repo == "api" {10} else {11},"full_name":format!("{owner}/{repo}"),"private":true,"owner":{"id":100,"login":owner}})) }))
         .route(
             "/app/installations/{id}/access_tokens",
             post(create_access_token),
@@ -127,6 +134,13 @@ fn routes(state: SharedState) -> Router {
         )
         .route("/calls", get(get_calls))
         .route("/outcomes", post(configure_outcome))
+        .route("/invitation-expired", post(|State(state):State<SharedState>,Json(input):Json<serde_json::Value>| async move {
+            let (Some(owner),Some(repo),Some(id),Some(expired))=(input["owner"].as_str(),input["repo"].as_str(),input["id"].as_u64(),input["expired"].as_bool()) else {return StatusCode::BAD_REQUEST;};
+            let mut state=state.lock().unwrap();
+            let Some(invitation)=state.invitations.get_mut(&(owner.to_owned(),repo.to_owned(),id)) else {return StatusCode::NOT_FOUND;};
+            invitation["expired"]=json!(expired);
+            StatusCode::NO_CONTENT
+        }))
         .route("/repos/{owner}/{repo}/invitations", get(list_invitations))
         .route(
             "/repos/{owner}/{repo}/invitations/{id}",
@@ -229,6 +243,7 @@ async fn add_collaborator(
         "repository": {"full_name": format!("{owner}/{repo}")},
         "permissions": permissions,
         "created_at": Utc::now(),
+        "expired": false,
     });
     if !declined {
         s.invitations.insert((owner, repo, id), invitation.clone());
@@ -349,179 +364,31 @@ fn repo_full_name(id: u64) -> String {
 
 async fn reset(State(state): State<SharedState>) -> impl IntoResponse {
     let mut s = state.lock().unwrap();
-    *s = StubState::default();
+    // GitHub identities are never reused, even when a scenario clears observations.
+    let next_id = s.next_id;
+    *s = StubState {
+        next_id,
+        ..StubState::default()
+    };
     StatusCode::OK
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{
-        CollaboratorAddition, InstallationClient, jwt::AppJwtSigner, transport::ReqwestTransport,
-    };
-    use ghinvite_core::Permission;
+mod tests;
 
-    #[tokio::test]
-    async fn controlled_outcomes_record_safe_calls_and_retry_once() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, router()).await.unwrap();
-        });
-        let http = reqwest::Client::new();
-        let github = InstallationClient::new(
-            Arc::new(ReqwestTransport::new().unwrap()),
-            AppJwtSigner::from_pem(123, include_str!("jwt_test_key.pem")).unwrap(),
-        )
-        .with_base(&base);
-        for (repo, outcome) in [
-            ("member", "already_collaborator"),
-            ("denied", "terminal_failure"),
-            ("retry", "transient_once"),
-            ("throttled", "throttled_once"),
-        ] {
-            let response = http
-                .post(format!("{base}/outcomes"))
-                .json(&json!({
-                    "owner": "acme", "repo": repo, "user": "alice", "outcome": outcome
-                }))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-        let add = |repo: &'static str| {
-            let github = github.clone();
-            async move {
-                github
-                    .add_collaborator(1, "acme", repo, "alice", Permission::Pull)
-                    .await
-            }
-        };
-        let answer = add("member").await;
-        assert!(
-            matches!(answer, CollaboratorAddition::AlreadyCollaborator),
-            "{answer:?}"
-        );
-        assert!(
-            github
-                .is_collaborator(1, "acme", "member", "alice")
-                .await
-                .unwrap()
-        );
-        let answer = add("denied").await;
-        assert!(
-            matches!(
-                answer,
-                CollaboratorAddition::ValidationRefused { status: 422 }
-            ),
-            "{answer:?}"
-        );
-        let answer = add("retry").await;
-        assert!(
-            matches!(&answer, CollaboratorAddition::Unanswered(error) if error.status() == Some(502)),
-            "{answer:?}"
-        );
-        let answer = add("retry").await;
-        assert!(
-            matches!(answer, CollaboratorAddition::Created { .. }),
-            "{answer:?}"
-        );
-        // The throttled refusal is a 403 like `denied`, but its documented
-        // evidence separates it from a permission decision.
-        let answer = add("throttled").await;
-        assert!(
-            matches!(
-                answer,
-                CollaboratorAddition::Throttled(limit)
-                    if limit.retry_after == Some(std::time::Duration::from_secs(1))
-            ),
-            "{answer:?}"
-        );
-        let answer = add("throttled").await;
-        assert!(
-            matches!(answer, CollaboratorAddition::Created { .. }),
-            "{answer:?}"
-        );
-        let calls: serde_json::Value = http
-            .get(format!("{base}/calls"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let puts: Vec<_> = calls["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c["method"] == "PUT")
-            .collect();
-        assert_eq!(
-            puts,
-            vec![
-                &json!({"method":"PUT", "path":"/repos/acme/member/collaborators/alice", "permission":"pull", "status":204}),
-                &json!({"method":"PUT", "path":"/repos/acme/denied/collaborators/alice", "permission":"pull", "status":422}),
-                &json!({"method":"PUT", "path":"/repos/acme/retry/collaborators/alice", "permission":"pull", "status":502}),
-                &json!({"method":"PUT", "path":"/repos/acme/retry/collaborators/alice", "permission":"pull", "status":201}),
-                &json!({"method":"PUT", "path":"/repos/acme/throttled/collaborators/alice", "permission":"pull", "status":403}),
-                &json!({"method":"PUT", "path":"/repos/acme/throttled/collaborators/alice", "permission":"pull", "status":201}),
-            ]
-        );
-        assert!(!calls.to_string().contains("test-token"));
-        assert!(!calls.to_string().contains("Bearer"));
-    }
-
-    #[tokio::test]
-    async fn successful_invitation_is_pending_and_can_be_listed_and_deleted() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, router()).await.unwrap();
-        });
-        let github = InstallationClient::new(
-            Arc::new(ReqwestTransport::new().unwrap()),
-            AppJwtSigner::from_pem(123, include_str!("jwt_test_key.pem")).unwrap(),
-        )
-        .with_base(base);
-        let CollaboratorAddition::Created { invitation_id: id } = github
-            .add_collaborator(1, "acme", "api", "alice", Permission::Push)
-            .await
-        else {
-            panic!("stub must return a decodable 201 invitation");
-        };
-        assert!(id > 0);
-        assert!(
-            !github
-                .is_collaborator(1, "acme", "api", "alice")
-                .await
-                .unwrap()
-        );
-        let pending = github.list_invitations(1, "acme", "api").await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, id);
-        assert_eq!(pending[0].invitee.login, "alice");
-        assert_eq!(pending[0].permissions, "write");
-        assert_eq!(
-            github
-                .delete_invitation(1, "acme", "api", id)
-                .await
-                .unwrap(),
-            crate::InvitationDeletion::Deleted
-        );
-        assert!(
-            github
-                .list_invitations(1, "acme", "api")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            github
-                .delete_invitation(1, "acme", "api", id)
-                .await
-                .unwrap(),
-            crate::InvitationDeletion::NotFound
-        );
-    }
+mod wire;
+/// Create the frozen synthetic HTTP fixture for every typed endpoint. Never
+/// deploy this router.
+///
+/// Requests must match the corpus's literal method, target, authentication,
+/// headers and serialized body. The default serves the first reviewed success
+/// pair. `POST /__fixture/select` accepts `{ "endpoint": "PutCollaborator",
+/// "response": 1 }` to select another listed success response, or
+/// `{ "protocol_case": "sso-partial" }` for a named header/status family.
+/// `GET /__fixture/summary` returns only request/match/refusal counts. All inputs
+/// and responses are synthetic fixtures; they do not establish live GitHub
+/// behavior, permissions, or unresolved spike results. Existing consumer
+/// [`router`] behavior is independent of this additive fixture.
+pub fn wire_contract_router() -> Router {
+    wire::router()
 }

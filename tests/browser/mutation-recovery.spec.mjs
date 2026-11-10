@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test('create, revoke, approve and decline recover their original attempts across navigation', async ({ page, context, request }) => {
   await page.goto('/fixture-login');
   await page.getByLabel('Description', { exact: true }).fill('Browser recovery');
-  await page.getByLabel('acme/api', { exact: true }).check();
+  await page.getByLabel('octocat/api', { exact: true }).check();
   const action = new URL(await page.locator('form').filter({ has: page.getByRole('button', { name: 'Create invitation link' }) }).getAttribute('action'), page.url());
   const linkId = action.searchParams.get('link_id');
   expect(linkId).toMatch(/^[0-7][0-9A-HJKMNP-TV-Z]{25}$/);
@@ -18,17 +18,19 @@ test('create, revoke, approve and decline recover their original attempts across
   await page.getByRole('button', { name: 'Retry original attempt' }).click();
   await expect(page).toHaveURL(detail);
   await expect(page.getByText('Browser recovery', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('Invitation link created.', { exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: 'Open invitation request flow' })).toHaveAttribute('href', new RegExp(`/i/${linkId}$`));
+  await expect(page.getByText('Invitation link created. The URL is shown only once. If you did not save it, rotate the invitation URL from link details.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open invitation request flow' })).toHaveCount(0);
+  await expect(page.getByText('The invitation URL is shown only once when created or rotated. Treat it like a password. The link ID does not grant access.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Rotate invitation URL', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Stop accepting new requests' }).click();
-  await page.getByRole('button', { name: 'Confirm stop' }).press('Enter');
+  await page.getByRole('button', { name: 'Confirm revoke' }).press('Enter');
   await expect(page.getByRole('status')).toContainText('Outcome unknown');
   const revocation = await page.getByRole('link', { name: 'Check original attempt status' }).getAttribute('href');
   await page.goto('/console/accounts/octocat/links');
   await page.getByRole('link', { name: 'Recover attempts' }).click();
   await page.locator(`form[action="${revocation}"]`).getByRole('button', { name: 'Retry original attempt' }).click();
   await expect(page).toHaveURL(detail);
-  await expect(page.getByText('Invitation link stopped accepting new invitation requests.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Invitation link stopped accepting new invitation requests.', { exact: false })).toBeVisible();
   await page.goto(revocation);
   await expect(page.getByRole('status')).toContainText('stopped accepting');
 

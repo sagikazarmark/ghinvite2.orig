@@ -23,6 +23,7 @@ pub async fn seed<S: ProjectionStorage + ?Sized>(
     s.apply_transition(&envelope(link, revision)).await?;
     for request in requests {
         s.apply_request(&RequestProjectionEnvelope {
+            approval: None,
             request: request_snapshot(link, request, revision),
             events: vec![],
         })
@@ -36,26 +37,35 @@ pub fn link_snapshot(link: &InvitationLink, revision: u64) -> LinkSnapshot {
         metadata: None,
         link_id: link.id,
         creation: CreateLink {
+            batch_source: link.batch_source,
+            access_lifetime_seconds: link.access_lifetime_seconds,
+            email_domains: link.email_domains.clone(),
             link_id: link.id,
             admin: AccountAdmin {
                 account_id: link.account_id,
                 user_id: link.created_by,
             },
             account_id: link.account_id,
+            organization_installation_id: link.organization_installation_id,
             installation_id: link.installation_id,
             description: link.description.clone(),
             internal_note: link.internal_note.clone(),
             expires_at: link.expires_at,
             max_uses: link.max_uses,
-            permission: link.permission,
+            invitation_lifetime_seconds: link.invitation_lifetime_seconds,
+            abuse_threshold_per_hour: link.abuse_threshold_per_hour,
+            budget_share_pct: link.budget_share_pct,
             approval_required: link.approval_required,
-            repos: link.repos.clone(),
+            targets: link.targets.clone(),
+            secret_sha256: link.secret.sha256,
         },
+        secret: link.secret.clone(),
         created_at: link.created_at,
         uses: link.uses_count.into(),
         revision,
         revoked_at: link.revoked_at,
         revoked_by: link.revoked_by,
+        pause: link.pause.clone(),
     }
 }
 
@@ -69,6 +79,8 @@ pub fn request_snapshot(
         (_, deadline) => deadline,
     };
     RequestSnapshot {
+        batch: None,
+        domain_evidence: request.domain_evidence.clone(),
         request_id: request.id,
         link_id: request.invitation_link_id,
         account_id: link.account_id,
@@ -83,7 +95,9 @@ pub fn request_snapshot(
             decided_by: request.decided_by,
             effective_at: request.decided_at.unwrap_or(request.created_at),
             evaluated_at: request.decided_at.unwrap_or(request.created_at),
+            cancellation_reason: request.cancellation_reason,
             decline_reason: request.decline_reason.clone(),
+            requester_message: request.requester_message.clone(),
         }),
     }
 }
@@ -97,7 +111,7 @@ where
     S: crate::storage::Storage + ProjectionStorage + ?Sized,
 {
     let mut link = s
-        .get_invitation_link_by_id(request.invitation_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id.expect("linked request fixture"))
         .await?
         .ok_or(crate::storage::Error::NotFound)?;
     link.uses_count += 1;
@@ -111,10 +125,11 @@ where
     S: crate::storage::Storage + ProjectionStorage + ?Sized,
 {
     let link = s
-        .get_invitation_link_by_id(request.invitation_link_id)
+        .get_invitation_link_by_id(request.invitation_link_id.expect("linked request fixture"))
         .await?
         .ok_or(crate::storage::Error::NotFound)?;
     s.apply_request(&RequestProjectionEnvelope {
+        approval: None,
         request: request_snapshot(&link, request, DECISION_REVISION),
         events: vec![],
     })

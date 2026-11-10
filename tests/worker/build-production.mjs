@@ -22,7 +22,9 @@ for (const config of ['web.toml', 'restate-svc.toml']) {
   assert.equal(data.compatibility_date, '2024-09-23');
   assert.deepEqual(data.compatibility_flags, ['nodejs_compat']);
   assert.equal(data.build.cwd, undefined, 'This gate mirrors root-level Wrangler deployment without build.cwd');
+  if (config === 'web.toml') assert.deepEqual(data.triggers.crons, ['5 * * * *']);
   assert.ok(!data.build.command.includes('runtime-tests'), 'Deployment must not enable fixture features');
+  assert.ok(!data.build.command.includes('link-secret-fixture'), 'Deployment must not enable deterministic capability entropy');
   // The exact deployment build command, production features and worker-build's
   // generated shim. No custom runtime-test packaging or JS fault wrappers.
   execFileSync('timeout', ['--kill-after=5s', '900s', 'bash', '-eu', '-c', data.build.command], {

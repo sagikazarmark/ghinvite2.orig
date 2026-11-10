@@ -1,9 +1,9 @@
 use ghinvite_core::storage::pending_queue::PendingBoundary;
 use ghinvite_core::storage::projection::fixture;
-use ghinvite_core::storage::{ConsoleStorage, InstallationStorage, RecordStorage};
+use ghinvite_core::storage::{AppInstallationStorage, ConsoleStorage, RecordStorage};
 use ghinvite_core::{
-    Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, Permission,
-    RequestId, RequestState, SelectedRepos, User,
+    Account, AccountType, InvitationLink, InvitationLinkId, InvitationRequest, RequestId,
+    RequestState, SelectedRepos, User,
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 
@@ -29,36 +29,56 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
     let storage = SqlxStorage::in_memory().await.unwrap();
     let now = "2026-01-01T00:00:00Z".parse().unwrap();
     storage
-        .insert_installation(&Account {
-            installation_id: 1,
-            account_id: 42,
-            account_login: "acme".into(),
-            account_type: AccountType::User,
-            installed_at: now,
-            uninstalled_at: None,
-            selected_repos: SelectedRepos::All,
-        })
+        .put_app_installation(&ghinvite_core::account::Installation::repo(
+            (Account {
+                installation_id: 1,
+                account_id: 42,
+                account_login: "acme".into(),
+                account_type: AccountType::User,
+                installed_at: now,
+                uninstalled_at: None,
+                selected_repos: SelectedRepos::All,
+            })
+            .clone(),
+        ))
         .await
         .unwrap();
     let link = InvitationLink {
+        batch_source: None,
+        access_lifetime_seconds: None,
+        email_domains: vec![],
         id: InvitationLinkId::new(),
+        organization_installation_id: None,
         installation_id: 1,
         account_id: 42,
         created_by: 1,
         created_at: now,
         expires_at: None,
         max_uses: None,
+        invitation_lifetime_seconds: 604800,
+        abuse_threshold_per_hour: None,
+        budget_share_pct: 50,
         uses_count: 0,
-        permission: Permission::Pull,
+
         approval_required: true,
         description: "Workshop".into(),
         internal_note: None,
         revoked_at: None,
         revoked_by: None,
-        repos: vec![ghinvite_core::InvitationLinkRepo {
-            repo_id: 10,
-            repo_full_name: "acme/api".into(),
-        }],
+        pause: None,
+        targets: ghinvite_core::targets::Targets {
+            repos: vec![ghinvite_core::targets::RepoTarget {
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+                grant: ghinvite_core::targets::RepoRole::Read,
+            }],
+            ..Default::default()
+        },
+
+        secret: ghinvite_core::LinkSecretState {
+            secret_generation: 1,
+            sha256: ghinvite_core::SecretHash::from_bytes([1; 32]),
+        },
     };
     for user_id in 1..=53 {
         storage
@@ -66,6 +86,7 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
                 user_id,
                 login: format!("user-{user_id}"),
                 avatar_url: None,
+                github_created_at: None,
                 last_seen_at: now,
             })
             .await
@@ -75,14 +96,18 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
     for n in (1..=53).rev() {
         let id: RequestId = format!("01ARZ3NDEKTSV4RRFFQ69G5{:03}", n).parse().unwrap();
         let request = InvitationRequest {
+            batch: None,
+            domain_evidence: None,
             id,
-            invitation_link_id: link.id,
+            invitation_link_id: Some(link.id),
             requester_id: n,
             justification: None,
             state: RequestState::Pending,
             decided_by: None,
             decided_at: None,
+            cancellation_reason: None,
             decline_reason: None,
+            requester_message: None,
             created_at: now,
             decision_deadline: Some(now),
         };
@@ -118,14 +143,13 @@ async fn pages_are_bounded_and_seek_past_terminal_transitions_with_repeated_cont
         ids[..25]
     );
     assert!(first.next.is_some());
-    assert!(
-        first
-            .rows
-            .iter()
-            .all(|r| r.link_description.as_deref() == Some("Workshop")
-                && r.repos == ["acme/api"]
-                && r.decision_deadline == Some(now))
-    );
+    assert!(first.rows.iter().all(|r| {
+        r.link_description.as_deref() == Some("Workshop")
+            && r.targets
+                .as_ref()
+                .is_some_and(|t| t.repos.len() == 1 && t.repos[0].repo_full_name == "acme/api")
+            && r.decision_deadline == Some(now)
+    }));
     assert!(
         storage
             .pending_request_page(43, None)
@@ -182,9 +206,9 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
     // External storage boundary: alternate time encodings, corruption, and
     // missing rows cannot be written through the domain's validated interface.
     sqlx::raw_sql("PRAGMA foreign_keys=OFF;
-        INSERT INTO installations VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
-        INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content)
-        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,42,1,'2026-01-01T00:00:00Z','pull',1,'Workshop',1,'{}');")
+        INSERT INTO installations(installation_id,account_id,account_login,account_type,installed_at,uninstalled_at,selected_repos) VALUES(1,42,'acme','User','2026-01-01T00:00:00Z',NULL,'[]');
+        INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,approval_required,description,projection_revision,projection_content,secret_generation,secret_sha256)
+        VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,42,1,'2026-01-01T00:00:00Z',1,'Workshop',1,'{}',1,'0101010101010101010101010101010101010101010101010101010101010101');")
         .execute(&db).await.unwrap();
     for (id, time) in [
         ("001", "2026-01-01T00:00:00.000000001Z"),
@@ -209,7 +233,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
     assert!(
         page.rows
             .iter()
-            .all(|r| r.requester_login == "user-99" && r.repos.is_empty())
+            .all(|r| r.requester_login == "user-99" && r.targets.is_none())
     );
     let boundary = PendingBoundary {
         created_at: page.rows[1].created_at,
@@ -270,7 +294,8 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         detail.contains("SEARCH r USING INDEX idx_pending_queue_seek (queue_account_id=?)"),
         "the overview count seeks the pending index: {detail}"
     );
-    sqlx::query("UPDATE invitation_links SET permission='corrupt'")
+    sqlx::query("INSERT INTO invitation_link_targets VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV','repo',10,'acme/api','read')").execute(&db).await.unwrap();
+    sqlx::raw_sql("PRAGMA ignore_check_constraints=ON; UPDATE invitation_link_targets SET grant='corrupt'; PRAGMA ignore_check_constraints=OFF")
         .execute(&db)
         .await
         .unwrap();
@@ -278,7 +303,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         storage.pending_request_page(42, None).await,
         Err(ghinvite_core::storage::Error::Corrupt(_))
     ));
-    sqlx::query("UPDATE invitation_links SET permission='pull',account_id=43")
+    sqlx::raw_sql("UPDATE invitation_link_targets SET grant='read'; UPDATE invitation_links SET account_id=43")
         .execute(&db)
         .await
         .unwrap();
@@ -319,7 +344,7 @@ async fn queue_index_seeks_exact_times_and_missing_context_or_failed_reads_stay_
         .execute(&db)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,permission,approval_required,description,projection_revision,projection_content) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,43,1,'2026-01-01T00:00:00Z','pull',1,'Restored',1,'{}')").execute(&db).await.unwrap();
+    sqlx::query("INSERT INTO invitation_links(id,installation_id,account_id,created_by,created_at,approval_required,description,projection_revision,projection_content,secret_generation,secret_sha256) VALUES('01ARZ3NDEKTSV4RRFFQ69G5FAV',1,43,1,'2026-01-01T00:00:00Z',1,'Restored',1,'{}',1,'0101010101010101010101010101010101010101010101010101010101010101')").execute(&db).await.unwrap();
     assert_eq!(
         storage
             .pending_request_page(43, None)

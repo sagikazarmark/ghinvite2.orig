@@ -17,12 +17,36 @@ where
     render_with_csrf(None, component)
 }
 
-pub fn render_with_csrf<F>(token: Option<String>, component: F) -> String
+/// Per-document context. Console facts originate only from the authorized
+/// extractor; the legacy token-only conversion serves public pages.
+pub struct RenderContext {
+    pub csrf_token: Option<String>,
+    pub console_apps: Option<ghinvite_ui::layouts::ConsoleApps>,
+    pub pending_requests: Option<ghinvite_ui::layouts::ConsolePendingRequests>,
+}
+impl From<Option<String>> for RenderContext {
+    fn from(csrf_token: Option<String>) -> Self {
+        Self {
+            csrf_token,
+            console_apps: None,
+            pending_requests: None,
+        }
+    }
+}
+
+pub fn render_with_csrf<F>(context: impl Into<RenderContext>, component: F) -> String
 where
     F: 'static + Clone + Fn() -> Element + Send,
 {
+    let context = context.into();
     let mut vdom = VirtualDom::new_with_props(component, ());
-    vdom.provide_root_context(ghinvite_ui::csrf::CsrfToken(token));
+    vdom.provide_root_context(ghinvite_ui::csrf::CsrfToken(context.csrf_token));
+    if let Some(apps) = context.console_apps {
+        vdom.provide_root_context(apps);
+    }
+    if let Some(pending) = context.pending_requests {
+        vdom.provide_root_context(pending);
+    }
     vdom.rebuild_in_place();
     ghinvite_ui::document::document_shell(&dioxus_ssr::render(&vdom))
 }

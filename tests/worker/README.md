@@ -7,6 +7,12 @@ creation/admission/decision responses, signed member settlement, status/audit
 convergence and actual request-batch commit acknowledgement loss. It uses the
 same disposable runtime and build prerequisites as `test:admission`.
 
+Run `npm run test:delivery-control --prefix tests/worker` for repository S0.
+It exercises pre-create hold/abort inboxes, exact historical control and decision
+receipts, release wakes, D1 projection, three real lost run acknowledgements around
+one PUT, and read-only unknown recovery. Cancellation DELETE and own-expiry
+execution remain separate gates.
+
 For the installation failure/replacement matrix on real Restate and Worker/D1,
 run `npm run test:installation --prefix tests/worker`. For the independent release
 packaging gate, install worker-build **0.8.1** and run
@@ -21,6 +27,9 @@ For shared storage conformance on the actual D1 adapter, run
 `ghinvite_core::storage::test_suite` scenario inside workerd, each against its
 own freshly migrated in-memory D1 database, plus D1 audit seek plans. See
 [local testing](../../docs/local-testing.md#d1-storage-conformance-requires-wasm-bindgen-cli).
+The gate also runs the populated canonical-delivery migration and rollback proof
+on actual D1. Python 3 supplies SQLite's statement parser so transactional D1
+batches retain complete trigger bodies.
 
 For the authenticated decision queue, run
 `npm run test:queue --prefix tests/worker`. This exercises the actual web Worker
@@ -114,3 +123,22 @@ Compatibility date/flags match `wrangler/web.toml`; keep them aligned when chang
 deployment compatibility. The harness does not apply domain migrations or perform
 a successful OAuth exchange. Native tests cover authenticated lifetime/rotation;
 this smoke does not establish distributed KV propagation or production rate limits.
+
+## Complete runtime output
+
+Run fixture entrypoints through `node run-runtime.mjs admission.mjs` (or the
+corresponding npm command). The launcher tracks only workerd children spawned by
+that Node process, preserves raw stdout/stderr until EOF across Miniflare
+`setOptions` and disposal, and waits for child `close`. Exact privacy callbacks
+scan each complete concatenated stream after shutdown; a split marker cannot
+hide behind interleaved stderr. Admission also stops its owned Compose service,
+captures its shutdown logs, then removes it, and drains the owned GitHub stub.
+
+`P1_RUNTIME_EVIDENCE` selects a fresh evidence directory; otherwise evidence goes
+to `.runtime-evidence/<fixture>-<pid>`. Acceptance requires both exit status zero
+and `completion.json` with `result=passed`, raw EOF/child close, and the raw-log
+hashes. An early `process.exit(0)` has no completion record and is not a pass.
+Capture overflow, stream errors, missing EOF and cleanup failure fail closed.
+Direct entrypoint execution can still diagnose behavior but does not establish
+complete shutdown-log privacy. `npm run test:runtime-output` exercises late and
+split output, errors, bounds, process ownership and premature exit.

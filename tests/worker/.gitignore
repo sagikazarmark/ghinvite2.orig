@@ -4,3 +4,9 @@ worker.mjs
 .generated-workflows/
 workflows-worker.mjs
 .production.json
+.generated-link-secret/
+link-secret-worker.mjs
+.generated-cancellation/
+cancellation-worker.mjs
+
+.runtime-evidence/

@@ -10,9 +10,11 @@ use std::str::FromStr;
 pub enum RequestState {
     Pending,
     Approved,
+    /// All targets are final, at least one invitation lapsed, and none satisfied.
+    Lapsed,
     Declined,
     Expired,
-    /// Reserved for v2 (link revoke cascading); not produced by v1 code paths.
+    /// Cancelled by an explicit link-revocation request cascade.
     Cancelled,
 }
 
@@ -26,6 +28,7 @@ impl FromStr for RequestState {
         match s {
             "pending" => Ok(Self::Pending),
             "approved" => Ok(Self::Approved),
+            "lapsed" => Ok(Self::Lapsed),
             "declined" => Ok(Self::Declined),
             "expired" => Ok(Self::Expired),
             "cancelled" => Ok(Self::Cancelled),
@@ -39,6 +42,7 @@ impl fmt::Display for RequestState {
         f.write_str(match self {
             Self::Pending => "pending",
             Self::Approved => "approved",
+            Self::Lapsed => "lapsed",
             Self::Declined => "declined",
             Self::Expired => "expired",
             Self::Cancelled => "cancelled",
@@ -52,16 +56,31 @@ impl RequestState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCancellationReason {
+    LinkRevoked,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitationRequest {
     pub id: RequestId,
-    pub invitation_link_id: InvitationLinkId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitation_link_id: Option<InvitationLinkId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<crate::bulk::BatchRef>,
     pub requester_id: u64,
     pub justification: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_evidence: Option<crate::email_domain::DomainEvidence>,
     pub state: RequestState,
     pub decided_by: Option<u64>,
     pub decided_at: Option<DateTime<Utc>>,
     pub decline_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_reason: Option<RequestCancellationReason>,
     pub created_at: DateTime<Utc>,
     /// Persisted admission deadline, independent of invitation-link expiration.
     /// None means no recorded deadline (auto-approval or missing historical data).
@@ -77,6 +96,7 @@ mod tests {
         for s in [
             RequestState::Pending,
             RequestState::Approved,
+            RequestState::Lapsed,
             RequestState::Declined,
             RequestState::Expired,
             RequestState::Cancelled,

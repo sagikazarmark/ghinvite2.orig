@@ -1,0 +1,30 @@
+import { test, expect } from '@playwright/test';
+
+test('confirmation recovers a lost response with the exact original operation', async ({ page, request }) => {
+  await page.goto('/fixture-login');
+  await expect(page.getByRole('heading', { name: 'Reissue delivery' })).toBeVisible();
+  await expect(page.getByText('It does not consume another invitation-link use', { exact: false })).toBeVisible();
+  const operation = await page.locator('[name="operation_id"]').inputValue();
+  const confirmation = page.getByLabel('Type REISSUE to confirm');
+  await confirmation.fill('NO');
+  await page.getByRole('button', { name: 'Reissue delivery' }).click();
+  await expect(page.getByRole('status')).toHaveText('Type REISSUE to confirm.');
+  expect((await (await request.get('/fixture-effects')).json()).calls).toEqual([]);
+  await expect(page.locator('[name="operation_id"]')).toHaveValue(operation);
+  await confirmation.fill('REISSUE');
+  await page.getByRole('button', { name: 'Reissue delivery' }).click();
+  await expect(page.getByRole('status')).toContainText('The outcome is unknown');
+  await expect(page.locator('[name="operation_id"]')).toHaveValue(operation);
+  await expect(confirmation).toHaveValue('REISSUE');
+  await page.getByRole('button', { name: 'Reissue delivery' }).press('Enter');
+  await expect(page.getByRole('status')).toContainText('generation 2 was issued');
+  await expect(page.getByRole('status')).toContainText('access are not yet confirmed');
+  await expect(page.locator('[name="operation_id"]')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Reissue delivery' })).toHaveCount(0);
+  const evidence = await (await request.get('/fixture-effects')).json();
+  expect(evidence.receipts).toBe(1);
+  expect(evidence.calls).toHaveLength(2);
+  expect(evidence.calls[0]).toEqual(evidence.calls[1]);
+  expect(evidence.calls[0].operation_id).toBe(operation);
+  expect(evidence.calls[0].admin).toEqual({ account_id: 9001, user_id: 42 });
+});

@@ -6,18 +6,15 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ghinvite_core::audit::{AuditEvent, EventType};
 use ghinvite_core::delivery::{CreateCommand, DeliverySnapshot};
+use ghinvite_core::storage::AppInstallationReadStorage;
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
 use ghinvite_core::storage::{
     AuditPage, AuditPosition, AuditStorage, ConsoleStorage, ContinuationStorage, DeliveryStorage,
-    Error, InstallationStorage, RecordStorage, Result, WebhookStorage, attempt_continuations,
-    audit_read, audit_write, classify_insert, delivery_attempts, delivery_projection,
-    github_invitations, installations, invitation_links, invitation_requests, pending_queue,
-    request_history, users,
+    Error, RecordStorage, Result, attempt_continuations, audit_read, audit_write, classify_insert,
+    delivery_attempts, delivery_projection, installations, invitation_links, invitation_requests,
+    pending_queue, request_history, users,
 };
-use ghinvite_core::{
-    Account, GithubInvitation, GithubInvitationId, InvitationLink, InvitationLinkId,
-    InvitationRequest, RequestId, SelectedRepos, User,
-};
+use ghinvite_core::{InvitationLink, InvitationLinkId, InvitationRequest, RequestId, User};
 use serde::de::{DeserializeOwned, IgnoredAny};
 use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Sqlite, SqlitePool};
@@ -74,33 +71,12 @@ impl SqlxStorage {
                       target_kind, target_id, metadata, request_id
                FROM audit_events WHERE account_id = ?1 ORDER BY occurred_at, id"#,
                 )
-                .bind(u64_to_i64(account_id)),
+                .bind(u64_to_i64(account_id)?),
             )
             .await?;
         rows.into_iter()
             .map(audit_read::AuditEventRow::into_event)
             .collect()
-    }
-
-    /// Test-only: force a GitHub invitation row into `state`, bypassing the
-    /// delivery and settlement writers. The settlement fence still applies.
-    #[cfg(any(test, feature = "test-util"))]
-    pub async fn debug_set_github_invitation(
-        &self,
-        id: GithubInvitationId,
-        state: ghinvite_core::InvitationState,
-        github_invitation_id: Option<u64>,
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE github_invitations SET state = ?2, github_invitation_id = ?3 WHERE id = ?1",
-        )
-        .bind(id.to_string())
-        .bind(state.to_string())
-        .bind(github_invitation_id.map(u64_to_i64))
-        .execute(&self.pool)
-        .await
-        .map_err(to_db_err)?;
-        Ok(())
     }
 
     /// Test-only fault injection for exercising durable audit retries against
@@ -191,7 +167,7 @@ impl SqlxStorage {
     }
 
     /// Run `statements` in one transaction, each bound to the same `input`.
-    async fn transaction<S: AsRef<str>>(
+    pub(crate) async fn transaction<S: AsRef<str>>(
         &self,
         statements: &[S],
         input: &str,
@@ -211,31 +187,19 @@ impl SqlxStorage {
 
 #[async_trait]
 impl RecordStorage for SqlxStorage {
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        let query = sqlx::query(installations::GET).bind(u64_to_i64(installation_id));
-        self.installation(query).await
-    }
-
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>> {
-        let query = sqlx::query(installations::ACTIVE_BY_ACCOUNT).bind(u64_to_i64(account_id));
-        self.installation(query).await
-    }
-
     async fn upsert_user(&self, user: &User) -> Result<()> {
         let query = sqlx::query(users::UPSERT)
-            .bind(u64_to_i64(user.user_id))
+            .bind(u64_to_i64(user.user_id)?)
             .bind(&user.login)
             .bind(user.avatar_url.as_deref())
-            .bind(user.last_seen_at);
+            .bind(user.last_seen_at)
+            .bind(user.github_created_at);
         self.execute(query).await?;
         Ok(())
     }
 
     async fn get_user(&self, user_id: u64) -> Result<Option<User>> {
-        self.optional(sqlx::query(users::GET).bind(u64_to_i64(user_id)))
+        self.optional(sqlx::query(users::GET).bind(u64_to_i64(user_id)?))
             .await
     }
 
@@ -248,29 +212,160 @@ impl RecordStorage for SqlxStorage {
     }
 
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
-        self.optional(sqlx::query(invitation_requests::GET).bind(id.to_string()))
-            .await
-    }
-
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>> {
-        self.optional(sqlx::query(github_invitations::GET).bind(id.to_string()))
-            .await
+        self.optional::<invitation_requests::Row>(
+            sqlx::query(invitation_requests::GET).bind(id.to_string()),
+        )
+        .await?
+        .map(invitation_requests::Row::into_request)
+        .transpose()
     }
 }
 
 #[async_trait]
 impl ConsoleStorage for SqlxStorage {
-    async fn get_active_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        self.installation(sqlx::query(installations::ACTIVE_BY_LOGIN).bind(login))
-            .await
+    async fn revoke_preview(
+        &self,
+        account_id: u64,
+        link_id: ghinvite_core::InvitationLinkId,
+    ) -> Result<Option<ghinvite_core::revocation::RevokePreview>> {
+        self.optional(
+            sqlx::query(ghinvite_core::storage::projection::revocation_sql::PREVIEW)
+                .bind(link_id.to_string())
+                .bind(ghinvite_core::storage::integer::unsigned(account_id)?),
+        )
+        .await
     }
 
-    async fn get_latest_installation_by_login(&self, login: &str) -> Result<Option<Account>> {
-        self.installation(sqlx::query(installations::LATEST_BY_LOGIN).bind(login))
-            .await
+    async fn scoped_blocked_digest(
+        &self,
+        scope: &ghinvite_core::storage::console_scope::ConsoleScope,
+        day: chrono::NaiveDate,
+    ) -> Result<Option<ghinvite_core::storage::blocked_digest::BlockedDigest>> {
+        self.read_blocked_digest(scope, day).await
+    }
+
+    async fn scoped_list_invitation_links_for_account(
+        &self,
+        scope: &ghinvite_core::storage::console_scope::ConsoleScope,
+    ) -> Result<Vec<InvitationLink>> {
+        use ghinvite_core::storage::console_scope as cs;
+        let Some(repos) = scope.repo_ids_json() else {
+            return self
+                .list_invitation_links_for_account(scope.account_id())
+                .await;
+        };
+        let sql = cs::links_query();
+        invitation_links::fold(
+            self.all(
+                sqlx::query(&sql)
+                    .bind(u64_to_i64(scope.account_id())?)
+                    .bind(repos),
+            )
+            .await?,
+        )
+    }
+    async fn scoped_count_pending_requests_for_account(
+        &self,
+        scope: &ghinvite_core::storage::console_scope::ConsoleScope,
+    ) -> Result<u64> {
+        use ghinvite_core::storage::console_scope as cs;
+        let Some(repos) = scope.repo_ids_json() else {
+            return self
+                .count_pending_requests_for_account(scope.account_id())
+                .await;
+        };
+        let sql = cs::count_query();
+        let row: pending_queue::CountRow = self
+            .one(
+                sqlx::query(&sql)
+                    .bind(u64_to_i64(scope.account_id())?)
+                    .bind(repos),
+            )
+            .await?;
+        Ok(row.pending)
+    }
+    async fn scoped_list_pending_requests_page(
+        &self,
+        scope: &ghinvite_core::storage::console_scope::ConsoleScope,
+        after: Option<pending_queue::PendingBoundary>,
+    ) -> Result<pending_queue::PendingPage> {
+        use ghinvite_core::storage::console_scope as cs;
+        let Some(repos) = scope.repo_ids_json() else {
+            return self.pending_request_page(scope.account_id(), after).await;
+        };
+        let sql = cs::pending_query(after.is_some());
+        pending_queue::PendingPage::from_json(
+            self.all(
+                sqlx::query(&sql)
+                    .bind(u64_to_i64(scope.account_id())?)
+                    .bind(after.map(|b| b.seek_key()))
+                    .bind(repos),
+            )
+            .await?,
+        )
+    }
+    async fn scoped_list_audit_events(
+        &self,
+        scope: &ghinvite_core::storage::console_scope::ConsoleScope,
+        event: Option<EventType>,
+        position: AuditPosition,
+    ) -> Result<AuditPage> {
+        use ghinvite_core::storage::console_scope as cs;
+        let Some(repos) = scope.repo_ids_json() else {
+            return self
+                .list_audit_events(scope.account_id(), event, position)
+                .await;
+        };
+        fn query<'a>(
+            sql: &'a str,
+            account: u64,
+            repos: &'a str,
+            event: Option<EventType>,
+            position: AuditPosition,
+        ) -> Result<Query<'a>> {
+            let boundary = position.boundary();
+            Ok(sqlx::query(sql)
+                .bind(u64_to_i64(account)?)
+                .bind(event.map(|e| e.as_str()))
+                .bind(boundary.map(audit_read::boundary_time))
+                .bind(boundary.map(|b| b.id.to_string()))
+                .bind(repos))
+        }
+        let sql = cs::audit_query(event, position, false);
+        let mut page = AuditPage::from_rows(
+            self.all(query(&sql, scope.account_id(), &repos, event, position)?)
+                .await?,
+            position,
+        )?;
+        if let Some([newer, older]) = page.probes() {
+            for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
+                let sql = cs::audit_query(event, seek, true);
+                *flag = self
+                    .optional::<IgnoredAny>(query(&sql, scope.account_id(), &repos, event, seek)?)
+                    .await?
+                    .is_some();
+            }
+        }
+        Ok(page)
+    }
+    async fn distinct_console_repo_targets(
+        &self,
+        account_id: u64,
+        after_repo_id: Option<u64>,
+        limit: u16,
+    ) -> Result<ghinvite_core::storage::console_scope::RepoTargetPage> {
+        use ghinvite_core::storage::console_scope as cs;
+        let (account, after, count) = cs::target_query_args(account_id, after_repo_id, limit)?;
+        cs::target_page(
+            self.all(
+                sqlx::query(cs::REPO_TARGETS)
+                    .bind(u64_to_i64(account)?)
+                    .bind(u64_to_i64(after)?)
+                    .bind(u64_to_i64(count)?),
+            )
+            .await?,
+            limit,
+        )
     }
 
     async fn invitation_link_belongs_to_account(
@@ -280,7 +375,7 @@ impl ConsoleStorage for SqlxStorage {
     ) -> Result<bool> {
         let query = sqlx::query(invitation_links::BELONGS_TO_ACCOUNT)
             .bind(id.to_string())
-            .bind(u64_to_i64(account_id));
+            .bind(u64_to_i64(account_id)?);
         Ok(self.optional::<IgnoredAny>(query).await?.is_some())
     }
 
@@ -288,7 +383,7 @@ impl ConsoleStorage for SqlxStorage {
         &self,
         account_id: u64,
     ) -> Result<Vec<InvitationLink>> {
-        let query = sqlx::query(invitation_links::FOR_ACCOUNT).bind(u64_to_i64(account_id));
+        let query = sqlx::query(invitation_links::FOR_ACCOUNT).bind(u64_to_i64(account_id)?);
         invitation_links::fold(self.all(query).await?)
     }
 
@@ -300,14 +395,14 @@ impl ConsoleStorage for SqlxStorage {
     ) -> Result<request_history::Page> {
         let sql = request_history::query(before);
         let query = sqlx::query(&sql)
-            .bind(u64_to_i64(account_id))
+            .bind(u64_to_i64(account_id)?)
             .bind(link_id.to_string())
             .bind(before.map(request_history::boundary_key));
-        Ok(request_history::page(self.all(query).await?))
+        request_history::page(self.all(query).await?)
     }
 
     async fn count_pending_requests_for_account(&self, account_id: u64) -> Result<u64> {
-        let query = sqlx::query(pending_queue::COUNT_QUERY).bind(u64_to_i64(account_id));
+        let query = sqlx::query(pending_queue::COUNT_QUERY).bind(u64_to_i64(account_id)?);
         let row: pending_queue::CountRow = self.one(query).await?;
         Ok(row.pending)
     }
@@ -319,23 +414,24 @@ impl ConsoleStorage for SqlxStorage {
     ) -> Result<pending_queue::PendingPage> {
         let sql = pending_queue::query(after.is_some());
         let query = sqlx::query(&sql)
-            .bind(u64_to_i64(account_id))
+            .bind(u64_to_i64(account_id)?)
             .bind(after.map(|b| b.seek_key()));
         pending_queue::PendingPage::from_json(self.all(query).await?)
+    }
+
+    async fn get_delivery(&self, key: &str) -> Result<Option<DeliverySnapshot>> {
+        self.optional::<delivery_projection::ReceiptRow>(
+            sqlx::query(delivery_projection::GET).bind(key),
+        )
+        .await?
+        .map(|row| row.decode())
+        .transpose()
     }
 
     async fn list_delivery_for_request(&self, id: RequestId) -> Result<Vec<DeliverySnapshot>> {
         let query = sqlx::query(delivery_projection::FOR_REQUEST).bind(id.to_string());
         let rows: Vec<delivery_projection::ReceiptRow> = self.all(query).await?;
         rows.into_iter().map(|row| row.decode()).collect()
-    }
-
-    async fn list_github_invitations_for_request(
-        &self,
-        id: RequestId,
-    ) -> Result<Vec<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::FOR_REQUEST);
-        self.all(query.bind(id.to_string())).await
     }
 
     async fn list_audit_events(
@@ -349,21 +445,21 @@ impl ConsoleStorage for SqlxStorage {
             account_id: u64,
             event: Option<EventType>,
             position: AuditPosition,
-        ) -> Query<'_> {
+        ) -> Result<Query<'_>> {
             let boundary = position.boundary();
-            sqlx::query(sql)
-                .bind(u64_to_i64(account_id))
+            Ok(sqlx::query(sql)
+                .bind(u64_to_i64(account_id)?)
                 .bind(event.map(|e| e.as_str()))
                 .bind(boundary.map(audit_read::boundary_time))
-                .bind(boundary.map(|b| b.id.to_string()))
+                .bind(boundary.map(|b| b.id.to_string())))
         }
         let sql = audit_read::query(event, position, false);
-        let rows = self.all(query(&sql, account_id, event, position)).await?;
+        let rows = self.all(query(&sql, account_id, event, position)?).await?;
         let mut page = AuditPage::from_rows(rows, position)?;
         if let Some([newer, older]) = page.probes() {
             for (seek, flag) in [(newer, &mut page.has_newer), (older, &mut page.has_older)] {
                 let sql = audit_read::query(event, seek, true);
-                let probe = query(&sql, account_id, event, seek);
+                let probe = query(&sql, account_id, event, seek)?;
                 *flag = self.optional::<IgnoredAny>(probe).await?.is_some();
             }
         }
@@ -373,6 +469,63 @@ impl ConsoleStorage for SqlxStorage {
 
 #[async_trait]
 impl ContinuationStorage for SqlxStorage {
+    async fn continuation_rotation_page(
+        &self,
+        after: Option<i64>,
+    ) -> Result<Vec<ghinvite_core::storage::continuation_rotation::ScanRow>> {
+        use ghinvite_core::storage::{continuation_rotation as sql, integer};
+        if let Some(value) = after {
+            integer::signed(value)?;
+        }
+        let rows: Vec<sql::ScanRow> = self.all(sqlx::query(sql::PAGE).bind(after)).await?;
+        if rows.is_empty() {
+            return Err(Error::Corrupt("continuation rotation epoch missing".into()));
+        }
+        for row in &rows {
+            row.validate()?;
+        }
+        Ok(rows)
+    }
+    async fn continuation_rotation_epoch(&self) -> Result<i64> {
+        use ghinvite_core::storage::{continuation_rotation as sql, integer};
+        let row: sql::Epoch = self.one(sqlx::query(sql::EPOCH)).await?;
+        integer::unsigned(
+            u64::try_from(row.revision)
+                .map_err(|_| Error::Corrupt("continuation rotation epoch".into()))?,
+        )?;
+        Ok(row.revision)
+    }
+    async fn rewrap_attempt_continuation(
+        &self,
+        old: &ghinvite_core::storage::continuation_rotation::ScanRow,
+        replacement: &str,
+        expected_epoch: i64,
+    ) -> Result<bool> {
+        use ghinvite_core::storage::{continuation_rotation as sql, integer};
+        old.validate()?;
+        integer::signed(expected_epoch)?;
+        if old.row_id.is_none()
+            || old.oversized != 0
+            || replacement.len() > sql::MAX_CIPHERTEXT_BYTES
+        {
+            return Err(Error::Corrupt("continuation rotation CAS input".into()));
+        }
+        let returned: Vec<sql::CasReceipt> = self
+            .all(
+                sqlx::query(sql::CAS)
+                    .bind(replacement)
+                    .bind(old.row_id)
+                    .bind(&old.scope)
+                    .bind(&old.id)
+                    .bind(&old.binding)
+                    .bind(&old.payload)
+                    .bind(old.expires_at)
+                    .bind(expected_epoch),
+            )
+            .await?;
+        sql::CasReceipt::applied(&returned, old.row_id.unwrap())
+    }
+
     async fn retain_attempt_continuation(
         &self,
         scope: &str,
@@ -383,14 +536,17 @@ impl ContinuationStorage for SqlxStorage {
         now: i64,
     ) -> Result<StoredContinuation> {
         use attempt_continuations::*;
-        self.execute(sqlx::query(CLEANUP).bind(now)).await?;
+        ghinvite_core::storage::integer::signed(expires_at)?;
+        ghinvite_core::storage::integer::signed(now)?;
+        self.execute(sqlx::query(CLEANUP).bind(ghinvite_core::storage::integer::signed(now)?))
+            .await?;
         self.execute(
             sqlx::query(INSERT)
                 .bind(scope)
                 .bind(id)
                 .bind(binding)
                 .bind(payload)
-                .bind(expires_at),
+                .bind(ghinvite_core::storage::integer::signed(expires_at)?),
         )
         .await?;
         self.one(
@@ -398,7 +554,7 @@ impl ContinuationStorage for SqlxStorage {
                 .bind(scope)
                 .bind(binding)
                 .bind(id)
-                .bind(now),
+                .bind(ghinvite_core::storage::integer::signed(now)?),
         )
         .await
     }
@@ -410,7 +566,13 @@ impl ContinuationStorage for SqlxStorage {
         now: i64,
     ) -> Result<Option<StoredContinuation>> {
         let query = sqlx::query(attempt_continuations::GET);
-        self.optional(query.bind(scope).bind(id).bind(now)).await
+        self.optional(
+            query
+                .bind(scope)
+                .bind(id)
+                .bind(ghinvite_core::storage::integer::signed(now)?),
+        )
+        .await
     }
 
     async fn list_attempt_continuations(
@@ -419,7 +581,12 @@ impl ContinuationStorage for SqlxStorage {
         now: i64,
     ) -> Result<Vec<StoredContinuation>> {
         let query = sqlx::query(attempt_continuations::LIST);
-        self.all(query.bind(scope).bind(now)).await
+        self.all(
+            query
+                .bind(scope)
+                .bind(ghinvite_core::storage::integer::signed(now)?),
+        )
+        .await
     }
 
     async fn release_attempt_continuation(&self, scope: &str, id: &str) -> Result<()> {
@@ -430,130 +597,105 @@ impl ContinuationStorage for SqlxStorage {
 }
 
 #[async_trait]
-impl WebhookStorage for SqlxStorage {
-    async fn get_github_invitation_by_github_id(
-        &self,
-        github_id: u64,
-    ) -> Result<Option<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::BY_GITHUB_ID).bind(u64_to_i64(github_id));
-        self.optional(query).await
-    }
-
-    async fn member_invitation_candidates(
-        &self,
-        account_id: u64,
-        repo_id: u64,
-        requester_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        let query = sqlx::query(github_invitations::MEMBER_CANDIDATES)
-            .bind(u64_to_i64(account_id))
-            .bind(u64_to_i64(repo_id))
-            .bind(u64_to_i64(requester_id));
-        self.all(query).await
-    }
-
-    async fn bind_member_webhook(
-        &self,
-        payload_sha256: &str,
-        invitation_id: Option<GithubInvitationId>,
-    ) -> Result<Option<GithubInvitationId>> {
-        let query = sqlx::query(github_invitations::BIND_MEMBER_WEBHOOK)
-            .bind(payload_sha256)
-            .bind(invitation_id.map(|id| id.to_string()));
-        self.execute(query).await?;
-        let query = sqlx::query(github_invitations::MEMBER_WEBHOOK_BINDING).bind(payload_sha256);
-        let binding: github_invitations::MemberWebhookBinding = self.one(query).await?;
-        Ok(binding.invitation_id)
-    }
-}
-
-#[async_trait]
-impl InstallationStorage for SqlxStorage {
-    async fn insert_installation(&self, account: &Account) -> Result<()> {
-        sqlx::query(installations::INSERT)
-            .bind(u64_to_i64(account.installation_id))
-            .bind(u64_to_i64(account.account_id))
-            .bind(&account.account_login)
-            .bind(account.account_type.to_string())
-            .bind(account.installed_at)
-            .bind(account.uninstalled_at)
-            .bind(installations::encode_selected_repos(
-                &account.selected_repos,
-            ))
-            .execute(&self.pool)
-            .await
-            .map_err(|e| classify_insert(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn mark_installation_uninstalled(
-        &self,
-        installation_id: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()> {
-        let query = sqlx::query(installations::MARK_UNINSTALLED)
-            .bind(when)
-            .bind(u64_to_i64(installation_id));
-        match self.execute(query).await? {
-            0 => Err(Error::NotFound),
-            _ => Ok(()),
-        }
-    }
-
-    async fn update_installation_repos(
-        &self,
-        installation_id: u64,
-        selected: &SelectedRepos,
-    ) -> Result<()> {
-        let query = sqlx::query(installations::UPDATE_REPOS)
-            .bind(installations::encode_selected_repos(selected))
-            .bind(u64_to_i64(installation_id));
-        match self.execute(query).await? {
-            0 => Err(Error::NotFound),
-            _ => Ok(()),
-        }
-    }
-
-    async fn list_active_installations(&self) -> Result<Vec<Account>> {
-        let rows: Vec<installations::InstallationRow> =
-            self.all(sqlx::query(installations::LIST_ACTIVE)).await?;
-        rows.into_iter().map(|row| row.into_account()).collect()
-    }
-}
-
-#[async_trait]
 impl DeliveryStorage for SqlxStorage {
-    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
-        let encoded = delivery_attempts::encode(command)?;
-        let id = command.invitation_id.to_string();
+    async fn cancellation_attempt_exists(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+    ) -> Result<bool> {
+        let encoded = delivery_attempts::encode_cancel(command)?;
+        let row = self
+            .optional(
+                sqlx::query(delivery_attempts::CANCEL_FENCED).bind(command.create.delivery_key()),
+            )
+            .await?;
+        delivery_attempts::fenced(row, &encoded)
+    }
+
+    async fn claim_cancellation_attempt(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+    ) -> Result<Option<u64>> {
+        let encoded = delivery_attempts::encode_cancel(command)?;
+        let key = command.create.delivery_key();
         let generation = self
             .optional(
-                sqlx::query(delivery_attempts::CLAIM)
-                    .bind(&id)
+                sqlx::query(delivery_attempts::CANCEL_CLAIM)
+                    .bind(&key)
                     .bind(&encoded),
             )
             .await?;
         let retained = self
-            .one(sqlx::query(delivery_attempts::COMMAND).bind(&id))
+            .one(
+                sqlx::query(delivery_attempts::CANCEL_COMMAND)
+                    .bind(&key)
+                    .bind(&encoded),
+            )
             .await?;
         delivery_attempts::claimed(generation, retained, &encoded)
     }
-
-    async fn reject_delivery_attempt(&self, id: GithubInvitationId, generation: u64) -> Result<()> {
-        let query = sqlx::query(delivery_attempts::REJECT)
-            .bind(id.to_string())
-            .bind(u64_to_i64(generation));
-        self.execute(query).await?;
+    async fn reject_cancellation_attempt(
+        &self,
+        command: &delivery_attempts::CancelCommand,
+        generation: u64,
+    ) -> Result<()> {
+        let encoded = delivery_attempts::encode_cancel(command)?;
+        self.execute(
+            sqlx::query(delivery_attempts::CANCEL_REJECT)
+                .bind(command.create.delivery_key())
+                .bind(encoded)
+                .bind(u64_to_i64(generation)?),
+        )
+        .await?;
         Ok(())
     }
 
-    async fn delivery_attempt_exists(&self, id: GithubInvitationId) -> Result<bool> {
-        let query = sqlx::query(delivery_attempts::FENCED).bind(id.to_string());
-        Ok(self.optional::<IgnoredAny>(query).await?.is_some())
+    async fn claim_delivery_attempt(&self, command: &CreateCommand) -> Result<Option<u64>> {
+        let encoded = delivery_attempts::encode(command)?;
+        let key = command.delivery_key();
+        let generation = self
+            .optional(
+                sqlx::query(delivery_attempts::CLAIM)
+                    .bind(&key)
+                    .bind(&encoded),
+            )
+            .await?;
+        let retained = self
+            .one(
+                sqlx::query(delivery_attempts::COMMAND)
+                    .bind(&key)
+                    .bind(&encoded),
+            )
+            .await?;
+        delivery_attempts::claimed(generation, retained, &encoded)
+    }
+    async fn reject_delivery_attempt(
+        &self,
+        command: &CreateCommand,
+        generation: u64,
+    ) -> Result<()> {
+        let encoded = delivery_attempts::encode(command)?;
+        self.execute(
+            sqlx::query(delivery_attempts::REJECT)
+                .bind(command.delivery_key())
+                .bind(encoded)
+                .bind(u64_to_i64(generation)?),
+        )
+        .await?;
+        Ok(())
+    }
+    async fn delivery_attempt_exists(&self, command: &CreateCommand) -> Result<bool> {
+        let encoded = delivery_attempts::encode(command)?;
+        let row = self
+            .optional(sqlx::query(delivery_attempts::FENCED).bind(command.delivery_key()))
+            .await?;
+        delivery_attempts::fenced(row, &encoded)
     }
 
-    async fn project_delivery(&self, receipt: &DeliverySnapshot) -> Result<()> {
-        let encoded = delivery_projection::encode(receipt)?;
+    async fn project_delivery_with_events(
+        &self,
+        projection: &ghinvite_core::delivery_audit::RepositoryDeliveryProjection,
+    ) -> Result<()> {
+        let encoded = delivery_projection::encode_with_events(projection)?;
         self.transaction(
             &delivery_projection::statements(),
             &encoded,
@@ -562,43 +704,33 @@ impl DeliveryStorage for SqlxStorage {
         .await
     }
 
-    async fn insert_github_invitation(&self, invitation: &GithubInvitation) -> Result<()> {
-        sqlx::query(github_invitations::INSERT)
-            .bind(invitation.id.to_string())
-            .bind(invitation.invitation_request_id.to_string())
-            .bind(u64_to_i64(invitation.repo_id))
-            .bind(invitation.github_invitation_id.map(u64_to_i64))
-            .bind(invitation.state.to_string())
-            .bind(invitation.error_message.as_deref())
-            .bind(invitation.created_at)
-            .bind(invitation.updated_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| classify_insert(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn list_pending_github_invitations_for_account(
+    async fn project_repository_telemetry(
         &self,
-        account_id: u64,
-    ) -> Result<Vec<GithubInvitation>> {
-        let query =
-            sqlx::query(github_invitations::PENDING_FOR_ACCOUNT).bind(u64_to_i64(account_id));
-        self.all(query).await
+        telemetry: &ghinvite_core::storage::operational::RepositoryTelemetry,
+    ) -> Result<()> {
+        use ghinvite_core::storage::operational;
+        let encoded = operational::encode(telemetry)?;
+        self.transaction(
+            &operational::statements(),
+            &encoded,
+            delivery_projection::classify,
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl AuditStorage for SqlxStorage {
     async fn audit(&self, event: &AuditEvent) -> Result<()> {
+        ghinvite_core::storage::integer::validate(event)?;
         let sql = audit_write::insert(event.event_type);
         let query = sqlx::query(&sql)
             .bind(event.id.to_string())
-            .bind(u64_to_i64(event.account_id))
+            .bind(u64_to_i64(event.account_id)?)
             .bind(event.occurred_at)
             .bind(event.event_type.as_str())
             .bind(event.actor_kind.to_string())
-            .bind(event.actor_id.map(u64_to_i64))
+            .bind(event.actor_id.map(u64_to_i64).transpose()?)
             .bind(event.target_kind.to_string())
             .bind(&event.target_id)
             .bind(audit_write::metadata(event))
@@ -608,18 +740,247 @@ impl AuditStorage for SqlxStorage {
     }
 }
 
-impl SqlxStorage {
-    async fn installation(&self, query: Query<'_>) -> Result<Option<Account>> {
-        let row: Option<installations::InstallationRow> = self.optional(query).await?;
-        row.map(|row| row.into_account()).transpose()
+impl SqlxStorage {}
+
+#[async_trait]
+impl ghinvite_core::storage::AppInstallationReadStorage for SqlxStorage {
+    async fn app_installation(
+        &self,
+        app: ghinvite_core::account::App,
+        id: u64,
+    ) -> Result<Option<ghinvite_core::account::Installation>> {
+        self.optional::<installations::AppRow>(
+            sqlx::query(installations::GET_APP)
+                .bind(app.as_str())
+                .bind(u64_to_i64(id)?),
+        )
+        .await?
+        .map(installations::AppRow::decode)
+        .transpose()
+    }
+    async fn active_app_installation(
+        &self,
+        app: ghinvite_core::account::App,
+        id: u64,
+    ) -> Result<Option<ghinvite_core::account::Installation>> {
+        self.optional::<installations::AppRow>(
+            sqlx::query(installations::ACTIVE_APP)
+                .bind(app.as_str())
+                .bind(u64_to_i64(id)?),
+        )
+        .await?
+        .map(installations::AppRow::decode)
+        .transpose()
+    }
+    async fn account_settings(
+        &self,
+        id: u64,
+    ) -> Result<Option<ghinvite_core::account::AccountSettings>> {
+        self.optional::<installations::SettingsRow>(
+            sqlx::query(installations::GET_SETTINGS).bind(u64_to_i64(id)?),
+        )
+        .await?
+        .map(installations::SettingsRow::decode)
+        .transpose()
+    }
+    async fn active_app_installation_by_login(
+        &self,
+        app: ghinvite_core::account::App,
+        login: &str,
+    ) -> Result<Option<ghinvite_core::account::Installation>> {
+        self.optional::<installations::AppRow>(
+            sqlx::query(installations::ACTIVE_APP_LOGIN)
+                .bind(app.as_str())
+                .bind(login),
+        )
+        .await?
+        .map(installations::AppRow::decode)
+        .transpose()
+    }
+    async fn latest_app_installation_by_login(
+        &self,
+        app: ghinvite_core::account::App,
+        login: &str,
+    ) -> Result<Option<ghinvite_core::account::Installation>> {
+        self.optional::<installations::AppRow>(
+            sqlx::query(installations::LATEST_APP_LOGIN)
+                .bind(app.as_str())
+                .bind(login),
+        )
+        .await?
+        .map(installations::AppRow::decode)
+        .transpose()
+    }
+    async fn list_active_app_installations(
+        &self,
+        app: ghinvite_core::account::App,
+    ) -> Result<Vec<ghinvite_core::account::Installation>> {
+        self.all::<installations::AppRow>(
+            sqlx::query(installations::LIST_ACTIVE_APP).bind(app.as_str()),
+        )
+        .await?
+        .into_iter()
+        .map(installations::AppRow::decode)
+        .collect()
+    }
+}
+#[async_trait]
+impl ghinvite_core::storage::AppInstallationStorage for SqlxStorage {
+    async fn project_installation_change(
+        &self,
+        owner: ghinvite_core::account::AccountInstallationRef,
+        change: &ghinvite_core::installation_audit::InstallationChange,
+    ) -> Result<()> {
+        use ghinvite_core::storage::installation_projection as sql;
+        let input = sql::encode(owner, change)?;
+        let mut tx = self.pool.begin().await.map_err(to_db_err)?;
+        for statement in sql::statements() {
+            sqlx::query(&statement)
+                .bind(&input)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    ghinvite_core::storage::delivery_projection::classify(e.to_string())
+                })?;
+        }
+        tx.commit().await.map_err(to_db_err)
+    }
+
+    async fn put_app_installation(
+        &self,
+        value: &ghinvite_core::account::Installation,
+    ) -> Result<()> {
+        let encoded = installations::encode_app(value)?;
+        let a = &value.account;
+        self.execute(
+            sqlx::query(installations::PUT_APP)
+                .bind(value.app.as_str())
+                .bind(u64_to_i64(a.installation_id)?)
+                .bind(u64_to_i64(a.account_id)?)
+                .bind(&a.account_login)
+                .bind(a.account_type.to_string())
+                .bind(a.installed_at.to_rfc3339())
+                .bind(a.uninstalled_at.map(|v| v.to_rfc3339()))
+                .bind(installations::encode_selected_repos(&a.selected_repos))
+                .bind(value.suspended_at.map(|v| v.to_rfc3339()))
+                .bind(serde_json::to_string(&value.permissions).expect("typed permissions"))
+                .bind(value.installed_by_user_id.map(u64_to_i64).transpose()?)
+                .bind(&value.installed_by_login)
+                .bind(u64_to_i64(value.revision)?)
+                .bind(encoded),
+        )
+        .await
+        .map_err(|e| match e {
+            Error::Database(message) => classify_insert(message),
+            other => other,
+        })?;
+        installations::applied_app(
+            value,
+            self.app_installation(value.app, a.installation_id).await?,
+        )
+    }
+    async fn put_account_settings(
+        &self,
+        value: &ghinvite_core::account::AccountSettings,
+    ) -> Result<()> {
+        let encoded = installations::encode_settings(value)?;
+        self.execute(
+            sqlx::query(installations::PUT_SETTINGS)
+                .bind(u64_to_i64(value.account_id)?)
+                .bind(i64::from(value.repo_admin_delegation))
+                .bind(u64_to_i64(value.changed_by)?)
+                .bind(value.changed_at.to_rfc3339())
+                .bind(u64_to_i64(value.revision)?)
+                .bind(encoded),
+        )
+        .await?;
+        installations::applied_settings(value, self.account_settings(value.account_id).await?)
+    }
+}
+
+#[async_trait]
+impl ghinvite_core::storage::LinkCapabilityStorage for SqlxStorage {
+    async fn link_targets(&self, id: InvitationLinkId) -> Result<ghinvite_core::targets::Targets> {
+        use ghinvite_core::storage::link_targets as t;
+        t::decode(self.all(sqlx::query(t::GET).bind(id.to_string())).await?)
+    }
+    async fn register_link_secret(
+        &self,
+        secret: &ghinvite_core::storage::link_secrets::LinkSecret,
+    ) -> Result<()> {
+        use ghinvite_core::storage::link_secrets as s;
+        secret.validate()?;
+        self.execute(
+            sqlx::query(s::REGISTER)
+                .bind(secret.secret_sha256.as_hex())
+                .bind(secret.link_id.to_string())
+                .bind(i64::from(secret.secret_generation))
+                .bind(secret.created_at.to_rfc3339()),
+        )
+        .await?;
+        s::registered(
+            secret,
+            self.optional(sqlx::query(s::EXACT).bind(secret.secret_sha256.as_hex()))
+                .await?,
+        )
+    }
+    async fn resolve_link_secret(
+        &self,
+        sha256: &ghinvite_core::SecretHash,
+    ) -> Result<Option<ghinvite_core::storage::link_secrets::LinkSecret>> {
+        self.optional(sqlx::query(ghinvite_core::storage::link_secrets::GET).bind(sha256.as_hex()))
+            .await
+    }
+    async fn retire_link_secrets(
+        &self,
+        id: InvitationLinkId,
+        through_generation: u32,
+        at: DateTime<Utc>,
+    ) -> Result<()> {
+        self.execute(
+            sqlx::query(ghinvite_core::storage::link_secrets::RETIRE)
+                .bind(id.to_string())
+                .bind(i64::from(through_generation))
+                .bind(at.to_rfc3339()),
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ghinvite_core::storage::SigninBudgetStorage for SqlxStorage {
+    async fn reserve_signin(
+        &self,
+        key: ghinvite_core::storage::signin_budget::SigninBudgetKey,
+        reservation: RequestId,
+        now_ms: i64,
+    ) -> Result<bool> {
+        use ghinvite_core::storage::signin_budget as s;
+        s::validate(key, reservation, now_ms)?;
+        sqlx::query(s::CLEANUP)
+            .bind(now_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(to_db_err)?;
+        let row: Option<s::ReservationRow> = self
+            .optional(
+                sqlx::query(s::RESERVE)
+                    .bind(key.as_hex())
+                    .bind(reservation.to_string())
+                    .bind(now_ms),
+            )
+            .await?;
+        Ok(row.is_some_and(|row| row.started_ms == now_ms))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghinvite_core::storage::AppInstallationStorage;
     use ghinvite_core::storage::ConflictKind;
-    use ghinvite_core::{AccountType, SelectedRepos};
+    use ghinvite_core::{Account, AccountType, SelectedRepos};
 
     pub(crate) fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -654,9 +1015,9 @@ mod tests {
             "installations",
             "users",
             "invitation_links",
-            "invitation_link_repos",
+            "invitation_link_targets",
             "invitation_requests",
-            "github_invitations",
+            "deliveries",
             "audit_events",
         ] {
             let row: Option<(String,)> =
@@ -683,48 +1044,62 @@ mod tests {
     async fn insert_and_get_installation() {
         let s = SqlxStorage::in_memory().await.unwrap();
         let acct = sample_account(1, 100, "acme");
-        s.insert_installation(&acct).await.unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo((acct).clone()))
+            .await
+            .unwrap();
 
-        let by_id = s.get_installation(1).await.unwrap().unwrap();
+        let by_id = s
+            .app_installation(ghinvite_core::account::App::Repo, 1)
+            .await
+            .map(|value| value.map(|installation| installation.account))
+            .unwrap()
+            .unwrap();
         assert_eq!(by_id, acct);
 
         let by_acc = s
-            .get_active_installation_by_account_id(100)
+            .active_app_installation(ghinvite_core::account::App::Repo, 100)
             .await
+            .map(|value| value.map(|installation| installation.account))
             .unwrap()
             .unwrap();
         assert_eq!(by_acc.installation_id, 1);
 
         let by_login = s
-            .get_active_installation_by_login("acme")
+            .active_app_installation_by_login(ghinvite_core::account::App::Repo, "acme")
             .await
+            .map(|value| value.map(|installation| installation.account))
             .unwrap()
             .unwrap();
         assert_eq!(by_login.installation_id, 1);
     }
 
     #[tokio::test]
-    async fn duplicate_installation_id_conflict() {
+    async fn same_installation_replay_preserves_account_binding() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        let acct = sample_account(1, 100, "acme");
-        s.insert_installation(&acct).await.unwrap();
-        let err = s.insert_installation(&acct).await.unwrap_err();
-        match err {
-            Error::Conflict(ConflictKind::DuplicateId)
-            | Error::Conflict(ConflictKind::DuplicateActiveInstallation) => (),
-            other => panic!("expected DuplicateId/DuplicateActiveInstallation, got {other:?}"),
-        }
+        let value = ghinvite_core::account::Installation::repo(sample_account(1, 100, "acme"));
+        s.put_app_installation(&value).await.unwrap();
+        s.put_app_installation(&value).await.unwrap();
+        let mut changed = value;
+        changed.account.account_id = 101;
+        assert!(matches!(
+            s.put_app_installation(&changed).await,
+            Err(Error::ProjectionInvariant(_))
+        ));
     }
 
     #[tokio::test]
     async fn duplicate_active_installation_for_same_account_conflict() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 100, "acme")).clone(),
+        ))
+        .await
+        .unwrap();
         // Different installation_id, same account_id, both active → partial unique index hits.
         let err = s
-            .insert_installation(&sample_account(2, 100, "acme"))
+            .put_app_installation(&ghinvite_core::account::Installation::repo(
+                (sample_account(2, 100, "acme")).clone(),
+            ))
             .await
             .unwrap_err();
         assert!(
@@ -740,49 +1115,65 @@ mod tests {
     async fn mark_uninstalled_hides_from_active_lookups() {
         let s = SqlxStorage::in_memory().await.unwrap();
         let acct = sample_account(1, 100, "acme");
-        s.insert_installation(&acct).await.unwrap();
-        s.mark_installation_uninstalled(1, dt("2026-05-05T00:00:00Z"))
+        s.put_app_installation(&ghinvite_core::account::Installation::repo((acct).clone()))
             .await
             .unwrap();
+        let mut value = s
+            .app_installation(ghinvite_core::account::App::Repo, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        value.revision += 1;
+        value.account.uninstalled_at = Some(dt("2026-05-05T00:00:00Z"));
+        s.put_app_installation(&value).await.unwrap();
         assert!(
-            s.get_active_installation_by_account_id(100)
+            s.active_app_installation(ghinvite_core::account::App::Repo, 100)
                 .await
+                .map(|value| value.map(|installation| installation.account))
                 .unwrap()
                 .is_none()
         );
         // Direct lookup still finds it (kept for audit):
-        let direct = s.get_installation(1).await.unwrap().unwrap();
+        let direct = s
+            .app_installation(ghinvite_core::account::App::Repo, 1)
+            .await
+            .map(|value| value.map(|installation| installation.account))
+            .unwrap()
+            .unwrap();
         assert!(direct.uninstalled_at.is_some());
     }
 
     #[tokio::test]
-    async fn second_uninstall_returns_not_found() {
+    async fn uninstall_replay_preserves_original_tombstone() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
-        s.mark_installation_uninstalled(1, dt("2026-05-05T00:00:00Z"))
-            .await
-            .unwrap();
-        let err = s
-            .mark_installation_uninstalled(1, dt("2026-05-06T00:00:00Z"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, Error::NotFound));
+        let mut value = ghinvite_core::account::Installation::repo(sample_account(1, 100, "acme"));
+        s.put_app_installation(&value).await.unwrap();
+        value.revision += 1;
+        value.account.uninstalled_at = Some(dt("2026-05-05T00:00:00Z"));
+        s.put_app_installation(&value).await.unwrap();
+        s.put_app_installation(&value).await.unwrap();
+        value.revision += 1;
+        value.account.uninstalled_at = Some(dt("2026-05-06T00:00:00Z"));
+        assert!(matches!(
+            s.put_app_installation(&value).await,
+            Err(Error::ProjectionInvariant(_))
+        ));
     }
 
     #[tokio::test]
     async fn update_repos_swaps_subset() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        let acct = sample_account(1, 100, "acme");
-        s.insert_installation(&acct).await.unwrap();
-
-        s.update_installation_repos(1, &SelectedRepos::Subset(vec![1, 2, 3]))
-            .await
-            .unwrap();
-
-        let got = s.get_installation(1).await.unwrap().unwrap();
-        assert_eq!(got.selected_repos, SelectedRepos::Subset(vec![1, 2, 3]));
+        let mut value = ghinvite_core::account::Installation::repo(sample_account(1, 100, "acme"));
+        s.put_app_installation(&value).await.unwrap();
+        value.revision += 1;
+        value.account.selected_repos = SelectedRepos::Subset(vec![1, 2, 3]);
+        s.put_app_installation(&value).await.unwrap();
+        assert_eq!(
+            s.app_installation(ghinvite_core::account::App::Repo, 1)
+                .await
+                .unwrap(),
+            Some(value)
+        );
     }
 
     pub(crate) fn sample_user(user_id: u64, login: &str) -> User {
@@ -790,6 +1181,7 @@ mod tests {
             user_id,
             login: login.into(),
             avatar_url: Some(format!("https://example.test/{login}.png")),
+            github_created_at: None,
             last_seen_at: dt("2026-05-04T12:00:00Z"),
         }
     }
@@ -799,32 +1191,49 @@ mod tests {
         installation_id: u64,
         created_by: u64,
     ) -> InvitationLink {
-        use ghinvite_core::{InvitationLinkRepo, Permission};
         InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: InvitationLinkId::new(),
+            organization_installation_id: None,
             installation_id,
             account_id,
             created_by,
             created_at: dt("2026-05-04T12:00:00Z"),
             expires_at: None,
             max_uses: Some(5),
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 0,
-            permission: Permission::Push,
+
             approval_required: true,
             description: "Contractor onboarding".into(),
             internal_note: Some("for the contractor".into()),
             revoked_at: None,
             revoked_by: None,
-            repos: vec![
-                InvitationLinkRepo {
-                    repo_id: 10,
-                    repo_full_name: "acme/api".into(),
-                },
-                InvitationLinkRepo {
-                    repo_id: 11,
-                    repo_full_name: "acme/web".into(),
-                },
-            ],
+            pause: None,
+            targets: ghinvite_core::targets::Targets {
+                repos: vec![
+                    ghinvite_core::targets::RepoTarget {
+                        repo_id: 10,
+                        repo_full_name: "acme/api".into(),
+                        grant: ghinvite_core::targets::RepoRole::Write,
+                    },
+                    ghinvite_core::targets::RepoTarget {
+                        repo_id: 11,
+                        repo_full_name: "acme/web".into(),
+                        grant: ghinvite_core::targets::RepoRole::Write,
+                    },
+                ],
+                ..Default::default()
+            },
+
+            secret: ghinvite_core::LinkSecretState {
+                secret_generation: 1,
+                sha256: ghinvite_core::SecretHash::from_bytes([1; 32]),
+            },
         }
     }
 
@@ -842,9 +1251,11 @@ mod tests {
     #[tokio::test]
     async fn projected_invitation_link_round_trips_with_repos() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 100, "acme")).clone(),
+        ))
+        .await
+        .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let link = sample_link(100, 1, 7);
@@ -857,9 +1268,11 @@ mod tests {
     #[tokio::test]
     async fn list_invitation_links_for_account_returns_in_descending_created_at() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 100, "acme")).clone(),
+        ))
+        .await
+        .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
 
         let mut older = sample_link(100, 1, 7);
@@ -880,14 +1293,18 @@ mod tests {
     pub(crate) fn sample_request(link_id: InvitationLinkId, requester: u64) -> InvitationRequest {
         use ghinvite_core::RequestState;
         InvitationRequest {
+            batch: None,
+            domain_evidence: None,
             id: RequestId::new(),
-            invitation_link_id: link_id,
+            invitation_link_id: Some(link_id),
             requester_id: requester,
             justification: Some("contractor for q2".into()),
             state: RequestState::Pending,
             decided_by: None,
             decided_at: None,
+            cancellation_reason: None,
             decline_reason: None,
+            requester_message: None,
             created_at: dt("2026-05-04T12:30:00Z"),
             decision_deadline: None,
         }
@@ -896,12 +1313,16 @@ mod tests {
     #[tokio::test]
     async fn pending_count_and_queue_filter_by_account() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
-        s.insert_installation(&sample_account(2, 200, "other"))
-            .await
-            .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 100, "acme")).clone(),
+        ))
+        .await
+        .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(2, 200, "other")).clone(),
+        ))
+        .await
+        .unwrap();
         s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
 
@@ -926,60 +1347,102 @@ mod tests {
         assert_eq!(s.count_pending_requests_for_account(300).await.unwrap(), 0);
     }
 
-    pub(crate) fn sample_ginv(req_id: RequestId, repo_id: u64) -> GithubInvitation {
-        use ghinvite_core::InvitationState;
-        GithubInvitation {
-            id: GithubInvitationId::new(),
-            invitation_request_id: req_id,
-            repo_id,
-            github_invitation_id: None,
-            state: InvitationState::Sending,
-            error_message: None,
-            created_at: dt("2026-05-04T13:00:00Z"),
-            updated_at: dt("2026-05-04T13:00:00Z"),
+    fn sample_delivery(link: &InvitationLink, request: &InvitationRequest) -> DeliverySnapshot {
+        ghinvite_core::delivery::CreateReceipt {
+            audit_version: ghinvite_core::delivery_audit::DeliveryAuditVersion::CanonicalV2,
+            command: CreateCommand {
+                invitation_id: None,
+                delivery_generation: 1,
+                link_id: Some(link.id),
+                batch: None,
+                request_id: request.id,
+                approval_id: "fixture-approval".into(),
+                account_id: link.account_id,
+                installation_id: link.installation_id,
+                requester_id: request.requester_id,
+                repo_id: 10,
+                repo_full_name: "acme/api".into(),
+                permission: ghinvite_core::Permission::Pull,
+                approved_at: dt("2026-05-04T13:00:00Z"),
+                budget_attribution: Default::default(),
+                access_lifetime_seconds: None,
+                budget_share_pct: 50,
+            },
+            outcome: ghinvite_core::delivery::CreateOutcome::Planned,
+            revision: 1,
+            confirmed_at: None,
         }
+        .into()
     }
 
     #[tokio::test]
-    async fn github_invitation_round_trips_and_resolves_by_github_id() {
-        use ghinvite_core::InvitationState;
+    async fn canonical_delivery_keys_are_identical_for_real_number_bindings() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "acme"))
-            .await
-            .unwrap();
-        s.upsert_user(&sample_user(7, "octocat")).await.unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(sample_account(
+            1, 100, "acme",
+        )))
+        .await
+        .unwrap();
+        s.upsert_user(&sample_user(7, "admin")).await.unwrap();
         s.upsert_user(&sample_user(8, "alice")).await.unwrap();
         let link = sample_link(100, 1, 7);
-        let req = sample_request(link.id, 8);
-        seed(&s, &link, std::slice::from_ref(&req), 1).await;
-
-        let mut g = sample_ginv(req.id, 10);
-        g.state = InvitationState::Sent;
-        g.github_invitation_id = Some(99999);
-        s.insert_github_invitation(&g).await.unwrap();
-
-        assert_eq!(
-            s.get_github_invitation(g.id).await.unwrap(),
-            Some(g.clone())
+        let request = sample_request(link.id, 8);
+        seed(&s, &link, std::slice::from_ref(&request), 1).await;
+        let delivery = sample_delivery(&link, &request);
+        let key = delivery.create.command.delivery_key();
+        // Real D1 numeric bindings receive INTEGER affinity before the key CHECK.
+        sqlx::query("INSERT INTO deliveries(id,request_id,target_id,delivery_generation,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?5)")
+            .bind(&key).bind(request.id.to_string()).bind(10.0f64).bind(1.0f64)
+            .bind(delivery.create.command.approved_at).execute(&s.pool).await.unwrap();
+        let actual: (String, String, String) = sqlx::query_as(
+            "SELECT id,typeof(target_id),typeof(delivery_generation) FROM deliveries",
+        )
+        .fetch_one(&s.pool)
+        .await
+        .unwrap();
+        assert_eq!(actual, (key.clone(), "integer".into(), "integer".into()));
+        assert!(
+            s.get_delivery(&key).await.unwrap().is_none(),
+            "a read row cannot invent its owner's receipt"
         );
-        let by_gid = s
-            .get_github_invitation_by_github_id(99999)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(by_gid.id, g.id);
+        s.project_delivery(&delivery).await.unwrap();
+        assert_eq!(s.get_delivery(&key).await.unwrap(), Some(delivery));
     }
 
     #[tokio::test]
-    async fn github_invitation_with_unknown_request_fails() {
+    async fn canonical_delivery_round_trips_with_upstream_identity() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        // No request exists → FK violation
-        let g = sample_ginv(RequestId::new(), 10);
-        let err = s.insert_github_invitation(&g).await.unwrap_err();
-        assert!(
-            matches!(err, Error::Conflict(ConflictKind::ForeignKey)),
-            "got {err:?}"
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(sample_account(
+            1, 100, "acme",
+        )))
+        .await
+        .unwrap();
+        s.upsert_user(&sample_user(7, "admin")).await.unwrap();
+        s.upsert_user(&sample_user(8, "alice")).await.unwrap();
+        let link = sample_link(100, 1, 7);
+        let request = sample_request(link.id, 8);
+        seed(&s, &link, std::slice::from_ref(&request), 1).await;
+        let mut delivery = sample_delivery(&link, &request);
+        delivery.create.outcome =
+            ghinvite_core::delivery::CreateOutcome::Created { upstream_id: 99999 };
+        delivery.create.confirmed_at = Some(delivery.create.command.approved_at);
+        s.project_delivery(&delivery).await.unwrap();
+        assert_eq!(
+            s.get_delivery(&delivery.create.command.delivery_key())
+                .await
+                .unwrap(),
+            Some(delivery)
         );
+    }
+
+    #[tokio::test]
+    async fn canonical_delivery_requires_its_request_projection() {
+        let s = SqlxStorage::in_memory().await.unwrap();
+        let link = sample_link(100, 1, 7);
+        let request = sample_request(link.id, 8);
+        let delivery = sample_delivery(&link, &request);
+        let error = s.project_delivery(&delivery).await.unwrap_err();
+        assert!(matches!(error, Error::ProjectionDependency), "{error:?}");
     }
 
     pub(crate) fn sample_audit(
@@ -1127,9 +1590,11 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         };
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 42, "acme"))
-            .await
-            .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 42, "acme")).clone(),
+        ))
+        .await
+        .unwrap();
         s.upsert_user(&sample_user(7, "requester")).await.unwrap();
         let link = sample_link(42, 1, 7);
         seed(&s, &link, &[], 1).await;
@@ -1319,18 +1784,121 @@ mod tests {
     #[tokio::test]
     async fn list_active_omits_uninstalled() {
         let s = SqlxStorage::in_memory().await.unwrap();
-        s.insert_installation(&sample_account(1, 100, "a"))
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(1, 100, "a")).clone(),
+        ))
+        .await
+        .unwrap();
+        s.put_app_installation(&ghinvite_core::account::Installation::repo(
+            (sample_account(2, 200, "b")).clone(),
+        ))
+        .await
+        .unwrap();
+        let mut value = s
+            .app_installation(ghinvite_core::account::App::Repo, 2)
             .await
+            .unwrap()
             .unwrap();
-        s.insert_installation(&sample_account(2, 200, "b"))
-            .await
-            .unwrap();
-        s.mark_installation_uninstalled(2, dt("2026-05-06T00:00:00Z"))
-            .await
-            .unwrap();
+        value.revision += 1;
+        value.account.uninstalled_at = Some(dt("2026-05-06T00:00:00Z"));
+        s.put_app_installation(&value).await.unwrap();
 
-        let active = s.list_active_installations().await.unwrap();
+        let active = s
+            .list_active_app_installations(ghinvite_core::account::App::Repo)
+            .await
+            .map(|values| {
+                values
+                    .into_iter()
+                    .map(|value| value.account)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].installation_id, 1);
+    }
+}
+
+#[async_trait]
+impl ghinvite_core::storage::OperationalReadStorage for SqlxStorage {
+    async fn delivery_signals(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<ghinvite_core::storage::operational::DeliverySignals> {
+        use ghinvite_core::storage::operational;
+        let rows = self.all(sqlx::query(operational::SIGNALS)).await?;
+        operational::report(rows, now)
+    }
+}
+
+#[cfg(test)]
+mod operational_tests {
+    use super::*;
+    use ghinvite_core::storage::{OperationalReadStorage, operational::RepositoryTelemetry};
+    use sqlx::Row;
+
+    #[tokio::test]
+    async fn telemetry_refuses_other_kinds_and_preserves_every_other_column() {
+        let storage = SqlxStorage::in_memory().await.unwrap();
+        ghinvite_core::storage::test_suite::scenario_repository_telemetry(storage.clone()).await;
+        let row=sqlx::query("SELECT id,request_id,target_id,delivery_generation FROM deliveries WHERE create_outcome='outcome_unknown' ORDER BY id LIMIT 1").fetch_one(&storage.pool).await.unwrap();
+        let key: String = row.get("id");
+        let value = RepositoryTelemetry {
+            request_id: row.get::<String, _>("request_id").parse().unwrap(),
+            target_id: row.get::<i64, _>("target_id") as u64,
+            delivery_generation: row.get::<i64, _>("delivery_generation") as u64,
+            account_id: 100,
+            unknown_since: None,
+            last_observed_at: Some("2026-05-04T15:00:00Z".parse().unwrap()),
+        };
+        // Email retains the unprefixed key: this reaches the kind guard itself.
+        sqlx::query("UPDATE deliveries SET kind='email' WHERE id=?1")
+            .bind(&key)
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            storage.project_repository_telemetry(&value).await,
+            Err(Error::ProjectionInvariant(_))
+        ));
+        let observed: Option<String> =
+            sqlx::query_scalar("SELECT last_observed_at FROM deliveries WHERE id=?1")
+                .bind(&key)
+                .fetch_one(&storage.pool)
+                .await
+                .unwrap();
+        assert!(observed.is_none());
+        assert_eq!(
+            storage
+                .delivery_signals("2026-05-04T15:00:00Z".parse().unwrap())
+                .await
+                .unwrap()
+                .counts
+                .repository_deliveries,
+            13
+        );
+        sqlx::query("UPDATE deliveries SET kind='repo' WHERE id=?1")
+            .bind(&key)
+            .execute(&storage.pool)
+            .await
+            .unwrap();
+        let before: Vec<serde_json::Value> = sqlx::query("SELECT * FROM deliveries WHERE id=?1")
+            .bind(&key)
+            .fetch_all(&storage.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| decode(r).unwrap())
+            .collect();
+        storage.project_repository_telemetry(&value).await.unwrap();
+        let mut after: Vec<serde_json::Value> = sqlx::query("SELECT * FROM deliveries WHERE id=?1")
+            .bind(&key)
+            .fetch_all(&storage.pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| decode(r).unwrap())
+            .collect();
+        after[0]["last_observed_at"] = before[0]["last_observed_at"].clone();
+        assert_eq!(after, before);
     }
 }

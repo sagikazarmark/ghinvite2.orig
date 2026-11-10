@@ -104,62 +104,99 @@
   });
 })();
 
-/* Enhance the inline revocation confirmation using the browser's modal dialog:
- * showModal makes the background inert and provides native Escape dismissal.
- * Move the original form so its native POST and CSRF token stay intact. */
-document.addEventListener('DOMContentLoaded', function () {
-  var confirmation = document.getElementById('stop-link-confirmation');
-  var opener = document.getElementById('stop-link-trigger');
-  if (!confirmation || !opener || typeof HTMLDialogElement === 'undefined' ||
-      typeof HTMLDialogElement.prototype.showModal !== 'function') return;
+/* Repository selection feedback. The POST still checks the entire selection;
+ * this read only gives early feedback. Delegated listeners also cover the
+ * island replacing the SSR form after the user has already started editing. */
+(function () {
+  var selector = 'form[data-repository-authority] input[type="checkbox"][name="repo_ids"]';
+  var observations = new WeakMap();
 
-  function asButton(link) {
-    var button = document.createElement('button');
-    button.type = 'button';
-    button.id = link.id;
-    button.className = link.className;
-    button.textContent = link.textContent;
-    link.replaceWith(button);
-    return button;
+  function display(box, observation, message) {
+    if (observations.get(box) !== observation || !box.isConnected) return;
+    box.setCustomValidity(message);
+    box.setAttribute('aria-invalid', message ? 'true' : 'false');
+    var row = box.closest('.repo-choice-row') || box.parentElement;
+    var status = row.querySelector('[data-repository-check]');
+    if (!status) {
+      status = document.createElement('span');
+      status.setAttribute('data-repository-check', '');
+      status.setAttribute('role', 'status');
+      status.className = 'text-sm';
+      row.appendChild(status);
+    }
+    status.textContent = box.checked ? (message || 'Access checked') : '';
   }
 
-  opener = asButton(opener);
-  var dialog = document.createElement('dialog');
-  // Keep the dialog out of the fallback's :target styling (including DaisyUI's
-  // hash-based modal rule), so closing a bookmarked confirmation hides it.
-  dialog.className = 'modal';
-  dialog.setAttribute('aria-labelledby', confirmation.getAttribute('aria-labelledby'));
-  dialog.setAttribute('aria-describedby', confirmation.getAttribute('aria-describedby'));
-  var box = document.createElement('div');
-  box.className = 'modal-box';
-  while (confirmation.firstChild) box.appendChild(confirmation.firstChild);
-  dialog.appendChild(box);
-  confirmation.replaceWith(dialog);
-  var cancel = asButton(dialog.querySelector('a[href="#stop-link-trigger"]'));
-  cancel.autofocus = true;
-  opener.setAttribute('aria-haspopup', 'dialog');
-  opener.addEventListener('click', function () { dialog.showModal(); });
-  cancel.addEventListener('click', function () { dialog.close(); });
-  dialog.addEventListener('close', function () { opener.focus(); });
-  // Native dialogs keep the page inert, but Tab can still leave for browser
-  // chrome. Wrap the two confirmation actions in both directions.
-  var confirm = dialog.querySelector('button[type="submit"]');
-  dialog.addEventListener('keydown', function (event) {
-    if (event.key !== 'Tab') return;
-    if (event.shiftKey && document.activeElement === cancel) {
-      event.preventDefault();
-      confirm.focus();
-    } else if (!event.shiftKey && document.activeElement === confirm) {
-      event.preventDefault();
-      cancel.focus();
+  async function check(box) {
+    var previous = observations.get(box);
+    if (previous) previous.controller.abort();
+    var observation = { controller: new AbortController(), allowed: false };
+    observations.set(box, observation);
+    if (!box.checked) {
+      display(box, observation, '');
+      return;
     }
+    display(box, observation, 'Checking access…');
+    var timeout = setTimeout(function () { observation.controller.abort(); }, 10000);
+    try {
+      var url = new URL(box.form.getAttribute('data-repository-authority'), window.location.href);
+      if (url.origin !== window.location.origin) throw new Error('Invalid selection endpoint');
+      url.searchParams.set('repo_id', box.value);
+      var response = await fetch(url, {
+        credentials: 'same-origin', cache: 'no-store', redirect: 'error',
+        headers: { Accept: 'application/json' }, signal: observation.controller.signal
+      });
+      if (observations.get(box) !== observation || !box.checked || !box.isConnected) return;
+      if (response.ok && (await response.json()).allowed === true) {
+        observation.allowed = true;
+        display(box, observation, '');
+      } else {
+        display(box, observation, response.status === 404
+          ? 'You cannot select this repository.'
+          : 'Access could not be checked. Deselect and select this repository to retry.');
+      }
+    } catch (_) {
+      display(box, observation, 'Access could not be checked. Deselect and select this repository to retry.');
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  document.addEventListener('change', function (event) {
+    if (event.target.matches(selector)) check(event.target);
   });
+  document.addEventListener('submit', function (event) {
+    var form = event.target;
+    if (!form.matches('form[data-repository-authority]')) return;
+    // These native POSTs only redisplay the form; the server never dispatches
+    // creation for them. They must remain usable while authority is unavailable.
+    if (event.submitter && ['apply_all', 'reload_repos'].includes(event.submitter.name)) return;
+    var blocked = Array.from(form.querySelectorAll('input[name="repo_ids"]:checked')).find(function (box) {
+      var observation = observations.get(box);
+      if (!observation) check(box);
+      return !observation || !observation.allowed;
+    });
+    if (blocked) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      blocked.reportValidity();
+    }
+  }, true);
 
-  // A bookmarked fallback fragment should still open the confirmation.
-  if (window.location.hash === '#' + confirmation.id) dialog.showModal();
-});
+  function initialize() {
+    document.querySelectorAll(selector).forEach(function (box) {
+      if (box.checked && !observations.has(box)) check(box);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    initialize();
+    new MutationObserver(initialize).observe(document.body, { childList: true, subtree: true });
+  });
+})();
 
-/* Invitation-code shortcut (home page, signed in): open /i/{code} from the
+
+
+/* Invitation-code shortcut (home page, signed in): open /i#secret from the
  * code input. Uses delegated listeners and null-checks every lookup so it is
  * inert on pages without the hooks. */
 (function () {
@@ -177,13 +214,47 @@ document.addEventListener('DOMContentLoaded', function () {
     var input = document.querySelector('[data-invitation-code-input]');
     var message = document.querySelector('[data-invitation-code-message]');
     if (!input) return;
-    var code = input.value.trim();
-    if (!code) {
-      if (message) message.textContent = 'Enter an invitation code first.';
+    var code = input.value;
+    if (!/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/.test(code)) {
+      if (message) message.textContent = 'Enter a valid invitation code.';
       input.focus();
       return;
     }
     if (message) message.textContent = '';
-    window.location.href = '/i/' + encodeURIComponent(code);
+    input.value = '';
+    window.location.href = '/i#' + code;
   }
+})();
+
+/* Read-only organization refresh: native POST remains the fallback. */
+(function () {
+  document.addEventListener('submit', async function (event) {
+    var form = event.target;
+    if (!form.matches('form[data-organization-refresh]') || !window.fetch) return;
+    event.preventDefault();
+    var button = form.querySelector('button[type="submit"]');
+    var status = form.querySelector('[data-refresh-status]');
+    if (button.disabled) return;
+    button.disabled = true;
+    status.textContent = 'Requesting organization delivery updates…';
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 30000);
+    try {
+      var response = await fetch(form.action, {
+        method: 'POST', credentials: 'same-origin', redirect: 'error', signal: controller.signal,
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(new FormData(form)),
+      });
+      var result = await response.json();
+      if (response.ok && result.kind === 'requested') {
+        status.textContent = 'Refresh requested. Check again shortly for verified organization and team updates.';
+      } else if (response.status === 429 && result.kind === 'throttled' && Number.isFinite(Date.parse(result.retry_at))) {
+        status.textContent = 'A refresh was requested recently. Try again no earlier than ' + new Date(result.retry_at).toISOString() + '.';
+      } else if (response.ok && result.kind === 'not_tracked') {
+        status.textContent = 'No tracked organization invitation is available to refresh yet. This does not establish current access.';
+      } else { throw new Error('Unavailable'); }
+    } catch (_) {
+      status.textContent = 'Organization refresh is unavailable. Check again later.';
+    } finally { clearTimeout(timeout); button.disabled = false; }
+  });
 })();

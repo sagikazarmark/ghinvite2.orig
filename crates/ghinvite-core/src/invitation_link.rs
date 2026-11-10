@@ -1,6 +1,7 @@
 use crate::ids::InvitationLinkId;
-use crate::permission::Permission;
+pub use crate::link_secret::{LinkSecretState, SecretHash};
 use crate::repository_identity::RepositoryIdentity;
+use crate::targets::Targets;
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -12,39 +13,289 @@ pub struct AccountAdmin {
     pub user_id: u64,
 }
 
+/// Default GitHub invitation lifetime: seven days.
+pub const fn default_invitation_lifetime_seconds() -> u32 {
+    604800
+}
+fn is_default_invitation_lifetime_seconds(value: &u32) -> bool {
+    *value == default_invitation_lifetime_seconds()
+}
+
+/// Immutable share of each applicable daily invitation bucket.
+pub const fn default_budget_share_pct() -> u8 {
+    50
+}
+pub fn is_default_budget_share_pct(value: &u8) -> bool {
+    *value == 50
+}
+
+/// Sliding-hour admission limit when the admin does not override it.
+pub fn default_abuse_threshold(max_uses: Option<u32>) -> u32 {
+    max_uses.map_or(20, |uses| uses.div_ceil(10).max(20))
+}
+
 /// Allocate the link ID before first submission; reuse it on retry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_source: Option<crate::bulk::BatchRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_lifetime_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_domains: Vec<crate::email_domain::DomainRule>,
     pub link_id: InvitationLinkId,
     pub admin: AccountAdmin,
     pub account_id: u64,
+    /// Installation of primary_app(); repository app when repository targets exist.
     pub installation_id: u64,
+    /// Separate org-app installation only for mixed repository/organization links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_installation_id: Option<u64>,
     pub description: String,
     pub internal_note: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub max_uses: Option<u32>,
-    pub permission: Permission,
+    #[serde(
+        default = "default_invitation_lifetime_seconds",
+        skip_serializing_if = "is_default_invitation_lifetime_seconds"
+    )]
+    pub invitation_lifetime_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abuse_threshold_per_hour: Option<u32>,
+    #[serde(
+        default = "default_budget_share_pct",
+        skip_serializing_if = "is_default_budget_share_pct"
+    )]
+    pub budget_share_pct: u8,
     pub approval_required: bool,
-    pub repos: Vec<InvitationLinkRepo>,
+    pub targets: Targets,
+    pub secret_sha256: SecretHash,
+}
+
+/// App selection is derived only from immutable targets, never a caller flag.
+pub(crate) fn primary_target_app(targets: &Targets) -> crate::account::App {
+    if targets.organization.is_some() && targets.repos.is_empty() {
+        crate::account::App::Org
+    } else {
+        crate::account::App::Repo
+    }
+}
+pub(crate) fn target_org_installation_id(
+    targets: &Targets,
+    primary: u64,
+    optional: Option<u64>,
+) -> Option<u64> {
+    match (targets.organization.is_some(), targets.repos.is_empty()) {
+        (false, _) => None,
+        (true, true) => Some(primary),
+        (true, false) => optional,
+    }
+}
+pub(crate) fn validate_target_installations(
+    targets: &Targets,
+    account_id: u64,
+    primary: u64,
+    optional: Option<u64>,
+) -> Result<(), InvalidLinkValues> {
+    if account_id == 0
+        || account_id > crate::storage::integer::MAX_EXACT
+        || targets
+            .organization
+            .as_ref()
+            .is_some_and(|org| org.org_id != account_id)
+    {
+        return Err(InvalidLinkValues);
+    }
+    validate_installation_ids(targets, primary, optional)
+}
+fn validate_installation_ids(
+    targets: &Targets,
+    primary: u64,
+    optional: Option<u64>,
+) -> Result<(), InvalidLinkValues> {
+    let valid = |id| id > 0 && id <= crate::storage::integer::MAX_EXACT;
+    if !valid(primary)
+        || optional.is_some_and(|id| !valid(id))
+        || match (targets.organization.is_some(), targets.repos.is_empty()) {
+            (true, false) => optional.is_none(),
+            _ => optional.is_some(),
+        }
+    {
+        return Err(InvalidLinkValues);
+    }
+    Ok(())
+}
+
+/// Public creation acknowledgment. The full retained snapshot stays in the owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LinkCreated {
+    pub link_id: InvitationLinkId,
+    pub secret_generation: u32,
+}
+
+/// Business refusals are journaled values; malformed commands remain terminal errors.
+pub type CreateLinkOutcome = Result<LinkCreated, CreateLinkError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailField {
+    EmailDomains,
+    MaxUses,
+    ExpiresAt,
+    InvitationLifetime,
+    AccessLifetime,
+    AbuseThreshold,
+    BudgetShare,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("invalid invitation link values")]
 pub struct InvalidLinkValues;
 
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, thiserror::Error, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CreateLinkError {
+    #[error("NoGuardrail")]
+    NoGuardrail,
+    #[error("InvalidTargets")]
+    InvalidTargets { reason: crate::targets::TargetError },
+    #[error("OrgAutoApproveNeedsMaxUses")]
+    OrgAutoApproveNeedsMaxUses,
+    #[error("InvalidGuardrail")]
+    InvalidGuardrail { field: GuardrailField },
+    #[error("AlreadyExists")]
+    AlreadyExists,
+}
 impl CreateLink {
+    pub fn primary_app(&self) -> crate::account::App {
+        primary_target_app(&self.targets)
+    }
+    pub fn org_installation_id(&self) -> Option<u64> {
+        target_org_installation_id(
+            &self.targets,
+            self.installation_id,
+            self.organization_installation_id,
+        )
+    }
+    pub fn validate_installations(&self) -> Result<(), InvalidLinkValues> {
+        validate_target_installations(
+            &self.targets,
+            self.account_id,
+            self.installation_id,
+            self.organization_installation_id,
+        )
+    }
+    pub fn validate_targets(&self) -> Result<(), CreateLinkError> {
+        if self
+            .targets
+            .organization
+            .as_ref()
+            .is_some_and(|org| org.org_id != self.account_id)
+        {
+            return Err(CreateLinkError::InvalidTargets {
+                reason: crate::targets::TargetError::DifferentAccounts,
+            });
+        }
+        self.targets
+            .validate()
+            .map_err(|reason| CreateLinkError::InvalidTargets { reason })
+    }
+
+    pub fn validate_guardrails(&self) -> Result<(), CreateLinkError> {
+        if self.email_domains.len() > crate::email_domain::MAX_DOMAIN_RULES {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::EmailDomains,
+            });
+        }
+        if self.access_lifetime_seconds == Some(0) {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::AccessLifetime,
+            });
+        }
+        if !(3600..=604800).contains(&self.invitation_lifetime_seconds) {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::InvitationLifetime,
+            });
+        }
+        if self.abuse_threshold_per_hour == Some(0) {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::AbuseThreshold,
+            });
+        }
+        if !(1..=100).contains(&self.budget_share_pct) {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::BudgetShare,
+            });
+        }
+        if self.max_uses == Some(0) {
+            return Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::MaxUses,
+            });
+        }
+        if !self.approval_required && self.max_uses.is_none() && self.targets.organization.is_some()
+        {
+            return Err(CreateLinkError::OrgAutoApproveNeedsMaxUses);
+        }
+        if !self.approval_required && self.max_uses.is_none() && self.expires_at.is_none() {
+            return Err(CreateLinkError::NoGuardrail);
+        }
+        Ok(())
+    }
+
+    /// Canonicalize syntactically valid input before binding either a success
+    /// or a business refusal. This does not establish target or guardrail validity.
+    pub fn canonical_input(mut self) -> Result<Self, InvalidLinkValues> {
+        // Account/target disagreement remains a typed InvalidTargets refusal.
+        validate_installation_ids(
+            &self.targets,
+            self.installation_id,
+            self.organization_installation_id,
+        )?;
+        let metadata = LinkMetadata::parse(&self.description, self.internal_note.as_deref())?;
+        (self.description, self.internal_note) = (metadata.description, metadata.internal_note);
+        self.email_domains.sort();
+        self.email_domains.dedup();
+        self.targets.repos.sort_by_key(|repo| repo.repo_id);
+        self.targets.teams.sort_by_key(|team| team.team_id);
+        Ok(self)
+    }
+
     /// Bind creation identity to normalized metadata, guardrails and scope.
     /// Admin authority is checked separately.
     pub fn normalized(mut self) -> Result<Self, InvalidLinkValues> {
-        if self.installation_id == 0 || self.max_uses == Some(0) {
+        if let Some(source) = self.batch_source {
+            source.validate().map_err(|_| InvalidLinkValues)?;
+            if self.max_uses != Some(1)
+                || self.approval_required
+                || self.expires_at.is_none()
+                || self.targets.organization.is_some()
+                || !self.targets.teams.is_empty()
+                || !self.email_domains.is_empty()
+            {
+                return Err(InvalidLinkValues);
+            }
+        }
+
+        self.email_domains.sort();
+        self.email_domains.dedup();
+        self.validate_installations()?;
+        if self.max_uses == Some(0)
+            || self
+                .targets
+                .organization
+                .as_ref()
+                .is_some_and(|org| org.org_id != self.account_id)
+        {
             return Err(InvalidLinkValues);
         }
+        self.validate_guardrails().map_err(|_| InvalidLinkValues)?;
         let metadata = LinkMetadata::parse(&self.description, self.internal_note.as_deref())?;
         (self.description, self.internal_note) = (metadata.description, metadata.internal_note);
-        self.repos = crate::RepositoryScope::parse(self.repos)
-            .map_err(|_| InvalidLinkValues)?
-            .into();
+        self.targets = self.targets.normalized().map_err(|_| InvalidLinkValues)?;
         Ok(self)
     }
 }
@@ -52,9 +303,12 @@ impl CreateLink {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LinkSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<crate::link_lifecycle::LinkPause>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<LinkMetadata>,
     pub link_id: InvitationLinkId,
     pub creation: CreateLink,
+    pub secret: LinkSecretState,
     pub created_at: DateTime<Utc>,
     pub uses: u64,
     pub revision: u64,
@@ -86,7 +340,26 @@ impl LinkMetadata {
     }
 }
 
+/// Authority state is distinct from the derived expiry/exhaustion guardrails.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    Active,
+    Paused,
+    Revoked,
+}
+
 impl LinkSnapshot {
+    pub fn state(&self) -> LinkState {
+        if self.revoked_at.is_some() {
+            LinkState::Revoked
+        } else if self.pause.is_some() {
+            LinkState::Paused
+        } else {
+            LinkState::Active
+        }
+    }
+
     pub fn description(&self) -> &str {
         self.metadata
             .as_ref()
@@ -101,51 +374,84 @@ impl LinkSnapshot {
     }
     pub fn inactive(&self, now: DateTime<Utc>) -> Option<Inactive> {
         Inactive::check(
-            self.revoked_at.is_some(),
+            self.state() == LinkState::Revoked,
             self.creation.expires_at,
             self.uses,
             self.creation.max_uses,
             now,
         )
+        .or_else(|| self.pause.as_ref().map(|_| Inactive::Paused))
     }
     pub fn as_link(&self) -> InvitationLink {
         InvitationLink {
+            batch_source: self.creation.batch_source,
+            access_lifetime_seconds: self.creation.access_lifetime_seconds,
+            email_domains: self.creation.email_domains.clone(),
             id: self.link_id,
+            organization_installation_id: self.creation.organization_installation_id,
             installation_id: self.creation.installation_id,
             account_id: self.creation.account_id,
             created_by: self.creation.admin.user_id,
             created_at: self.created_at,
             expires_at: self.creation.expires_at,
             max_uses: self.creation.max_uses,
+            invitation_lifetime_seconds: self.creation.invitation_lifetime_seconds,
+            abuse_threshold_per_hour: self.creation.abuse_threshold_per_hour,
+            budget_share_pct: self.creation.budget_share_pct,
             uses_count: self.uses.try_into().unwrap_or(u32::MAX),
-            permission: self.creation.permission,
             approval_required: self.creation.approval_required,
             description: self.description().into(),
             internal_note: self.internal_note().map(str::to_owned),
             revoked_at: self.revoked_at,
             revoked_by: self.revoked_by,
-            repos: self.creation.repos.clone(),
+            pause: self.pause.clone(),
+            targets: self.creation.targets.clone(),
+            secret: self.secret.clone(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvitationLink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_source: Option<crate::bulk::BatchRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_lifetime_seconds: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub email_domains: Vec<crate::email_domain::DomainRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause: Option<crate::link_lifecycle::LinkPause>,
     pub id: InvitationLinkId,
+    /// Installation of primary_app(); repository app when repository targets exist.
     pub installation_id: u64,
+    /// Separate org-app installation only for mixed repository/organization links.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_installation_id: Option<u64>,
     pub account_id: u64,
     pub created_by: u64, // user_id
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub max_uses: Option<u32>,
+    #[serde(
+        default = "default_invitation_lifetime_seconds",
+        skip_serializing_if = "is_default_invitation_lifetime_seconds"
+    )]
+    pub invitation_lifetime_seconds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abuse_threshold_per_hour: Option<u32>,
+    #[serde(
+        default = "default_budget_share_pct",
+        skip_serializing_if = "is_default_budget_share_pct"
+    )]
+    pub budget_share_pct: u8,
     pub uses_count: u32,
-    pub permission: Permission,
     pub approval_required: bool,
     pub description: String,
     pub internal_note: Option<String>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub revoked_by: Option<u64>,
-    pub repos: Vec<InvitationLinkRepo>,
+    pub targets: Targets,
+    pub secret: LinkSecretState,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -155,22 +461,51 @@ pub struct InvitationLinkRepo {
 }
 
 impl InvitationLink {
+    pub fn primary_app(&self) -> crate::account::App {
+        primary_target_app(&self.targets)
+    }
+    pub fn org_installation_id(&self) -> Option<u64> {
+        target_org_installation_id(
+            &self.targets,
+            self.installation_id,
+            self.organization_installation_id,
+        )
+    }
+    pub fn validate_installations(&self) -> Result<(), InvalidLinkValues> {
+        validate_target_installations(
+            &self.targets,
+            self.account_id,
+            self.installation_id,
+            self.organization_installation_id,
+        )
+    }
+    pub fn state(&self) -> LinkState {
+        if self.revoked_at.is_some() {
+            LinkState::Revoked
+        } else if self.pause.is_some() {
+            LinkState::Paused
+        } else {
+            LinkState::Active
+        }
+    }
     /// `is_active` is the per-spec derived state: not revoked AND not expired AND not exhausted.
     pub fn is_active(&self, now: DateTime<Utc>) -> bool {
         Inactive::check(
-            self.revoked_at.is_some(),
+            self.state() == LinkState::Revoked,
             self.expires_at,
             u64::from(self.uses_count),
             self.max_uses,
             now,
         )
         .is_none()
+            && self.pause.is_none()
     }
 }
 
 /// Why an invitation link no longer accepts new invitation requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Inactive {
+    Paused,
     Revoked,
     Expired,
     Exhausted,
@@ -341,22 +676,201 @@ mod tests {
 
     fn base_link() -> InvitationLink {
         InvitationLink {
+            batch_source: None,
+            access_lifetime_seconds: None,
+            email_domains: vec![],
             id: InvitationLinkId::new(),
+            organization_installation_id: None,
             installation_id: 1,
             account_id: 2,
             created_by: 3,
             created_at: at(2026, 1, 1),
             expires_at: None,
             max_uses: None,
+            invitation_lifetime_seconds: 604800,
+            abuse_threshold_per_hour: None,
+            budget_share_pct: 50,
             uses_count: 0,
-            permission: Permission::Pull,
+
             approval_required: false,
             description: "AI coding workshop".into(),
             internal_note: None,
             revoked_at: None,
             revoked_by: None,
-            repos: vec![],
+            pause: None,
+            targets: crate::targets::Targets {
+                repos: vec![],
+                ..Default::default()
+            },
+
+            secret: crate::LinkSecretState {
+                secret_generation: 1,
+                sha256: crate::SecretHash::from_bytes([1; 32]),
+            },
         }
+    }
+
+    #[test]
+    fn target_installations_are_canonical_app_scoped_and_portable() {
+        let wire = serde_json::json!({"link_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV","admin":{"account_id":2,"user_id":3},"account_id":2,"installation_id":1,"description":"Access","internal_note":null,"expires_at":null,"max_uses":5,"approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/repo","grant":"read"}]},"secret_sha256":"01".repeat(32)});
+        let repo: CreateLink = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(repo.primary_app(), crate::account::App::Repo);
+        assert_eq!(repo.org_installation_id(), None);
+        assert_eq!(
+            serde_json::to_value(&repo).unwrap(),
+            wire,
+            "legacy repository canonical content gains no fields"
+        );
+        assert!(repo.clone().normalized().is_ok());
+        let mut restricted = repo.clone();
+        restricted.email_domains = vec![
+            crate::email_domain::DomainRule::parse("EXAMPLE.COM.")
+                .unwrap();
+            crate::email_domain::MAX_DOMAIN_RULES + 1
+        ];
+        assert_eq!(restricted.normalized().unwrap().email_domains.len(), 1);
+        let mut too_many = repo.clone();
+        too_many.email_domains = (0..=crate::email_domain::MAX_DOMAIN_RULES)
+            .map(|n| {
+                crate::email_domain::DomainRule::parse(&format!("team{n}.example.com")).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            too_many.canonical_input().unwrap().validate_guardrails(),
+            Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::EmailDomains
+            })
+        );
+        let mut redundant = repo.clone();
+        redundant.organization_installation_id = Some(1);
+        assert!(redundant.clone().canonical_input().is_err());
+        assert!(redundant.normalized().is_err());
+        let mut mixed = repo.clone();
+        mixed.targets.organization = Some(crate::targets::OrganizationTarget {
+            org_id: 2,
+            org_login: "acme".into(),
+            grant: crate::targets::MemberGrant::Member,
+        });
+        assert!(mixed.clone().normalized().is_err());
+        mixed.organization_installation_id = Some(1); // Same numeric ID in distinct app namespaces is valid.
+        assert_eq!(mixed.primary_app(), crate::account::App::Repo);
+        assert_eq!(mixed.org_installation_id(), Some(1));
+        assert!(mixed.clone().normalized().is_ok());
+        for id in [0, crate::storage::integer::MAX_EXACT + 1, u64::MAX] {
+            let mut bad = mixed.clone();
+            bad.organization_installation_id = Some(id);
+            assert!(bad.normalized().is_err());
+            let mut bad = repo.clone();
+            bad.installation_id = id;
+            assert!(bad.normalized().is_err());
+        }
+        let mut wrong_account = mixed.clone();
+        wrong_account.targets.organization.as_mut().unwrap().org_id = 3;
+        assert!(
+            wrong_account.clone().canonical_input().is_ok(),
+            "account mismatch retains typed target refusal"
+        );
+        assert_eq!(
+            wrong_account.validate_targets(),
+            Err(CreateLinkError::InvalidTargets {
+                reason: crate::targets::TargetError::DifferentAccounts
+            })
+        );
+        assert!(wrong_account.normalized().is_err());
+        let mut org = mixed;
+        org.targets.repos.clear();
+        org.organization_installation_id = None;
+        assert_eq!(org.primary_app(), crate::account::App::Org);
+        assert_eq!(org.org_installation_id(), Some(1));
+        assert!(org.clone().normalized().is_ok());
+        org.organization_installation_id = Some(1);
+        assert!(
+            org.normalized().is_err(),
+            "org-only must use its primary field, not two authorities"
+        );
+    }
+
+    #[test]
+    fn creation_requires_explicit_secret_per_target_grants_and_guardrails() {
+        let mut input = serde_json::json!({
+            "link_id":"01ARZ3NDEKTSV4RRFFQ69G5FAV", "admin":{"account_id":2,"user_id":3},
+            "account_id":2,"installation_id":1,"description":"Access","internal_note":null,
+            "expires_at":null,"max_uses":null,"approval_required":false,
+            "targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/repo","grant":"read"}]},
+            "secret_sha256":"01".repeat(32)
+        });
+        let mut create: CreateLink = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(
+            create.validate_guardrails(),
+            Err(CreateLinkError::NoGuardrail)
+        );
+        create.approval_required = true;
+        assert_eq!(create.invitation_lifetime_seconds, 604800);
+        assert_eq!(create.abuse_threshold_per_hour, None);
+        assert_eq!(create.budget_share_pct, 50);
+        assert!(
+            serde_json::to_value(&create)
+                .unwrap()
+                .get("budget_share_pct")
+                .is_none()
+        );
+        for pct in [0, 101, u8::MAX] {
+            let mut invalid = create.clone();
+            invalid.budget_share_pct = pct;
+            assert_eq!(
+                invalid.validate_guardrails(),
+                Err(CreateLinkError::InvalidGuardrail {
+                    field: GuardrailField::BudgetShare
+                })
+            );
+        }
+        for pct in [1, 50, 100] {
+            let mut valid = create.clone();
+            valid.budget_share_pct = pct;
+            assert!(valid.normalized().is_ok());
+        }
+        for seconds in [0, 3599, 604801, u32::MAX] {
+            let mut invalid = create.clone();
+            invalid.invitation_lifetime_seconds = seconds;
+            assert_eq!(
+                invalid.validate_guardrails(),
+                Err(CreateLinkError::InvalidGuardrail {
+                    field: GuardrailField::InvitationLifetime
+                })
+            );
+        }
+        for seconds in [3600, 604800] {
+            let mut valid = create.clone();
+            valid.invitation_lifetime_seconds = seconds;
+            assert!(valid.normalized().is_ok());
+        }
+        let mut invalid = create.clone();
+        invalid.abuse_threshold_per_hour = Some(0);
+        assert_eq!(
+            invalid.validate_guardrails(),
+            Err(CreateLinkError::InvalidGuardrail {
+                field: GuardrailField::AbuseThreshold
+            })
+        );
+        assert_eq!(default_abuse_threshold(None), 20);
+        assert_eq!(default_abuse_threshold(Some(200)), 20);
+        assert_eq!(default_abuse_threshold(Some(201)), 21);
+        assert_eq!(default_abuse_threshold(Some(u32::MAX)), 429496730);
+        assert!(create.normalized().is_ok());
+        input["max_uses"] = serde_json::json!(1);
+        let create: CreateLink = serde_json::from_value(input.clone()).unwrap();
+        assert!(create.normalized().is_ok());
+        input["targets"]["organization"] =
+            serde_json::json!({"org_id":2,"org_login":"acme","grant":"member"});
+        input["max_uses"] = serde_json::Value::Null;
+        input["expires_at"] = serde_json::json!("2027-01-01T00:00:00Z");
+        let create: CreateLink = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(
+            create.validate_guardrails(),
+            Err(CreateLinkError::OrgAutoApproveNeedsMaxUses)
+        );
+        input.as_object_mut().unwrap().remove("secret_sha256");
+        assert!(serde_json::from_value::<CreateLink>(input).is_err());
     }
 
     #[test]
@@ -552,4 +1066,18 @@ mod tests {
             );
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RotateSecret {
+    pub link_id: InvitationLinkId,
+    pub operation_id: crate::admission::AdmissionOperationId,
+    pub admin: AccountAdmin,
+    pub new_sha256: SecretHash,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SecretRotated {
+    pub secret_generation: u32,
 }

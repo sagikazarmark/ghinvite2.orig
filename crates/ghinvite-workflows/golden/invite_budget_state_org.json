@@ -1,0 +1,229 @@
+{
+  "limit_observations": {
+    "0000000000000000000000000000000000000000000000000000000000000007": {
+      "bucket": {
+        "kind": "org"
+      },
+      "until": null,
+      "observation": {
+        "id": "0000000000000000000000000000000000000000000000000000000000000007",
+        "reason": "spammed",
+        "observed_at": "1970-01-01T00:16:42Z"
+      }
+    }
+  },
+  "limit_coverage_started_at": 1000,
+  "limit_overflow_until": null,
+  "unclassified_limit_until": 87403,
+  "ledger": {
+    "state": {
+      "buckets": {
+        "content": {
+          "spec": {
+            "id": "content",
+            "windows": [
+              [
+                80,
+                60
+              ],
+              [
+                500,
+                3600
+              ]
+            ],
+            "min_spacing_secs": 1
+          },
+          "closed_until": 1100
+        },
+        "org": {
+          "spec": {
+            "id": "org",
+            "windows": [
+              [
+                500,
+                86400
+              ]
+            ],
+            "min_spacing_secs": 0
+          },
+          "closed_until": 87402
+        }
+      },
+      "slots": {
+        "1": {
+          "refunded": [],
+          "buckets": [
+            "content",
+            "org"
+          ],
+          "tag": "01J0000000000000000000000A",
+          "at": 1000
+        },
+        "3": {
+          "refunded": [],
+          "buckets": [
+            "content",
+            "org"
+          ],
+          "tag": "01J0000000000000000000000B",
+          "at": 1002
+        }
+      },
+      "holds": {},
+      "reservations": {
+        "r1": {
+          "at": 1000,
+          "value": {
+            "Granted": {
+              "slot": 1
+            }
+          }
+        },
+        "r2": {
+          "at": 1001,
+          "value": {
+            "Granted": {
+              "slot": 2
+            }
+          }
+        },
+        "r3": {
+          "at": 1002,
+          "value": {
+            "Granted": {
+              "slot": 3
+            }
+          }
+        },
+        "r4": {
+          "at": 1003,
+          "value": {
+            "RetryAt": 87402
+          }
+        }
+      },
+      "hold_keys": {},
+      "commits": {},
+      "watermark": 1003,
+      "next_id": 3
+    }
+  },
+  "revision": 1,
+  "next_slot": 3,
+  "now": 1003,
+  "confirmed_established": true,
+  "cap_policy": {
+    "account_id": 1,
+    "revision": 1,
+    "command": {
+      "operation_id": "01J0000000000000000000000D",
+      "actor_user_id": 8,
+      "confirmed_established": true
+    },
+    "changed_at": "1970-01-01T00:16:40Z"
+  },
+  "shares": {
+    "01J0000000000000000000000A": 40,
+    "01J0000000000000000000000B": 25
+  },
+  "link_policy_bound": true,
+  "receipts": {
+    "r1": {
+      "at": 1000,
+      "input": {
+        "request_key": "r1",
+        "kind": {
+          "kind": "org_invite"
+        },
+        "link_id": "01J0000000000000000000000A"
+      },
+      "result": {
+        "kind": "granted",
+        "slot_id": 1
+      }
+    },
+    "r2": {
+      "at": 1001,
+      "input": {
+        "request_key": "r2",
+        "kind": {
+          "kind": "other_write"
+        },
+        "link_id": null
+      },
+      "result": {
+        "kind": "granted",
+        "slot_id": 2
+      }
+    },
+    "r3": {
+      "at": 1002,
+      "input": {
+        "request_key": "r3",
+        "kind": {
+          "kind": "org_invite"
+        },
+        "link_id": "01J0000000000000000000000B"
+      },
+      "result": {
+        "kind": "granted",
+        "slot_id": 3
+      }
+    },
+    "r4": {
+      "at": 1003,
+      "input": {
+        "request_key": "r4",
+        "kind": {
+          "kind": "org_invite"
+        },
+        "link_id": null
+      },
+      "result": {
+        "kind": "retry_at",
+        "at": "1970-01-02T00:16:42Z",
+        "why": "closed"
+      }
+    }
+  },
+  "policy_receipts": {
+    "policy-1": {
+      "at": 1000,
+      "input": {
+        "request_key": "policy-1",
+        "confirmed_established": false,
+        "link_shares": [
+          {
+            "link_id": "01J0000000000000000000000A",
+            "percent": 40
+          }
+        ]
+      }
+    }
+  },
+  "slots": {
+    "1": {
+      "ledger_slot": 1,
+      "invitation_refunded": false,
+      "at": 1000,
+      "bucket": {
+        "kind": "org"
+      },
+      "link_id": "01J0000000000000000000000A"
+    },
+    "3": {
+      "ledger_slot": 3,
+      "invitation_refunded": false,
+      "at": 1002,
+      "bucket": {
+        "kind": "org"
+      },
+      "link_id": "01J0000000000000000000000B"
+    }
+  },
+  "buckets": [
+    {
+      "kind": "org"
+    }
+  ]
+}

@@ -7,9 +7,10 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use common::build_app;
 use ghinvite_github::mocks::{Expectation, MockTransport};
-use ghinvite_github::transport::{Method, Response};
-use ghinvite_web::{AppState, RestateClient, WebConfig, build_app};
+use ghinvite_github::{Method, Response};
+use ghinvite_web::{RestateClient, WebConfig};
 use http_body_util::BodyExt;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -72,13 +73,15 @@ async fn build_app_with(mock: MockTransport, ingress: &str) -> axum::Router {
             .await
             .unwrap(),
     );
-    let transport: Arc<dyn ghinvite_github::HttpTransport> = Arc::new(mock);
+    let transport: Arc<dyn ghinvite_github::HttpTransportDyn> = Arc::new(mock);
     let restate = Arc::new(RestateClient::new(ingress).unwrap());
-    let state = AppState::new(
+    let state = crate::common::sign_in::app_state(
         storage,
         transport,
         restate,
-        WebConfig::for_local_dev_with_secret([7; 32]),
+        WebConfig {
+            ..WebConfig::for_local_dev_with_secret([7; 32])
+        },
     );
     build_app(state, tower_sessions::MemoryStore::default())
 }
@@ -139,9 +142,20 @@ async fn oauth_callback_error_parameters_are_not_reflected() {
 async fn oauth_callback_distinguishes_a_decline_from_a_provider_error() {
     let app = build_app_with(MockTransport::scripted(vec![]), "http://127.0.0.1:8080").await;
 
-    let declined = body_text(get(&app, "/oauth/callback?error=access_denied", None).await).await;
-    let failed =
-        body_text(get(&app, "/oauth/callback?error=bad_verification_code", None).await).await;
+    // GitHub's error redirect names the pending sign-in's state.
+    let callback = |error: &'static str| {
+        let app = app.clone();
+        async move {
+            let started = get(&app, "/login", None).await;
+            let cookie = common::sign_in::session_cookie(&started, None);
+            let location = started.headers()["location"].to_str().unwrap();
+            let state = common::sign_in::state_from_location(location).to_owned();
+            let uri = format!("/oauth/callback?error={error}&state={state}");
+            body_text(get(&app, &uri, Some(&cookie)).await).await
+        }
+    };
+    let declined = callback("access_denied").await;
+    let failed = callback("bad_verification_code").await;
 
     assert!(declined.contains("did not authorize"), "{declined}");
     assert!(failed.contains("could not complete"), "{failed}");
@@ -149,14 +163,14 @@ async fn oauth_callback_distinguishes_a_decline_from_a_provider_error() {
 }
 
 /// A gateway sitting in front of GitHub answers a setup-return read with a body
-/// that quotes the user token we sent.
+/// that quotes a secret marker; no upstream text may reach logs or HTML.
 #[tokio::test]
 async fn github_gateway_body_never_reaches_the_browser() {
     let (logs, _guard) = capture_logs();
-    let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
+    let mut expectations = oauth_expectations(OCTOCAT.with_token(USER_TOKEN));
     expectations.push(Expectation {
         method: Method::Get,
-        url: "https://api.github.com/user/installations?per_page=100".into(),
+        url: "https://api.github.com/app/installations/77".into(),
         required_headers: BTreeMap::new(),
         expected_body: None,
         response: Response {
@@ -177,18 +191,18 @@ async fn github_gateway_body_never_reaches_the_browser() {
 
     let response = get(
         &app,
-        "/setup/github?installation_id=77&setup_action=install",
+        "/setup/repo?installation_id=77&setup_action=install",
         Some(&cookie),
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     let body = body_text(response).await;
     let leaked = [USER_TOKEN, "proxy failure", "Authorization"];
     assert_absent(&body, &leaked, "setup response");
     assert_absent(&logs.text(), &leaked, "logs");
     // The status is still there for whoever is on call.
-    assert!(logs.text().contains("502"), "{}", logs.text());
+    assert!(logs.text().contains("gh:api:server"), "{}", logs.text());
     assert!(body.contains("href=\"/\""), "{body}");
 }
 
@@ -208,20 +222,16 @@ async fn unsupported_installation_fields_are_not_reflected() {
         ),
     ] {
         let (logs, _guard) = capture_logs();
-        let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
+        let mut expectations = oauth_expectations(OCTOCAT.with_token(USER_TOKEN));
         expectations.push(Expectation::ok_json(
             Method::Get,
-            "https://api.github.com/user/installations?per_page=100",
-            serde_json::json!({
-                "total_count": 1,
-                "installations": [{
-                    "id": 77,
-                    "account": {"id": 9001, "login": "acme", "type": account_type},
-                    "repository_selection": repository_selection,
-                    "target_type": account_type,
-                    "target_id": 9001
-                }]
-            }),
+            "https://api.github.com/app/installations/77",
+            {
+                let mut installation =
+                    common::apps::installation(123, 77, 9001, "acme", account_type);
+                installation["repository_selection"] = serde_json::json!(repository_selection);
+                installation
+            },
         ));
         let app = build_app_with(
             MockTransport::scripted(expectations),
@@ -232,7 +242,7 @@ async fn unsupported_installation_fields_are_not_reflected() {
 
         let response = get(
             &app,
-            "/setup/github?installation_id=77&setup_action=install",
+            "/setup/repo?installation_id=77&setup_action=install",
             Some(&cookie),
         )
         .await;
@@ -240,15 +250,8 @@ async fn unsupported_installation_fields_are_not_reflected() {
         let body = body_text(response).await;
         let leaked = [USER_TOKEN, "Mystery", "mystery", "<b>"];
         assert_absent(&body, &leaked, "setup response");
-        // The bounded log keeps the field name without the value ghinvite
-        // could not act on.
         assert_absent(&logs.text(), &leaked, "logs");
-        assert!(
-            logs.text().contains(ghinvite_github::UNRECOGNIZED),
-            "{}",
-            logs.text()
-        );
-        assert!(body.contains("not supported"), "{body}");
+        assert!(body.contains("could not verify"), "{body}");
         assert!(body.contains("href=\"/\""), "{body}");
     }
 }
@@ -266,27 +269,18 @@ async fn restate_ingress_body_never_reaches_the_browser() {
         .mount(&ingress)
         .await;
 
-    let mut expectations = oauth_expectations(OCTOCAT.with_access_token(USER_TOKEN));
+    let mut expectations = oauth_expectations(OCTOCAT.with_token(USER_TOKEN));
     expectations.push(Expectation::ok_json(
         Method::Get,
-        "https://api.github.com/user/installations?per_page=100",
-        serde_json::json!({
-            "total_count": 1,
-            "installations": [{
-                "id": 77,
-                "account": {"id": 9001, "login": "acme", "type": "Organization"},
-                "repository_selection": "all",
-                "target_type": "Organization",
-                "target_id": 9001
-            }]
-        }),
+        "https://api.github.com/app/installations/77",
+        common::apps::installation(123, 77, 9001, "acme", "Organization"),
     ));
     let app = build_app_with(MockTransport::scripted(expectations), &ingress.uri()).await;
     let cookie = sign_in(&app).await;
 
     let response = get(
         &app,
-        "/setup/github?installation_id=77&setup_action=install",
+        "/setup/repo?installation_id=77&setup_action=install",
         Some(&cookie),
     )
     .await;

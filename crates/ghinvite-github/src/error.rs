@@ -1,265 +1,370 @@
+//! Secret-free classification of GitHub failures.
+//!
+//! [`ApiError`] keeps fixed codes, statuses and durations, never response
+//! text, so it can be logged and journaled. Its rate-limit, 403 and 422
+//! evidence rules are octoauth's ([`octoauth::ApiError::classify`]); this
+//! crate adds what only a REST client sees: transport certainty
+//! ([`ApiError::NotSent`] vs [`ApiError::Ambiguous`]), redirects, 405/410,
+//! SSO-partial listings and response-shape failures.
+
+use crate::ids::OrgId;
+use crate::transport::{Response, TransportError};
 use std::time::Duration;
-use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub use octoauth::RateLimitScope;
 
-/// Which documented GitHub limit a throttled response reports.
+/// Larger error bodies are not inspected (octoauth's bound).
+const MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+
+/// Bounded reason for a forbidden request, including local refusals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RateLimitScope {
-    /// The hourly request quota, reported as `x-ratelimit-remaining: 0` and
-    /// cleared at `x-ratelimit-reset`.
-    Primary,
-    /// A secondary (burst) limit, reported as `retry-after`, a 429, or the
-    /// documented rate-limit wording in the response body.
-    Secondary,
+#[non_exhaustive]
+pub enum ForbiddenReason {
+    /// The credential lacks the required permission or access to the resource.
+    Permission,
+    /// Organization policy forbids outside collaborators.
+    OutsideCollaboratorsRestricted,
+    /// The credential requires organization SSO authorization.
+    SsoRequired,
+    /// An IP allow list rejected the request.
+    IpAllowList,
+    /// The endpoint rejected this credential class before dispatch.
+    WrongCredential,
+    /// The requested capability is disabled in this crate.
+    Disabled,
+    /// A refusal without a more specific classification.
+    Other,
 }
 
-/// Throttling evidence GitHub returned instead of deciding a request, and the
-/// wait it asked for when it supplied one.
-///
-/// `retry_after` is guidance about when the limit clears, not a deadline: it is
-/// absent whenever GitHub named a limit without saying how long it lasts.
+/// Why an otherwise successful observation is incomplete.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RateLimit {
-    pub scope: RateLimitScope,
-    pub retry_after: Option<Duration>,
+#[non_exhaustive]
+pub enum PartialReason {
+    /// Some organizations are hidden until the credential satisfies SSO.
+    SsoRequired,
 }
 
-/// All failure modes a GitHub-side call can produce.
-///
-/// Where a status has one meaning for an endpoint, the endpoint answers it as
-/// a typed value instead (a missing installation, a missing invitation, the
-/// outcome of adding a collaborator), so no caller has to match on it. The
-/// statuses left here are those an endpoint cannot interpret alone: a 404 on
-/// `get_repo` or a permission read may mean the App lost the repository, and
-/// only the caller knows what it verified first.
-///
-/// Every string in here is a diagnostic, not a payload. Error values are
-/// formatted into logs and into Restate terminal errors long after the request
-/// that produced them, so no variant may carry a raw upstream body or anything
-/// derived from one that has not been through [`crate::redact`].
-#[derive(Debug, Error)]
-pub enum Error {
-    /// The HTTP transport itself failed (DNS, TLS, broken pipe, etc).
-    #[error("transport error: {0}")]
-    Transport(String),
+/// Known GitHub rate-limit resource; unknown text is discarded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
+pub enum Resource {
+    /// The ordinary REST quota.
+    Core,
+    /// The search quota.
+    Search,
+    /// The GraphQL quota.
+    Graphql,
+    /// The app-manifest quota.
+    IntegrationManifest,
+    /// Any other resource; the name is not retained.
+    Other,
+}
 
-    /// The server returned a non-2xx status. Holds the numeric status and a
-    /// bounded, sanitized summary of the body: the documented validation
-    /// sub-codes when it was a GitHub error envelope, and its size and shape
-    /// otherwise. No upstream text survives — see [`crate::redact`]. Build it
-    /// with [`crate::Response::status_error`].
-    ///
-    /// A 403 arriving as this variant carries no rate-limit evidence, so it is
-    /// a genuine permission refusal rather than throttling; throttled responses
-    /// are [`Error::RateLimited`] instead.
-    #[error("github returned status {status}: {body}")]
-    Status { status: u16, body: String },
+/// Documented validation codes; no upstream string is retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ValidationCode {
+    /// `missing`: a resource does not exist.
+    Missing,
+    /// `missing_field`: a required field was not set.
+    MissingField,
+    /// `invalid`: a field's value is malformed.
+    Invalid,
+    /// `already_exists`: another resource has the same unique value.
+    AlreadyExists,
+    /// `unprocessable`: the inputs were invalid.
+    Unprocessable,
+    /// `custom`: a rule GitHub explains only in its message (discarded).
+    Custom,
+    /// Documented collaborator rejection below an organization's base role.
+    CannotAssignBelowBase,
+    /// Organization policy refuses the outside-collaborator operation.
+    OutsideCollaboratorsRestricted,
+    /// Any other code; its text is discarded.
+    Other,
+}
 
-    /// GitHub throttled the request rather than deciding it: a 403 or 429
-    /// carrying documented rate-limit evidence. The request was refused
-    /// outright, so nothing was applied and it may be retried once the limit
-    /// named in `rate_limit` clears.
-    ///
-    /// `body` is the same sanitized summary [`Error::Status`] carries: a
-    /// throttled response is still an upstream body. The rate-limit wording
-    /// that produced this classification is read from the raw response before
-    /// the summary is built, so nothing is lost by not keeping it.
-    #[error("github throttled the request with status {status}: {body}")]
-    RateLimited {
-        status: u16,
-        body: String,
-        rate_limit: RateLimit,
+/// Secret-free API failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ApiError {
+    /// 401: the credential was not accepted.
+    Unauthorized,
+    /// The request was refused by a permission, policy or credential boundary.
+    Forbidden {
+        /// Bounded refusal classification.
+        reason: ForbiddenReason,
     },
-
-    /// The response body was not valid JSON or did not match the expected
-    /// shape. Build it with [`Error::decode`] / [`Error::decode_shape`]: the
-    /// body is described, never quoted.
-    #[error("response decode error: {0}")]
-    Decode(String),
-
-    /// The OAuth authorization-code exchange returned an error from GitHub
-    /// (`error=...`). Carries the bounded error code only; GitHub's
-    /// `error_description` prose is upstream-controlled and is not kept.
-    #[error("oauth error: {0}")]
-    OAuth(String),
-
-    /// Something is wrong with the calling code's inputs (e.g. bad URL,
-    /// unparseable PEM, expired JWT key), or a well-formed response this crate
-    /// refuses to act on: an incomplete repository refresh, a pending-invitation
-    /// listing whose pages could not be walked, an identity mismatch. Never
-    /// thrown by the transport itself. Callers treat it as unknown, not as a
-    /// terminal answer.
-    #[error("invalid input: {0}")]
-    InvalidInput(String),
-
-    /// JWT minting / signing failed.
-    #[error("jwt error: {0}")]
-    Jwt(String),
+    /// 404: not found, or not visible to this credential.
+    NotFound,
+    /// 409: conflicts with the resource's current state.
+    Conflict,
+    /// 405: the method is not allowed.
+    NotAllowed,
+    /// 410: the resource is gone.
+    Gone,
+    /// A redirect; credentials are never forwarded automatically.
+    Moved {
+        /// The redirect status; the location is not retained.
+        status: u16,
+    },
+    /// 422: GitHub rejected the submitted values.
+    Validation {
+        /// Recognised codes; unrecognised text is discarded.
+        codes: Vec<ValidationCode>,
+        /// Length of GitHub's message, without its contents.
+        message_len: usize,
+    },
+    /// GitHub's explicit `spammed` (abuse protection).
+    Spammed,
+    /// GitHub throttled the request instead of answering it.
+    RateLimited {
+        /// The limit GitHub cited.
+        scope: RateLimitScope,
+        /// GitHub's requested wait, when it named one.
+        retry_after: Option<Duration>,
+        /// The quota resource GitHub named, if any.
+        resource: Option<Resource>,
+    },
+    /// A successful response that is explicitly incomplete.
+    Partial {
+        /// Why the listing cannot be treated as exhaustive.
+        reason: PartialReason,
+        /// Bounded numeric organizations requiring SSO; no URLs retained.
+        org_ids: Vec<OrgId>,
+    },
+    /// 5xx.
+    Server {
+        /// The HTTP status.
+        status: u16,
+    },
+    /// The request may have reached GitHub; unsafe effects need reconciliation.
+    Ambiguous,
+    /// The transport proves no request was dispatched.
+    NotSent,
+    /// The response (or the caller's input) failed the expected shape.
+    Decode {
+        /// Fixed label naming the decode boundary, never upstream text.
+        what: &'static str,
+    },
+    /// Any other status.
+    Status {
+        /// The HTTP status.
+        status: u16,
+    },
 }
 
-impl Error {
-    /// The status code of any response-carrying variant, throttled responses
-    /// included, for logs and for the few callers that interpret a status an
-    /// endpoint leaves ambiguous.
-    pub fn status(&self) -> Option<u16> {
+impl ApiError {
+    /// Stable code without response diagnostics.
+    pub fn code(&self) -> &'static str {
         match self {
-            Error::Status { status, .. } | Error::RateLimited { status, .. } => Some(*status),
+            Self::Unauthorized => "gh:api:unauthorized",
+            Self::Forbidden { .. } => "gh:api:forbidden",
+            Self::NotFound => "gh:api:not_found",
+            Self::Conflict => "gh:api:conflict",
+            Self::NotAllowed => "gh:api:not_allowed",
+            Self::Gone => "gh:api:gone",
+            Self::Moved { .. } => "gh:api:moved",
+            Self::Validation { .. } => "gh:api:validation",
+            Self::Spammed => "gh:api:spammed",
+            Self::RateLimited {
+                scope: RateLimitScope::Primary,
+                ..
+            } => "gh:api:rate_limited:primary",
+            Self::RateLimited { .. } => "gh:api:rate_limited:secondary",
+            Self::Partial { .. } => "gh:api:partial",
+            Self::Server { .. } => "gh:api:server",
+            Self::Ambiguous => "gh:api:ambiguous",
+            Self::NotSent => "gh:api:not_sent",
+            Self::Decode { .. } => "gh:api:decode",
+            Self::Status { .. } => "gh:api:status",
+        }
+    }
+
+    /// Whether a caller may retry, given its endpoint's duplicate-effect safety.
+    pub fn is_transient_for_retry_safe(&self, retry_safe: bool) -> bool {
+        matches!(
+            self,
+            Self::Server { .. } | Self::NotSent | Self::RateLimited { .. }
+        ) || (retry_safe && matches!(self, Self::Ambiguous))
+    }
+
+    /// GitHub's requested wait for a rate limit, or 60 s when it named none.
+    /// Guidance only: this crate never sleeps.
+    pub fn suggested_wait(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited { retry_after, .. } => {
+                Some(retry_after.unwrap_or(Duration::from_secs(60)))
+            }
             _ => None,
         }
     }
 
-    /// The throttling evidence and retry guidance GitHub returned, if this is a
-    /// throttled response. `None` for every other failure, a permission-denied
-    /// 403 included, so callers can classify a refusal without re-reading
-    /// headers.
-    pub fn rate_limit(&self) -> Option<RateLimit> {
-        match self {
-            Error::RateLimited { rate_limit, .. } => Some(*rate_limit),
-            _ => None,
+    /// Classify a response that is not the success the caller expected.
+    ///
+    /// Rate limits, 403 reasons, spam and 422 codes come from
+    /// [`octoauth::ApiError::classify`]; redirects, 405 and 410 are this
+    /// crate's own, as are the 422 message length and the rate-limit resource.
+    pub(crate) fn from_response(response: &Response) -> Self {
+        let Ok(status) = http::StatusCode::from_u16(response.status) else {
+            return Self::Status {
+                status: response.status,
+            };
+        };
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in &response.headers {
+            if let (Ok(name), Ok(value)) = (
+                http::HeaderName::from_bytes(name.as_bytes()),
+                http::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, value);
+            }
         }
-    }
-
-    /// A stable, payload-free label for logs and metrics.
-    ///
-    /// Log this plus [`Error::status`] instead of the error itself: a
-    /// `tracing` field holding the whole error drags its diagnostic string
-    /// into every sink that ever sees the event.
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Error::Transport(_) => "transport",
-            Error::Status { .. } => "status",
-            Error::RateLimited { .. } => "rate_limited",
-            Error::Decode(_) => "decode",
-            Error::OAuth(_) => "oauth",
-            Error::InvalidInput(_) => "invalid_input",
-            Error::Jwt(_) => "jwt",
-        }
-    }
-
-    /// A decode failure described by category and position.
-    ///
-    /// `serde_json`'s own message quotes the offending value — on a token
-    /// endpoint that value is the credential — so only its classification
-    /// survives.
-    pub(crate) fn decode(error: &serde_json::Error, body_len: usize) -> Self {
-        Error::Decode(crate::redact::decode_diagnostic(error, body_len))
-    }
-
-    /// A decode failure for a *response* that was already parsed once and then
-    /// failed to match the expected shape. `context` names the call site and
-    /// must be a literal — never anything derived from the response.
-    ///
-    /// Failures encoding a request belong in [`Error::InvalidInput`]: nothing
-    /// has been received yet, so calling them a decode error misreads which
-    /// side was at fault.
-    pub(crate) fn decode_shape(context: &'static str) -> Self {
-        Error::Decode(format!("{context}: unexpected response shape"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn throttled(status: u16, retry_after: Option<Duration>) -> Error {
-        Error::RateLimited {
+        let classified = octoauth::ApiError::classify(
             status,
-            body: "rate limit".into(),
-            rate_limit: RateLimit {
-                scope: RateLimitScope::Secondary,
+            &headers,
+            octoauth::ErrorBody::Bytes(&response.body),
+        );
+        match classified {
+            octoauth::ApiError::RateLimited { scope, retry_after } => Self::RateLimited {
+                scope,
                 retry_after,
+                resource: response
+                    .headers
+                    .get("x-ratelimit-resource")
+                    .map(|r| match r.as_str() {
+                        "core" => Resource::Core,
+                        "search" => Resource::Search,
+                        "graphql" => Resource::Graphql,
+                        "integration_manifest" => Resource::IntegrationManifest,
+                        _ => Resource::Other,
+                    }),
+            },
+            octoauth::ApiError::Unauthorized => Self::Unauthorized,
+            octoauth::ApiError::Forbidden { reason } => Self::Forbidden {
+                reason: match reason {
+                    octoauth::ForbiddenReason::SsoRequired => ForbiddenReason::SsoRequired,
+                    octoauth::ForbiddenReason::IpAllowList => ForbiddenReason::IpAllowList,
+                    octoauth::ForbiddenReason::OutsideCollaboratorsRestricted => {
+                        ForbiddenReason::OutsideCollaboratorsRestricted
+                    }
+                    _ => ForbiddenReason::Other,
+                },
+            },
+            octoauth::ApiError::NotFound => Self::NotFound,
+            octoauth::ApiError::Conflict => Self::Conflict,
+            octoauth::ApiError::Validation { codes } => {
+                let mut mapped = Vec::with_capacity(codes.len());
+                for code in codes {
+                    let code = map_validation_code(code);
+                    if !mapped.contains(&code) {
+                        mapped.push(code);
+                    }
+                }
+                Self::Validation {
+                    codes: mapped,
+                    message_len: message_len(&response.body),
+                }
+            }
+            octoauth::ApiError::Spammed => Self::Spammed,
+            octoauth::ApiError::Server { status } => Self::Server { status },
+            // octoauth's `Status`: the statuses only a REST client tells apart.
+            _ => match response.status {
+                405 => Self::NotAllowed,
+                410 => Self::Gone,
+                300..=399 => Self::Moved {
+                    status: response.status,
+                },
+                status => Self::Status { status },
             },
         }
     }
+}
 
-    #[test]
-    fn status_extracts_only_for_status_variant() {
-        assert_eq!(
-            Error::Status {
-                status: 404,
-                body: "x".into(),
-            }
-            .status(),
-            Some(404)
-        );
-        assert_eq!(Error::Decode("nope".into()).status(), None);
-    }
-
-    #[test]
-    fn status_covers_a_throttled_response() {
-        assert_eq!(throttled(429, None).status(), Some(429));
-    }
-
-    #[test]
-    fn rate_limit_separates_throttling_from_a_permission_refusal() {
-        assert_eq!(
-            throttled(403, Some(Duration::from_secs(45)))
-                .rate_limit()
-                .and_then(|limit| limit.retry_after),
-            Some(Duration::from_secs(45))
-        );
-        assert_eq!(
-            Error::Status {
-                status: 403,
-                body: "Resource not accessible by integration".into(),
-            }
-            .rate_limit(),
-            None
-        );
-        assert_eq!(Error::Transport("dns".into()).rate_limit(), None);
-    }
-
-    #[test]
-    fn errors_render_useful_messages() {
-        let s = Error::Status {
-            status: 401,
-            body: "bad creds".into(),
+fn map_validation_code(code: octoauth::ValidationCode) -> ValidationCode {
+    match code {
+        octoauth::ValidationCode::Missing => ValidationCode::Missing,
+        octoauth::ValidationCode::MissingField => ValidationCode::MissingField,
+        octoauth::ValidationCode::Invalid => ValidationCode::Invalid,
+        octoauth::ValidationCode::AlreadyExists => ValidationCode::AlreadyExists,
+        octoauth::ValidationCode::Unprocessable => ValidationCode::Unprocessable,
+        octoauth::ValidationCode::Custom => ValidationCode::Custom,
+        octoauth::ValidationCode::CannotAssignBelowBase => ValidationCode::CannotAssignBelowBase,
+        octoauth::ValidationCode::OutsideCollaboratorsRestricted => {
+            ValidationCode::OutsideCollaboratorsRestricted
         }
-        .to_string();
-        assert!(s.contains("401"));
-        assert!(s.contains("bad creds"));
-    }
-
-    #[test]
-    fn kind_labels_every_variant_without_its_payload() {
-        let cases = [
-            (Error::Transport("dns: host.example".into()), "transport"),
-            (
-                Error::Status {
-                    status: 500,
-                    body: "secret".into(),
-                },
-                "status",
-            ),
-            (throttled(429, None), "rate_limited"),
-            (Error::Decode("secret".into()), "decode"),
-            (Error::OAuth("secret".into()), "oauth"),
-            (Error::InvalidInput("secret".into()), "invalid_input"),
-            (Error::Jwt("secret".into()), "jwt"),
-        ];
-        for (error, expected) in cases {
-            assert_eq!(error.kind(), expected);
-            assert!(!error.kind().contains("secret"));
-        }
-    }
-
-    #[test]
-    fn decode_never_quotes_the_body() {
-        let body = r#"{"access_token":"installation-token-test-only-not-a-credential"}"#;
-        let failure = serde_json::from_str::<u64>(body).unwrap_err();
-        let error = Error::decode(&failure, body.len());
-        let rendered = format!("{error} {error:?}");
-        assert!(!rendered.contains("ghs_"), "{rendered}");
-        assert!(rendered.contains("shape error"), "{rendered}");
-    }
-
-    #[test]
-    fn decode_shape_names_the_call_site_only() {
-        let error = Error::decode_shape("oauth token response");
-        assert_eq!(
-            error.to_string(),
-            "response decode error: oauth token response: unexpected response shape"
-        );
+        _ => ValidationCode::Other,
     }
 }
+
+/// Length of a bounded JSON body's `message`, or 0.
+fn message_len(body: &[u8]) -> usize {
+    if body.len() > MAX_ERROR_BODY_BYTES {
+        return 0;
+    }
+    serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|body| body.get("message")?.as_str().map(str::len))
+        .unwrap_or(0)
+}
+
+impl From<TransportError> for ApiError {
+    fn from(e: TransportError) -> Self {
+        match e {
+            TransportError::NotSent => Self::NotSent,
+            TransportError::SentNoResponse { .. } => Self::Ambiguous,
+            TransportError::Oversize => Self::Decode { what: "oversize" },
+        }
+    }
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.code())?;
+        if let Self::Moved { status } | Self::Server { status } | Self::Status { status } = self {
+            write!(f, ":{status}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ApiError {}
+
+/// A closure's failure: a GitHub API error or the application's own.
+#[derive(Clone, Debug)]
+pub enum CallError<E = std::convert::Infallible> {
+    /// A typed GitHub API failure.
+    Api(ApiError),
+    /// An application-defined failure; the application owns its hygiene.
+    App(E),
+}
+
+impl<E> From<ApiError> for CallError<E> {
+    fn from(e: ApiError) -> Self {
+        Self::Api(e)
+    }
+}
+
+impl<E> CallError<E> {
+    /// Fixed code; never formats the application's payload.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Api(e) => e.code(),
+            Self::App(_) => "gh:call:app",
+        }
+    }
+}
+
+impl<E> std::fmt::Display for CallError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Api(e) => e.fmt(f),
+            Self::App(_) => f.write_str("gh:call:app"),
+        }
+    }
+}
+
+impl<E: std::fmt::Debug> std::error::Error for CallError<E> {}
+
+#[cfg(test)]
+mod tests;

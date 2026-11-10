@@ -6,11 +6,33 @@ use ghinvite_core::audit::EventType;
 
 pub fn event_label(event: EventType) -> &'static str {
     match event {
+        EventType::InvitationLinkSecretRotated => "Invitation link secret rotated",
+        EventType::DeliveryAlreadySatisfied => "Requested access already satisfied",
+        EventType::DeliveryUpgraded => "Repository access upgraded",
+        EventType::DeliverySkippedCustomRole => "Delivery skipped for custom role",
+        EventType::DeliveryBlocked => "Delivery blocked",
+        EventType::DeliveryOutcomeUnknown => "Delivery outcome unknown",
+        EventType::InstallationOwnerRecorded => "Installing owner recorded",
+        EventType::OrganizationInviteCapChanged => "Organization invitation cap changed",
+        EventType::RepositoryAdminDelegationChanged => "Repository admin delegation changed",
+        EventType::DeliveryAlreadyPending => "Existing invitation tracked",
+        EventType::DeliveryAborted => "Delivery stopped",
+        EventType::DeliveryHeld => "Delivery held for review",
+        EventType::DeliveryReissued => "Delivery reissued",
+        EventType::AccessRemoved => "Access removed",
+        EventType::AccessRemovalSkipped => "Access removal skipped",
+        EventType::DeliveryReleased => "Delivery released from hold",
+        EventType::InstallationSuspended => "Installation suspended",
+        EventType::InstallationPermissionsAccepted => "Installation permissions accepted",
         EventType::InstallationCreated => "Installation created",
         EventType::InstallationReposChanged => "Installation repositories changed",
         EventType::InstallationUninstalled => "Installation uninstalled",
         EventType::InvitationLinkCreated => "Invitation link created",
         EventType::InvitationLinkMetadataUpdated => "Invitation link metadata updated",
+        EventType::InvitationLinkPaused => "Invitation link paused",
+        EventType::InvitationLinkResumed => "Invitation link resumed",
+        EventType::InvitationLinkAutoPaused => "Invitation link automatically paused",
+        EventType::InvitationLinkRevokeCascadeRequested => "Revocation cascade requested",
         EventType::InvitationLinkRevoked => "Invitation link revoked",
         EventType::InvitationLinkExpired => "Invitation link expired",
         EventType::InvitationLinkExhausted => "Invitation link exhausted",
@@ -18,6 +40,18 @@ pub fn event_label(event: EventType) -> &'static str {
         EventType::RequestApproved => "Invitation request approved",
         EventType::RequestDeclined => "Invitation request declined",
         EventType::RequestExpired => "Invitation request expired",
+        EventType::RequestCancelled => "Invitation request cancelled",
+        EventType::RequestLapsed => "Invitation request lapsed",
+        EventType::OrgInvitationSent => "Organization invitation sent",
+        EventType::EmailInvitationNoLongerPending => "Email invitation no longer pending",
+        EventType::EmailInvitationFailed => "Email invitation failed",
+        EventType::BulkBatchCreated => "Bulk batch created",
+        EventType::BulkBatchSubmitted => "Bulk batch submitted",
+        EventType::BulkBatchRowsRemoved => "Bulk batch rows removed",
+        EventType::BulkBatchCancelled => "Bulk batch cancelled",
+
+        EventType::TeamMembershipAdded => "Team membership added",
+        EventType::OrgInvitationAccepted => "Organization invitation accepted",
         EventType::InvitationSent => "GitHub invitation sent",
         EventType::InvitationAccepted => "GitHub invitation accepted",
         EventType::InvitationDeclined => "GitHub invitation declined",
@@ -39,6 +73,8 @@ pub struct AuditRow {
 
 #[derive(Clone, PartialEq, Props)]
 pub struct AuditLogPageProps {
+    #[props(default)]
+    pub authority_pending: bool,
     pub signed_in_login: Option<String>,
     pub account_login: String,
     pub event: Option<EventType>,
@@ -60,6 +96,10 @@ pub fn AuditLogPage(props: AuditLogPageProps) -> Element {
             account_login: Some(props.account_login),
             active_nav: Some("audit".to_string()),
             flash: None,
+
+                if props.authority_pending {
+                    p { role: "status", class: "mb-4", "Checking access… Some results are unavailable while GitHub is busy. Try again in a minute." }
+                }
             header { class: "mb-6",
                 p { class: "text-sm font-medium text-primary", "Audit" }
                 h1 { class: "text-2xl font-semibold tracking-tight", "Audit log" }

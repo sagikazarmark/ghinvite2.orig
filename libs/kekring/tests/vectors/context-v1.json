@@ -1,0 +1,56 @@
+[
+  {
+    "id": "ambiguity-0",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "ab",
+      "right": "c"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c6566740002616207707572706f7365000f766563746f72732d636f6e74657874057269676874000163"
+  },
+  {
+    "id": "ambiguity-1",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "a",
+      "right": "bc"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c65667400016107707572706f7365000f766563746f72732d636f6e7465787405726967687400026263"
+  },
+  {
+    "id": "ambiguity-2",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "a\u0000",
+      "right": "b"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c6566740002610007707572706f7365000f766563746f72732d636f6e74657874057269676874000162"
+  },
+  {
+    "id": "ambiguity-3",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "a",
+      "right": "\u0000b"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c65667400016107707572706f7365000f766563746f72732d636f6e7465787405726967687400020062"
+  },
+  {
+    "id": "ambiguity-4",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "é",
+      "right": "é"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c6566740002c3a907707572706f7365000f766563746f72732d636f6e74657874057269676874000365cc81"
+  },
+  {
+    "id": "ambiguity-5",
+    "context": {
+      "purpose": "vectors-context",
+      "left": "é",
+      "right": "é"
+    },
+    "aad_hex": "616e796b6d732d6374782f76310003046c656674000365cc8107707572706f7365000f766563746f72732d636f6e746578740572696768740002c3a9"
+  }
+]

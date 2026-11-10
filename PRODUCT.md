@@ -31,3 +31,35 @@ Avoid marketing-site presentation: oversized hero treatment, centered brochure c
 ## Accessibility & Inclusion
 
 Use responsive layouts that remain usable on small screens, keyboard-friendly native links and buttons, readable contrast, and status treatment that does not rely on color alone. Keep motion minimal and purposeful for state feedback only.
+
+## P1 changes from the proof of concept
+
+- Invitation URLs carry an independent secret in the fragment. Creation and
+  rotation show the URL once; lists and detail pages cannot reconstruct it.
+  Internal link IDs no longer open public invitations. The manual code form
+  remains available without JavaScript.
+- Personal owners administer their own accounts. An organization's Installing
+  Owner administers a repository-app installation; other repository admins need
+  explicit, default-off delegation. Delegates see only links whose repositories
+  they all administer, including scoped counts, request history and audit pages.
+  Settings explain that the app may bypass GitHub's repository-admin invitation
+  restriction before the owner enables delegation.
+- Delegated repository discovery uses search. Selecting a repository checks
+  access, and creation checks the complete selection again. An unavailable check
+  preserves the form and offers recovery rather than treating uncertainty as
+  permission. Installations above 5,000 repositories allow owner administration
+  only; delegated authority is unavailable.
+- Each selected repository has its own grant. Set all is a form-editing helper;
+  changing that helper alone does not override individual grants or create a
+  link. Approval and delivery retain the grants recorded at creation.
+- Expiration defaults to 14 days. Never expires requires an explicit choice and
+  warning. A link must retain an admission guardrail; revocation stops new
+  requests without undoing existing requests or delivered access.
+- Delivery distinguishes existing sufficient access, upgrades, preexisting
+  invitations, blocked prerequisites, throttling and unknown outcomes. Unknown
+  creates are reconciled without sending a second invitation. Policy and IP
+  restrictions show specific guidance without exposing upstream error bodies.
+
+These describe the implemented local behavior. They do not assert production
+deployment or completion of M1 organization targets, lifecycle controls, budget
+governance, or M2 bulk and email invitation workflows.

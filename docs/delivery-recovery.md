@@ -207,7 +207,7 @@ remaining invitation, and read-only unknown replay with missing projections/fenc
 `npm run test:delivery --prefix tests/worker` verifies withheld parents, real HTTP
 delivery, applied PUT/result loss, read-only recovery and convergence on Worker/D1.
 
-`bash scripts/test-restate.sh retained_delivery` exercises real Restate 1.7.9,
+`bash scripts/test-restate.sh retained_delivery` exercises real Restate 1.8.1,
 native SQLx, and the GitHub HTTP stub: stable plans, 201/204/422, ambiguous 502,
 HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
@@ -234,3 +234,45 @@ Worker GitHub 201/204/422 delivery. Console HTTP summary/privacy coverage is in 
 #49's approved policy is recorded in ADR 0004. #60 implements admission availability
 enforcement and installation-event convergence; #57 moved the browser onto
 authoritative admission.
+
+### Operator delivery signals
+
+Operators listed in `P1_OPERATOR_IDS` can inspect `/console/operations` and its
+JSON counterpart. See [operational delivery signals](operational-delivery-signals.md)
+for thresholds, incomplete evidence, access controls and verification limits.
+
+## Requester status by request ID and manual observation
+
+`GET /requests/{request_id}` loads the request owner's new `requester_status`
+handler with the authenticated numeric GitHub user. It does not require the
+browser to retain its selected invitation-link capability. This read cannot
+admit a new request. Unknown requests and requests belonging to another user
+return the same not-found response. The owner evaluates the retained decision
+deadline, returns immutable targets and the current dispatch generation, and
+omits private decline reasons and email-domain evidence. The page excludes
+admin notes, justification and upstream diagnostics.
+
+`POST /requests/{request_id}/refresh` requires the session's CSRF token and
+shares the existing per-user request rate limit. The selected target must belong
+to the owned immutable manifest. Repository and organization status must match
+the request, origin, account, requester, target grants and current delivery
+generation. Missing or mismatched owner state never authorizes a refresh from
+SQL history. A missing tracked owner reports `NotTracked`; an identity mismatch
+is temporarily unavailable.
+
+The new `RepositoryDelivery/refresh` handler uses the physical key
+`<request_id>:<repository_id>:<delivery_generation>`. Only unsettled Created or
+AlreadyPending receipts with active tracking can request observation. It records
+`manual_refreshed_at` using the journaled run `repository_refresh_time`, then
+sends one `Reconcile/target` containing exactly that delivery. Calls before the
+retained time plus sixty seconds return the original retry boundary; later
+generations have separate throttles. The Reconciler uses read-only credentials;
+refresh does not submit create work, claim an attempt fence, or mutate GitHub.
+The requester sees that observation was requested and checks again for results.
+
+These are new handler names; existing `request_status` and `create` input
+contracts remain unchanged. The source-derived journal inventory now includes
+both the untracked empty path and the tracked/throttled
+`[repository_refresh_time]` path. As with other protocol changes, deploy matching
+service definitions under immutable endpoint versioning; do not repoint retained
+invocations to an incompatible deployment.

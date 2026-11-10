@@ -1,4 +1,12 @@
 use ghinvite_web::{LinkAuthority, RestateClient, WebError};
+fn capability() -> ghinvite_web::session::PendingLink {
+    ghinvite_web::session::PendingLink {
+        link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+        secret_sha256: [42; 32].into(),
+        secret_generation: 1,
+    }
+}
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
@@ -30,7 +38,7 @@ async fn native_restate_deadline_preserves_unknown_mutation_outcomes() {
             client.call::<_, serde_json::Value>("Fixture", "key", "headers", &input),
             async {
                 authority
-                    .requester_page("01ARZ3NDEKTSV4RRFFQ69G5FAV", 2, None)
+                    .requester_page(&capability(), 2, None)
                     .await
                     .map_err(WebError::from)
             },

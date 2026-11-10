@@ -1,6 +1,6 @@
 //! Real link/request owners: replay, arbitration, races and retained business state.
 #![cfg(feature = "integration")]
-use ghinvite_core::{InvitationLinkId, RequestId};
+use ghinvite_core::{InvitationLinkId, RequestId, storage::RecordStorage};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 
@@ -10,27 +10,19 @@ struct Runtime {
     admin: String,
     link_faults: Arc<ghinvite_workflows::admission::Faults>,
     request_faults: Arc<ghinvite_workflows::request_owner::Faults>,
-    server: tokio::task::JoinHandle<()>,
-    github_server: tokio::task::JoinHandle<()>,
-    github_url: String,
-}
-impl Drop for Runtime {
-    fn drop(&mut self) {
-        self.server.abort();
-        self.github_server.abort();
-    }
+    harness: ghinvite_e2e::Harness,
+    storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
 }
 impl Runtime {
     async fn start() -> Self {
-        let ingress = std::env::var("RESTATE_INGRESS_URL")
-            .expect("bash scripts/test-restate.sh authoritative_admission");
-        let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
-        let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(25))
-            .build()
-            .unwrap();
+        Self::start_mode(false).await
+    }
+    async fn start_mode(cascade: bool) -> Self {
+        let harness = ghinvite_e2e::Harness::start().await;
+        let ingress = harness.restate.ingress_url().to_owned();
+        let admin = harness.restate.admin_url().to_owned();
+        let client = harness.client.clone();
+        let github_url = harness.github_url.clone();
         let link_faults = Arc::new(ghinvite_workflows::admission::Faults::default());
         let request_faults = Arc::new(ghinvite_workflows::request_owner::Faults::default());
         let storage = Arc::new(
@@ -38,69 +30,72 @@ impl Runtime {
                 .await
                 .unwrap(),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let github_url = format!("http://{}", listener.local_addr().unwrap());
-        let github_server = tokio::spawn(async move {
-            axum::serve(listener, ghinvite_github::stub::router())
+        for (user_id, login) in [(7, "creator"), (8, "alice"), (9, "bob")] {
+            storage
+                .upsert_user(&ghinvite_core::User {
+                    user_id,
+                    login: login.into(),
+                    avatar_url: None,
+                    github_created_at: None,
+                    last_seen_at: chrono::Utc::now(),
+                })
                 .await
                 .unwrap();
-        });
-        let github = Arc::new(
-            ghinvite_github::InstallationClient::new(
-                Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
-                    client.clone(),
-                )),
-                ghinvite_github::jwt::AppJwtSigner::from_pem(
-                    123,
-                    include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
-                )
-                .unwrap(),
+        }
+        let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
+            ghinvite_workflows::RepositoryGithub::new(
+                ghinvite_e2e::github_transport(client.clone()),
+                &github_url,
+                ghinvite_e2e::repository_apps(&github_url),
             )
-            .with_base(&github_url),
-        );
-        let state = ghinvite_workflows::AppState::new(storage.clone(), github);
+            .unwrap(),
+        ));
+        let cascade_state = state
+            .clone()
+            .with_pre_activation_cancellation()
+            .with_invite_budget(storage.clone());
         let builder = ghinvite_workflows::admission::bind_with_availability_faults(
             restate_sdk::endpoint::Endpoint::builder(),
             link_faults.clone(),
         );
         let builder =
             ghinvite_workflows::request_owner::bind_with_faults(builder, request_faults.clone());
-        let builder = ghinvite_workflows::projection::bind(builder, storage);
+        let builder = ghinvite_workflows::projection::bind(builder, storage.clone());
         let endpoint = ghinvite_workflows::delivery::bind(builder, state.clone())
             .bind(ghinvite_workflows::availability::InstallationProjection {
                 state: state.clone(),
             })
             .bind(ghinvite_workflows::availability::AccountInstallation { state })
+            .bind(ghinvite_workflows::sweep_schedule::SweepSchedule::default())
             .build();
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = tokio::spawn(async move {
-            restate_sdk::http_server::HttpServer::new(endpoint)
-                .serve(listener)
-                .await;
-        });
-        let response = client
-            .post(format!("{admin}/deployments"))
-            .json(&json!({"uri":format!("http://{host}:{port}")}))
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            response.status().is_success(),
-            "{}",
-            response.text().await.unwrap()
-        );
+        let endpoint = if cascade {
+            ghinvite_workflows::build_endpoint(cascade_state, storage.clone(), None).unwrap()
+        } else {
+            endpoint
+        };
+        harness.restate.deploy(endpoint).await;
         let runtime = Self {
             client,
             ingress,
             admin,
             link_faults,
             request_faults,
-            server,
-            github_server,
-            github_url,
+            harness,
+            storage,
         };
-        runtime.ok("AccountInstallation", 100, "onboard", &json!({"installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()})).await;
+        runtime.ok("AccountInstallation", 100, "onboard", &ghinvite_e2e::setup_command(json!({"app":"repo","installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))).await;
+        let status = runtime
+            .ok("AccountInstallation", 100, "status", &Value::Null)
+            .await;
+        let setup = json!({"verified":{"app":"repo","account":status["account"],"permissions":{"administration":"write","metadata":"read"},"suspended_at":null}});
+        runtime
+            .ok(
+                "AccountInstallation",
+                100,
+                "onboard_webhook",
+                &ghinvite_e2e::signed_owner_command(&setup, 7),
+            )
+            .await;
         runtime
     }
     fn call(
@@ -110,13 +105,14 @@ impl Runtime {
         handler: &str,
         input: &Value,
     ) -> reqwest::RequestBuilder {
-        let request = self.client.post(format!(
-            "{}/{}/{}/{}",
-            self.ingress,
-            service,
-            key.to_string(),
-            handler
-        ));
+        let key = key.to_string();
+        let key = if service == "AccountInstallation" {
+            format!("repo:{key}")
+        } else {
+            key
+        };
+        let path = ghinvite_e2e::Call::object(service, &key, handler).path();
+        let request = self.client.post(format!("{}{}", self.ingress, path));
         if input.is_null() {
             request
         } else {
@@ -140,9 +136,9 @@ impl Runtime {
     }
     async fn create(&self, max: Option<u32>) -> InvitationLinkId {
         let id = InvitationLinkId::new();
-        self.ok("InvitationLink", id, "create", &json!({"link_id":id,"account_id":100,"installation_id":1,
+        self.ok("InvitationLink", id, "create", &json!({"secret_sha256":"2a".repeat(32),"link_id":id,"account_id":100,"installation_id":1,
             "admin":{"account_id":100,"user_id":7},"description":"Request ownership","approval_required":true,
-            "permission":"push","max_uses":max,"repos":[{"repo_id":10,"repo_full_name":"acme/api"}]})).await;
+            "max_uses":max,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
         id
     }
     async fn uses(&self, id: InvitationLinkId) -> Value {
@@ -157,7 +153,7 @@ impl Runtime {
     }
 }
 fn attempt(id: InvitationLinkId, user: u64) -> Value {
-    json!({"link_id":id,"operation_id":RequestId::new(),"requester_id":user,"justification":"Docs"})
+    json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":id,"operation_id":RequestId::new(),"requester_id":user,"justification":"Docs"})
 }
 fn query(id: InvitationLinkId, receipt: &Value, user: u64) -> Value {
     json!({"link_id":id,"request_id":receipt["result"]["request_id"],"requester_id":user})
@@ -167,15 +163,234 @@ fn decision(id: InvitationLinkId, receipt: &Value, action: Value) -> Value {
         "admin":{"account_id":100,"user_id":7},"action":action})
 }
 
+fn revoke_command(id: InvitationLinkId) -> Value {
+    json!({
+        "link_id": id,
+        "admin": {"account_id": 100, "user_id": 7},
+        "operation_id": RequestId::new(),
+        "cascade": {
+            "decline_pending_requests": false,
+            "cancel_pending_invitations": false,
+            "remove_granted_access": false,
+        }
+    })
+}
+
+#[tokio::test]
+async fn manual_pause_resume_retains_results_and_orders_admission_without_changing_requests() {
+    let r = Runtime::start().await;
+    let id = r.create(Some(3)).await;
+    let admin = json!({"link_id":id,"admin":{"account_id":100,"user_id":7}});
+    let lifecycle = |id: InvitationLinkId| json!({"link_id":id,"admin":{"account_id":100,"user_id":7},"operation_id":RequestId::new()});
+    let original_attempt = attempt(id, 8);
+    let accepted = r.ok("InvitationLink", id, "admit", &original_attempt).await;
+    assert_eq!(accepted["result"]["kind"], "accepted");
+    let pause = lifecycle(id);
+    r.link_faults.arm("lifecycle-after-state");
+    let pending_pause = r.call("InvitationLink", id, "pause", &pause);
+    let task = tokio::spawn(async move { pending_pause.send().await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while r.link_faults.attempts() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // This admission queues behind the exclusive pause even while its response
+    // and projection handoff are interrupted.
+    let fresh = attempt(id, 9);
+    let queued = r.call("InvitationLink", id, "admit", &fresh);
+    let queued = tokio::spawn(async move { queued.send().await.unwrap() });
+    r.link_faults.release();
+    let paused: Value = task
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(paused["Ok"]["pause"]["reason"]["kind"], "manual");
+    let page_input = json!({"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":id,"requester_id":10});
+    let page = r
+        .ok("InvitationLink", id, "requester_page", &page_input)
+        .await;
+    assert_eq!(page["paused"], true);
+    assert_eq!(page["can_start_fresh"], false);
+    assert!(page.get("pause").is_none());
+    let mut invalid_page = page_input.clone();
+    invalid_page["secret_sha256"] = json!("99".repeat(32));
+    assert_eq!(
+        r.call("InvitationLink", id, "requester_page", &invalid_page)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    let refused: Value = queued
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(refused["result"]["reason"], "paused");
+    assert_eq!(r.uses(id).await, 1);
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &original_attempt).await,
+        accepted
+    );
+    let mut wrong_secret = attempt(id, 10);
+    wrong_secret["secret_sha256"] = json!("99".repeat(32));
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &wrong_secret).await["result"]["reason"],
+        "not_available"
+    );
+    assert_eq!(
+        r.ok("InvitationLink", id, "pause", &lifecycle(id)).await["Err"],
+        "already_paused"
+    );
+    // Manual pause leaves pending decisions and their immutable deadline intact.
+    let request_id = accepted["result"]["request_id"].as_str().unwrap();
+    let before = r
+        .ok(
+            "InvitationRequest",
+            request_id,
+            "request_status",
+            &query(id, &accepted, 8),
+        )
+        .await;
+    assert_eq!(
+        before["decision_deadline"],
+        accepted["result"]["decision_deadline"]
+    );
+    let approved = r
+        .ok(
+            "InvitationRequest",
+            request_id,
+            "decide",
+            &decision(id, &accepted, json!({"kind":"approve"})),
+        )
+        .await;
+    assert!(approved.to_string().contains("approved"), "{approved}");
+    let resume = lifecycle(id);
+    let resumed = r.ok("InvitationLink", id, "resume", &resume).await;
+    assert!(resumed["Ok"].get("pause").is_none());
+    assert_eq!(r.ok("InvitationLink", id, "pause", &pause).await, paused);
+    assert_eq!(r.ok("InvitationLink", id, "resume", &resume).await, resumed);
+    assert_eq!(r.ok("InvitationLink", id, "admit", &fresh).await, refused);
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &attempt(id, 9)).await["result"]["kind"],
+        "accepted"
+    );
+    assert_eq!(
+        r.call("InvitationLink", id, "resume", &pause)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let mut conflicting = pause.clone();
+    conflicting["admin"]["user_id"] = json!(9);
+    assert_eq!(
+        r.call("InvitationLink", id, "pause", &conflicting)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let revocation = revoke_command(id);
+    assert_eq!(
+        r.call("InvitationLink", id, "revoke", &admin)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400,
+        "legacy revoke input cannot silently supply an operation or cascade"
+    );
+    let revoked = r.ok("InvitationLink", id, "revoke", &revocation).await;
+    assert!(revoked["Ok"].is_object(), "{revoked}");
+    assert_eq!(
+        r.ok("InvitationLink", id, "revoke", &revocation).await,
+        revoked
+    );
+    let mut changed_revoke = revocation.clone();
+    changed_revoke["cascade"]["decline_pending_requests"] = json!(true);
+    assert_eq!(
+        r.call("InvitationLink", id, "revoke", &changed_revoke)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    assert_eq!(
+        r.ok("InvitationLink", id, "revoke", &revoke_command(id))
+            .await,
+        json!({"Err":"revoked"})
+    );
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &original_attempt).await,
+        accepted
+    );
+    assert_eq!(r.ok("InvitationLink", id, "pause", &pause).await, paused);
+    assert_eq!(
+        r.ok("InvitationLink", id, "resume", &lifecycle(id)).await["Err"],
+        "revoked"
+    );
+    assert!(r.ok("InvitationLink", id, "link_status", &admin).await["revoked_at"].is_string());
+
+    let exhausted = r.create(Some(1)).await;
+    r.ok(
+        "InvitationLink",
+        exhausted,
+        "admit",
+        &attempt(exhausted, 15),
+    )
+    .await;
+    r.ok("InvitationLink", exhausted, "pause", &lifecycle(exhausted))
+        .await;
+    assert_eq!(
+        r.ok("InvitationLink", exhausted, "resume", &lifecycle(exhausted))
+            .await["Err"],
+        "expired_or_exhausted"
+    );
+    assert_eq!(r.uses(exhausted).await, 1);
+    let expiry_id = InvitationLinkId::new();
+    let now = chrono::Utc::now();
+    r.ok("InvitationLink",expiry_id,"create",&json!({"secret_sha256":"2a".repeat(32),"link_id":expiry_id,"account_id":100,"installation_id":1,
+        "admin":{"account_id":100,"user_id":7},"description":"Expiry pause","approval_required":true,
+        "expires_at":now+chrono::Duration::hours(1),"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
+    r.ok("InvitationLink", expiry_id, "pause", &lifecycle(expiry_id))
+        .await;
+    r.link_faults
+        .set_clock(Some(now + chrono::Duration::hours(2)));
+    assert_eq!(
+        r.ok("InvitationLink", expiry_id, "resume", &lifecycle(expiry_id))
+            .await["Err"],
+        "expired_or_exhausted"
+    );
+}
+
 #[tokio::test]
 async fn request_authority_contract() {
     let runtime = Runtime::start().await;
     let r = &runtime;
-    // Interrupted positive evidence ages past its freshness window. It cannot
-    // consume a use; the same attempt must obtain current evidence on retry.
+    // Retry after a journaled clock read but before computing the decision.
+    // Advancing the injected clock beyond the pending lifetime must not move
+    // either admission time or the deadline derived from that reading.
     let id = r.create(None).await;
+    let first_time =
+        chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
+    r.link_faults.set_clock(Some(first_time));
+    r.link_faults.arm("after-admission-time");
     let a = attempt(id, 8);
-    r.link_faults.arm("after-availability-evidence");
     let sending = r.call("InvitationLink", id, "admit", &a);
     let pending = tokio::spawn(async move { sending.send().await.unwrap() });
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -186,37 +401,41 @@ async fn request_authority_contract() {
     .await
     .unwrap();
     r.link_faults
-        .set_clock(Some(chrono::Utc::now() + chrono::Duration::minutes(6)));
+        .set_clock(Some(first_time + chrono::Duration::days(8)));
     r.link_faults.release();
-    assert_eq!(pending.await.unwrap().status(), 503);
-    assert_eq!(r.uses(id).await, 0);
-    r.link_faults.set_clock(None);
-    r.client
-        .post(format!("{}/installation-repositories", r.github_url))
-        .json(&json!([]))
-        .send()
+    let receipt: Value = pending
         .await
         .unwrap()
         .error_for_status()
-        .unwrap();
-    r.ok("AccountInstallation", 100, "refresh", &json!(1)).await;
-    let rejected = r.ok("InvitationLink", id, "admit", &a).await;
-    assert_eq!(rejected["result"]["kind"], "rejected");
-    assert_eq!(r.uses(id).await, 0);
-    r.client
-        .post(format!("{}/installation-repositories", r.github_url))
-        .json(&json!([10, 11]))
-        .send()
-        .await
         .unwrap()
-        .error_for_status()
+        .json()
+        .await
         .unwrap();
-    r.ok("AccountInstallation", 100, "refresh", &json!(1)).await;
-    assert_eq!(r.ok("InvitationLink", id, "admit", &a).await, rejected);
+    assert_eq!(receipt["result"]["kind"], "accepted");
+    assert_eq!(receipt["decided_at"], json!(first_time));
     assert_eq!(
-        r.ok("InvitationLink", id, "admit", &attempt(id, 8)).await["result"]["kind"],
+        receipt["result"]["decision_deadline"],
+        json!(first_time + chrono::Duration::days(7))
+    );
+    r.link_faults.set_clock(None);
+
+    // Scope evidence is caller-supplied. A recent negative refuses, while
+    // stale/missing observations do not turn the link owner into a GitHub reader.
+    let id = r.create(None).await;
+    let mut a = attempt(id, 8);
+    a["scope_evidence"] = json!([{"app":"repo","observed_at":chrono::Utc::now() - chrono::Duration::minutes(2),"available":false,"unavailable_target_ids":[10]}]);
+    let rejected = r.ok("InvitationLink", id, "admit", &a).await;
+    assert_eq!(rejected["result"]["reason"], "scope_unavailable");
+    assert_eq!(r.uses(id).await, 0);
+    assert_eq!(r.ok("InvitationLink", id, "admit", &a).await, rejected);
+    a["operation_id"] = json!(RequestId::new());
+    a["scope_evidence"][0]["observed_at"] =
+        json!(chrono::Utc::now() - chrono::Duration::minutes(6));
+    assert_eq!(
+        r.ok("InvitationLink", id, "admit", &a).await["result"]["kind"],
         "accepted"
     );
+    assert_eq!(r.uses(id).await, 1);
     for stage in [
         "creation-before-decision",
         "creation-after-decision",
@@ -226,9 +445,9 @@ async fn request_authority_contract() {
     ] {
         let id = InvitationLinkId::new();
         let now = chrono::Utc::now();
-        let command = json!({"link_id":id,"account_id":100,"installation_id":1,
+        let command = json!({"secret_sha256":"2a".repeat(32),"link_id":id,"account_id":100,"installation_id":1,
             "admin":{"account_id":100,"user_id":7},"description":"Original creation","approval_required":true,
-            "permission":"push","expires_at":now + chrono::Duration::hours(1),"repos":[{"repo_id":10,"repo_full_name":"acme/api"}]});
+            "expires_at":now + chrono::Duration::hours(1),"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}});
         r.link_faults.arm(stage);
         let sending = r.call("InvitationLink", id, "create", &command);
         let first = tokio::spawn(async move { sending.send().await.unwrap() });
@@ -278,7 +497,13 @@ async fn request_authority_contract() {
         r.ok("InvitationLink", id, "update_metadata", &metadata)
             .await;
         assert_eq!(r.ok("InvitationLink", id, "create", &command).await, first);
-        r.ok("InvitationLink", id, "revoke", &admin).await;
+        let revocation = revoke_command(id);
+        let revoked = r.ok("InvitationLink", id, "revoke", &revocation).await;
+        assert!(revoked["Ok"].is_object(), "{revoked}");
+        assert_eq!(
+            r.ok("InvitationLink", id, "revoke", &revocation).await,
+            revoked
+        );
         assert_eq!(r.ok("InvitationLink", id, "create", &command).await, first);
         r.link_faults
             .set_clock(Some(now + chrono::Duration::hours(2)));
@@ -403,7 +628,7 @@ async fn request_authority_contract() {
     r.ok("InvitationRequest", rid, "tick_expire", &Value::Null)
         .await;
     let blocked = r.ok("InvitationLink", id, "admit", &attempt(id, 8)).await;
-    assert_eq!(blocked["result"]["reason"], "existing_request");
+    assert_eq!(blocked["result"]["reason"], "already_pending");
     assert_eq!(r.uses(id).await, 2);
     assert_eq!(r.ok("InvitationLink", id, "admit", &a).await, receipt);
     let mut different = decline.clone();
@@ -475,7 +700,7 @@ async fn request_authority_contract() {
     tokio::time::sleep(Duration::from_secs(4)).await;
     r.link_faults.release();
     let rejected: Value = pending.await.unwrap().json().await.unwrap();
-    assert_eq!(rejected["result"]["reason"], "existing_request");
+    assert_eq!(rejected["result"]["reason"], "already_pending");
     assert_eq!(r.ok("InvitationLink", id, "admit", &a).await, rejected);
     assert_eq!(
         r.ok("InvitationLink", id, "admit", &attempt(id, 8)).await["result"]["kind"],
@@ -557,4 +782,183 @@ async fn request_authority_contract() {
         );
         *r.request_faults.clock.lock().unwrap() = None;
     }
+    runtime.harness.finish().await;
 }
+
+#[tokio::test]
+async fn abuse_window_refuses_without_a_use_holds_approval_and_resumes_or_aborts() {
+    let r = Runtime::start().await;
+    async fn wait_outcome(r: &Runtime, receipt: &Value, expected: &str) -> Value {
+        let key = format!("{}:10:1", receipt["result"]["request_id"].as_str().unwrap());
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let status = r
+                    .ok("RepositoryDelivery", &key, "status", &Value::Null)
+                    .await;
+                if status["create"]["outcome"]["kind"] == expected {
+                    return status;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("delivery did not reach {expected}"))
+    }
+    async fn writes(r: &Runtime) -> usize {
+        let trace: Value = r
+            .client
+            .get(format!("{}/calls", r.harness.github_url))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        trace["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|v| matches!(v["method"].as_str(), Some("PUT" | "DELETE")))
+            .count()
+    }
+    for revoke in [false, true] {
+        let id = InvitationLinkId::new();
+        let create = json!({"secret_sha256":"2a".repeat(32),"link_id":id,"account_id":100,"installation_id":1,
+            "admin":{"account_id":100,"user_id":7},"description":"Abuse hold","approval_required":true,
+            "max_uses":null,"abuse_threshold_per_hour":1,"invitation_lifetime_seconds":604800,
+            "targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}});
+        r.ok("InvitationLink", id, "create", &create).await;
+        let original = attempt(id, 8);
+        let accepted = r.ok("InvitationLink", id, "admit", &original).await;
+        let rid = accepted["result"]["request_id"].as_str().unwrap();
+        let deadline = accepted["result"]["decision_deadline"].clone();
+        let before = writes(&r).await;
+        let mut refused_attempt = attempt(id, 9);
+        // A user-chosen operation equal to an existing request identity cannot
+        // collide with the private hold operation and suppress its effect.
+        refused_attempt["operation_id"] = accepted["result"]["request_id"].clone();
+        let admitted_at: chrono::DateTime<chrono::Utc> = serde_json::from_value(
+            r.ok(
+                "InvitationRequest",
+                rid,
+                "request_status",
+                &query(id, &accepted, 8),
+            )
+            .await["admitted_at"]
+                .clone(),
+        )
+        .unwrap();
+        r.link_faults
+            .set_clock(Some(admitted_at - chrono::Duration::seconds(1)));
+        assert_eq!(
+            r.call("InvitationLink", id, "admit", &refused_attempt)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            503
+        );
+        assert_eq!(r.uses(id).await, 1);
+        assert!(
+            r.ok(
+                "InvitationLink",
+                id,
+                "link_status",
+                &json!({"link_id":id,"admin":{"account_id":100,"user_id":7}})
+            )
+            .await["pause"]
+                .is_null()
+        );
+        r.link_faults.set_clock(None);
+        let refused = r.ok("InvitationLink", id, "admit", &refused_attempt).await;
+        assert_eq!(refused["result"]["reason"], "paused");
+        assert_eq!(r.uses(id).await, 1);
+        assert_eq!(
+            r.ok("InvitationLink", id, "admit", &original).await,
+            accepted
+        );
+        let admin = json!({"link_id":id,"admin":{"account_id":100,"user_id":7}});
+        let paused = r.ok("InvitationLink", id, "link_status", &admin).await;
+        assert_eq!(paused["pause"]["reason"]["kind"], "abuse_suspected");
+        let pending = r
+            .ok(
+                "InvitationRequest",
+                rid,
+                "request_status",
+                &query(id, &accepted, 8),
+            )
+            .await;
+        assert_eq!(pending["state"], "pending");
+        assert_eq!(pending["decision_deadline"], deadline);
+        assert_eq!(
+            paused["pause"]["reason"]["window_start"],
+            pending["admitted_at"]
+        );
+        let approved = r
+            .ok(
+                "InvitationRequest",
+                rid,
+                "decide",
+                &decision(id, &accepted, json!({"kind":"approve"})),
+            )
+            .await;
+        assert_eq!(approved["request"]["state"], "approved");
+        wait_outcome(&r, &accepted, "held").await;
+        assert_eq!(
+            writes(&r).await,
+            before,
+            "approval while held makes no GitHub write"
+        );
+        if revoke {
+            let revocation = revoke_command(id);
+            let revoked = r.ok("InvitationLink", id, "revoke", &revocation).await;
+            assert!(revoked["Ok"].is_object(), "{revoked}");
+            wait_outcome(&r, &accepted, "aborted").await;
+            assert_eq!(writes(&r).await, before);
+            assert_eq!(
+                r.ok("InvitationLink", id, "revoke", &revocation).await,
+                revoked
+            );
+        } else {
+            let resume = json!({"link_id":id,"admin":{"account_id":100,"user_id":7},"operation_id":RequestId::new()});
+            let resumed = r.ok("InvitationLink", id, "resume", &resume).await;
+            assert!(resumed["Ok"]["pause"].is_null());
+            wait_outcome(&r, &accepted, "created").await;
+            assert_eq!(writes(&r).await, before + 1);
+            assert_eq!(r.ok("InvitationLink", id, "resume", &resume).await, resumed);
+            assert_eq!(
+                r.ok("InvitationLink", id, "admit", &refused_attempt).await,
+                refused
+            );
+            // The same hour still contains the original use; resume does not
+            // reset the immutable guardrail's sliding window.
+            assert_eq!(
+                r.ok("InvitationLink", id, "admit", &attempt(id, 9)).await["result"]["reason"],
+                "paused"
+            );
+            r.link_faults
+                .set_clock(Some(admitted_at + chrono::Duration::hours(1)));
+            let fresh_resume = json!({"link_id":id,"admin":{"account_id":100,"user_id":7},"operation_id":RequestId::new()});
+            r.ok("InvitationLink", id, "resume", &fresh_resume).await;
+            assert_eq!(
+                r.ok("InvitationLink", id, "admit", &attempt(id, 9)).await["result"]["kind"],
+                "accepted"
+            );
+            assert_eq!(r.uses(id).await, 2);
+            r.link_faults.set_clock(None);
+        }
+    }
+    r.harness.finish().await;
+}
+
+#[path = "authoritative_admission/control_replay.rs"]
+mod control_replay;
+
+#[path = "authoritative_admission/revocation.rs"]
+mod revocation;
+
+#[path = "authoritative_admission/load_ordering.rs"]
+mod load_ordering;
+
+#[path = "authoritative_admission/requester_message.rs"]
+mod requester_message;

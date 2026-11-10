@@ -521,6 +521,34 @@ Restate state becomes critical business data. Per-link serialization limits a ho
 
 ## Historical reconciliation and references
 
+### P1 M1 pause and revoke amendment (2026-10-17)
+
+Manual pause refuses fresh admission while existing requests continue. Automatic
+pause captures an immutable admission window and hold epoch; the link retains
+the addressed workset and sends full revisioned controls through request owners
+to their approved delivery generations. A resume releases only the current hold.
+Revocation is terminal and carries the captured window even when cancellation
+options are false, so a delayed control can abort a qualifying pre-write hold.
+
+Revoke progress uses the retained addressed request/target slots as its fixed
+denominator. Pending-request cancellation and owned invitation cancellation are
+separate options. Recipient owners report target-bound results; delayed reports
+cannot change the workset or count one target twice. SQL supplies an operational
+view of progress and does not decide whether a GitHub DELETE is authorized.
+
+Possibly effective external writes recover read-only and retain cancellation
+intent. They never become pre-write Aborted from an empty listing. Confirmed
+foreign invitations retain their original create history; a cascade stops local
+tracking without deleting them. Owned cancellation uses a separate durable fence
+and the explicit cancellation composition described in
+[delivery control](../delivery-control.md). Manual pause does not cancel requests
+or invitations, and revoke does not refund consumed admission uses.
+
+These controls and their exact operation receipts are implemented and locally
+tested. Endpoint pinning or draining under ID-21 remains required for changed
+journal paths. Live app, budget, hosting and release gates remain separate from
+the local runtime evidence in the implementation ledger.
+
 The original v1 design spec (§8 request timer, §9 workflow, and Q8) and the Restate handlers implementation plan (Plan 3) (both removed; see git history) retain the historical link-expiry deadline cap and older workflow/storage assumptions. This ADR supersedes those admission/deadline rules; their original bodies remain historical evidence. The current domain language is in [CONTEXT.md](../../CONTEXT.md).
 
 Restate's [database integration guidance](https://docs.restate.dev/guides/databases) describes object-state consistency and retry-safe external writes; its [state documentation](https://docs.restate.dev/develop/ts/state) distinguishes object-state retention from workflow retention. These explain the architectural choice; implementation details must be checked against this repository's pinned Rust SDK/runtime rather than inferred from examples for other SDKs.

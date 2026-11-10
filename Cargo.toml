@@ -1,10 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ghinvite-e2e",
+    "crates/ghinvite-email-vault",
     "crates/ghinvite-core",
+    "crates/ghinvite-config",
+    "crates/ghinvite-github",
     "crates/ghinvite-storage-sqlx",
     "crates/ghinvite-storage-d1",
-    "crates/ghinvite-github",
     "crates/ghinvite-workflows",
     "crates/ghinvite-workflows-server",
     "crates/ghinvite-workflows-worker",
@@ -13,7 +16,10 @@ members = [
     "crates/ghinvite-web",
     "crates/ghinvite-web-server",
     "crates/ghinvite-web-worker",
+    "libs/kekring",
 ]
+# `libs/octoauth` is its own workspace (the GitHub App toolkit); consumed by path.
+exclude = ["libs/octoauth"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +28,10 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
+anykms-core = { version = "0.2", default-features = false }
+anykms-recipes = { version = "0.2", default-features = false, features = ["envelope"] }
+# Stopgap provisioned KEK + typed context (see libs/kekring/README.md).
+anykms-keyring = { path = "libs/kekring", default-features = false }
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
 base64 = "0.22"
@@ -36,12 +46,12 @@ dioxus = { version = "0.7.10", default-features = false, features = ["html", "ma
 dioxus-ssr = { version = "0.7.10" }
 hmac = "0.12"
 jsonwebtoken = { version = "10", default-features = false }   # only used by tests as a verifier
-octoevents = { version = "0.3", default-features = false, features = ["http-body", "derive", "tracing"] }
+octoevents = { version = "0.5", default-features = false }
 parking_lot = "0.12"
 rand = { version = "0.8", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "charset"] }
-restate-sdk = { version = "0.12", default-features = false, features = ["hyper", "schemars", "rust_crypto"] }
+restate-sdk = { version = "0.13", default-features = false, features = ["hyper", "schemars", "rust_crypto"] }
 rsa = { version = "0.9", default-features = false, features = ["pem", "sha2"] }
 schemars = { version = "1.2", features = ["chrono04"] }
 serde = { version = "1", features = ["derive"] }
@@ -59,13 +69,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 ulid = { version = "1", features = ["serde"] }
 url = "2"
+idna = "1.1"
+octologin = { path = "libs/octoauth/crates/octologin" }
+octoscrub = { path = "libs/octoauth/crates/octoscrub" }
 wiremock = "0.6"
 
 # crates depend on each other only via path:
 ghinvite-core = { path = "crates/ghinvite-core" }
+ghinvite-email-vault = { path = "crates/ghinvite-email-vault" }
+ghinvite-config = { path = "crates/ghinvite-config" }
+ghinvite-github = { path = "crates/ghinvite-github" }
+octoauth = { path = "libs/octoauth/crates/octoauth" }
+octotoken = { path = "libs/octoauth/crates/octotoken" }
 ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
 ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
-ghinvite-github = { path = "crates/ghinvite-github" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }
 ghinvite-ui = { path = "crates/ghinvite-ui" }
 ghinvite-web = { path = "crates/ghinvite-web" }
@@ -84,6 +101,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Wasm clocks and input draining: https://github.com/restatedev/sdk-rust/pull/128
+# Wasm clocks and input draining (restatedev/sdk-rust#128, declined upstream on
+# 2026-11-09): carried on the fork's `wasm` branch, rebased on each upstream
+# release. Cargo.lock pins the exact commit; `cargo update -p restate-sdk`
+# moves it deliberately.
 [patch.crates-io]
-restate-sdk = { git = "https://github.com/sagikazarmark/restate-sdk-rust", rev = "e882e9e04f9ad9942b4fe7f3788999a521dfa336" }
+restate-sdk = { git = "https://github.com/sagikazarmark/restate-sdk-rust", branch = "wasm" }

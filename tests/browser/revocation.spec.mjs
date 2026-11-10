@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test';
 
-async function openActiveLink(page) {
+async function openActiveLink(page, enhanced = true) {
   await page.goto('/fixture-login');
   await page.getByLabel('Description', { exact: true }).fill('Keyboard confirmation');
-  await page.getByLabel('acme/api', { exact: true }).check();
+  await page.getByLabel('octocat/api', { exact: true }).check();
+  if (enhanced) await expect(page.getByRole('status').filter({ hasText: 'Access checked' })).toBeVisible();
   await page.getByRole('button', { name: 'Create invitation link' }).click();
   await page.getByRole('button', { name: 'Retry original attempt' }).click();
   await expect(page.getByRole('heading', { name: 'Keyboard confirmation' })).toBeVisible();
@@ -17,86 +18,42 @@ async function tabTo(page, target) {
   await expect(target).toBeFocused();
 }
 
-test('keyboard opening names the confirmation and focuses the safe action', async ({ page }) => {
+test('keyboard opens a protected confirmation page and cancellation preserves the active link', async ({ page }) => {
   await openActiveLink(page);
-  const opener = page.getByText('Stop accepting new requests', { exact: true });
-  await tabTo(page, opener);
+  const detail = page.url();
+  await tabTo(page, page.getByRole('link', { name: 'Stop accepting new requests' }));
   await page.keyboard.press('Enter');
-  const dialog = page.getByRole('dialog', { name: 'Confirm stop' });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAccessibleDescription('GitHub users will no longer be able to create invitation requests from this invitation link. Existing invitation requests and GitHub invitations continue.');
-  await expect(dialog.getByText('Cancel', { exact: true })).toBeFocused();
-});
-
-test('modal contains forward and backward tabbing and restores focus after dismissal', async ({ page }) => {
-  await openActiveLink(page);
-  const opener = page.getByRole('button', { name: 'Stop accepting new requests' });
-  await tabTo(page, opener);
+  await expect(page.getByRole('heading', { name: 'Revoke invitation link' })).toBeVisible();
+  await expect(page.getByText('Revoking stops new requests permanently.', { exact: false })).toBeVisible();
+  await expect(page.getByRole('checkbox', { name: /Cancel .* pending GitHub/ })).toBeDisabled();
+  await tabTo(page, page.getByRole('link', { name: 'Cancel', exact: true }));
   await page.keyboard.press('Enter');
-  const dialog = page.getByRole('dialog', { name: 'Confirm stop' });
-  const cancel = dialog.getByRole('button', { name: 'Cancel' });
-  const confirm = dialog.getByRole('button', { name: 'Confirm stop' });
-  await page.keyboard.press('Shift+Tab');
-  await expect(confirm).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(confirm).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(cancel).toBeFocused();
-  // Even an attempted programmatic focus move cannot reach the inert page.
-  await page.getByRole('link', { name: 'Edit details' }).evaluate(element => element.focus());
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(dialog).not.toBeVisible();
-  await expect(opener).toBeFocused();
-  await page.keyboard.press('Space');
-  await expect(cancel).toBeFocused();
-  await page.keyboard.press('Enter');
-  await expect(dialog).not.toBeVisible();
-  await expect(opener).toBeFocused();
+  await expect(page).toHaveURL(detail);
   await expect(page.getByText('active', { exact: true })).toBeVisible();
 });
 
-test('a bookmarked confirmation can be dismissed and reopened', async ({ page }) => {
+test('a bookmarked confirmation and reload perform no mutation', async ({ page }) => {
   await openActiveLink(page);
-  await page.goto(`${page.url()}#stop-link-confirmation`);
+  const detail = page.url();
+  await page.goto(`${detail}/revoke`);
   await page.reload();
-  const dialog = page.getByRole('dialog', { name: 'Confirm stop' });
-  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(dialog).not.toBeVisible();
-  await expect(page.getByRole('button', { name: 'Stop accepting new requests' })).toBeFocused();
-  await page.keyboard.press('Enter');
-  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await expect(page.getByRole('heading', { name: 'Revoke invitation link' })).toBeVisible();
+  await page.getByRole('link', { name: 'Cancel', exact: true }).click();
+  await expect(page).toHaveURL(detail);
+  await expect(page.getByText('active', { exact: true })).toBeVisible();
 });
 
-test.describe('without JavaScript', () => {
-  test.use({ javaScriptEnabled: false });
-
-  test('inline confirmation supports keyboard navigation and cancellation without claiming modality', async ({ page }) => {
-    await openActiveLink(page);
-    const opener = page.getByRole('link', { name: 'Stop accepting new requests' });
-    const confirmation = page.getByRole('region', { name: 'Confirm stop' });
-    await expect(confirmation).not.toBeVisible();
-    await tabTo(page, opener);
-    await page.keyboard.press('Enter');
-    await expect(confirmation).toBeVisible();
-    await expect(confirmation).toBeFocused();
-    await expect(confirmation).toHaveAccessibleDescription(/Existing invitation requests and GitHub invitations continue/);
-    await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(page.locator('[aria-modal="true"]')).toHaveCount(0);
-    await page.keyboard.press('Tab');
-    const cancel = confirmation.getByRole('link', { name: 'Cancel' });
-    await expect(cancel).toBeFocused();
-    await page.keyboard.press('Tab');
-    await expect(confirmation.getByRole('button', { name: 'Confirm stop' })).toBeFocused();
-    await page.keyboard.press('Shift+Tab');
-    await expect(cancel).toBeFocused();
-    await page.keyboard.press('Enter');
-    await expect(confirmation).not.toBeVisible();
-    await expect(opener).toBeFocused();
-  });
+test('cascade confirmation refuses missing text and preserves the operation and selection', async ({ page }) => {
+  await openActiveLink(page);
+  await page.getByRole('link', { name: 'Stop accepting new requests' }).click();
+  const operation = await page.locator('input[name="operation_id"]').inputValue();
+  await page.getByRole('checkbox', { name: /Decline .* pending requests/ }).check();
+  await page.getByRole('button', { name: 'Confirm revoke' }).click();
+  await expect(page.getByRole('alert')).toContainText('Type REVOKE');
+  await expect(page.locator('input[name="operation_id"]')).toHaveValue(operation);
+  await expect(page.getByRole('checkbox', { name: /Decline .* pending requests/ })).toBeChecked();
+  await page.getByRole('link', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByText('active', { exact: true })).toBeVisible();
 });
 
 for (const javaScriptEnabled of [true, false]) {
@@ -104,7 +61,7 @@ for (const javaScriptEnabled of [true, false]) {
     test.use({ javaScriptEnabled });
 
     test('keyboard confirmation submits one native CSRF-protected POST', async ({ page }) => {
-      await openActiveLink(page);
+      await openActiveLink(page, javaScriptEnabled);
       const detail = page.url();
       // Exercise the real HTTP boundary: a forged request must not revoke.
       const rejected = await page.request.post(`${detail}/revoke`, {
@@ -115,10 +72,11 @@ for (const javaScriptEnabled of [true, false]) {
       const opener = page.getByText('Stop accepting new requests', { exact: true });
       await tabTo(page, opener);
       await page.keyboard.press('Enter');
-      const confirmation = page.getByRole(javaScriptEnabled ? 'dialog' : 'region', { name: 'Confirm stop' });
+      const confirmation = page.locator('form').filter({ has: page.getByRole('button', { name: 'Confirm revoke' }) });
+      const operation = await confirmation.locator('input[name="operation_id"]').inputValue();
       const token = await confirmation.locator('input[name="csrf_token"]').inputValue();
       expect(token).not.toBe('');
-      await tabTo(page, confirmation.getByRole('button', { name: 'Confirm stop' }));
+      await tabTo(page, confirmation.getByRole('button', { name: 'Confirm revoke' }));
       const posts = [];
       page.on('request', request => {
         if (request.url() === `${detail}/revoke` && request.method() === 'POST') posts.push(request);
@@ -128,6 +86,7 @@ for (const javaScriptEnabled of [true, false]) {
       await expect(page.getByRole('status')).toContainText('Outcome unknown');
       expect(posts).toHaveLength(1);
       expect(posts[0].isNavigationRequest()).toBe(true);
+      expect(new URLSearchParams(posts[0].postData()).getAll('operation_id')).toEqual([operation]);
       expect(new URLSearchParams(posts[0].postData()).getAll('csrf_token')).toEqual([token]);
       await page.getByRole('button', { name: 'Retry original attempt' }).click();
       await expect(page).toHaveURL(detail);

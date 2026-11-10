@@ -1,0 +1,125 @@
+{
+  "authz:org:2:0:identity": {
+    "observed_at": 0,
+    "value": {
+      "id": 100,
+      "login": "acme"
+    }
+  },
+  "authz:org:2:0:team-101": {
+    "observed_at": 0,
+    "value": {
+      "id": 101,
+      "ldap_dn": "",
+      "name": "Last team",
+      "organization": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+        "id": 100,
+        "login": "acme",
+        "type": "Organization"
+      },
+      "slug": "team-101"
+    }
+  },
+  "authz:org:2:0:teams-0": {
+    "observed_at": 0,
+    "value": {
+      "next": "/orgs/acme/teams?per_page=100&page=2",
+      "teams": [
+        {
+          "id": 5,
+          "ldap_dn": null,
+          "name": "Build",
+          "slug": "build"
+        },
+        {
+          "id": 6,
+          "ldap_dn": "cn=synced,dc=acme",
+          "name": "Synced",
+          "slug": "synced"
+        }
+      ]
+    }
+  },
+  "authz:org:2:0:teams-1": {
+    "observed_at": 0,
+    "value": {
+      "next": null,
+      "teams": [
+        {
+          "id": 101,
+          "ldap_dn": null,
+          "name": "Last team",
+          "slug": "team-101"
+        }
+      ]
+    }
+  },
+  "authz:org:2:8:membership": {
+    "observed_at": 0,
+    "value": {
+      "organization": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+        "id": 100,
+        "login": "acme",
+        "type": "Organization"
+      },
+      "role": "admin",
+      "state": "active",
+      "user": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/8?v=4",
+        "id": 8,
+        "login": "alice",
+        "type": "User"
+      }
+    }
+  },
+  "authz:repo:1:0:1": {
+    "observed_at": 0,
+    "value": {
+      "account": 100,
+      "allowed": true,
+      "id": 1,
+      "name": "acme/r1",
+      "user": 0
+    }
+  },
+  "authz:repo:1:0:page-0": {
+    "observed_at": 0,
+    "value": {
+      "next": "/installation/repositories?per_page=100&page=2",
+      "repositories": [
+        {
+          "full_name": "acme/r1",
+          "id": 1,
+          "owner": {
+            "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+            "id": 100,
+            "login": "acme",
+            "type": "Organization"
+          }
+        }
+      ],
+      "total_count": 2
+    }
+  },
+  "authz:repo:1:0:page-1": {
+    "observed_at": 0,
+    "value": {
+      "next": null,
+      "repositories": [
+        {
+          "full_name": "acme/r2",
+          "id": 2,
+          "owner": {
+            "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+            "id": 100,
+            "login": "acme",
+            "type": "Organization"
+          }
+        }
+      ],
+      "total_count": 2
+    }
+  }
+}

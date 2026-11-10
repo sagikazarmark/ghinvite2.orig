@@ -1,7 +1,7 @@
 services:
   restate:
     hostname: restate
-    image: &restate-image docker.restate.dev/restatedev/restate:1.7.9@sha256:329e32e12059610b681e165161bcd0722d193325b6c893bc46bfec72cd54b595
+    image: &restate-image docker.restate.dev/restatedev/restate:1.8.1@sha256:fea6b4a893616fd8ec4594bd72fbf9967f9ab9242c8c75008de75edfbb58b2c7
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:

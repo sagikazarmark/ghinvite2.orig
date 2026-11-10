@@ -1,8 +1,8 @@
 //! #60: availability through public commands and a real GitHub HTTP boundary.
 #![cfg(feature = "integration")]
 use ghinvite_core::RequestId;
+use ghinvite_core::storage::AppInstallationReadStorage as _;
 use ghinvite_core::storage::{AuditStorage, ConsoleStorage, RecordStorage};
-use restate_sdk::http_server::HttpServer;
 use serde_json::{Value, json};
 use std::{
     sync::{Arc, Mutex},
@@ -35,6 +35,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
                 user_id,
                 login: format!("user-{user_id}"),
                 avatar_url: None,
+                github_created_at: None,
                 last_seen_at: chrono::Utc::now(),
             })
             .await
@@ -68,61 +69,35 @@ async fn availability_preserves_admission_and_pending_decisions() {
                     let repos = data["repos"].as_array().unwrap();
                     (200, json!({"total_count":repos.len(),"repositories":repos.iter().skip(page * 100).take(100).map(|id|json!({"id":id,"full_name":"acme/api","private":true})).collect::<Vec<_>>()}))
                 }
-                else if path == format!("/app/installations/{}", data["adopted"]) { (200, json!({"id":data["adopted"],"account":{"id":300,"login":"adopted","type":"Organization"},"suspended_at":null})) }
-                else if path == format!("/app/installations/{}", data["id"]) { (200, json!({"id":data["id"],"account":{"id":data.get("account_id").unwrap_or(&json!(100)),"login":"renamed","type":"Organization"},"suspended_at":null})) }
+                else if path == format!("/app/installations/{}", data["adopted"]) { (200, json!({"id":data["adopted"],"account":{"id":300,"login":"adopted","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null})) }
+                else if path == format!("/app/installations/{}", data["id"]) { (200, json!({"id":data["id"],"account":{"id":data.get("account_id").unwrap_or(&json!(100)),"login":"renamed","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null})) }
                 else { (404, json!({})) };
                 if let Some(counter) = observation {
                     let read = data[counter].as_u64().unwrap_or(0);
                     data[counter] = json!(read + 1);
                 }
-                (axum::http::StatusCode::from_u16(status).unwrap(), axum::Json(body))
+                let mut headers = axum::http::HeaderMap::new();
+                if path == "/installation/repositories" && body["total_count"].as_u64().unwrap_or(0)>100 && !request.uri().query().unwrap_or_default().contains("page=2") {
+                    let host=request.headers().get("host").unwrap().to_str().unwrap();
+                    headers.insert("link",format!("<http://{host}/installation/repositories?per_page=100&page=2>; rel=\"next\"").parse().unwrap());
+                }
+                (axum::http::StatusCode::from_u16(status).unwrap(), headers, axum::Json(body))
             }
         })).await.unwrap();
     });
-    let state = ghinvite_workflows::AppState::new(
-        storage.clone(),
-        Arc::new(
-            ghinvite_github::InstallationClient::new(
-                Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
-                    client.clone(),
-                )),
-                ghinvite_github::jwt::AppJwtSigner::from_pem(
-                    123,
-                    include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
-                )
-                .unwrap(),
-            )
-            .with_base(base),
-        ),
-    );
+    let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
+        ghinvite_workflows::RepositoryGithub::new(
+            ghinvite_e2e::github_transport(client.clone()),
+            &base,
+            ghinvite_e2e::repository_apps(&base),
+        )
+        .unwrap(),
+    ));
     let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        HttpServer::new(endpoint)
-            .serve_with_cancel(listener, std::future::pending::<()>())
-            .await;
-    });
-    let admin = std::env::var("RESTATE_ADMIN_URL").unwrap();
-    let ingress = std::env::var("RESTATE_INGRESS_URL").unwrap();
-    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
-    for _ in 0..100 {
-        if client.get(format!("{admin}/health")).send().await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let response = client
-        .post(format!("{admin}/deployments"))
-        .json(&json!({"uri":format!("http://{host}:{port}")}))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "{}",
-        response.text().await.unwrap()
-    );
+    let harness = ghinvite_e2e::Harness::start().await;
+    let ingress = harness.restate.ingress_url().to_owned();
+    let admin = harness.restate.admin_url().to_owned();
+    harness.restate.deploy(endpoint).await;
     let link = ghinvite_core::InvitationLinkId::new().to_string();
     let call = |handler: &str, input: Value| {
         let route = if matches!(handler, "request_status" | "decide" | "approved_plan") {
@@ -135,8 +110,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         };
         client.post(format!("{ingress}/{route}")).json(&input)
     };
-    let creation = json!({"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
-        "description":"Availability","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":11,"repo_full_name":"acme/web"}]});
+    let creation = json!({"secret_sha256":"2a".repeat(32),"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
+        "description":"Availability","max_uses":2,"approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"read"},{"repo_id":11,"repo_full_name":"acme/web","grant":"read"}]}});
     assert!(
         call("create", creation)
             .send()
@@ -145,22 +120,21 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .status()
             .is_success()
     );
-    let result = call(
-        "admit",
-        json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()}),
-    )
-    .send()
-    .await
-    .unwrap();
+    let result = scope_call(&client, &ingress, 100, &[10, 11])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
         result.status(),
         503,
         "missing retained authority is uncertain"
     );
-    let onboard = json!({"installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()});
+    let onboard = ghinvite_e2e::setup_command(
+        json!({"app":"repo","installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}),
+    );
     let installation = |id: u64, handler: &str, input: Value| {
         client
-            .post(format!("{ingress}/Installation/{id}/{handler}"))
+            .post(format!("{ingress}/Installation/repo:{id}/{handler}"))
             .json(&input)
     };
     let response = installation(9, "onboard", onboard.clone())
@@ -172,11 +146,24 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "{}",
         response.text().await.unwrap()
     );
+    let signed = installation(
+        9,
+        "onboard_webhook",
+        ghinvite_e2e::signed_owner_command(&onboard, 7),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(
+        signed.status().is_success(),
+        "{}",
+        signed.text().await.unwrap()
+    );
     observed.lock().unwrap()["repos"] = json!([10]);
     let response = installation(
         9,
         "repos_changed",
-        json!({"installation_id":9,"selected_repos":"all"}),
+        json!({"app":"repo","installation_id":9,"selected_repos":"all"}),
     )
     .send()
     .await
@@ -186,7 +173,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "{}",
         response.text().await.unwrap()
     );
-    let attempt = json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
+    let mut attempt = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
+    attempt["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 11]).await;
     let unavailable: Value = call("admit", attempt.clone())
         .send()
         .await
@@ -196,7 +184,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap();
     assert_eq!(
         unavailable["result"],
-        json!({"kind":"rejected","reason":"repository_unavailable"})
+        json!({"kind":"rejected","reason":"scope_unavailable"})
     );
     observed.lock().unwrap()["repos"] = json!([10, 11]);
     let replay: Value = call("admit", attempt)
@@ -207,16 +195,16 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .await
         .unwrap();
     assert_eq!(replay, unavailable);
-    let accepted_attempt = json!({"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
+    let accepted_attempt = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
     observed.lock().unwrap()["rate_limited"] = json!(true);
-    assert_eq!(
-        call("admit", accepted_attempt.clone())
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        503
-    );
+    let limited: Value = scope_call(&client, &ingress, 100, &[10, 11])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(limited["eligibility"]["kind"], "unknown");
     observed.lock().unwrap()["rate_limited"] = json!(false);
     let accepted: Value = call("admit", accepted_attempt.clone())
         .send()
@@ -234,7 +222,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         installation(
             9,
             "repos_changed",
-            json!({"installation_id":9,"selected_repos":"all"})
+            json!({"app":"repo","installation_id":9,"selected_repos":"all"})
         )
         .send()
         .await
@@ -255,11 +243,11 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     // The outage reaches the account through the refresh its own webhook
     // acknowledged. Only then has this account nothing recent and available to
-    // admit on, so admission reads GitHub again and fails through promptly.
+    // admit on, so the caller-side evidence read reports uncertainty promptly.
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let status: Value = client
-                .post(format!("{ingress}/AccountInstallation/100/status"))
+                .post(format!("{ingress}/AccountInstallation/repo:100/status"))
                 .send()
                 .await
                 .unwrap()
@@ -274,11 +262,15 @@ async fn availability_preserves_admission_and_pending_decisions() {
     })
     .await
     .unwrap();
-    let fresh = json!({"link_id":link,"requester_id":12,"operation_id":RequestId::new()});
-    assert_eq!(
-        call("admit", fresh.clone()).send().await.unwrap().status(),
-        503
-    );
+    let fresh = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":12,"operation_id":RequestId::new()});
+    let unavailable: Value = scope_call(&client, &ingress, 100, &[10, 11])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unavailable["eligibility"]["kind"], "unknown");
     let query =
         json!({"link_id":link,"request_id":accepted["result"]["request_id"],"requester_id":8});
     let pending: Value = call("request_status", query.clone())
@@ -309,7 +301,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     for command in plan["commands"].as_array().unwrap() {
         let receipt: Value = client
             .post(format!(
-                "{ingress}/RepositoryDelivery/{}:{}/create",
+                "{ingress}/RepositoryDelivery/{}:{}:1/create",
                 command["request_id"].as_str().unwrap(),
                 command["repo_id"]
             ))
@@ -331,7 +323,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // must repair delivery prerequisites even without another GitHub webhook.
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallation/100/recheck"))
+            .post(format!("{ingress}/AccountInstallation/repo:100/recheck"))
             .send()
             .await
             .unwrap()
@@ -340,9 +332,15 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if storage.get_installation(9).await.unwrap().is_some_and(|a| {
-                a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![10, 11])
-            }) {
+            if storage
+                .app_installation(ghinvite_core::account::App::Repo, 9)
+                .await
+                .map(|value| value.map(|installation| installation.account))
+                .unwrap()
+                .is_some_and(|a| {
+                    a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![10, 11])
+                })
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -358,8 +356,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .execute(&failures)
         .await
         .unwrap();
-    let seeded = installation(40, "onboard", json!({"installation_id":40,"actor_user_id":7,"account_id":300,
-        "account_login":"adopted","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}))
+    let seeded = installation(40, "onboard", ghinvite_e2e::setup_command(json!({"app":"repo","installation_id":40,"actor_user_id":7,"account_id":300,
+        "account_login":"adopted","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()})))
         .send()
         .await
         .unwrap();
@@ -373,7 +371,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             let state: Value = client
                 .post(format!("{admin}/query"))
                 .header("accept", "application/json")
-                .json(&json!({"query":"SELECT key FROM state WHERE service_name = 'Installation' AND service_key = '40'"}))
+                .json(&json!({"query":"SELECT key FROM state WHERE service_name = 'Installation' AND service_key = 'repo:40'"}))
                 .send()
                 .await
                 .unwrap()
@@ -393,8 +391,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert!(
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/create"))
-            .json(&json!({"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
-                "description":"Adopted","max_uses":2,"approval_required":true,"permission":"pull","repos":[{"repo_id":10,"repo_full_name":"acme/api"}]}))
+            .json(&json!({"secret_sha256":"2a".repeat(32),"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
+                "description":"Adopted","max_uses":2,"approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"read"}]}}))
             .send()
             .await
             .unwrap()
@@ -402,12 +400,12 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     // Installation reads fail while GitHub stays reachable.
-    let repos_changed = json!({"installation_id":40,"selected_repos":"all"});
+    let repos_changed = json!({"app":"repo","installation_id":40,"selected_repos":"all"});
     // The webhook acknowledges the event with a durable send, exactly as the
     // repository-change command does.
     assert!(
         client
-            .post(format!("{ingress}/Installation/40/repos_changed/send"))
+            .post(format!("{ingress}/Installation/repo:40/repos_changed/send"))
             .json(&repos_changed)
             .send()
             .await
@@ -429,7 +427,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // A delayed event for an identity this account never onboarded is harmless.
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallation/300/refresh"))
+            .post(format!("{ingress}/AccountInstallation/repo:300/refresh"))
             .json(&json!(41))
             .send()
             .await
@@ -439,8 +437,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     // Retained authority remains usable during the projection outage.
     let started = std::time::Instant::now();
-    let adopted_attempt =
-        json!({"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
+    let adopted_attempt = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":adopted_link,"requester_id":8,"operation_id":RequestId::new()});
     assert_eq!(
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/admit"))
@@ -453,7 +450,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert_eq!(
         client
-            .post(format!("{ingress}/AccountInstallation/300/status"))
+            .post(format!("{ingress}/AccountInstallation/repo:300/status"))
             .send()
             .await
             .unwrap()
@@ -462,11 +459,12 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert!(started.elapsed() < Duration::from_secs(15));
     // An unrelated uninstall retains a tombstone without affecting this account.
-    let uninstall_41 = json!({"installation_id":41,"uninstalled_at":chrono::Utc::now()});
+    let uninstall_41 =
+        json!({"app":"repo","installation_id":41,"uninstalled_at":chrono::Utc::now()});
     for _ in 0..2 {
         assert!(
             client
-                .post(format!("{ingress}/AccountInstallation/300/uninstall"))
+                .post(format!("{ingress}/AccountInstallation/repo:300/uninstall"))
                 .json(&uninstall_41)
                 .send()
                 .await
@@ -489,7 +487,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // An unusable account key is refused, not retried as if it were an outage.
     assert_eq!(
         client
-            .post(format!("{ingress}/AccountInstallation/0/uninstall"))
+            .post(format!("{ingress}/AccountInstallation/repo:0/uninstall"))
             .json(&uninstall_41)
             .send()
             .await
@@ -505,8 +503,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             if storage
-                .get_installation(40)
+                .app_installation(ghinvite_core::account::App::Repo, 40)
                 .await
+                .map(|value| value.map(|installation| installation.account))
                 .unwrap()
                 .is_some_and(|a| {
                     a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![10, 11])
@@ -520,7 +519,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .await
     .unwrap();
     let adopted: Value = client
-        .post(format!("{ingress}/AccountInstallation/300/status"))
+        .post(format!("{ingress}/AccountInstallation/repo:300/status"))
         .send()
         .await
         .unwrap()
@@ -548,7 +547,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         installation(
             40,
             "uninstall",
-            json!({"installation_id":40,"uninstalled_at":chrono::Utc::now()})
+            json!({"app":"repo","installation_id":40,"uninstalled_at":chrono::Utc::now()})
         )
         .send()
         .await
@@ -558,7 +557,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallation/300/refresh"))
+            .post(format!("{ingress}/AccountInstallation/repo:300/refresh"))
             .json(&json!(40))
             .send()
             .await
@@ -567,7 +566,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     let retired: Value = client
-        .post(format!("{ingress}/AccountInstallation/300/status"))
+        .post(format!("{ingress}/AccountInstallation/repo:300/status"))
         .send()
         .await
         .unwrap()
@@ -577,8 +576,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert!(retired["account"].is_null());
     assert_eq!(
         storage
-            .get_installation(40)
+            .app_installation(ghinvite_core::account::App::Repo, 40)
             .await
+            .map(|value| value.map(|installation| installation.account))
             .unwrap()
             .unwrap()
             .selected_repos,
@@ -588,8 +588,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // survives a renamed account and obsolete events cannot mutate the replacement.
     observed.lock().unwrap()["id"] = json!(20);
     let mut replacement = onboard.clone();
-    replacement["installation_id"] = json!(20);
-    replacement["account_login"] = json!("untrusted-old-name");
+    replacement["operation_id"] = json!(RequestId::new());
+    replacement["verified"]["account"]["installation_id"] = json!(20);
+    replacement["verified"]["account"]["account_login"] = json!("untrusted-old-name");
     let response = installation(20, "onboard", replacement.clone())
         .send()
         .await
@@ -599,7 +600,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "{}",
         response.text().await.unwrap()
     );
-    let uninstall = json!({"installation_id":9,"uninstalled_at":chrono::Utc::now()});
+    let uninstall = json!({"app":"repo","installation_id":9,"uninstalled_at":chrono::Utc::now()});
     for _ in 0..2 {
         assert!(
             installation(9, "uninstall", uninstall.clone())
@@ -621,7 +622,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             installation(
                 9,
                 "repos_changed",
-                json!({"installation_id":9,"selected_repos":[]})
+                json!({"app":"repo","installation_id":9,"selected_repos":[]})
             )
             .send()
             .await
@@ -631,7 +632,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         );
     }
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallation/100/status"))
+        .post(format!("{ingress}/AccountInstallation/repo:100/status"))
         .send()
         .await
         .unwrap()
@@ -649,20 +650,20 @@ async fn availability_preserves_admission_and_pending_decisions() {
         installation(
             20,
             "repos_changed",
-            json!({"installation_id":20,"selected_repos":[]})
+            json!({"app":"repo","installation_id":20,"selected_repos":[]})
         )
         .send(),
         installation(
             20,
             "repos_changed",
-            json!({"installation_id":20,"selected_repos":[999]})
+            json!({"app":"repo","installation_id":20,"selected_repos":[999]})
         )
         .send()
     );
     assert!(first.unwrap().status().is_success());
     assert!(second.unwrap().status().is_success());
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallation/100/status"))
+        .post(format!("{ingress}/AccountInstallation/repo:100/status"))
         .send()
         .await
         .unwrap()
@@ -686,9 +687,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert!(
         scoped(
             "create",
-            json!({"link_id":scoped_link,"account_id":100,"installation_id":20,"admin":{"account_id":100,"user_id":7},
-                "description":"Recent observation","max_uses":3,"approval_required":true,"permission":"pull",
-                "repos":[{"repo_id":10,"repo_full_name":"acme/api"},{"repo_id":200,"repo_full_name":"acme/extra"}]})
+            json!({"secret_sha256":"2a".repeat(32),"link_id":scoped_link,"account_id":100,"installation_id":20,"admin":{"account_id":100,"user_id":7},
+                "description":"Recent observation","max_uses":3,"approval_required":true,
+                "targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"read"},{"repo_id":200,"repo_full_name":"acme/extra","grant":"read"}]}})
         )
         .send()
         .await
@@ -696,9 +697,11 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .status()
         .is_success()
     );
-    let scoped_attempt = |requester_id: u64| json!({"link_id":scoped_link,"requester_id":requester_id,"operation_id":RequestId::new()});
+    let scoped_attempt = |requester_id: u64| json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":scoped_link,"requester_id":requester_id,"operation_id":RequestId::new()});
     observed.lock().unwrap()["repo_reads"] = json!(0);
-    let refused: Value = scoped("admit", scoped_attempt(15))
+    let mut scoped_negative = scoped_attempt(15);
+    scoped_negative["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 200]).await;
+    let refused: Value = scoped("admit", scoped_negative)
         .send()
         .await
         .unwrap()
@@ -707,7 +710,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap();
     assert_eq!(
         refused["result"],
-        json!({"kind":"rejected","reason":"repository_unavailable"})
+        json!({"kind":"rejected","reason":"scope_unavailable"})
     );
     assert_eq!(
         observed.lock().unwrap()["repo_reads"],
@@ -720,7 +723,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
     observed.lock().unwrap()["repos"] = json!((10..=110).chain([200]).collect::<Vec<_>>());
     observed.lock().unwrap()["repo_reads"] = json!(0);
     for requester_id in [31, 32, 33] {
-        let admitted: Value = scoped("admit", scoped_attempt(requester_id))
+        let mut input = scoped_attempt(requester_id);
+        input["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 200]).await;
+        let admitted: Value = scoped("admit", input)
             .send()
             .await
             .unwrap()
@@ -739,7 +744,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // observation; admission then confirms the refusal against GitHub.
     assert!(
         client
-            .post(format!("{ingress}/AccountInstallation/100/recheck"))
+            .post(format!("{ingress}/AccountInstallation/repo:100/recheck"))
             .send()
             .await
             .unwrap()
@@ -747,7 +752,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     observed.lock().unwrap()["identity_reads"] = json!(0);
-    let foreign = json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
+    let mut foreign = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
+    foreign["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 11]).await;
     assert_eq!(
         call("admit", foreign)
             .send()
@@ -756,7 +762,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .json::<Value>()
             .await
             .unwrap()["result"]["reason"],
-        "installation_unavailable"
+        "scope_unavailable"
     );
     assert!(
         observed.lock().unwrap()["identity_reads"].as_u64().unwrap() > 0,
@@ -812,12 +818,15 @@ async fn availability_preserves_admission_and_pending_decisions() {
     assert_eq!(link_status["uses"], 2);
     assert_eq!(link_status["creation"]["installation_id"], 9);
     assert_eq!(
-        link_status["creation"]["repos"].as_array().unwrap().len(),
+        link_status["creation"]["targets"]["repos"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
     let exhausted: Value = call(
         "admit",
-        json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
+        json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
     )
     .send()
     .await
@@ -825,7 +834,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .json()
     .await
     .unwrap();
-    assert_eq!(exhausted["result"]["reason"], "exhausted");
+    assert_eq!(exhausted["result"]["reason"], "not_available");
     call("revoke", link_query).send().await.unwrap();
     assert!(
         installation(20, "onboard", replacement.clone())
@@ -837,7 +846,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     );
     let revoked: Value = call(
         "admit",
-        json!({"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
+        json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()}),
     )
     .send()
     .await
@@ -845,13 +854,13 @@ async fn availability_preserves_admission_and_pending_decisions() {
     .json()
     .await
     .unwrap();
-    assert_eq!(revoked["result"]["reason"], "revoked");
+    assert_eq!(revoked["result"]["reason"], "not_available");
     // Uninstall before any onboarding leaves a durable tombstone.
     assert!(
         installation(
             30,
             "uninstall",
-            json!({"installation_id":30,"uninstalled_at":chrono::Utc::now()})
+            json!({"app":"repo","installation_id":30,"uninstalled_at":chrono::Utc::now()})
         )
         .send()
         .await
@@ -860,7 +869,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .is_success()
     );
     observed.lock().unwrap()["id"] = json!(30);
-    replacement["installation_id"] = json!(30);
+    replacement["operation_id"] = json!(RequestId::new());
+    replacement["verified"]["account"]["installation_id"] = json!(30);
     assert!(
         installation(30, "onboard", replacement)
             .send()
@@ -870,7 +880,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .is_success()
     );
     let status: Value = client
-        .post(format!("{ingress}/AccountInstallation/100/status"))
+        .post(format!("{ingress}/AccountInstallation/repo:100/status"))
         .send()
         .await
         .unwrap()
@@ -878,7 +888,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .await
         .unwrap();
     assert_eq!(status["account"]["installation_id"], 20);
-    server.abort();
+    harness.finish().await;
     let events = storage
         .list_audit_events(100, None, ghinvite_core::storage::AuditPosition::Latest)
         .await
@@ -909,4 +919,32 @@ async fn availability_preserves_admission_and_pending_decisions() {
     stub_server.abort();
     failures.close().await;
     std::fs::remove_file(database).unwrap();
+}
+
+fn scope_call(
+    client: &reqwest::Client,
+    ingress: &str,
+    account: u64,
+    repos: &[u64],
+) -> reqwest::RequestBuilder {
+    client
+        .post(format!(
+            "{ingress}/AccountInstallation/repo:{account}/admission_evidence"
+        ))
+        .json(&json!({"account_id":account,"repo_ids":repos}))
+}
+async fn scope_evidence(
+    client: &reqwest::Client,
+    ingress: &str,
+    account: u64,
+    repos: &[u64],
+) -> Value {
+    let response = scope_call(client, ingress, account, repos)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let evidence: Value = response.json().await.unwrap();
+    assert!(status.is_success(), "{evidence}");
+    json!([{"app":"repo","observed_at":chrono::Utc::now(),"available":evidence["eligibility"]["kind"] == "available","unavailable_target_ids":[]}])
 }

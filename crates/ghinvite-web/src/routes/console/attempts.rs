@@ -5,28 +5,34 @@ use crate::attempt_continuations::{AttemptContinuations, Retention, Scope};
 use axum::http::StatusCode;
 use axum::response::{Redirect, Response};
 use ghinvite_core::admission::AdminLinkCommand;
-use ghinvite_core::invitation_link::CreateLink;
+use ghinvite_core::invitation_link::{CreateLink, CreateLinkError};
 use ghinvite_core::request_lifecycle::{DecideRequest, DecisionOutcome, DecisionReceipt};
 use serde::{Deserialize, Serialize};
 
-const CREATED: &str = "Invitation link created.";
+const CREATED: &str = "Invitation link created. The URL is shown only once. If you did not save it, rotate the invitation URL from link details.";
 const REVOKED: &str = "Invitation link stopped accepting new invitation requests.";
 /// The authority refused the creation's input; nothing was created.
 pub(super) const CREATE_REJECTED: &str =
     "The invitation link could not be created with these values. Review them and try again.";
 const REVOKE_REJECTED: &str = "This invitation link could not be stopped. Reload it and try again.";
 
-/// The authority definitively rejected a creation (400): nothing was created
-/// and the retained continuation was released, so the same creation identity
-/// can carry corrected values. The caller that holds the submitted form
-/// re-renders it.
-pub(super) struct CreateRejected;
+/// A definitive creation rejection. A typed business refusal binds the old
+/// creation identity, so corrected input must get a fresh one. Malformed input
+/// (400) applies nothing and does not bind the identity.
+pub(super) struct CreateRejected {
+    pub refusal: Option<CreateLinkError>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) enum Command {
-    Create(CreateLink),
-    Revoke(AdminLinkCommand),
+    Create(Box<CreateLink>),
+    Revoke(ghinvite_core::revocation::RevokeCommand),
+    Rotate(ghinvite_core::invitation_link::RotateSecret),
     Decision(DecideRequest),
+    Lifecycle {
+        action: ghinvite_core::link_lifecycle::LifecycleAction,
+        command: ghinvite_core::link_lifecycle::LifecycleCommand,
+    },
 }
 
 /// The attempt identity of the creation of `link_id`. The creation form
@@ -43,7 +49,7 @@ pub(super) enum CreateRecovery {
     /// outcome, or a conflict when the resubmitted input differs.
     Answered(Response),
     /// The retained creation was replayed and definitively rejected.
-    Rejected,
+    Rejected(CreateRejected),
 }
 
 /// Recover the creation of `link_id` retained in this session, before
@@ -60,6 +66,7 @@ pub(super) async fn recover_create(
         return Ok(CreateRecovery::Fresh);
     };
     let repos = original
+        .targets
         .repos
         .iter()
         .map(|r| RepositoryChoice {
@@ -67,21 +74,26 @@ pub(super) async fn recover_create(
             full_name: r.repo_full_name.clone(),
         })
         .collect::<Vec<_>>();
-    let matches = create_link_form::validate(form, &repos, anchor).is_ok_and(|v| {
-        v.into_command(
-            original.link_id,
-            original.admin.clone(),
-            original.account_id,
-            original.installation_id,
-        ) == original
-    });
+    let organization = super::organization_from_targets(&original.targets);
+    let matches = create_link_form::validate_selection(form, &repos, &organization, anchor)
+        .is_ok_and(|v| {
+            let mut command = v.into_command(
+                original.link_id,
+                original.admin.clone(),
+                original.account_id,
+                original.installation_id,
+                original.secret_sha256,
+            );
+            command.organization_installation_id = original.organization_installation_id;
+            command == *original
+        });
     let command = Command::Create(original);
     if !matches {
         return Ok(CreateRecovery::Answered(conflict(admin, &command)));
     }
     Ok(match submit(state, admin, command).await {
         Ok(response) => CreateRecovery::Answered(response),
-        Err(CreateRejected) => CreateRecovery::Rejected,
+        Err(rejected) => CreateRecovery::Rejected(rejected),
     })
 }
 
@@ -97,11 +109,39 @@ pub(super) async fn pending_create(
         .map(|command| unknown(admin, &command)))
 }
 
+pub(super) async fn recover_rotation(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    link_id: ghinvite_core::InvitationLinkId,
+    operation_id: &ghinvite_core::admission::AdmissionOperationId,
+) -> Option<Response> {
+    let id = format!("rotate-{link_id}-{}", String::from(operation_id.clone()));
+    match load(state, admin, &id).await {
+        Ok(Some(command)) => Some(execute(state, admin, command).await),
+        Ok(None) => None,
+        Err(error) => Some(error.into_response()),
+    }
+}
+
 impl Command {
     fn id(&self) -> String {
         match self {
             Self::Create(c) => create_id(c.link_id),
-            Self::Revoke(c) => format!("revoke-{}", c.link_id),
+            Self::Lifecycle { command, .. } => format!(
+                "lifecycle-{}-{}",
+                command.link_id,
+                String::from(command.operation_id.clone())
+            ),
+            Self::Rotate(c) => format!(
+                "rotate-{}-{}",
+                c.link_id,
+                String::from(c.operation_id.clone())
+            ),
+            Self::Revoke(c) => format!(
+                "revoke-{}-{}",
+                c.link_id,
+                String::from(c.operation_id.clone())
+            ),
             Self::Decision(c) => format!(
                 "decision-{}-{}",
                 c.request_id,
@@ -113,7 +153,9 @@ impl Command {
     fn link_id(&self) -> ghinvite_core::InvitationLinkId {
         match self {
             Self::Create(c) => c.link_id,
+            Self::Lifecycle { command, .. } => command.link_id,
             Self::Revoke(c) => c.link_id,
+            Self::Rotate(c) => c.link_id,
             Self::Decision(c) => c.link_id,
         }
     }
@@ -121,7 +163,12 @@ impl Command {
     fn label(&self) -> &'static str {
         match self {
             Self::Create(_) => "Create invitation link",
+            Self::Lifecycle { action, .. } => match action {
+                ghinvite_core::link_lifecycle::LifecycleAction::Pause => "Pause invitation link",
+                ghinvite_core::link_lifecycle::LifecycleAction::Resume => "Resume invitation link",
+            },
             Self::Revoke(_) => "Revoke invitation link",
+            Self::Rotate(_) => "Rotate invitation URL",
             Self::Decision(c) => match c.action {
                 ghinvite_core::request_lifecycle::DecisionAction::Approve => {
                     "Approve invitation request"
@@ -158,9 +205,46 @@ async fn load(
     } else {
         id
     };
-    AttemptContinuations::new(state)
-        .load(&scope(admin)?, id)
-        .await
+    let command = AttemptContinuations::new(state)
+        .load::<Command>(&scope(admin)?, id)
+        .await?;
+    if let Some(command) = &command {
+        authorize_command(state, admin, command, false).await?;
+    }
+    Ok(command)
+}
+
+async fn authorize_command(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    command: &Command,
+    mutation: bool,
+) -> crate::Result<()> {
+    let targets = match command {
+        Command::Create(c) => {
+            if c.account_id != admin.account.account_id || c.admin.user_id != admin.session.user_id
+            {
+                return Err(crate::WebError::Forbidden);
+            }
+            c.targets.clone()
+        }
+        _ => {
+            authoritative_link(state, admin, command.link_id())
+                .await
+                .map_err(crate::WebError::from)?
+                .targets
+        }
+    };
+    let access = if mutation {
+        admin.authority.can_mutate_targets(&targets).await
+    } else {
+        admin.authority.can_read_link(&targets).await
+    };
+    match access {
+        Ok(crate::authority::Access::Allowed) => Ok(()),
+        Ok(crate::authority::Access::Denied) => Err(crate::WebError::Forbidden),
+        Ok(crate::authority::Access::Pending) | Err(_) => Err(crate::WebError::ConsoleAuthority),
+    }
 }
 
 // An immutable record per attempt prevents request-local session snapshots from
@@ -198,20 +282,24 @@ pub(super) async fn index(State(state): State<AppState>, admin: RequireConsoleAd
     .await;
     match result {
         Ok(commands) => {
-            let rows = commands
-                .iter()
-                .map(|c| ghinvite_ui::attempts::AttemptRow {
-                    label: c.label().into(),
-                    id: c.id(),
-                    status_url: url(&admin, c),
-                    detail_url: format!(
-                        "/console/accounts/{}/links/{}",
-                        admin.account.account_login,
-                        c.link_id()
-                    ),
-                })
-                .collect::<Vec<_>>();
-            let html = render(admin.session.csrf_token.clone(), move || {
+            let mut rows = Vec::new();
+            for c in &commands {
+                match authorize_command(&state, &admin, c, false).await {
+                    Ok(()) => rows.push(ghinvite_ui::attempts::AttemptRow {
+                        label: c.label().into(),
+                        id: c.id(),
+                        status_url: url(&admin, c),
+                        detail_url: format!(
+                            "/console/accounts/{}/links/{}",
+                            admin.account.account_login,
+                            c.link_id()
+                        ),
+                    }),
+                    Err(crate::WebError::Forbidden | crate::WebError::NotFound) => {}
+                    Err(error) => return error.into_response(),
+                }
+            }
+            let html = render(admin.render_context(), move || {
                 rsx! {
                     ghinvite_ui::attempts::AttemptListPage {
                         signed_in_login: admin.session.login.clone(), account_login: admin.account.account_login.clone(), rows: rows.clone(),
@@ -251,17 +339,37 @@ pub(super) async fn page(
             })
             .await
             .and_then(|link| {
-                if link.creation == *c {
+                if link.creation == **c {
                     Ok(Some(CREATED))
                 } else {
                     Err(AuthorityError::Conflict)
                 }
             }),
-        Command::Revoke(c) => state
-            .link_authority
-            .link_status(c.clone())
-            .await
-            .map(|link| link.revoked_at.map(|_| REVOKED)),
+        Command::Lifecycle { .. } => {
+            return render_attempt(
+                &admin,
+                &command,
+                StatusCode::OK,
+                "Retry this retained operation to confirm its outcome. The link's current state may include later operations.",
+                true,
+            );
+        }
+        Command::Rotate(_) => {
+            return render_attempt(
+                &admin,
+                &command,
+                StatusCode::OK,
+                "Check link details for the current generation. Retry this retained rotation to confirm its outcome. Its secret cannot be recovered; rotate again if the URL was lost.",
+                true,
+            );
+        }
+        Command::Revoke(c) => {
+            return match state.link_authority.revoke_status(c.clone()).await {
+                Ok(Some(outcome)) => revocation_response(&admin, &command, &outcome),
+                Ok(None) => unknown(&admin, &command),
+                Err(e) => failed(&admin, &command, e),
+            };
+        }
     };
     match result {
         Ok(Some(message)) => render_attempt(&admin, &command, StatusCode::OK, message, false),
@@ -293,7 +401,7 @@ pub(super) async fn execute(
 ) -> Response {
     match submit(state, admin, command).await {
         Ok(response) => response,
-        Err(CreateRejected) => {
+        Err(_) => {
             flash(admin, session::FlashLevel::Error, CREATE_REJECTED).await;
             Redirect::to(&format!(
                 "/console/accounts/{}/links/new",
@@ -338,6 +446,20 @@ pub(super) async fn submit(
     admin: &RequireConsoleAdminOf,
     command: Command,
 ) -> Result<Response, CreateRejected> {
+    submit_with_secret(state, admin, command, None).await
+}
+
+/// The plaintext exists only in this request. Continuations and ingress carry
+/// its hash; only a confirmed operation plus durable routing permits display.
+pub(super) async fn submit_with_secret(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    command: Command,
+    secret: Option<crate::link_secret::LinkSecret>,
+) -> Result<Response, CreateRejected> {
+    if let Err(error) = authorize_command(state, admin, &command, true).await {
+        return Ok(error.into_response());
+    }
     match retain(state, admin, &command).await {
         Ok(Retention::Retained) => {}
         Ok(Retention::Bound(original)) => {
@@ -358,10 +480,59 @@ pub(super) async fn submit(
         Err(e) => return Ok(back_to_link(admin, &command, e)),
     }
     let (result, completed) = match &command {
+        Command::Lifecycle {
+            action,
+            command: input,
+        } => {
+            use ghinvite_core::link_lifecycle::{LifecycleAction, LifecycleRefusal};
+            let result = match action {
+                LifecycleAction::Pause => state.link_authority.pause(input.clone()).await,
+                LifecycleAction::Resume => state.link_authority.resume(input.clone()).await,
+            };
+            let message = match result {
+                Ok(Ok(_)) => match action {
+                    LifecycleAction::Pause => {
+                        "Invitation link paused. Existing requests and invitations continue."
+                    }
+                    LifecycleAction::Resume => "Invitation link resumed.",
+                },
+                Ok(Err(refusal)) => {
+                    let message = match refusal {
+                        LifecycleRefusal::Revoked => {
+                            "This link is revoked and cannot be paused or resumed."
+                        }
+                        LifecycleRefusal::AlreadyPaused => {
+                            "This invitation link is already paused."
+                        }
+                        LifecycleRefusal::NotPaused => "This invitation link is not paused.",
+                        LifecycleRefusal::ExpiredOrExhausted => {
+                            "This link cannot resume because it has expired or reached its maximum uses."
+                        }
+                    };
+                    return Ok(render_attempt(
+                        admin,
+                        &command,
+                        StatusCode::OK,
+                        message,
+                        false,
+                    ));
+                }
+                Err(error) => return Ok(failed(admin, &command, error)),
+            };
+            (Ok(()), message)
+        }
         Command::Decision(c) => {
             let result = state.request_authority.decide(c.clone()).await;
             return Ok(match result {
-                Ok(receipt) if receipt.outcome == DecisionOutcome::Incompatible => {
+                Ok(receipt) if receipt.outcome == DecisionOutcome::NotAuthorized => {
+                    crate::WebError::Forbidden.into_response()
+                }
+                Ok(receipt)
+                    if matches!(
+                        receipt.outcome,
+                        DecisionOutcome::Incompatible | DecisionOutcome::NotPending
+                    ) =>
+                {
                     decision_response(admin, &command, &receipt)
                 }
                 Ok(receipt) => {
@@ -380,14 +551,83 @@ pub(super) async fn submit(
                 Err(e) => failed(admin, &command, e),
             });
         }
-        Command::Create(c) => (
-            state.link_authority.create(c.clone()).await.map(|_| ()),
-            CREATED,
-        ),
-        Command::Revoke(c) => (
-            state.link_authority.revoke(c.clone()).await.map(|_| ()),
-            REVOKED,
-        ),
+        Command::Create(c) => {
+            let result = match state.link_authority.create((**c).clone()).await {
+                Ok(Ok(created)) => Ok(created),
+                Ok(Err(refusal)) => {
+                    release(state, admin, &command).await;
+                    return Err(CreateRejected {
+                        refusal: Some(refusal),
+                    });
+                }
+                Err(error) => Err(error),
+            };
+            if let (Ok(created), Some(secret)) = (&result, secret) {
+                if created.link_id != c.link_id
+                    || created.secret_generation != 1
+                    || !c.secret_sha256.constant_time_eq(&secret.hash())
+                {
+                    return Ok(render_attempt(
+                        admin,
+                        &command,
+                        StatusCode::CONFLICT,
+                        "This creation has already been superseded. Open link details to rotate the URL.",
+                        false,
+                    ));
+                }
+                return Ok(register_and_show(
+                    state,
+                    admin,
+                    &command,
+                    secret,
+                    created.secret_generation,
+                    Utc::now(),
+                )
+                .await);
+            }
+            (result.map(|_| ()), CREATED)
+        }
+        Command::Rotate(c) => {
+            let result = state.link_authority.rotate_secret(c.clone()).await;
+            if let (Ok(rotated), Some(secret)) = (&result, secret) {
+                return Ok(register_and_show(
+                    state,
+                    admin,
+                    &command,
+                    secret,
+                    rotated.secret_generation,
+                    Utc::now(),
+                )
+                .await);
+            }
+            (
+                result.map(|_| ()),
+                "Rotation confirmed. The URL cannot be recovered. Rotate again if you did not save it.",
+            )
+        }
+        Command::Revoke(c) => {
+            return Ok(match state.link_authority.revoke(c.clone()).await {
+                Ok(Ok(accepted)) => {
+                    flash(admin,session::FlashLevel::Success,&format!("{REVOKED} Cascade accepted for {} requests and {} deliveries. Check link details for progress.",accepted.addressed_requests,accepted.addressed_deliveries)).await;
+                    Redirect::to(&format!(
+                        "/console/accounts/{}/links/{}",
+                        admin.account.account_login, c.link_id
+                    ))
+                    .into_response()
+                }
+                Ok(outcome) => revocation_response(admin, &command, &outcome),
+                Err(AuthorityError::Invalid) => {
+                    release(state, admin, &command).await;
+                    flash(admin, session::FlashLevel::Error, REVOKE_REJECTED).await;
+                    Redirect::to(&format!(
+                        "/console/accounts/{}/links/{}",
+                        admin.account.account_login, c.link_id
+                    ))
+                    .into_response()
+                }
+                Err(error) => failed(admin, &command, error),
+            });
+        }
     };
     let detail = format!(
         "/console/accounts/{}/links/{}",
@@ -406,7 +646,7 @@ pub(super) async fn submit(
         Err(AuthorityError::Invalid) => {
             release(state, admin, &command).await;
             match command {
-                Command::Create(_) => Err(CreateRejected),
+                Command::Create(_) => Err(CreateRejected { refusal: None }),
                 _ => {
                     flash(admin, session::FlashLevel::Error, REVOKE_REJECTED).await;
                     Ok(Redirect::to(&detail).into_response())
@@ -415,6 +655,60 @@ pub(super) async fn submit(
         }
         Err(e) => Ok(failed(admin, &command, e)),
     }
+}
+
+async fn register_and_show(
+    state: &AppState,
+    admin: &RequireConsoleAdminOf,
+    command: &Command,
+    secret: crate::link_secret::LinkSecret,
+    generation: u32,
+    created_at: chrono::DateTime<Utc>,
+) -> Response {
+    let binding = ghinvite_core::storage::link_secrets::LinkSecret {
+        secret_sha256: secret.hash(),
+        link_id: command.link_id(),
+        secret_generation: generation,
+        created_at,
+        retired_at: None,
+    };
+    if state.storage.register_link_secret(&binding).await.is_err() {
+        return render_attempt(
+            admin,
+            command,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The link operation completed, but the URL is not ready. Open link details and rotate the invitation URL.",
+            false,
+        );
+    }
+    let encoded = secret.show_once();
+    let invitation_url = zeroize::Zeroizing::new(format!(
+        "{}/i#{}",
+        state.config.base_url.trim_end_matches('/'),
+        encoded.as_str()
+    ));
+    let detail = format!(
+        "/console/accounts/{}/links/{}",
+        admin.account.account_login,
+        command.link_id()
+    );
+    // Dioxus escapes the URL as text and attribute content. The response is the
+    // only plaintext copy delivered to the user, never a flash/session record.
+    let login = admin.session.login.clone();
+    let html = render(admin.render_context(), move || {
+        let invitation_url = invitation_url.as_str();
+        rsx! {
+            ghinvite_ui::layouts::InvitationLayout {
+                signed_in_login: Some(login.clone()), title: "Save invitation URL · ghinvite".to_owned(),
+                account_login: None, active_nav: None, flash: None,
+                h1 { "Save this invitation URL" }
+                p { "This URL is shown once. Anyone with it can open the invitation. If it is lost, rotate it from link details." }
+                p { a { href: "{invitation_url}", "{invitation_url}" } }
+                p { a { href: "{detail}", "Back to link details" } }
+            }
+        }
+    });
+    Html(html).into_response()
 }
 
 fn unknown(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
@@ -428,10 +722,16 @@ fn unknown(admin: &RequireConsoleAdminOf, command: &Command) -> Response {
 }
 
 fn decision_message(receipt: &DecisionReceipt) -> String {
+    if receipt.request.state == ghinvite_core::RequestState::Cancelled {
+        return "Request cancelled because its invitation link was revoked. The requested decision was not applied.".into();
+    }
     if receipt.request.state == ghinvite_core::RequestState::Expired {
         return "Request expired. The decision deadline passed; the requested decision was not applied.".into();
     }
-    if receipt.outcome == DecisionOutcome::Incompatible {
+    if matches!(
+        receipt.outcome,
+        DecisionOutcome::Incompatible | DecisionOutcome::NotPending
+    ) {
         return format!(
             "Request is {}. The requested decision was not applied.",
             receipt.request.state
@@ -458,7 +758,13 @@ fn decision_response(
     command: &Command,
     receipt: &DecisionReceipt,
 ) -> Response {
-    let status = if receipt.outcome == DecisionOutcome::Incompatible {
+    if receipt.outcome == DecisionOutcome::NotAuthorized {
+        return crate::WebError::Forbidden.into_response();
+    }
+    let status = if matches!(
+        receipt.outcome,
+        DecisionOutcome::Incompatible | DecisionOutcome::NotPending
+    ) {
         StatusCode::CONFLICT
     } else {
         StatusCode::OK
@@ -520,7 +826,7 @@ fn render_attempt(
         detail_url: format!("/console/accounts/{account}/links/{}", command.link_id()),
     };
     let message = message.to_owned();
-    let html = render(admin.session.csrf_token.clone(), move || {
+    let html = render(admin.render_context(), move || {
         rsx! {
             ghinvite_ui::attempts::AttemptPage {
                 signed_in_login: login.clone(), account_login: account.clone(), row: row.clone(), message: message.clone(), retry,
@@ -528,4 +834,18 @@ fn render_attempt(
         }
     });
     (status, Html(html)).into_response()
+}
+
+fn revocation_response(
+    admin: &RequireConsoleAdminOf,
+    command: &Command,
+    outcome: &ghinvite_core::revocation::RevokeOutcome,
+) -> Response {
+    use ghinvite_core::revocation::RevokeRefusal;
+    let (status,message)=match outcome {
+        Ok(accepted)=>(StatusCode::OK,format!("{REVOKED} Cascade accepted for {} requests and {} deliveries. Check link details for progress; acceptance does not confirm GitHub cancellation.",accepted.addressed_requests,accepted.addressed_deliveries)),
+        Err(RevokeRefusal::Revoked)=>(StatusCode::CONFLICT,"This link was already revoked by a different operation. This operation did not change it.".into()),
+        Err(RevokeRefusal::UnsupportedCascade)=>(StatusCode::BAD_REQUEST,"These cascade options are not available. This operation did not revoke the link.".into()),
+    };
+    render_attempt(admin, command, status, &message, false)
 }

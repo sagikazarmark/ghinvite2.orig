@@ -11,11 +11,12 @@ pub struct PendingRequestRow {
     pub link_description: Option<String>,
     pub link_id: String,
     pub requester_login: String,
+    pub avatar_href: Option<String>,
+    pub github_created_at: Option<DateTime<Utc>>,
     pub justification: Option<String>,
     pub created_at: DateTime<Utc>,
     pub decision_deadline: Option<DateTime<Utc>>,
-    pub permission: Option<String>,
-    pub repos: Vec<String>,
+    pub targets: Option<ghinvite_core::targets::Targets>,
     pub expires_at: Option<DateTime<Utc>>,
     pub approval_required: Option<bool>,
 }
@@ -43,11 +44,15 @@ mod tests {
                         link_description: Some("Workshop".into()),
                         link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAA".into(),
                         requester_login: "octocat".into(),
+                        avatar_href: None,
+                        github_created_at: None,
                         justification: Some("Need access for launch".into()),
                         created_at: dt("2026-05-04T12:30:00Z"),
                         decision_deadline: None,
-                        permission: Some("push".into()),
-                        repos: vec!["acme/api".into(), "acme/web".into()],
+                        targets: Some(ghinvite_core::targets::Targets { repos: vec![
+                            ghinvite_core::targets::RepoTarget {repo_id: 10, repo_full_name: "acme/api".into(), grant: ghinvite_core::targets::RepoRole::Write},
+                            ghinvite_core::targets::RepoTarget {repo_id: 11, repo_full_name: "acme/web".into(), grant: ghinvite_core::targets::RepoRole::Read},
+                        ], ..Default::default() }),
                         expires_at: Some(dt("2026-06-03T12:00:00Z")),
                         approval_required: Some(true),
                     }],
@@ -86,11 +91,12 @@ mod tests {
                         link_description: None,
                         link_id: "".into(),
                         requester_login: "octocat".into(),
+                        avatar_href: None,
+                        github_created_at: None,
                         justification: None,
                         created_at: dt("2026-05-04T12:30:00Z"),
                         decision_deadline: None,
-                        permission: None,
-                        repos: vec![],
+                        targets: None,
                         expires_at: None,
                         approval_required: None,
                     }],
@@ -115,6 +121,8 @@ mod tests {
 
 #[derive(Clone, PartialEq, Props)]
 pub struct RequestsQueueProps {
+    #[props(default)]
+    pub authority_pending: bool,
     pub now: DateTime<Utc>,
     pub signed_in_login: Option<String>,
     pub flash: Option<Flash>,
@@ -138,6 +146,10 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
             active_nav: Some("requests".to_string()),
             flash: props.flash.clone(),
             children: rsx! {
+                if props.authority_pending {
+                    p { role: "status", class: "mb-4", "Checking access… Some results are unavailable while GitHub is busy. Try again in a minute." }
+                }
+
                 header { class: "mb-6",
                     p { class: "text-sm font-medium text-primary", "Requests" }
                     h1 { class: "text-2xl font-semibold tracking-tight", "Decision queue" }
@@ -161,20 +173,19 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                 let decline_operation = ghinvite_core::RequestId::new().to_string();
                                 let just = r.justification.clone();
                                 let link_id = r.link_id.clone();
-                                let invitation_code = if r.link_id.is_empty() { "(deleted link)".into() } else { r.link_id.clone() };
-                                let description = r.link_description.clone().unwrap_or_else(|| invitation_code.clone());
+                                let link_identity = if r.link_id.is_empty() { "(deleted link)".into() } else { r.link_id.clone() };
+                                let description = r.link_description.clone().unwrap_or_else(|| link_identity.clone());
                                 let link_label = if link_id.is_empty() {
-                                    rsx! { span { "{invitation_code}" } }
+                                    rsx! { span { "{link_identity}" } }
                                 } else {
                                     rsx! {
                                         a { class: "link link-hover", href: "/console/accounts/{login}/links/{link_id}", "{description}" }
-                                        span { class: "ml-2 text-xs text-muted", "Code: {invitation_code}" }
+                                        span { class: "ml-2 text-xs text-muted", "Code: {link_identity}" }
                                     }
                                 };
                                 let requester = r.requester_login.clone();
                                 let created = r.created_at;
-                                let permission = r.permission.clone().unwrap_or_else(|| "unknown permission".into());
-                                let repos_available = !r.repos.is_empty();
+                                let repos_available = r.targets.as_ref().is_some_and(|t| !t.repos.is_empty() || t.organization.is_some());
                                 let actions_available = !link_id.is_empty() && repos_available;
                                 let deadline = r.decision_deadline.map(|when| when.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(|| "Unavailable".into());
                                 let expires = r.expires_at.map(|when| when.format("%Y-%m-%d %H:%M:%S UTC").to_string()).unwrap_or_else(|| if link_id.is_empty() { "Unavailable".into() } else { "No expiration".into() });
@@ -183,23 +194,18 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                     Some(false) => "Auto-approved invitation link",
                                     None => "Approval policy unavailable",
                                 };
-                                let repos = if r.repos.is_empty() {
-                                    rsx! { p { class: "text-sm text-base-content/65", "Repository details unavailable" } }
-                                } else {
-                                    rsx! {
-                                        ul { class: "mt-1 flex flex-wrap gap-1.5 text-sm",
-                                            {r.repos.iter().map(|repo| {
-                                                let repo = repo.clone();
-                                                rsx! { li { class: "badge badge-ghost badge-sm", "{repo}" } }
-                                            })}
-                                        }
-                                    }
+                                let repos = match &r.targets {
+                                    Some(targets) => rsx! { crate::invitation::AccessSummary { targets: targets.clone(), approval_required: r.approval_required.unwrap_or(true) } },
+                                    None => rsx! { p { class: "text-sm text-base-content/65", "Repository details unavailable" } },
                                 };
                                 rsx! {
                                     div { class: "grid gap-3 border-b border-base-300 px-4 py-3 last:border-b-0 lg:grid-cols-[minmax(10rem,14rem)_minmax(0,1fr)_auto] lg:items-start",
                                         div { class: "min-w-0",
-                                            p { class: "truncate text-sm font-medium", "@{requester}" }
+                                            crate::requester_profile::RequesterProfile { label: format!("@{requester}"), avatar_href: r.avatar_href.clone(), github_created_at: r.github_created_at, now: props.now }
                                             a { class: "link text-sm", href: "/console/accounts/{login}/requests/{rid}", "Request details" }
+                                            if repos_available {
+                                                p { a { class: "link text-sm", href: "/console/accounts/{login}/requests/{rid}?preview=1", "Preview effective access" } }
+                                            }
                                             p { class: "mt-0.5 text-xs text-muted", "Requested at {created}" }
                                         }
                                         div { class: "min-w-0 space-y-2",
@@ -208,7 +214,6 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                 {link_label}
                                             }
                                             div { class: "flex flex-wrap gap-1.5",
-                                                span { class: "badge badge-neutral badge-sm", "Permission: {permission}" }
                                                 span { class: "badge badge-ghost badge-sm", "Decision deadline: {deadline}" }
                                                 span { class: "badge badge-ghost badge-sm", "Invitation link expiration: {expires}" }
                                                 span { class: "badge badge-ghost badge-sm", "{approval}" }
@@ -244,6 +249,9 @@ pub fn RequestsQueuePage(props: RequestsQueueProps) -> Element {
                                                         crate::csrf::CsrfField {}
                                                         input { r#type: "hidden", name: "link_id", value: "{link_id}" }
                                                         input { r#type: "hidden", name: "operation_id", value: "{decline_operation}" }
+                                                        label { r#for: "decline-message-{rid}", class: "text-sm", "Message to requester (optional)" }
+                                                        textarea { id: "decline-message-{rid}", name: "requester_message", maxlength: "500", rows: "2", class: "textarea textarea-bordered w-full", aria_label: "Message to requester (optional)" }
+                                                        p { class: "text-xs", "This message will be shown to this requester." }
                                                         button { r#type: "submit", class: "btn btn-error btn-sm h-8 min-h-0", "Decline request" }
                                                     }
                                                 }

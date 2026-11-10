@@ -1,131 +1,298 @@
-//! `Reconcile` Service: daily sweep over pending GitHub invitations.
-
-use crate::state::AppState;
+//! Authoritative scheduled sweep. Each invocation inspects at most one delivery;
+//! repository pagination is completed once and reused by its read-only fan-out.
+use crate::{AppState, settlement_observation::ListedInvitation, sweep_schedule::Tracked};
 use chrono::{DateTime, Utc};
-use restate_sdk::context::{Context, ContextClient, ContextSideEffects, ContextTimers, RunFuture};
-use restate_sdk::errors::TerminalError;
-use restate_sdk::serde::Json;
-use schemars::JsonSchema;
+use ghinvite_core::{
+    account::{AccountInstallationRef, App},
+    delivery::CreateOutcome,
+};
+use ghinvite_github::{CallError, profiles};
+use restate_sdk::{
+    context::{Context, ContextClient, ContextSideEffects, RunFuture},
+    errors::TerminalError,
+    serde::Json,
+};
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize, JsonSchema, Serialize)]
-pub struct DailyRunInput {
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct SweepInput {
+    pub account: AccountInstallationRef,
+    pub token: u64,
+    pub tracked: Tracked,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct TargetInput {
+    pub account: AccountInstallationRef,
+    pub target_id: u64,
+    pub deliveries: Vec<String>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct Observations {
+    pub target: TargetInput,
+    pub installation_id: u64,
+    pub repository: String,
     pub at: DateTime<Utc>,
+    pub invitations: Vec<ListedInvitation>,
 }
-
-/// One invitation the sweep will observe, and the account whose GitHub quota
-/// observing it spends. Rate limits belong to the installation, so the sweep
-/// waits one out per account rather than once for every account at a time.
-#[derive(Debug, Deserialize, Serialize)]
-struct Candidate {
-    row: ghinvite_core::GithubInvitation,
-    account_id: u64,
-}
-
-/// What one sweep step learned about an invitation: the settlement evidence, or
-/// the bounded wait GitHub asked for before it would answer at all.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Observed {
-    Throttled { throttled_for_secs: u64 },
-    Evidence(Option<crate::settlement::ReconcileEvidence>),
-}
-
 pub struct Reconcile {
     pub state: AppState,
+}
+
+impl Reconcile {
+    /// The repository app, configured with the GitHub runtime.
+    fn repo_app(&self) -> Result<ghinvite_github::GithubApp, TerminalError> {
+        self.state
+            .github_apps
+            .as_ref()
+            .and_then(|apps| apps.apps.app(ghinvite_github::AppSlot::Repo).ok())
+            .ok_or_else(|| TerminalError::new_with_code(503, "repository app runtime unavailable"))
+    }
 }
 
 #[restate_sdk::service]
 impl Reconcile {
     #[handler]
-    async fn daily_run(
+    async fn sweep(
         &self,
         ctx: Context<'_>,
-        Json(input): Json<DailyRunInput>,
-    ) -> std::result::Result<(), TerminalError> {
-        let Json(rows) = ctx
-            .run(|| async {
-                let mut rows = Vec::new();
-                for account in self.state.storage.list_active_installations().await? {
-                    rows.extend(
-                        self.state
-                            .storage
-                            .list_pending_github_invitations_for_account(account.account_id)
-                            .await?
-                            .into_iter()
-                            .filter(crate::settlement::eligible)
-                            .map(|row| Candidate {
-                                account_id: account.account_id,
-                                row,
-                            }),
-                    );
-                }
-                Ok::<_, restate_sdk::errors::HandlerError>(Json(rows))
-            })
-            .name("settlement_candidates")
+        Json(input): Json<SweepInput>,
+    ) -> Result<(), TerminalError> {
+        if input.account.app == App::Org && self.state.organization_delivery.is_none() {
+            return Err(TerminalError::new_with_code(
+                400,
+                "organization sweeps are disabled",
+            ));
+        }
+        let account_key = input.account.key().map_err(TerminalError::new)?;
+        // Empty schedules still check installation drift. This is a one-way
+        // request: AccountInstallation never waits on the schedule owner.
+        ctx.object_client::<crate::availability::AccountInstallationClient>(account_key)
+            .recheck()
+            .send()
             .await?;
-        // One deferral per account, not per row and not per sweep. A quota is
-        // the installation's, so a wait that clears one account's limit clears
-        // it for that account's remaining rows and says nothing about any
-        // other; and a limit outlasting GitHub's own guidance is tomorrow's
-        // sweep to observe rather than this one's to hold open row after row.
-        // The sweep is a service, so the wait holds no invitation object.
-        let mut deferred = std::collections::HashSet::new();
-        let mut exhausted = std::collections::HashSet::new();
-        for Candidate { account_id, row } in rows {
-            if exhausted.contains(&account_id) {
+        for (target_id, keys) in input.tracked {
+            if input.account.app == App::Org {
+                ctx.service_client::<crate::org_reconcile::OrganizationReconcileClient>()
+                    .target(Json(TargetInput {
+                        account: input.account,
+                        target_id,
+                        deliveries: keys.into_iter().collect(),
+                    }))
+                    .send()
+                    .await?;
                 continue;
             }
-            let owner = ctx.object_client::<crate::delivery::RepositoryDeliveryClient>(
-                ghinvite_core::delivery::delivery_key(row.invitation_request_id, row.repo_id),
-            );
-            let Json(Some(snapshot)) = owner.status().call().await? else {
-                continue;
-            };
-            let Json(Some(account)) = ctx
-                .object_client::<crate::availability::AccountInstallationClient>(
-                    account_id.to_string(),
-                )
-                .current_installation()
-                .call()
-                .await?
-            else {
-                continue;
-            };
-            let evidence = loop {
-                let Json(observed) = ctx.run(|| async {
-                    match crate::settlement::observe(&self.state, &snapshot, &account, input.at).await {
-                        Ok(evidence) => Ok(Json(Observed::Evidence(evidence))),
-                        Err(e) => match e.rate_limit() {
-                            Some(limit) => Ok(Json(Observed::Throttled {
-                                throttled_for_secs: crate::throttle::backoff(limit.retry_after).as_secs(),
-                            })),
-                            None if e.is_terminal() => {
-                                tracing::warn!(invitation_id = %row.id, err = %e, "settlement observation failed");
-                                Ok(Json(Observed::Evidence(None)))
-                            },
-                            None => Err(crate::error::to_sdk_handler_error(e)),
+            ctx.service_client::<ReconcileClient>()
+                .target(Json(TargetInput {
+                    account: input.account,
+                    target_id,
+                    deliveries: keys.into_iter().collect(),
+                }))
+                .send()
+                .await?;
+        }
+        Ok(())
+    }
+    #[handler]
+    async fn target(
+        &self,
+        ctx: Context<'_>,
+        Json(mut input): Json<TargetInput>,
+    ) -> Result<(), TerminalError> {
+        let Some(key) = input.deliveries.first() else {
+            return Ok(());
+        };
+        let Json(Some(snapshot)) = ctx
+            .object_client::<crate::delivery::RepositoryDeliveryClient>(key)
+            .status()
+            .call()
+            .await?
+        else {
+            input.deliveries.remove(0);
+            if !input.deliveries.is_empty() {
+                ctx.service_client::<ReconcileClient>()
+                    .target(Json(input))
+                    .send()
+                    .await?;
+            }
+            return Ok(());
+        };
+        let command = &snapshot.create.command;
+        if input.account.app != App::Repo
+            || command.account_id != input.account.account_id
+            || command.repo_id != input.target_id
+            || command.delivery_key() != *key
+        {
+            return Err(TerminalError::new_with_code(
+                400,
+                "sweep target identity mismatch",
+            ));
+        }
+        let Json(Some(account)) = ctx
+            .object_client::<crate::availability::AccountInstallationClient>(
+                input.account.key().map_err(TerminalError::new)?,
+            )
+            .current_installation()
+            .call()
+            .await?
+        else {
+            return Ok(());
+        };
+        let at = crate::clock::now(&ctx, "sweep_observation_time").await?;
+        let Json(invitations) = ctx
+            .run(|| async {
+                let app = self.repo_app()?;
+                // Not replayed on a 401: the next account sweep reads again.
+                match app
+                    .write_once(
+                        account.installation_id,
+                        &profiles::REPO_READ,
+                        |handle| async move {
+                            crate::settlement_observation::list(
+                                &handle.rest(),
+                                &command.repo_full_name,
+                            )
+                            .await
+                            .map_err(CallError::<std::convert::Infallible>::Api)
                         },
-                    }
-                }).name("observe_invitation").await?;
-                match observed {
-                    Observed::Evidence(evidence) => break evidence,
-                    Observed::Throttled { throttled_for_secs } if deferred.insert(account_id) => {
-                        ctx.sleep(std::time::Duration::from_secs(throttled_for_secs))
-                            .await?;
-                    }
-                    // Throttled again after waiting out GitHub's own guidance.
-                    // Probing this account's remaining rows would only spend
-                    // more of the quota it has already run out of.
-                    Observed::Throttled { .. } => {
-                        exhausted.insert(account_id);
-                        break None;
+                    )
+                    .await
+                {
+                    Ok(list) => Ok::<_, restate_sdk::errors::HandlerError>(Json(Some(list))),
+                    Err(error) => {
+                        let error: crate::HandlerError = error.into();
+                        // A failed/partial read supplies no evidence. The next
+                        // account sweep retries it; never accumulate an unbounded
+                        // Restate retry chain alongside the hourly schedule.
+                        tracing::warn!(error = %error, "scheduled observation unavailable");
+                        Ok(Json(None))
                     }
                 }
-            };
-            if let Some(evidence) = evidence {
-                owner.reconcile(Json(evidence)).call().await?;
-            }
+            })
+            .name("list_repository_invitations")
+            .await?;
+        if let Some(invitations) = invitations {
+            ctx.service_client::<ReconcileClient>()
+                .observe_next(Json(Observations {
+                    installation_id: account.installation_id,
+                    repository: command.repo_full_name.clone(),
+                    target: input,
+                    at,
+                    invitations,
+                }))
+                .send()
+                .await?;
+        }
+        Ok(())
+    }
+    #[handler]
+    async fn observe_next(
+        &self,
+        ctx: Context<'_>,
+        Json(mut input): Json<Observations>,
+    ) -> Result<(), TerminalError> {
+        let Some(key) = input.target.deliveries.pop() else {
+            return Ok(());
+        };
+        // Queue the continuation before the external read. One throttled or
+        // unavailable delivery cannot hold the remaining fan-out behind it.
+        if !input.target.deliveries.is_empty() {
+            ctx.service_client::<ReconcileClient>()
+                .observe_next(Json(input.clone()))
+                .send()
+                .await?;
+        }
+        let Json(Some(snapshot)) = ctx
+            .object_client::<crate::delivery::RepositoryDeliveryClient>(&key)
+            .status()
+            .call()
+            .await?
+        else {
+            return Ok(());
+        };
+        let command = &snapshot.create.command;
+        if command.delivery_key() != key
+            || command.account_id != input.target.account.account_id
+            || command.repo_id != input.target.target_id
+            || command.repo_full_name != input.repository
+            || input.target.account.app != App::Repo
+        {
+            return Err(TerminalError::new_with_code(
+                400,
+                "sweep delivery identity mismatch",
+            ));
+        }
+        if snapshot.settlement.is_some()
+            || snapshot.tracking_stopped.is_some()
+            || !(snapshot.create.outcome.needs_settlement()
+                || matches!(snapshot.create.outcome, CreateOutcome::OutcomeUnknown))
+        {
+            return Ok(());
+        }
+        let Json(Some(account)) = ctx
+            .object_client::<crate::availability::AccountInstallationClient>(
+                input.target.account.key().map_err(TerminalError::new)?,
+            )
+            .current_installation()
+            .call()
+            .await?
+        else {
+            return Ok(());
+        };
+        if account.installation_id != input.installation_id {
+            return Ok(());
+        }
+        let Json(evidence) = ctx
+            .run(|| async {
+                let app = self.repo_app()?;
+                let app_rest = app
+                    .app_rest()
+                    .map_err(octotoken::TokenError::from)
+                    .map_err(crate::HandlerError::from)
+                    .map_err(crate::error::to_sdk_handler_error)?;
+                let app_rest = &app_rest.rest();
+                let account = &account;
+                let snapshot = &snapshot;
+                let input = &input;
+                // Not replayed on a 401: the next account sweep reads again.
+                match app
+                    .write_once(
+                        account.installation_id,
+                        &profiles::REPO_READ,
+                        |handle| async move {
+                            crate::settlement_observation::observe_listed(
+                                &handle,
+                                app_rest,
+                                account,
+                                snapshot,
+                                input.at,
+                                crate::settlement_policy::AcceptancePolicy::default(),
+                                &input.invitations,
+                            )
+                            .await
+                            .map_err(CallError::<std::convert::Infallible>::Api)
+                        },
+                    )
+                    .await
+                {
+                    Ok(evidence) => Ok::<_, restate_sdk::errors::HandlerError>(Json(evidence)),
+                    Err(error) => {
+                        let error: crate::HandlerError = error.into();
+                        // A failed/partial read supplies no evidence. The next
+                        // account sweep retries it; never accumulate an unbounded
+                        // Restate retry chain alongside the hourly schedule.
+                        tracing::warn!(error = %error, "scheduled observation unavailable");
+                        Ok(Json(None))
+                    }
+                }
+            })
+            .name("verify_sweep_delivery")
+            .await?;
+        if let Some(evidence) = evidence {
+            ctx.object_client::<crate::delivery::RepositoryDeliveryClient>(key)
+                .reconcile(Json(evidence))
+                .send()
+                .await?;
         }
         Ok(())
     }

@@ -1,8 +1,9 @@
 //! Receiving-side create receipts. Private ingress; ADR 0004.
 use crate::AppState;
-use crate::repository_access::{RepositoryAccess, Unavailable, verify_repository_access};
-use ghinvite_core::delivery::{CreateCommand, CreateOutcome, CreateReceipt, DeliverySnapshot};
-use ghinvite_github::{CollaboratorAddition, RateLimit};
+use ghinvite_core::delivery::{
+    BlockedReason, CreateCommand, CreateOutcome, CreateReceipt, DeliverySnapshot,
+};
+use ghinvite_core::targets::RepoRole;
 use restate_sdk::{
     context::{
         Context, ContextClient, ContextReadState, ContextSideEffects, ContextWriteState,
@@ -35,11 +36,16 @@ pub struct DeliveryRecheck {
 #[cfg(feature = "integration")]
 #[derive(Default)]
 pub struct DeliveryFaults {
+    pub cancel_after_result: std::sync::atomic::AtomicBool,
+    pub cancel_after_reserve: std::sync::atomic::AtomicBool,
+    pub lose_cancel_results: std::sync::atomic::AtomicUsize,
+    pub lost_cancel_results: std::sync::atomic::AtomicUsize,
     pub stage: std::sync::Mutex<Option<String>>,
     pub interruptions: std::sync::atomic::AtomicUsize,
     pub projection_unavailable: std::sync::atomic::AtomicBool,
     pub projection_failures: std::sync::atomic::AtomicUsize,
     pub lose_http_result: std::sync::atomic::AtomicBool,
+    pub lose_http_results: std::sync::atomic::AtomicUsize,
     pub lose_projection_ack: std::sync::atomic::AtomicBool,
     pub http_result_losses: std::sync::atomic::AtomicUsize,
     pub lose_release_ack: std::sync::atomic::AtomicBool,
@@ -48,6 +54,12 @@ pub struct DeliveryFaults {
 
 pub fn bind(builder: Builder, state: AppState) -> Builder {
     builder
+        .bind(crate::sweep_schedule::SweepSchedule {
+            organization_enabled: state.organization_delivery.is_some()
+                || state.email_deliveries.is_some(),
+            #[cfg(feature = "integration")]
+            clock: state.sweep_clock.clone(),
+        })
         .bind(RepositoryDelivery {
             state: state.clone(),
             #[cfg(feature = "integration")]
@@ -71,6 +83,12 @@ pub fn bind_with_faults(
     faults: std::sync::Arc<DeliveryFaults>,
 ) -> Builder {
     builder
+        .bind(crate::sweep_schedule::SweepSchedule {
+            organization_enabled: state.organization_delivery.is_some()
+                || state.email_deliveries.is_some(),
+            #[cfg(feature = "integration")]
+            clock: state.sweep_clock.clone(),
+        })
         .bind(RepositoryDelivery {
             state: state.clone(),
             faults: Some(faults.clone()),
@@ -105,6 +123,65 @@ impl DeliveryRecovery {
 #[restate_sdk::object]
 impl RepositoryDelivery {
     #[handler]
+    async fn cancel_unsent(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ghinvite_core::bulk_cancel::RepositoryCancelUnsent>,
+    ) -> Result<Json<ghinvite_core::bulk_cancel::CancelUnsentResult>, TerminalError> {
+        if self.state.bulk.is_none() {
+            return Err(TerminalError::new_with_code(503, "bulk unavailable"));
+        }
+        crate::delivery_batch_cancel::cancel(&ctx, &self.state, input)
+            .await
+            .map(Json)
+    }
+
+    #[handler]
+    async fn prepare_reissue(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ghinvite_core::reissue::RepositoryReissueBarrierQuery>,
+    ) -> Result<Json<ghinvite_core::reissue::InvitationBarrier>, TerminalError> {
+        crate::delivery_reissue::prepare(
+            &ctx,
+            &self.state,
+            input,
+            #[cfg(feature = "integration")]
+            self.faults.as_deref(),
+        )
+        .await
+        .map(Json)
+    }
+
+    #[handler]
+    async fn cascade_progress(
+        &self,
+        ctx: SharedObjectContext<'_>,
+        Json(query): Json<ghinvite_core::revocation::DeliveryCascadeQuery>,
+    ) -> Result<Json<ghinvite_core::revocation::DeliveryCascadeProgress>, TerminalError> {
+        crate::delivery_control::cascade_progress(&ctx, query)
+            .await
+            .map(Json)
+    }
+    #[handler]
+    async fn drive_cancellation(&self, ctx: ObjectContext<'_>) -> Result<(), TerminalError> {
+        crate::delivery_cancellation::drive(
+            &ctx,
+            &self.state,
+            #[cfg(feature = "integration")]
+            self.faults.as_deref(),
+        )
+        .await
+    }
+    #[handler]
+    async fn tick_own_expiry(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::delivery_cancellation::ExpiryTick>,
+    ) -> Result<(), TerminalError> {
+        crate::delivery_cancellation::tick(&ctx, &self.state, input).await
+    }
+    #[handler]
     async fn on_webhook(
         &self,
         ctx: ObjectContext<'_>,
@@ -119,7 +196,8 @@ impl RepositoryDelivery {
         ctx: ObjectContext<'_>,
         input: Json<crate::settlement::ReconcileEvidence>,
     ) -> Result<(), TerminalError> {
-        crate::settlement::reconcile(ctx, input).await
+        crate::settlement::reconcile(&ctx, input).await?;
+        crate::delivery_control::advance(&ctx, &self.state).await
     }
 
     #[handler]
@@ -138,6 +216,27 @@ impl RepositoryDelivery {
         input: Json<crate::github_invitation::TickExpireInput>,
     ) -> Result<(), TerminalError> {
         crate::settlement::expire(&self.state, ctx, input).await
+    }
+    #[handler]
+    async fn control(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<crate::delivery_control::DeliveryControlInput>,
+    ) -> Result<Json<crate::delivery_control::DeliveryControlResult>, TerminalError> {
+        crate::delivery_control::control(&ctx, &self.state, input)
+            .await
+            .map(Json)
+    }
+    #[handler]
+    async fn control_wake(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(wake): Json<crate::delivery_control::ControlWake>,
+    ) -> Result<(), TerminalError> {
+        if let Some(command) = crate::delivery_control::wake_command(&ctx, &wake).await? {
+            self.create(ctx, Json(command)).await?;
+        }
+        Ok(())
     }
     #[handler]
     async fn recheck(
@@ -168,10 +267,57 @@ impl RepositoryDelivery {
         ctx: SharedObjectContext<'_>,
     ) -> Result<Json<Option<DeliverySnapshot>>, TerminalError> {
         Ok(Json(
-            ctx.get::<Json<DeliverySnapshot>>("snapshot")
+            crate::repository_audit::shared_snapshot(&ctx)
                 .await?
+                .map(Json)
                 .map(|r| r.0),
         ))
+    }
+
+    /// Schedule one read-only sweep, durably throttled per physical generation.
+    #[handler]
+    async fn refresh(
+        &self,
+        ctx: ObjectContext<'_>,
+    ) -> Result<Json<ghinvite_core::delivery::RepositoryRefresh>, TerminalError> {
+        use ghinvite_core::delivery::RepositoryRefresh;
+        let Some(snapshot) = crate::repository_audit::snapshot(&ctx).await? else {
+            return Ok(Json(RepositoryRefresh::NotTracked));
+        };
+        validate_notice_snapshot(ctx.key(), &snapshot)?;
+        if snapshot.settlement.is_some()
+            || snapshot.tracking_stopped.is_some()
+            || !matches!(
+                snapshot.create.outcome,
+                CreateOutcome::Created { .. } | CreateOutcome::AlreadyPending { .. }
+            )
+        {
+            return Ok(Json(RepositoryRefresh::NotTracked));
+        }
+        let now = crate::clock::now(&ctx, "repository_refresh_time").await?;
+        if let Some(Json(at)) = ctx
+            .get::<Json<chrono::DateTime<chrono::Utc>>>("manual_refreshed_at")
+            .await?
+            && now < at + chrono::Duration::seconds(60)
+        {
+            return Ok(Json(RepositoryRefresh::Throttled {
+                retry_at: at + chrono::Duration::seconds(60),
+            }));
+        }
+        ctx.set("manual_refreshed_at", Json(now));
+        let command = &snapshot.create.command;
+        ctx.service_client::<crate::reconcile::ReconcileClient>()
+            .target(Json(crate::reconcile::TargetInput {
+                account: ghinvite_core::account::AccountInstallationRef {
+                    app: ghinvite_core::account::App::Repo,
+                    account_id: command.account_id,
+                },
+                target_id: command.repo_id,
+                deliveries: vec![command.delivery_key()],
+            }))
+            .send()
+            .await?;
+        Ok(Json(RepositoryRefresh::Requested))
     }
 
     #[handler]
@@ -180,8 +326,15 @@ impl RepositoryDelivery {
         ctx: ObjectContext<'_>,
         Json(command): Json<CreateCommand>,
     ) -> Result<Json<CreateReceipt>, TerminalError> {
-        if ctx.key() != command.delivery_key() || command.requester_id == 0 {
+        if ctx.key() != command.delivery_key()
+            || ghinvite_core::bulk::validate_origin(command.link_id, command.batch).is_err()
+            || command.requester_id == 0
+            || command.delivery_generation == 0
+        {
             return Err(TerminalError::new_with_code(400, "invalid create command"));
+        }
+        if self.state.access_grants.is_some() {
+            ctx.set("access_grants_enabled", true);
         }
         match ctx.get::<Json<CreateCommand>>("input").await? {
             Some(Json(old)) if old != command => {
@@ -194,65 +347,144 @@ impl RepositoryDelivery {
                 ctx.set("input", Json(command.clone()));
             }
         }
-        let previous = ctx
-            .get::<Json<CreateReceipt>>("receipt")
+        if let Some(receipt) =
+            crate::delivery_batch_cancel::gate(&ctx, &self.state, &command).await?
+        {
+            return Ok(Json(receipt));
+        }
+        if self.state.invite_budget.is_some() {
+            crate::delivery_budget::recover_unused(&ctx, self.state.storage.as_ref(), &command)
+                .await?;
+        }
+        if let Some(receipt) = crate::delivery_control::gate(&ctx, &self.state, &command).await? {
+            return Ok(Json(receipt));
+        }
+        let previous = crate::repository_audit::receipt(&ctx)
             .await?
+            .map(Json)
             .map(|r| r.0);
+        let audit_version = previous.as_ref().map_or(
+            ghinvite_core::delivery_audit::new_owner_version(command.invitation_id),
+            |receipt| receipt.audit_version,
+        );
         if let Some(receipt) = &previous
             && receipt.outcome.confirmed()
         {
-            let snapshot = ctx
-                .get::<Json<DeliverySnapshot>>("snapshot")
+            let snapshot = crate::repository_audit::snapshot(&ctx)
                 .await?
+                .map(Json)
                 .ok_or_else(|| TerminalError::new_with_code(500, "missing delivery snapshot"))?;
             send_projection(&ctx, &snapshot.0).await?;
             return Ok(Json(receipt.clone()));
         }
         let Json(account) = ctx
-            .object_client::<crate::availability::AccountInstallationClient>(
-                command.account_id.to_string(),
-            )
+            .object_client::<crate::availability::AccountInstallationClient>(format!(
+                "repo:{}",
+                command.account_id
+            ))
             .current_installation()
             .call()
             .await?;
-        let read_only = matches!(
+        if matches!(
             previous.as_ref().map(|r| &r.outcome),
             Some(CreateOutcome::OutcomeUnknown)
-        );
-        let release = ctx.get::<u64>("rejected_generation").await?;
-        let released = if let Some(generation) = release {
-            ctx.run(|| async {
-                Ok::<_, HandlerError>(
-                    self.state
-                        .storage
-                        .reject_delivery_attempt(command.invitation_id, generation)
-                        .await
-                        .is_ok(),
-                )
-            })
-            .name("release_rejected_generation")
-            .await?
-        } else {
-            true
-        };
-        if released {
+        ) {
+            let Json(snapshot) = crate::repository_audit::snapshot(&ctx)
+                .await?
+                .map(Json)
+                .ok_or_else(|| TerminalError::new("missing unknown delivery snapshot"))?;
+            let at = crate::clock::now(&ctx, "recovery_time").await?;
+            let Json((observation, retry)) = ctx
+                .run(|| async {
+                    let result = match account.as_ref() {
+                        Some(account) => {
+                            match crate::settlement::observe(&self.state, &snapshot, account, at)
+                                .await
+                            {
+                                Ok(observation) => (observation, None),
+                                Err(error) if !error.is_terminal() => (
+                                    None,
+                                    Some(
+                                        error
+                                            .rate_limit()
+                                            .map(|limit| {
+                                                crate::throttle::backoff(limit.retry_after)
+                                            })
+                                            .unwrap_or(crate::throttle::MAXIMUM)
+                                            .as_secs(),
+                                    ),
+                                ),
+                                Err(_) => (None, None),
+                            }
+                        }
+                        None => (None, None),
+                    };
+                    Ok::<_, HandlerError>(Json(result))
+                })
+                .name("recover_unknown_invitation")
+                .await?;
+            if let Some(observation) = observation {
+                crate::settlement::apply_observation(&ctx, snapshot, &observation).await?;
+                crate::delivery_control::advance(&ctx, &self.state).await?;
+            }
+            if let Some(seconds) = retry {
+                self.schedule_recheck(&ctx, command, std::time::Duration::from_secs(seconds))
+                    .await?;
+            }
+            let receipt = crate::repository_audit::receipt(&ctx)
+                .await?
+                .map(Json)
+                .ok_or_else(|| TerminalError::new("missing recovered receipt"))?;
+            return Ok(receipt);
+        }
+        let repo_app = self
+            .state
+            .github_apps
+            .as_ref()
+            .and_then(|apps| apps.apps.app(ghinvite_github::AppSlot::Repo).ok())
+            .ok_or_else(|| {
+                TerminalError::new_with_code(503, "repository app runtime unavailable")
+            })?;
+        let repo_app = &repo_app;
+        if let Some(generation) = ctx.get::<u64>("rejected_generation").await? {
+            let released = ctx
+                .run(|| async {
+                    Ok::<_, HandlerError>(
+                        self.state
+                            .storage
+                            .reject_delivery_attempt(&command, generation)
+                            .await
+                            .is_ok(),
+                    )
+                })
+                .name("release_rejected_generation")
+                .await?;
+            if !released {
+                self.schedule_recheck(&ctx, command, BLOCKED_RECHECK_INTERVAL)
+                    .await?;
+                return previous
+                    .map(Json)
+                    .ok_or_else(|| TerminalError::new("missing rejected receipt"));
+            }
             ctx.clear("rejected_generation");
         }
-        // Journal a read-only preflight separately from the re-executable effect.
-        // Failure here leaves the existing receipt unchanged. A failure inside
-        // the effect step may follow an applied PUT and must retain uncertainty.
-        let fence_available = ctx
-            .run(|| async {
-                Ok::<_, HandlerError>(
-                    self.state
-                        .storage
-                        .delivery_attempt_exists(command.invitation_id)
-                        .await
-                        .is_ok(),
-                )
-            })
-            .name("delivery_fence_preflight")
-            .await?;
+        let now = crate::clock::now(&ctx, "delivery_time").await?;
+        let Json((fence_available, read)) = ctx.run(|| async {
+            let available = self.state.storage.delivery_attempt_exists(&command).await.is_ok();
+            let read = match account.as_ref() {
+                Some(account) if account.account_id == command.account_id && account.uninstalled_at.is_none()
+                    && !matches!(&account.selected_repos, ghinvite_core::SelectedRepos::Subset(ids) if !ids.contains(&command.repo_id)) => {
+                    if available {
+                        crate::repository_protocol::pre_read(repo_app,
+                            account.installation_id, &command, now).await
+                    } else {
+                        crate::repository_protocol::PreRead::Stopped(CreateOutcome::Blocked { reason: BlockedReason::InstallationUnavailable })
+                    }
+                },
+                _ => crate::repository_protocol::PreRead::Stopped(CreateOutcome::Blocked { reason: BlockedReason::InstallationUnavailable }),
+            };
+            Ok::<_, HandlerError>(Json((available, read)))
+        }).name("pre_read_repository").await?;
         if !fence_available {
             self.schedule_recheck(&ctx, command, BLOCKED_RECHECK_INTERVAL)
                 .await?;
@@ -261,56 +493,140 @@ impl RepositoryDelivery {
                 "delivery fence unavailable",
             ));
         }
-        let Json(attempted) = ctx
-            .run(|| async {
-                if !released {
-                    return Ok::<_, HandlerError>(Json(Attempt::from(
-                        previous.clone().expect("rejected attempt retains receipt"),
-                    )));
-                }
-                let attempted =
-                    match attempt(&self.state, &command, account.as_ref(), read_only).await {
-                        Ok(attempted) => attempted,
-                        // A failed fence acknowledgement may follow an applied PUT.
-                        // Retain uncertainty and move the retry outside exclusivity.
-                        Err(_) => Attempt {
-                            receipt: CreateReceipt {
-                                command: command.clone(),
-                                outcome: CreateOutcome::OutcomeUnknown,
-                                revision: 1,
-                                confirmed_at: None,
-                            },
-                            throttled_for_secs: Some(BLOCKED_RECHECK_INTERVAL.as_secs()),
-                            rejected_generation: None,
-                        },
-                    };
-                #[cfg(feature = "integration")]
-                if let Some(faults) = &self.faults {
-                    use std::sync::atomic::Ordering;
-                    if attempted.receipt.outcome.confirmed()
-                        && faults.lose_http_result.swap(false, Ordering::SeqCst)
-                    {
-                        faults.http_result_losses.fetch_add(1, Ordering::SeqCst);
-                        return Err(std::io::Error::other(
-                            "fixture: GitHub result lost before journal acknowledgement",
-                        )
-                        .into());
-                    }
-                }
-                Ok::<_, HandlerError>(Json(attempted))
-            })
-            .name("guarded_github_create")
+        // S2 is pure policy; S3 is a durable owner-to-budget call, outside
+        // both I/O runs. M0 composition leaves this explicitly disabled.
+        if self.state.invite_budget.is_some()
+            && let crate::repository_protocol::PreRead::Limited { limit, .. } = &read
+        {
+            crate::delivery_budget::finish(
+                &ctx,
+                &command,
+                &crate::repository_protocol::BudgetEvidence {
+                    effect: crate::repository_protocol::BudgetEffect::Retain,
+                    limit: Some(limit.clone()),
+                },
+            )
             .await?;
+        }
+        let mut plan = crate::repository_protocol::plan(&read, RepoRole::from(command.permission));
+        if self.state.invite_budget.is_some()
+            && !matches!(plan, crate::repository_protocol::Plan::Complete(_))
+        {
+            match crate::delivery_budget::reserve(&ctx, &command, &plan).await? {
+                Some(ghinvite_core::budget::Reservation::Granted { .. }) => {
+                    self.checkpoint(&ctx, "after-budget-reserve").await?;
+                }
+                Some(ghinvite_core::budget::Reservation::RetryAt { at, why }) => {
+                    plan = crate::repository_protocol::Plan::Complete(CreateOutcome::Throttled {
+                        until: at,
+                        reason: Some(why),
+                    });
+                }
+                None => {
+                    plan = crate::repository_protocol::Plan::Complete(CreateOutcome::OutcomeUnknown)
+                }
+            }
+        }
+        let mut attempted = match plan {
+            crate::repository_protocol::Plan::Complete(outcome) => Attempt::from(CreateReceipt {
+                audit_version,
+                command: command.clone(),
+                confirmed_at: outcome.confirmed().then_some(now),
+                outcome,
+                revision: 1,
+            }),
+            crate::repository_protocol::Plan::Put
+            | crate::repository_protocol::Plan::Patch { .. } => {
+                let account = account
+                    .as_ref()
+                    .expect("write plan requires a verified installation");
+                // Retained before the run: a lost acknowledgement or cancelled
+                // invocation cannot let a later control invent no-write proof.
+                ctx.set(crate::delivery_control::MAY_HAVE_WRITTEN, true);
+                let Json(attempted) = ctx
+                    .run(|| async {
+                        let result = crate::repository_protocol::write_stage(
+                            repo_app,
+                            account.installation_id,
+                            self.state.storage.as_ref(),
+                            &command,
+                            &read,
+                            now,
+                        )
+                        .await;
+                        let mut attempted = Attempt::from(CreateReceipt {
+                            audit_version,
+                            command: command.clone(),
+                            confirmed_at: result.outcome.confirmed().then_some(now),
+                            outcome: result.outcome,
+                            revision: 1,
+                        });
+                        attempted.timing = result.timing;
+                        attempted.rejected_generation = result.rejected_generation;
+                        attempted.budget = result.budget;
+                        #[cfg(feature = "runtime-tests")]
+                        if attempted.receipt.outcome.confirmed()
+                            && crate::delivery_run_fixture::lose_confirmed_result()
+                        {
+                            return Err(std::io::Error::other(
+                                "fixture: confirmed GitHub result lost before run acknowledgement",
+                            )
+                            .into());
+                        }
+                        #[cfg(feature = "integration")]
+                        if let Some(faults) = &self.faults {
+                            use std::sync::atomic::Ordering;
+                            if attempted.receipt.outcome.confirmed()
+                                && (faults.lose_http_result.swap(false, Ordering::SeqCst)
+                                    || faults
+                                        .lose_http_results
+                                        .fetch_update(
+                                            Ordering::SeqCst,
+                                            Ordering::SeqCst,
+                                            |remaining| remaining.checked_sub(1),
+                                        )
+                                        .is_ok())
+                            {
+                                faults.http_result_losses.fetch_add(1, Ordering::SeqCst);
+                                return Err(std::io::Error::other(
+                                    "fixture: GitHub result lost before journal acknowledgement",
+                                )
+                                .into());
+                            }
+                        }
+                        Ok::<_, HandlerError>(Json(attempted))
+                    })
+                    .name("guarded_github_create")
+                    .await?;
+                if !matches!(
+                    attempted.receipt.outcome,
+                    CreateOutcome::OutcomeUnknown | CreateOutcome::Submitted
+                ) {
+                    ctx.set(crate::delivery_control::MAY_HAVE_WRITTEN, false);
+                }
+                attempted
+            }
+        };
+        // Persist positive rejection before any cross-object budget call can
+        // suspend this invocation. Recovery must not lose no-effect evidence.
+        if let Some(generation) = attempted.rejected_generation {
+            ctx.set("rejected_generation", generation);
+        }
+        if self.state.invite_budget.is_some() {
+            crate::delivery_budget::finish(&ctx, &command, &attempted.budget).await?;
+        }
+        if let CreateOutcome::Throttled { until, .. } = &attempted.receipt.outcome {
+            attempted.throttled_for_secs = Some((*until - now).num_seconds().max(1) as u64);
+        }
         // Positive non-application evidence is journaled before release. Lost
         // release acknowledgements never turn a refused PUT into uncertainty.
         if let Some(generation) = attempted.rejected_generation {
-            ctx.set("rejected_generation", generation);
             let released = ctx
                 .run(|| async {
                     let released = self
                         .state
                         .storage
-                        .reject_delivery_attempt(command.invitation_id, generation)
+                        .reject_delivery_attempt(&command, generation)
                         .await
                         .is_ok();
                     #[cfg(feature = "integration")]
@@ -333,16 +649,49 @@ impl RepositoryDelivery {
                 ctx.clear("rejected_generation");
             }
         }
+        let timing = attempted.timing.clone().or_else(|| match &read {
+            crate::repository_protocol::PreRead::Ready {
+                pending: Some(pending),
+                ..
+            } => pending.timing.clone(),
+            _ => None,
+        });
         let NextReceipt {
             receipt,
             recheck_after,
         } = next_receipt(previous.as_ref(), attempted);
-        ctx.set("receipt", Json(receipt.clone()));
-        let snapshot = DeliverySnapshot::from(receipt.clone());
-        ctx.set("snapshot", Json(snapshot.clone()));
+        crate::operational::record_unknown(&ctx, previous.as_ref(), &receipt).await?;
+        if matches!(
+            receipt.outcome,
+            CreateOutcome::Blocked {
+                reason: BlockedReason::InstallationUnavailable
+                    | BlockedReason::InstallationPermissions
+            }
+        ) && let Some(account) = &account
+        {
+            ctx.object_client::<crate::installation::InstallationClient>(format!(
+                "repo:{}",
+                account.installation_id
+            ))
+            .recheck_permissions()
+            .send()
+            .await?;
+        }
+        let mut snapshot = DeliverySnapshot::from(receipt.clone());
+        if let Some(timing) = timing {
+            let timing = crate::delivery_control::invitation_timing(&ctx, timing).await?;
+            // New owner state can include metadata in this same atomic revision.
+            let revision = snapshot.revision;
+            if snapshot.retain_invitation_timing(timing) {
+                snapshot.revision = revision;
+            }
+        }
+        crate::repository_audit::save(&ctx, &snapshot).await?;
+        let projection = retain_projection(&ctx, &snapshot).await?;
         self.checkpoint(&ctx, "after-receipt").await?;
-        send_projection(&ctx, &snapshot).await?;
+        send_retained_projection(&ctx, projection).await?;
         self.checkpoint(&ctx, "after-projection-send").await?;
+        crate::delivery_control::advance(&ctx, &self.state).await?;
         // The object lock is released before the recheck — the wait is a
         // continuation, not a held retry. Exactly one recheck stands per
         // invitation. Explicit recovery keeps an existing timer, even if its
@@ -415,26 +764,148 @@ impl RepositoryDelivery {
     }
 }
 
+pub(crate) fn validate_notice_snapshot(
+    key: &str,
+    snapshot: &DeliverySnapshot,
+) -> Result<(), TerminalError> {
+    let command = &snapshot.create.command;
+    ghinvite_core::delivery_audit::validate_identity(
+        snapshot.create.audit_version,
+        command.invitation_id,
+    )
+    .map_err(|message| TerminalError::new_with_code(409, message))?;
+    let numeric = |id| id > 0 && id <= ghinvite_core::storage::integer::MAX_EXACT;
+    if command.delivery_key() != key
+        || ![
+            command.account_id,
+            command.installation_id,
+            command.requester_id,
+            command.repo_id,
+            command.delivery_generation,
+        ]
+        .into_iter()
+        .all(numeric)
+        || snapshot
+            .create
+            .confirmed_at
+            .is_some_and(|at| at < command.approved_at)
+        || snapshot.settlement.as_ref().is_some_and(|settled| {
+            snapshot
+                .create
+                .confirmed_at
+                .is_none_or(|at| settled.event.occurred_at < at)
+        })
+    {
+        return Err(TerminalError::new_with_code(
+            409,
+            "invalid retained repository delivery",
+        ));
+    }
+    ghinvite_core::storage::delivery_projection::encode(snapshot)
+        .map_err(|_| TerminalError::new_with_code(409, "invalid retained repository delivery"))?;
+    Ok(())
+}
+
 pub(crate) async fn send_projection(
     ctx: &ObjectContext<'_>,
     receipt: &DeliverySnapshot,
 ) -> Result<(), TerminalError> {
-    ctx.object_client::<DeliveryProjectionClient>(receipt.create.command.delivery_key())
-        .apply(Json(receipt.clone()))
+    let projection = retain_projection(ctx, receipt).await?;
+    send_retained_projection(ctx, projection).await
+}
+
+async fn retain_projection(
+    ctx: &ObjectContext<'_>,
+    receipt: &DeliverySnapshot,
+) -> Result<ghinvite_core::delivery_audit::RepositoryDeliveryProjection, TerminalError> {
+    crate::repository_audit::projection(ctx, receipt).await
+}
+
+async fn send_retained_projection(
+    ctx: &ObjectContext<'_>,
+    projection: ghinvite_core::delivery_audit::RepositoryDeliveryProjection,
+) -> Result<(), TerminalError> {
+    let retained_snapshot = projection.snapshot.clone();
+    let receipt = &retained_snapshot;
+    if ctx
+        .get::<bool>("access_grants_enabled")
+        .await?
+        .unwrap_or(false)
+        && let Some(grant) =
+            ghinvite_core::access_grant::accepted_repository(receipt).map_err(TerminalError::new)?
+    {
+        ctx.object_client::<crate::access_grant::AccessGrantClient>(grant.key())
+            .schedule(Json(grant))
+            .send()
+            .await?;
+    }
+    if ghinvite_core::request_completion::repository(receipt).is_some() {
+        ctx.object_client::<crate::request_owner::InvitationRequestClient>(
+            receipt.create.command.request_id.to_string(),
+        )
+        .on_delivery_settled(Json(ghinvite_core::request_completion::DeliveryNotice {
+            kind: ghinvite_core::delivery_control::DeliveryKind::Repository,
+            target_id: receipt.create.command.repo_id,
+            delivery_generation: receipt.create.command.delivery_generation,
+        }))
         .send()
         .await?;
-    Ok(())
+    }
+    let command = &receipt.create.command;
+    let schedule = ctx.object_client::<crate::sweep_schedule::SweepScheduleClient>(format!(
+        "repo:{}",
+        command.account_id
+    ));
+    let registration = Json(crate::sweep_schedule::Registration {
+        target_id: command.repo_id,
+        delivery_key: command.delivery_key(),
+    });
+    if receipt.settlement.is_none()
+        && receipt.tracking_stopped.is_none()
+        && (receipt.create.outcome.needs_settlement()
+            || matches!(receipt.create.outcome, CreateOutcome::OutcomeUnknown))
+    {
+        schedule.track(registration).send().await?;
+    } else {
+        schedule.untrack(registration).send().await?;
+    }
+    ctx.object_client::<DeliveryProjectionClient>(receipt.create.command.delivery_key())
+        .apply(Json(projection))
+        .send()
+        .await?;
+    crate::repository_audit::acknowledge(ctx).await?;
+    crate::operational::send_projection(ctx, receipt).await
 }
 
 #[restate_sdk::object]
 impl DeliveryProjection {
     #[handler]
+    async fn telemetry(
+        &self,
+        ctx: ObjectContext<'_>,
+        Json(input): Json<ghinvite_core::storage::operational::RepositoryTelemetry>,
+    ) -> Result<(), TerminalError> {
+        if ctx.key() != input.key() {
+            return Err(TerminalError::new_with_code(400, "projection key mismatch"));
+        }
+        ctx.run(|| async {
+            self.state
+                .storage
+                .project_repository_telemetry(&input)
+                .await?;
+            Ok::<_, HandlerError>(())
+        })
+        .name("project_delivery_telemetry")
+        .await
+    }
+
+    #[handler]
     async fn apply(
         &self,
         ctx: ObjectContext<'_>,
-        Json(receipt): Json<DeliverySnapshot>,
+        Json(projection): Json<ghinvite_core::delivery_audit::RepositoryDeliveryProjection>,
     ) -> Result<(), TerminalError> {
-        if ctx.key() != receipt.create.command.delivery_key() {
+        if ctx.key() != projection.snapshot.create.command.delivery_key() {
             return Err(TerminalError::new_with_code(400, "projection key mismatch"));
         }
         ctx.run(|| async {
@@ -451,7 +922,10 @@ impl DeliveryProjection {
                     std::io::Error::other("fixture: receipt/audit projection unavailable").into(),
                 );
             }
-            self.state.storage.project_delivery(&receipt).await?;
+            self.state
+                .storage
+                .project_delivery_with_events(&projection)
+                .await?;
             #[cfg(feature = "integration")]
             if let Some(faults) = &self.faults
                 && faults
@@ -474,34 +948,25 @@ impl DeliveryProjection {
 /// GitHub throttled it rather than deciding it.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    timing: Option<ghinvite_core::delivery::InvitationTiming>,
     receipt: CreateReceipt,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     throttled_for_secs: Option<u64>,
     #[serde(default)]
     rejected_generation: Option<u64>,
+    #[serde(default)]
+    budget: crate::repository_protocol::BudgetEvidence,
 }
 
 impl From<CreateReceipt> for Attempt {
     fn from(receipt: CreateReceipt) -> Self {
         Self {
             receipt,
+            timing: None,
             throttled_for_secs: None,
             rejected_generation: None,
-        }
-    }
-}
-
-impl Attempt {
-    /// Pair a receipt with the bounded wait GitHub's throttling guidance
-    /// allows. Only a receipt reporting no confirmed outcome carries one, so a
-    /// wait can never shorten the life of a settled delivery.
-    fn throttled_by(receipt: CreateReceipt, limit: RateLimit) -> Self {
-        let retry_after = limit.retry_after;
-        Self {
-            throttled_for_secs: (!receipt.outcome.confirmed())
-                .then(|| crate::throttle::backoff(retry_after).as_secs()),
-            receipt,
-            rejected_generation: None,
+            budget: Default::default(),
         }
     }
 }
@@ -537,18 +1002,21 @@ fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextRecei
         ..
     } = attempt;
     receipt.revision = previous.map_or(1, |r| r.revision + 1);
+    if let Some(previous) = previous {
+        receipt.audit_version = previous.audit_version;
+    }
     if matches!(
         previous.map(|r| &r.outcome),
         Some(CreateOutcome::OutcomeUnknown)
     ) && matches!(
         receipt.outcome,
-        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled
+        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled { .. }
     ) {
         receipt.outcome = CreateOutcome::OutcomeUnknown;
     }
     let blocked = matches!(
         receipt.outcome,
-        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled
+        CreateOutcome::Blocked { .. } | CreateOutcome::Throttled { .. }
     );
     let recheck_after = match throttled_for_secs {
         Some(secs) => Some(std::time::Duration::from_secs(secs)),
@@ -560,609 +1028,23 @@ fn next_receipt(previous: Option<&CreateReceipt>, attempt: Attempt) -> NextRecei
     }
 }
 
-async fn attempt(
-    state: &AppState,
-    command: &CreateCommand,
-    account: Option<&ghinvite_core::Account>,
-    read_only: bool,
-) -> Result<Attempt, HandlerError> {
-    // An existing `github_invitations` row is not create evidence. Only this
-    // object's own projection writes it, after the receipt it projects is
-    // already retained, so the row never knows more than `receipt`. Every
-    // PUT is preceded by a durable claim on the fence below, which is what
-    // keeps a retry — even one without a retained receipt — from writing twice.
-    let attempted = if read_only {
-        true
-    } else {
-        match state
-            .storage
-            .delivery_attempt_exists(command.invitation_id)
-            .await
-        {
-            Ok(attempted) => attempted,
-            // This external-effect step may be replaying an applied PUT whose
-            // result was not journaled. A failed read cannot prove non-application.
-            // The caller retains Unknown and schedules a bounded read-only retry.
-            Err(error) => return Err(error.into()),
-        }
-    };
-    let blocked = |reason: &str| CreateReceipt {
-        command: command.clone(),
-        outcome: if attempted {
-            CreateOutcome::OutcomeUnknown
-        } else {
-            CreateOutcome::Blocked {
-                reason: reason.into(),
-            }
-        },
-        revision: 1,
-        confirmed_at: None,
-    };
-    let Some(account) = account else {
-        return Ok(blocked("installation unavailable").into());
-    };
-    if account.account_id != command.account_id || account.uninstalled_at.is_some() {
-        return Ok(blocked("installation identity unverified").into());
-    }
-    let repo = ghinvite_core::RepositoryIdentity::parse(command.repo_full_name.clone())
-        .map_err(|_| TerminalError::new_with_code(400, "invalid repository"))?;
-    // A prerequisite GitHub would not answer for is not a prerequisite that went
-    // away: it blocks on GitHub's wait rather than on the unavailability cadence.
-    let unread = |error: &ghinvite_github::Error, unavailable: &str| match error.rate_limit() {
-        Some(limit) => {
-            let mut receipt = blocked("GitHub throttled a delivery prerequisite");
-            if !attempted {
-                receipt.outcome = CreateOutcome::Throttled;
-            }
-            Attempt::throttled_by(receipt, limit)
-        }
-        None => blocked(unavailable).into(),
-    };
-    match state.github.get_installation(account.installation_id).await {
-        Ok(Some(current))
-            if current.id == account.installation_id
-                && current.account.id == command.account_id
-                && current.suspended_at.is_none() => {}
-        Ok(_) => return Ok(blocked("installation identity unverified").into()),
-        Err(error) => return Ok(unread(&error, "installation identity unverified")),
-    }
-    match verify_repository_access(&state.github, account, command.repo_id, &repo).await {
-        RepositoryAccess::Verified => (),
-        RepositoryAccess::Unavailable(Unavailable::NotSelected) => {
-            return Ok(blocked("repository unavailable").into());
-        }
-        // A repository that answered with a different identity is verified as
-        // the wrong one, not unread.
-        RepositoryAccess::Unavailable(Unavailable::IdentityMismatch) => {
-            return Ok(blocked("repository unavailable or identity unverified").into());
-        }
-        RepositoryAccess::Unread(error) => {
-            return Ok(unread(
-                &error,
-                "repository unavailable or identity unverified",
-            ));
-        }
-    };
-    let user = match state
-        .github
-        .verified_user(account.installation_id, command.requester_id)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return Ok(unread(&error, "requester identity unverified")),
-    };
-    // Mint the PUT's credential before the fence: a mint failure inside the PUT
-    // leaves the PUT unanswered, fencing a write that was never sent as outcome
-    // unknown. A token this fresh outlives the PUT, which then reuses it from
-    // the cache.
-    if let Err(error) = state
-        .github
-        .installation_token(account.installation_id)
-        .await
-    {
-        return Ok(unread(&error, "installation token unavailable"));
-    }
-    // A database write fence protects retries of this run closure even when
-    // GitHub succeeded but Restate never journaled its response. It never expires.
-    // This also validates the exact input of an existing fence. A retained
-    // unknown receipt cannot use a fresh claim (even after a lost fence row).
-    let generation = state.storage.claim_delivery_attempt(command).await?;
-    let generation = if read_only { None } else { generation };
-    let mut throttled_by = None;
-    let mut rejected_generation = None;
-    let outcome = if let Some(generation) = generation {
-        match state
-            .github
-            .add_collaborator(
-                account.installation_id,
-                repo.owner(),
-                repo.name(),
-                &user.login,
-                command.permission,
-            )
-            .await
-        {
-            CollaboratorAddition::Created { invitation_id } => CreateOutcome::Created {
-                upstream_id: invitation_id,
-            },
-            CollaboratorAddition::AlreadyCollaborator => CreateOutcome::AlreadyCollaborator,
-            // A throttled response is GitHub refusing the PUT outright, so it is
-            // as explicit a rejection as a 403: the write did not happen and
-            // this exact generation may be claimed again. Only a *response*
-            // is throttled — a transport failure is unanswered and keeps the
-            // fence, so throttling can never release an ambiguous PUT.
-            CollaboratorAddition::Throttled(limit) => {
-                rejected_generation = Some(generation);
-                throttled_by = Some(limit);
-                CreateOutcome::Throttled
-            }
-            // An access refusal is a prerequisite gone missing, not a verdict on
-            // the invitation, so it blocks and releases the fence for a retry.
-            CollaboratorAddition::AccessRefused { .. } => {
-                rejected_generation = Some(generation);
-                CreateOutcome::Blocked {
-                    reason: "GitHub rejected access".into(),
-                }
-            }
-            CollaboratorAddition::ValidationRefused { status } => CreateOutcome::Failed { status },
-            CollaboratorAddition::Unanswered(_) => CreateOutcome::OutcomeUnknown,
-        }
-    } else {
-        // Reconciliation is read-only. Absence, API failure, or a subsequently
-        // declined invitation never permits another write of this operation.
-        let pending = state
-            .github
-            .list_invitations(account.installation_id, repo.owner(), repo.name())
-            .await;
-        // Reading is safe to repeat, so a throttled read earns the same bounded
-        // recheck a throttled write does — whichever of the two reads it was.
-        // The outcome stays unknown either way: a limit is not evidence about
-        // the original PUT.
-        let mut unread = |error: ghinvite_github::Error| {
-            if let Some(limit) = error.rate_limit() {
-                throttled_by = Some(limit);
-            }
-            CreateOutcome::OutcomeUnknown
-        };
-        match pending {
-            Ok(items) => match items.iter().find(|i| {
-                i.invitee.id == command.requester_id
-                    && ghinvite_github::CollaboratorRole::parse(&i.permissions)
-                        .matches(command.permission)
-            }) {
-                Some(item) => CreateOutcome::Created {
-                    upstream_id: item.id,
-                },
-                None => match state
-                    .github
-                    .collaborator_permission(
-                        account.installation_id,
-                        repo.owner(),
-                        repo.name(),
-                        &user.login,
-                    )
-                    .await
-                {
-                    Ok((id, role))
-                        if id == command.requester_id && role.matches(command.permission) =>
-                    {
-                        CreateOutcome::AlreadyCollaborator
-                    }
-                    // Membership evidence that named somebody else is read, not
-                    // unread: it reports no limit and schedules nothing.
-                    Ok(_) => CreateOutcome::OutcomeUnknown,
-                    Err(error) => unread(error),
-                },
-            },
-            Err(error) => unread(error),
-        }
-    };
-    let receipt = CreateReceipt {
-        command: command.clone(),
-        confirmed_at: outcome.confirmed().then(chrono::Utc::now),
-        outcome,
-        revision: 1,
-    };
-    let mut attempt = match throttled_by {
-        Some(limit) => Attempt::throttled_by(receipt, limit),
-        None => receipt.into(),
-    };
-    attempt.rejected_generation = rejected_generation;
-    Ok(attempt)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        dt, fixture_github_client, invitation_item, invitation_page, refusal,
-        seed_pending_invitation, token_mint,
-    };
+    use crate::test_support::dt;
     use ghinvite_core::GithubInvitationId;
-    use ghinvite_core::delivery::CreateCommand;
-    use ghinvite_github::mocks::{Expectation, MockTransport};
-    use ghinvite_github::transport::Method;
-    use std::sync::Arc;
-
-    async fn attempt(state: &AppState, command: &CreateCommand) -> Result<Attempt, HandlerError> {
-        let account = state
-            .storage
-            .get_active_installation_by_account_id(command.account_id)
-            .await?;
-        let attempted = super::attempt(state, command, account.as_ref(), false).await?;
-        if let Some(generation) = attempted.rejected_generation {
-            state
-                .storage
-                .reject_delivery_attempt(command.invitation_id, generation)
-                .await?;
-        }
-        Ok(attempted)
-    }
-
-    fn installation_identity() -> Expectation {
-        Expectation::ok_json(
-            Method::Get,
-            "https://api.github.test/app/installations/9",
-            serde_json::json!({"id":9,"account":{"id":100,"login":"acme","type":"Organization"},"suspended_at":null}),
-        )
-    }
-
-    /// A pending invitation on the same repository for somebody else, so page
-    /// one carries no evidence about this command's requester.
-    fn other_requester_item(id: u64) -> serde_json::Value {
-        serde_json::json!({
-            "id": id,
-            "invitee": {"id": 41, "login": "bob"},
-            "permissions": "write",
-            "created_at": "2026-05-04T13:00:00Z"
-        })
-    }
-
-    /// GitHub calls `attempt` makes before it reaches the pending-invitation
-    /// listing: repository identity, then requester identity and its address.
-    fn identity_expectations() -> Vec<Expectation> {
-        vec![
-            installation_identity(),
-            token_mint(9),
-            Expectation::ok_json(
-                Method::Get,
-                "https://api.github.test/repos/acme/api",
-                serde_json::json!({"id": 10, "full_name": "acme/api", "private": true}),
-            ),
-            Expectation::ok_json(
-                Method::Get,
-                "https://api.github.test/user/8",
-                serde_json::json!({"id": 8, "login": "alice"}),
-            ),
-            Expectation::ok_json(
-                Method::Get,
-                "https://api.github.test/users/alice",
-                serde_json::json!({"id": 8, "login": "alice"}),
-            ),
-        ]
-    }
-
-    /// Seed the projections `attempt` reads, leaving the delivery fence
-    /// unclaimed so the first guarded PUT may go out.
-    async fn state_with_pending_create(mock: MockTransport) -> (AppState, CreateCommand) {
-        let storage = Arc::new(
-            ghinvite_storage_sqlx::SqlxStorage::in_memory()
-                .await
-                .unwrap(),
-        );
-        let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
-        let seeded = seed_pending_invitation(&storage, "acme/api").await;
-        let command = CreateCommand {
-            invitation_id: GithubInvitationId::new(),
-            link_id: seeded.link_id,
-            request_id: seeded.request_id,
-            approval_id: "approval-1".into(),
-            account_id: 100,
-            installation_id: 9,
-            requester_id: 8,
-            repo_id: 10,
-            repo_full_name: "acme/api".into(),
-            permission: ghinvite_core::Permission::Push,
-            approved_at: dt("2026-05-04T13:00:00Z"),
-        };
-        (state, command)
-    }
-
-    /// The PUT `attempt` issues once the identity checks have passed, answered
-    /// with `status`, `headers` and a GitHub-shaped `{"message": ...}` body.
-    fn put_collaborator(status: u16, headers: &[(&str, &str)], message: &str) -> Vec<Expectation> {
-        let mut script = identity_expectations();
-        script.push(Expectation {
-            method: Method::Put,
-            url: "https://api.github.test/repos/acme/api/collaborators/alice".into(),
-            required_headers: Default::default(),
-            expected_body: None,
-            response: refusal(status, headers, message),
-        });
-        script
-    }
-
-    /// Whether the delivery fence would authorize another PUT for this command.
-    async fn fence_is_open(state: &AppState, command: &CreateCommand) -> bool {
-        state
-            .storage
-            .claim_delivery_attempt(command)
-            .await
-            .unwrap()
-            .is_some()
-    }
-
-    #[tokio::test]
-    async fn throttled_put_blocks_on_githubs_own_schedule() {
-        let mock = MockTransport::scripted(put_collaborator(
-            403,
-            &[("retry-after", "45")],
-            "You have exceeded a secondary rate limit",
-        ));
-        let (state, command) = state_with_pending_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::Throttled);
-        assert_eq!(attempted.throttled_for_secs, Some(45));
-        // An explicit throttle refused the PUT outright, so this generation is
-        // released and the recheck may claim it again.
-        assert!(fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn permission_denied_put_blocks_without_throttle_guidance() {
-        let mock = MockTransport::scripted(put_collaborator(
-            403,
-            &[("x-ratelimit-remaining", "4998")],
-            "Resource not accessible by integration",
-        ));
-        let (state, command) = state_with_pending_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Blocked {
-                reason: "GitHub rejected access".into()
-            }
-        );
-        // Nothing to wait out: this recheck keeps the slow dependency cadence.
-        assert_eq!(attempted.throttled_for_secs, None);
-        assert!(fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn ambiguous_put_is_never_read_as_throttling() {
-        // 502 carries no rate-limit evidence, so it stays uncertain: the PUT may
-        // have been applied, and neither the fence nor a throttled retry may
-        // assume otherwise.
-        let mock = MockTransport::scripted(put_collaborator(502, &[], "Bad gateway"));
-        let (state, command) = state_with_pending_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
-        assert_eq!(attempted.throttled_for_secs, None);
-        assert!(!fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn throttled_prerequisite_blocks_before_the_fence_is_claimed() {
-        let mock = MockTransport::scripted(vec![
-            installation_identity(),
-            token_mint(9),
-            Expectation {
-                method: Method::Get,
-                url: "https://api.github.test/repos/acme/api".into(),
-                required_headers: Default::default(),
-                expected_body: None,
-                response: refusal(403, &[("retry-after", "30")], "API rate limit exceeded"),
-            },
-        ]);
-        let (state, command) = state_with_pending_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::Throttled);
-        assert_eq!(attempted.throttled_for_secs, Some(30));
-        // A prerequisite that was never read is not a repository that went away,
-        // and no PUT was attempted, so the fence is untouched.
-        assert!(fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
-
-    /// Seed the projections `attempt` reads, then burn the delivery claim the
-    /// way a create whose GitHub response was never journaled does. The retry
-    /// can no longer write, so it has to recover the outcome by observation.
-    async fn state_with_retained_create(mock: MockTransport) -> (AppState, CreateCommand) {
-        let storage = Arc::new(
-            ghinvite_storage_sqlx::SqlxStorage::in_memory()
-                .await
-                .unwrap(),
-        );
-        let state = AppState::new(storage.clone(), fixture_github_client(Arc::new(mock)));
-        let seeded = seed_pending_invitation(&storage, "acme/api").await;
-        let command = CreateCommand {
-            invitation_id: GithubInvitationId::new(),
-            link_id: seeded.link_id,
-            request_id: seeded.request_id,
-            approval_id: "approval-1".into(),
-            account_id: 100,
-            installation_id: 9,
-            requester_id: 8,
-            repo_id: 10,
-            repo_full_name: "acme/api".into(),
-            permission: ghinvite_core::Permission::Push,
-            approved_at: dt("2026-05-04T13:00:00Z"),
-        };
-        assert!(
-            state
-                .storage
-                .claim_delivery_attempt(&command)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        (state, command)
-    }
-
-    #[tokio::test]
-    async fn retained_create_is_recovered_from_a_later_page() {
-        let mut script = identity_expectations();
-        script.extend([
-            invitation_page(
-                "https://api.github.test/repos/acme/api/invitations?per_page=100",
-                serde_json::json!([other_requester_item(7001)]),
-                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
-            ),
-            invitation_page(
-                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
-                serde_json::json!([invitation_item(9977)]),
-                None,
-            ),
-        ]);
-        let mock = MockTransport::scripted(script);
-        let (state, command) = state_with_retained_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Created { upstream_id: 9977 }
-        );
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn retained_create_stays_unknown_when_a_later_page_fails() {
-        let mut script = identity_expectations();
-        script.extend([
-            invitation_page(
-                "https://api.github.test/repos/acme/api/invitations?per_page=100",
-                serde_json::json!([other_requester_item(7001)]),
-                Some("https://api.github.test/repos/acme/api/invitations?per_page=100&page=2"),
-            ),
-            Expectation::status(
-                Method::Get,
-                "https://api.github.test/repos/acme/api/invitations?per_page=100&page=2",
-                502,
-            ),
-        ]);
-        let mock = MockTransport::scripted(script);
-        let (state, command) = state_with_retained_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        // Half a listing is not evidence of absence, so the collaborator probe
-        // never runs and the create stays unknown.
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
-        // A 502 says nothing about when reading might work, so nothing is
-        // scheduled: recovery reconciles this one.
-        assert_eq!(attempted.throttled_for_secs, None);
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn retained_create_rechecks_a_throttled_reconciliation() {
-        let mut script = identity_expectations();
-        script.push(Expectation {
-            method: Method::Get,
-            url: "https://api.github.test/repos/acme/api/invitations?per_page=100".into(),
-            required_headers: Default::default(),
-            expected_body: None,
-            response: refusal(403, &[("retry-after", "90")], "API rate limit exceeded"),
-        });
-        let mock = MockTransport::scripted(script);
-        let (state, command) = state_with_retained_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        // The fence stays burned and the outcome stays unknown — a limit is no
-        // evidence about the original PUT — but rereading is safe, so this one
-        // is worth rechecking once GitHub says the limit has cleared.
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
-        assert_eq!(attempted.throttled_for_secs, Some(90));
-        assert!(!fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
-
-    #[tokio::test]
-    async fn retained_create_rechecks_a_throttled_membership_probe() {
-        // The listing is complete and shows no invitation, so absence is real
-        // and the membership probe follows — and that read is the throttled one.
-        let mut script = identity_expectations();
-        script.extend([
-            invitation_page(
-                "https://api.github.test/repos/acme/api/invitations?per_page=100",
-                serde_json::json!([other_requester_item(7001)]),
-                None,
-            ),
-            Expectation {
-                method: Method::Get,
-                url: "https://api.github.test/repos/acme/api/collaborators/alice/permission".into(),
-                required_headers: Default::default(),
-                expected_body: None,
-                response: refusal(403, &[("retry-after", "20")], "API rate limit exceeded"),
-            },
-        ]);
-        let mock = MockTransport::scripted(script);
-        let (state, command) = state_with_retained_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        assert_eq!(attempted.receipt.outcome, CreateOutcome::OutcomeUnknown);
-        assert_eq!(attempted.throttled_for_secs, Some(20));
-        mock.assert_exhausted();
-    }
-
-    /// A token mint whose token is already past its refresh window, so the
-    /// next call mints again.
-    fn stale_token_mint() -> Expectation {
-        let mut mint = token_mint(9);
-        mint.response.body = br#"{"token":"ghs_old","expires_at":"2000-01-01T00:00:00Z"}"#.to_vec();
-        mint
-    }
-
-    #[tokio::test]
-    async fn a_failed_token_mint_blocks_before_the_fence_is_claimed() {
-        // Every read mints afresh; the mint that would authorize the PUT fails.
-        let mut script = identity_expectations();
-        script[1] = stale_token_mint();
-        script.insert(3, stale_token_mint());
-        script.insert(5, stale_token_mint());
-        script.push(Expectation {
-            method: Method::Post,
-            url: "https://api.github.test/app/installations/9/access_tokens".into(),
-            required_headers: Default::default(),
-            expected_body: None,
-            response: refusal(502, &[], "Bad Gateway"),
-        });
-        let mock = MockTransport::scripted(script);
-        let (state, command) = state_with_pending_create(mock.clone()).await;
-
-        let attempted = attempt(&state, &command).await.unwrap();
-
-        // Nothing was sent, so this is a prerequisite that blocked, not a PUT
-        // whose outcome is unknown.
-        assert_eq!(
-            attempted.receipt.outcome,
-            CreateOutcome::Blocked {
-                reason: "installation token unavailable".into()
-            }
-        );
-        assert!(fence_is_open(&state, &command).await);
-        mock.assert_exhausted();
-    }
 
     fn receipt(outcome: CreateOutcome, revision: u64) -> CreateReceipt {
         CreateReceipt {
+            audit_version: Default::default(),
             command: CreateCommand {
-                invitation_id: GithubInvitationId::new(),
-                link_id: ghinvite_core::InvitationLinkId::new(),
+                batch: None,
+                budget_attribution: Default::default(),
+                access_lifetime_seconds: None,
+                budget_share_pct: 50,
+                delivery_generation: 1,
+                invitation_id: Some(GithubInvitationId::new()),
+                link_id: Some(ghinvite_core::InvitationLinkId::new()),
                 request_id: ghinvite_core::RequestId::new(),
                 approval_id: "approval-1".into(),
                 account_id: 100,
@@ -1179,17 +1061,50 @@ mod tests {
         }
     }
 
+    #[test]
+    fn final_notice_rejects_invalid_retained_identity_receipt_and_revision() {
+        let mut create = receipt(
+            CreateOutcome::AlreadySatisfied {
+                effective_role: ghinvite_core::targets::EffectiveRole::Write,
+            },
+            1,
+        );
+        create.confirmed_at = Some(create.command.approved_at);
+        let snapshot = DeliverySnapshot::from(create);
+        let key = snapshot.create.command.delivery_key();
+        assert!(validate_notice_snapshot(&key, &snapshot).is_ok());
+        assert!(validate_notice_snapshot("other:key:1", &snapshot).is_err());
+        let mut invalid = snapshot.clone();
+        invalid.create.command.account_id = 0;
+        assert!(validate_notice_snapshot(&key, &invalid).is_err());
+        let mut invalid = snapshot.clone();
+        invalid.create.confirmed_at = None;
+        assert!(validate_notice_snapshot(&key, &invalid).is_err());
+        let mut invalid = snapshot.clone();
+        invalid.create.confirmed_at =
+            Some(invalid.create.command.approved_at - chrono::Duration::seconds(1));
+        assert!(validate_notice_snapshot(&key, &invalid).is_err());
+        let mut invalid = snapshot.clone();
+        invalid.revision = 0;
+        assert!(validate_notice_snapshot(&key, &invalid).is_err());
+        let mut invalid = snapshot;
+        invalid.tracking_stopped = Some(ghinvite_core::delivery::SettlementReason::LinkRevoked);
+        assert!(validate_notice_snapshot(&key, &invalid).is_err());
+    }
+
     fn blocked() -> CreateOutcome {
         CreateOutcome::Blocked {
-            reason: "repository unavailable".into(),
+            reason: BlockedReason::TargetUnavailable,
         }
     }
 
     fn attempted(outcome: CreateOutcome, throttled_for_secs: Option<u64>) -> Attempt {
         Attempt {
+            timing: None,
             receipt: receipt(outcome, 1),
             throttled_for_secs,
             rejected_generation: None,
+            budget: Default::default(),
         }
     }
 
@@ -1207,6 +1122,23 @@ mod tests {
         let next = next_receipt(Some(&previous), attempted(blocked(), None));
 
         assert_eq!(next.receipt.revision, 5);
+    }
+
+    #[test]
+    fn confirming_uncertainty_preserves_the_retained_audit_contract() {
+        use ghinvite_core::delivery_audit::DeliveryAuditVersion::{CanonicalV1, Legacy};
+        for (retained, incoming) in [(Legacy, CanonicalV1), (CanonicalV1, Legacy)] {
+            let mut previous = receipt(CreateOutcome::OutcomeUnknown, 1);
+            previous.audit_version = retained;
+            let mut attempt = attempted(CreateOutcome::Created { upstream_id: 77 }, None);
+            attempt.receipt.audit_version = incoming;
+            let next = next_receipt(Some(&previous), attempt);
+            assert_eq!(next.receipt.audit_version, retained);
+            assert_eq!(
+                next.receipt.outcome,
+                CreateOutcome::Created { upstream_id: 77 }
+            );
+        }
     }
 
     #[test]

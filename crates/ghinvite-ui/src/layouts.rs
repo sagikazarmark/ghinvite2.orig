@@ -4,6 +4,64 @@
 use crate::components::{AppScript, Footer, Nav};
 use dioxus::prelude::*;
 
+/// Display-only, per-document app facts supplied by the web's authorized
+/// account extractor. Absence never implies an installed or available app.
+#[derive(Clone, Copy, PartialEq)]
+pub enum InstalledAppState {
+    Installed,
+    Suspended,
+    NotInstalled,
+}
+impl InstalledAppState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Installed => "Installed",
+            Self::Suspended => "Suspended",
+            Self::NotInstalled => "Not installed",
+        }
+    }
+}
+#[derive(Clone, PartialEq)]
+pub struct ConsoleApps {
+    pub account_login: String,
+    pub repository: InstalledAppState,
+    /// Delegated repository administrators do not receive org-app facts.
+    pub organization: Option<InstalledAppState>,
+    pub can_manage: bool,
+}
+/// Display-only pending count, calculated with this user's complete Console scope.
+#[derive(Clone, PartialEq)]
+pub struct ConsolePendingRequests {
+    pub account_login: String,
+    /// Missing means the complete count could not be established.
+    pub count: Option<u64>,
+}
+
+#[component]
+fn PendingRequestsBadge(count: Option<u64>) -> Element {
+    rsx! {
+        match count {
+            Some(count) => rsx! { span { class:"badge badge-sm ml-auto", aria_label:format!("Pending requests: {count}"), "{count}" } },
+            None => rsx! { span { class:"badge badge-sm ml-auto", aria_label:"Pending request count unavailable", "—" } },
+        }
+    }
+}
+
+#[component]
+fn ConsoleAppHeader(apps: ConsoleApps) -> Element {
+    rsx! {
+        header { class: "flex flex-wrap items-center gap-3 border-b border-base-300 bg-base-100 px-4 py-2 text-sm", aria_label: "Installed GitHub apps",
+            span { "Repo app: {apps.repository.label()}" }
+            if let Some(org) = apps.organization { span { "Org app: {org.label()}" } }
+            if apps.can_manage {
+                if apps.repository == InstalledAppState::NotInstalled { a { class: "link", href: "/onboarding", "Add repo app" } }
+                if apps.organization == Some(InstalledAppState::NotInstalled) { a { class: "link", href: "/onboarding", "Add org app" } }
+                a { class: "link", href: "/console/accounts/{apps.account_login}/installations", "Manage apps" }
+            } else { a { class: "link", href: "/onboarding", "Choose apps" } }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Props)]
 pub struct LayoutProps {
     pub signed_in_login: Option<String>,
@@ -59,6 +117,11 @@ pub fn HomeLayout(props: LayoutProps) -> Element {
 #[component]
 pub fn ConsoleLayout(props: LayoutProps) -> Element {
     let login = props.account_login.clone().unwrap_or_default();
+    let apps = try_consume_context::<ConsoleApps>()
+        .filter(|apps| apps.account_login.eq_ignore_ascii_case(&login));
+    let show_apps_panel = apps.as_ref().is_none_or(|apps| apps.can_manage);
+    let pending = try_consume_context::<ConsolePendingRequests>()
+        .filter(|pending| pending.account_login.eq_ignore_ascii_case(&login));
     let active_nav = props.active_nav.clone().unwrap_or_default();
     let overview_side = if active_nav == "overview" {
         "app-nav-row app-nav-row-active flex w-full items-center"
@@ -80,6 +143,11 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
     } else {
         "app-nav-row flex w-full items-center"
     };
+    let installations_side = if active_nav == "installations" {
+        "app-nav-row app-nav-row-active flex w-full items-center"
+    } else {
+        "app-nav-row flex w-full items-center"
+    };
     let audit_side = if active_nav == "audit" {
         "app-nav-row app-nav-row-active flex w-full items-center"
     } else {
@@ -97,9 +165,10 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                     nav { class: "flex-1 space-y-1 p-3 text-sm", aria_label: "Console",
                         a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                         a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
-                        a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" }
+                        a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Pending requests" if let Some(pending) = &pending { PendingRequestsBadge { count:pending.count } } }
                         a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit log" }
                         a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                        if show_apps_panel { a { class: "{installations_side}", href: "/console/accounts/{login}/installations", aria_current: if active_nav == "installations" { "page" } else { "false" }, "Apps" } }
                     }
                     div { class: "sidebar-account-switcher border-t border-base-300 p-3",
                         p { class: "text-[0.68rem] font-semibold uppercase tracking-wide text-muted", "Active account" }
@@ -107,7 +176,7 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                             span { class: "grid size-7 shrink-0 place-items-center rounded-lg bg-base-300 text-xs font-semibold", "@" }
                             span { class: "min-w-0 flex-1 truncate font-medium", "{login}" }
                         }
-                        a { class: "btn btn-ghost btn-xs mt-2 h-7 min-h-0 w-full justify-start px-2", href: "/install", "Install another account" }
+                        a { class: "btn btn-ghost btn-xs mt-2 h-7 min-h-0 w-full justify-start px-2", href: "/onboarding", "Install another account" }
                     }
                 }
                 div { class: "console-content min-w-0 flex flex-1 flex-col",
@@ -115,15 +184,17 @@ pub fn ConsoleLayout(props: LayoutProps) -> Element {
                         div { class: "flex flex-wrap gap-1 text-sm",
                             a { class: "{overview_side}", href: "/console/accounts/{login}", aria_current: if active_nav == "overview" { "page" } else { "false" }, "Overview" }
                             a { class: "{links_side}", href: "/console/accounts/{login}/links", aria_current: if active_nav == "links" { "page" } else { "false" }, "Links" }
-                            a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" }
+                            a { class: "{requests_side}", href: "/console/accounts/{login}/requests", aria_current: if active_nav == "requests" { "page" } else { "false" }, "Requests" if let Some(pending) = &pending { PendingRequestsBadge { count:pending.count } } }
                             a { class: "{audit_side}", href: "/console/accounts/{login}/audit", aria_current: if active_nav == "audit" { "page" } else { "false" }, "Audit" }
                             a { class: "{settings_side}", href: "/console/accounts/{login}/settings", aria_current: if active_nav == "settings" { "page" } else { "false" }, "Settings" }
+                        if show_apps_panel { a { class: "{installations_side}", href: "/console/accounts/{login}/installations", aria_current: if active_nav == "installations" { "page" } else { "false" }, "Apps" } }
                         }
                     }
                     nav { class: "flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-base-300 bg-base-100 px-3 py-2 text-xs md:hidden", aria_label: "Account",
                         a { class: "link min-w-0 break-all", href: "/console/accounts/{login}/settings", "Account: {login}" }
-                        a { class: "link", href: "/install", "Install another account" }
+                        a { class: "link", href: "/onboarding", "Install another account" }
                     }
+                    if let Some(apps) = apps { ConsoleAppHeader { apps } }
                     main { class: "console-main",
                         {match &props.flash {
                             Some(f) => {
@@ -310,6 +381,10 @@ mod tests {
             (Some("requests"), Some("/console/accounts/acme/requests")),
             (Some("audit"), Some("/console/accounts/acme/audit")),
             (Some("settings"), Some("/console/accounts/acme/settings")),
+            (
+                Some("installations"),
+                Some("/console/accounts/acme/installations"),
+            ),
             (None, None),
         ] {
             let html = crate::testing::render(move || {
@@ -344,7 +419,11 @@ mod tests {
                     anchor.contains("href=\"/console/accounts/acme/links\"")
                         && anchor.ends_with(">Links")
                 }));
-                assert_eq!(anchors.len(), 5);
+                assert_eq!(anchors.len(), 6);
+                assert!(anchors.iter().any(|anchor| {
+                    anchor.contains("href=\"/console/accounts/acme/installations\"")
+                        && anchor.ends_with(">Apps")
+                }));
                 for anchor in anchors {
                     let current = destination
                         .is_some_and(|href| anchor.contains(&format!("href=\"{href}\"")));
@@ -436,5 +515,56 @@ mod tests {
             .find("http-equiv=\"refresh\"")
             .expect("meta refresh is rendered");
         assert!(meta_pos < head_end, "meta refresh must be inside <head>");
+    }
+}
+
+#[cfg(test)]
+mod pending_navigation_tests {
+    use super::*;
+    fn render(facts: ConsolePendingRequests) -> String {
+        let mut vdom = VirtualDom::new(|| {
+            rsx! {
+                ConsoleLayout {
+                    signed_in_login: Some("admin".to_string()),
+                    title: "Links".to_string(),
+                    account_login: Some("acme".to_string()),
+                    active_nav: Some("links".to_string()),
+                    flash: None,
+                    children: rsx! { p { "Links" } },
+                }
+            }
+        });
+        vdom.provide_root_context(facts);
+        vdom.rebuild_in_place();
+        dioxus_ssr::render(&vdom)
+    }
+    #[test]
+    fn pending_count_is_available_on_both_navigation_layouts_even_at_zero() {
+        for count in [0, 7, 1200] {
+            let html = render(ConsolePendingRequests {
+                account_login: "acme".into(),
+                count: Some(count),
+            });
+            assert_eq!(
+                html.matches(&format!("aria-label=\"Pending requests: {count}\""))
+                    .count(),
+                2
+            );
+        }
+    }
+    #[test]
+    fn unknown_pending_count_is_explicit_and_other_account_context_is_ignored() {
+        let html = render(ConsolePendingRequests {
+            account_login: "acme".into(),
+            count: None,
+        });
+        assert_eq!(html.matches("Pending request count unavailable").count(), 2);
+        assert!(!html.contains("Pending requests: 0"));
+        let html = render(ConsolePendingRequests {
+            account_login: "other".into(),
+            count: Some(711),
+        });
+        assert!(!html.contains("711"));
+        assert!(!html.contains("Pending request count unavailable"));
     }
 }

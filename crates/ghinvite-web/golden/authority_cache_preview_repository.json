@@ -1,0 +1,41 @@
+{
+  "authz:bulk:v1:repo:1:181072b63fb76a25a3d6ac2d264f86b03fc7a510b38ced291e5c70046364a446": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "avatar_url": "https://avatars.githubusercontent.com/u/8?v=4",
+        "created_at": "2015-01-01T00:00:00Z",
+        "id": 8,
+        "login": "alice",
+        "type": "User"
+      }
+    }
+  },
+  "authz:bulk:v1:repo:1:748368d11b182fcd6cc7ad2ce5a709b5f3ff249d14255625b136b015ed6ba839": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "kind": "repository",
+        "role": "read"
+      }
+    }
+  },
+  "authz:bulk:v1:repo:1:7add9380b7d61ee88bb94e5f9e5b9e9ca1aaff26a924d8343ae98e6fad0cbe10": {
+    "observed_at": 0,
+    "value": {
+      "observed_at": "1970-01-01T00:00:00Z",
+      "value": {
+        "full_name": "acme/r1",
+        "id": 1,
+        "owner": {
+          "avatar_url": "https://avatars.githubusercontent.com/u/100?v=4",
+          "id": 100,
+          "login": "acme",
+          "type": "Organization"
+        }
+      }
+    }
+  }
+}

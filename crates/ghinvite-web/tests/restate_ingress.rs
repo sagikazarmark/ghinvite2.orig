@@ -1,6 +1,14 @@
 //! Public ingress boundary: credentials stay on server-to-Restate requests.
 use ghinvite_web::restate_client::RestateAuth;
 use ghinvite_web::{LinkAuthority, RestateClient, WebError};
+fn capability() -> ghinvite_web::session::PendingLink {
+    ghinvite_web::session::PendingLink {
+        link_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap(),
+        secret_sha256: [42; 32].into(),
+        secret_generation: 1,
+    }
+}
+
 use serde_json::{Value, json};
 use std::sync::Arc;
 use wiremock::matchers::{header, method, path};
@@ -105,7 +113,7 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .await
             .unwrap_err(),
         authority(&client)
-            .requester_page(CODE, 2, None)
+            .requester_page(&capability(), 2, None)
             .await
             .map_err(WebError::from)
             .unwrap_err(),
@@ -125,7 +133,7 @@ async fn decoding_and_transport_failures_are_sanitized() {
             .await
             .unwrap_err(),
         authority(&client)
-            .requester_page(CODE, 2, None)
+            .requester_page(&capability(), 2, None)
             .await
             .map_err(WebError::from)
             .unwrap_err(),
@@ -158,7 +166,7 @@ async fn rejected_credentials_and_upstream_errors_never_expose_response_content(
                     .await
                     .unwrap_err(),
                 authority(&client)
-                    .requester_page(CODE, 2, None)
+                    .requester_page(&capability(), 2, None)
                     .await
                     .map_err(WebError::from)
                     .unwrap_err(),
@@ -255,7 +263,9 @@ async fn authenticated_ingress_accepts_calls_link_authority_calls_and_sends() {
         .unwrap();
     assert_eq!(result, json!({"ok": true}));
     assert!(matches!(
-        authority(&client).requester_page(CODE, 2, None).await,
+        authority(&client)
+            .requester_page(&capability(), 2, None)
+            .await,
         Err(ghinvite_web::AuthorityError::Missing)
     ));
     client

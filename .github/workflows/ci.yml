@@ -18,8 +18,43 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
+      - name: Verify bounded operational collector and privacy contracts
+        run: python3 -m unittest discover -s deploy/observability -p 'test_*.py'
+      - name: Validate operational alert syntax and behavior
+        run: docker run --rm --entrypoint /bin/promtool -v "$PWD/deploy/observability:/config:ro" --workdir /config prom/prometheus@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62 test rules alerts-test.yml
       - name: Run tests
         run: cargo test --workspace
+
+  native-fallback:
+    name: Native fallback release artifacts
+    runs-on: ubuntu-24.04
+    needs: island
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '1'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: island-bundle
+          path: dist/public
+      - name: Validate native packaging inputs
+        run: python3 scripts/test-native-fallback.py
+      - name: Build both production native entrypoints and bind package to checkout
+        env:
+          CHECKOUT_SHA: ${{ github.sha }}
+        run: python3 scripts/package-native-fallback.py --sha "$CHECKOUT_SHA" --output dist/native-fallback
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-fallback-linux-x86_64-${{ github.sha }}
+          path: dist/native-fallback
+          if-no-files-found: error
+          retention-days: 30
 
   lint:
     name: Lint
@@ -90,14 +125,60 @@ jobs:
       # Must match Cargo.lock; tests/worker/build.mjs checks before building.
       - run: cargo binstall -y wasm-bindgen-cli@0.2.120
       - run: npm ci --prefix tests/worker
+      - run: npm run test:runtime-output --prefix tests/worker
       - run: npm test --prefix tests/worker
       - run: npm run test:queue --prefix tests/worker
       - run: npm run test:history --prefix tests/worker
       - run: npm run test:deadlines --prefix tests/worker
+      - name: Bounded operational events on actual Worker
+        run: node tests/worker/run-runtime.mjs operational-signals.mjs
+      - name: Verified continuation CAS rotation and zero-old zero-bad gate on actual D1
+        run: node tests/worker/run-runtime.mjs continuation-rotation.mjs
+      - name: Admission timing and privacy on actual Worker
+        run: node tests/worker/run-runtime.mjs admission-telemetry.mjs
+
+      - name: Encrypted pending sign-in on actual Worker and D1
+        run: node tests/worker/run-runtime.mjs pending-signin.mjs
+      - name: Encrypted email recovery and write fence on actual Worker and D1
+        run: node tests/worker/run-runtime.mjs email-vault.mjs
+      - name: Cross-admin encrypted email review and hourly cleanup on actual D1
+        run: node tests/worker/run-runtime.mjs email-review.mjs
+      - name: Scheduled protected email cleanup on actual Worker and D1
+        run: node tests/worker/run-runtime.mjs email-maintenance.mjs
+      - name: Typed domain sign-in on actual Worker and D1
+        run: node tests/worker/run-runtime.mjs domain-signin.mjs
+      - name: Typed session cutover and pending keyring rollout
+        run: node tests/worker/run-runtime.mjs signin-cutover.mjs
       - name: Shared storage conformance on actual D1
         run: npm run test:storage --prefix tests/worker
+      - name: Scheduled daily delivery digest on actual Worker and D1
+        run: node tests/worker/run-runtime.mjs daily-digest.mjs
       - name: Verify Worker/D1 installation failure and replacement recovery
         run: npm run test:installation --prefix tests/worker
+      - name: Org observation and authority on actual signed Workers
+        run: ORG_OBSERVATION_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Organization admission and delivery on actual signed Workers
+        run: ORG_DELIVERY_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Organization cancellation and expiry on actual signed Workers
+        run: ORG_CANCELLATION_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Bulk email delivery and privacy on actual signed Workers and D1
+        run: EMAIL_DELIVERY_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Accepted access removal and delayed expiry on signed Workers
+        run: ACCESS_REMOVAL_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Administrator reissue on actual signed Workers and D1
+        run: REISSUE_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Authenticated organization webhooks on actual Workers and D1
+        run: ORG_WEBHOOK_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Retained pause and resume on actual signed Workers
+        run: PAUSE_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Delivery control inbox and S0 on actual signed Workers
+        run: DELIVERY_CONTROL_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Build isolated cancellation composition
+        run: node tests/worker/build.mjs cancellation-fixture
+      - name: Separately fenced cancellation on actual signed Workers
+        run: CANCELLATION_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
+      - name: Authenticated organization cap on actual signed Workers
+        run: BUDGET_CAP_ONLY=1 node tests/worker/run-runtime.mjs admission.mjs
       - run: npm run test:admission --prefix tests/worker
       - name: Authenticated assembled journey on actual Workers and D1
         run: npm run test:journey --prefix tests/worker
@@ -129,6 +210,7 @@ jobs:
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall -y wasm-bindgen-cli@0.2.120 worker-build@0.8.1
       - run: npm ci --prefix tests/worker
+      - run: npm run test:runtime-output --prefix tests/worker
       - name: Build deployment artifacts and verify runtime entrypoints without fixture routes
         run: npm run test:production --prefix tests/worker
 
@@ -194,6 +276,18 @@ jobs:
       - name: Accessible revocation confirmation regressions
         working-directory: tests/browser
         run: npx playwright test --config revocation.config.mjs
+      - name: Reissue confirmation and exact retry with and without JavaScript
+        working-directory: tests/browser
+        run: npx playwright test --config reissue.config.mjs
+      - name: Bulk review and exact recovery with and without JavaScript
+        working-directory: tests/browser
+        run: npx playwright test --config bulk.config.mjs
+      - name: Two-app onboarding and confirmed installation requests
+        working-directory: tests/browser
+        run: npx playwright test --config onboarding.config.mjs
+      - name: Link pause browser recovery
+        working-directory: tests/browser
+        run: npx playwright test --config link-pause.config.mjs
       - name: Browser failure diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
@@ -220,8 +314,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The runner owns the disposable runtime; the test owns loopback GitHub
       # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
-      - name: Verify authoritative admission and recovery
-        run: bash scripts/test-restate.sh authoritative_admission
+      - name: Verify authoritative admission, recovery and 500-call lifecycle ordering
+        env:
+          CI: 'true'
+        run: |
+          container=$(docker create docker.restate.dev/restatedev/restate:1.8.1@sha256:fea6b4a893616fd8ec4594bd72fbf9967f9ab9242c8c75008de75edfbb58b2c7)
+          docker cp "$container:/usr/local/bin/restate-server" "$RUNNER_TEMP/restate-server"
+          docker rm "$container"
+          RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
+      - name: Verify organization observation and retained authority
+        env:
+          CI: 'true'
+        run: |
+          container=$(docker create docker.restate.dev/restatedev/restate:1.8.1@sha256:fea6b4a893616fd8ec4594bd72fbf9967f9ab9242c8c75008de75edfbb58b2c7)
+          docker cp "$container:/usr/local/bin/restate-server" "$RUNNER_TEMP/restate-server"
+          docker rm "$container"
+          RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test org_installation_observation --test organization_authority
+      - name: Verify mixed dispatch and organization delivery
+        env:
+          CI: 'true'
+        run: RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test mixed_dispatch --test organization_delivery --test organization_reconcile --test request_completion --test email_delivery -- --test-threads=1
       - name: Verify request initialization and deadline verdict recovery
         run: bash scripts/test-restate.sh request_owner
       - name: Authenticated invitation journey, settlement and retained recovery

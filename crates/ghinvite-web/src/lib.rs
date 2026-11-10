@@ -2,21 +2,39 @@
 //! layouts. `ghinvite-web-worker` serves `build_app()` on Cloudflare Workers.
 
 pub(crate) mod attempt_continuations;
+pub mod continuation_rotation;
+#[cfg(feature = "runtime-tests")]
+pub use attempt_continuations::verify_continuation_envelope;
+mod admission_telemetry;
+pub mod authority;
+pub use authority::bulk_review;
+pub mod authority_cache;
+pub mod bulk_authority;
+pub mod bulk_submission;
 pub mod commands;
 pub mod config;
 pub mod delivery_authority;
 pub mod error;
 pub(crate) mod forms;
+#[cfg(test)]
+mod golden;
+mod installed_apps;
 pub mod link_authority;
+pub(crate) mod link_secret;
+#[doc(hidden)]
+pub mod link_secret_entropy;
 pub mod middleware;
+pub mod rate_limit;
 pub mod render;
 pub mod request_authority;
 pub mod restate_client;
 pub mod routes;
 pub mod session;
 pub mod session_store;
+pub mod signin;
 pub mod state;
 pub mod wasm_compat;
+mod webhook_events;
 
 // Re-exports filled in as types appear:
 pub use commands::RestateCommands;
@@ -24,7 +42,7 @@ pub use config::WebConfig;
 pub use error::{IngressFailure, OAuthFailure, Result, WebError};
 pub use link_authority::{AuthorityError, LinkAuthority};
 pub use restate_client::RestateClient;
-pub use state::{AppState, WebStorage};
+pub use state::{AppState, WebGithub, WebStorage};
 
 use axum::Router;
 
@@ -68,15 +86,24 @@ where
         ));
 
     let router = Router::new()
+        .route("/console/keyring", axum::routing::get(keyring_fingerprint))
+        .merge(routes::operations::router())
+        .merge(routes::continuation_rotation::router())
         .merge(routes::health::router())
         .merge(routes::home::router())
         .merge(routes::oauth::router())
         .merge(routes::setup::router())
+        .merge(routes::onboarding::router())
         .merge(routes::console::router())
         .merge(routes::invitation::router())
         .merge(routes::webhook::router())
         .route("/static/styles.css", axum::routing::get(serve_styles_css))
-        .route("/static/app.js", axum::routing::get(serve_app_js));
+        .route("/static/app.js", axum::routing::get(serve_app_js))
+        .route("/static/i.js", axum::routing::get(serve_i_js))
+        .route(
+            "/robots.txt",
+            axum::routing::get(middleware::security::robots),
+        );
 
     let router = match extra {
         Some(extra) => router.merge(extra),
@@ -98,7 +125,15 @@ where
                     .then(|| axum::http::HeaderValue::from_static("private, no-store"))
             },
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::enforce,
+        ))
+        .layer(axum::middleware::from_fn(
+            session_store::require_readable_session,
+        ))
         .layer(session_layer)
+        .layer(axum::middleware::from_fn(middleware::security::headers))
         .with_state(state)
 }
 
@@ -123,3 +158,33 @@ fn static_asset(content_type: &'static str, body: &'static str) -> axum::respons
     use axum::response::IntoResponse;
     ([(header::CONTENT_TYPE, content_type)], body).into_response()
 }
+
+async fn serve_i_js() -> impl axum::response::IntoResponse {
+    static_asset(
+        "text/javascript; charset=utf-8",
+        include_str!("../assets/i.js"),
+    )
+}
+
+/// Operator IDs are numeric identities, independent of organization authority.
+async fn keyring_fingerprint(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    tower: tower_sessions::Session,
+) -> Result<impl axum::response::IntoResponse> {
+    let session = session::load(&tower)
+        .await
+        .map_err(|_| WebError::Session("session unavailable".into()))?;
+    if !session.is_authenticated() || !state.config.operator_ids.contains(&session.user_id) {
+        return Err(WebError::NotFound);
+    }
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "private, no-store")],
+        state.config.keyring.fingerprint().to_string(),
+    ))
+}
+
+mod organization_delivery;
+
+pub mod personal_link;
+
+pub mod email_rows;

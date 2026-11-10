@@ -27,6 +27,8 @@ pub struct Page {
     /// Optional profile enrichment fetched with the bounded page, keyed by the
     /// immutable requester ID. Missing profiles do not hide historical requests.
     pub requester_logins: std::collections::HashMap<u64, String>,
+    pub requester_avatars: std::collections::HashMap<u64, String>,
+    pub requester_created_at: std::collections::HashMap<u64, DateTime<Utc>>,
     pub older: Option<Boundary>,
 }
 
@@ -52,7 +54,7 @@ pub fn query(before: Option<Boundary>) -> String {
         "?3 IS NULL".into()
     };
     format!(
-        "SELECT id, invitation_link_id, requester_id, justification, state, decided_by, decided_at, decline_reason, created_at, decision_deadline, (SELECT login FROM users WHERE user_id = invitation_requests.requester_id) AS requester_login FROM invitation_requests WHERE invitation_link_id = ?2 AND EXISTS (SELECT 1 FROM invitation_links WHERE id = ?2 AND account_id = ?1) AND {bound} ORDER BY {SEEK_KEY} DESC LIMIT {}",
+        "SELECT id, invitation_link_id, requester_id, justification, state, decided_by, decided_at, decline_reason, requester_message, cancellation_reason, domain_evidence_json, created_at, decision_deadline, (SELECT login FROM users WHERE user_id = invitation_requests.requester_id) AS requester_login, (SELECT avatar_url FROM users WHERE user_id = invitation_requests.requester_id) AS requester_avatar_url, (SELECT github_created_at FROM users WHERE user_id = invitation_requests.requester_id) AS requester_github_created_at FROM invitation_requests WHERE invitation_link_id = ?2 AND EXISTS (SELECT 1 FROM invitation_links WHERE id = ?2 AND account_id = ?1) AND {bound} ORDER BY {SEEK_KEY} DESC LIMIT {}",
         PAGE_SIZE + 1
     )
 }
@@ -62,9 +64,20 @@ pub struct Row {
     #[serde(flatten)]
     pub request: InvitationRequest,
     pub requester_login: Option<String>,
+    pub requester_avatar_url: Option<String>,
+    pub requester_github_created_at: Option<DateTime<Utc>>,
+    pub domain_evidence_json: Option<String>,
 }
 
-pub fn page(mut rows: Vec<Row>) -> Page {
+pub fn page(mut rows: Vec<Row>) -> super::Result<Page> {
+    for row in &mut rows {
+        super::invitation_requests::validate_requester_message(&row.request)?;
+        row.request.domain_evidence = super::invitation_requests::decode_evidence(
+            row.domain_evidence_json.as_deref(),
+            row.request.invitation_link_id,
+            row.request.created_at,
+        )?;
+    }
     let more = rows.len() > PAGE_SIZE;
     rows.truncate(PAGE_SIZE);
     let requester_logins = rows
@@ -75,15 +88,32 @@ pub fn page(mut rows: Vec<Row>) -> Page {
                 .map(|login| (row.request.requester_id, login.clone()))
         })
         .collect();
+    let requester_avatars = rows
+        .iter()
+        .filter_map(|row| {
+            row.requester_avatar_url
+                .clone()
+                .map(|url| (row.request.requester_id, url))
+        })
+        .collect();
+    let requester_created_at = rows
+        .iter()
+        .filter_map(|row| {
+            row.requester_github_created_at
+                .map(|at| (row.request.requester_id, at))
+        })
+        .collect();
     let requests: Vec<_> = rows.into_iter().map(|row| row.request).collect();
     let older = if more {
         requests.last().map(Boundary::from)
     } else {
         None
     };
-    Page {
+    Ok(Page {
         requests,
         older,
         requester_logins,
-    }
+        requester_avatars,
+        requester_created_at,
+    })
 }

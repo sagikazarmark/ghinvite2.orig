@@ -1,18 +1,17 @@
 //! #83: one installation transition leaves one audit event behind, even when
 //! the projection is retried after its audit write has already committed.
 //!
-//! `InstallationProjection::apply` retains the audit event in a `ctx.run` step
-//! before it projects anything, so a retry replays the identity the first
+//! `AccountInstallation` retains the audit event in a `ctx.run` step
+//! before sending the projection, so a retry replays the identity the first
 //! attempt minted. Nothing but a real invocation retry can show that: if the
 //! identity were minted outside the journal, the retry would mint a second one
 //! and the account would gain a duplicate "installation created" entry.
 #![cfg(feature = "integration")]
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ghinvite_core::audit::{AuditEvent, EventType};
 use ghinvite_core::storage::*;
 use ghinvite_core::*;
-use restate_sdk::http_server::HttpServer;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,17 +45,6 @@ impl AuditStorage for LostAuditAcknowledgement {
 
 #[async_trait::async_trait]
 impl RecordStorage for LostAuditAcknowledgement {
-    async fn get_installation(&self, installation_id: u64) -> Result<Option<Account>> {
-        self.inner.get_installation(installation_id).await
-    }
-    async fn get_active_installation_by_account_id(
-        &self,
-        account_id: u64,
-    ) -> Result<Option<Account>> {
-        self.inner
-            .get_active_installation_by_account_id(account_id)
-            .await
-    }
     async fn upsert_user(&self, user: &User) -> Result<()> {
         self.inner.upsert_user(user).await
     }
@@ -72,73 +60,145 @@ impl RecordStorage for LostAuditAcknowledgement {
     async fn get_invitation_request(&self, id: RequestId) -> Result<Option<InvitationRequest>> {
         self.inner.get_invitation_request(id).await
     }
-    async fn get_github_invitation(
-        &self,
-        id: GithubInvitationId,
-    ) -> Result<Option<GithubInvitation>> {
-        self.inner.get_github_invitation(id).await
-    }
 }
 
 #[async_trait::async_trait]
-impl InstallationStorage for LostAuditAcknowledgement {
-    async fn insert_installation(&self, account: &Account) -> Result<()> {
-        self.inner.insert_installation(account).await
-    }
-    async fn mark_installation_uninstalled(
+impl AppInstallationReadStorage for LostAuditAcknowledgement {
+    async fn app_installation(
         &self,
-        installation_id: u64,
-        when: DateTime<Utc>,
-    ) -> Result<()> {
+        app: account::App,
+        id: u64,
+    ) -> Result<Option<account::Installation>> {
+        self.inner.app_installation(app, id).await
+    }
+    async fn active_app_installation(
+        &self,
+        app: account::App,
+        id: u64,
+    ) -> Result<Option<account::Installation>> {
+        self.inner.active_app_installation(app, id).await
+    }
+    async fn active_app_installation_by_login(
+        &self,
+        app: account::App,
+        login: &str,
+    ) -> Result<Option<account::Installation>> {
         self.inner
-            .mark_installation_uninstalled(installation_id, when)
+            .active_app_installation_by_login(app, login)
             .await
     }
-    async fn update_installation_repos(
+    async fn latest_app_installation_by_login(
         &self,
-        installation_id: u64,
-        selected: &SelectedRepos,
-    ) -> Result<()> {
+        app: account::App,
+        login: &str,
+    ) -> Result<Option<account::Installation>> {
         self.inner
-            .update_installation_repos(installation_id, selected)
+            .latest_app_installation_by_login(app, login)
             .await
     }
-    async fn list_active_installations(&self) -> Result<Vec<Account>> {
-        self.inner.list_active_installations().await
+    async fn list_active_app_installations(
+        &self,
+        app: account::App,
+    ) -> Result<Vec<account::Installation>> {
+        self.inner.list_active_app_installations(app).await
+    }
+    async fn account_settings(&self, id: u64) -> Result<Option<account::AccountSettings>> {
+        self.inner.account_settings(id).await
+    }
+}
+#[async_trait::async_trait]
+impl AppInstallationStorage for LostAuditAcknowledgement {
+    async fn project_installation_change(
+        &self,
+        owner: account::AccountInstallationRef,
+        change: &ghinvite_core::installation_audit::InstallationChange,
+    ) -> Result<()> {
+        self.inner
+            .project_installation_change(owner, change)
+            .await?;
+        if change
+            .event
+            .as_ref()
+            .is_some_and(|event| event.event_type == EventType::InstallationCreated)
+            && self.swallowed.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Err(Error::Database(
+                "fixture: committed but acknowledgement lost".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn put_app_installation(&self, value: &account::Installation) -> Result<()> {
+        self.inner.put_app_installation(value).await
+    }
+    async fn put_account_settings(&self, value: &account::AccountSettings) -> Result<()> {
+        self.inner.put_account_settings(value).await
     }
 }
 
 /// Installation transitions deliver nothing.
 #[async_trait::async_trait]
 impl DeliveryStorage for LostAuditAcknowledgement {
+    async fn cancellation_attempt_exists(
+        &self,
+        command: &ghinvite_core::storage::delivery_attempts::CancelCommand,
+    ) -> Result<bool> {
+        self.inner.cancellation_attempt_exists(command).await
+    }
+
+    async fn claim_cancellation_attempt(
+        &self,
+        command: &ghinvite_core::storage::delivery_attempts::CancelCommand,
+    ) -> Result<Option<u64>> {
+        self.inner.claim_cancellation_attempt(command).await
+    }
+    async fn reject_cancellation_attempt(
+        &self,
+        command: &ghinvite_core::storage::delivery_attempts::CancelCommand,
+        generation: u64,
+    ) -> Result<()> {
+        self.inner
+            .reject_cancellation_attempt(command, generation)
+            .await
+    }
+
     async fn claim_delivery_attempt(
         &self,
         _: &ghinvite_core::delivery::CreateCommand,
     ) -> Result<Option<u64>> {
         unreachable!()
     }
-    async fn reject_delivery_attempt(&self, _: GithubInvitationId, _: u64) -> Result<()> {
-        unreachable!()
-    }
-    async fn delivery_attempt_exists(&self, _: GithubInvitationId) -> Result<bool> {
-        unreachable!()
-    }
-    async fn project_delivery(&self, _: &ghinvite_core::delivery::DeliverySnapshot) -> Result<()> {
-        unreachable!()
-    }
-    async fn insert_github_invitation(&self, _: &GithubInvitation) -> Result<()> {
-        unreachable!()
-    }
-    async fn list_pending_github_invitations_for_account(
+    async fn reject_delivery_attempt(
         &self,
+        _: &ghinvite_core::delivery::CreateCommand,
         _: u64,
-    ) -> Result<Vec<GithubInvitation>> {
+    ) -> Result<()> {
         unreachable!()
+    }
+    async fn delivery_attempt_exists(
+        &self,
+        _: &ghinvite_core::delivery::CreateCommand,
+    ) -> Result<bool> {
+        unreachable!()
+    }
+    async fn project_delivery_with_events(
+        &self,
+        _: &ghinvite_core::delivery_audit::RepositoryDeliveryProjection,
+    ) -> Result<()> {
+        unreachable!()
+    }
+    async fn project_repository_telemetry(
+        &self,
+        value: &ghinvite_core::storage::operational::RepositoryTelemetry,
+    ) -> Result<()> {
+        self.inner.project_repository_telemetry(value).await
     }
 }
 
 #[tokio::test]
 async fn a_retried_projection_leaves_one_installation_audit_event() {
+    let harness = ghinvite_e2e::Harness::start().await;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(20))
@@ -155,6 +215,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
             user_id: 7,
             login: "installer".into(),
             avatar_url: None,
+            github_created_at: None,
             last_seen_at: Utc::now(),
         })
         .await
@@ -181,7 +242,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
                 } else if path == "/app/installations/9" {
                     (
                         200,
-                        json!({"id":9,"account":{"id":100,"login":"acme","type":"Organization"},"suspended_at":null}),
+                        json!({"id":9,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}),
                     )
                 } else {
                     (404, json!({}))
@@ -200,64 +261,38 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         inner: storage.clone(),
         swallowed: AtomicUsize::new(0),
     });
-    let state = ghinvite_workflows::AppState::new(
-        acknowledgements.clone(),
-        Arc::new(
-            ghinvite_github::InstallationClient::new(
-                Arc::new(ghinvite_github::transport::ReqwestTransport::with_client(
-                    client.clone(),
-                )),
-                ghinvite_github::jwt::AppJwtSigner::from_pem(
-                    123,
-                    include_str!("../../ghinvite-github/src/jwt_test_key.pem"),
-                )
-                .unwrap(),
+    let state =
+        ghinvite_workflows::AppState::new(acknowledgements.clone()).with_github_apps(Arc::new(
+            ghinvite_workflows::RepositoryGithub::new(
+                ghinvite_e2e::github_transport(client.clone()),
+                &base,
+                ghinvite_e2e::repository_apps(&base),
             )
-            .with_base(base),
-        ),
-    );
+            .unwrap(),
+        ));
     // Projection ownership is not what this test varies; only the audit write is.
     let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        HttpServer::new(endpoint)
-            .serve_with_cancel(listener, std::future::pending::<()>())
-            .await;
-    });
-
-    let admin = std::env::var("RESTATE_ADMIN_URL")
-        .expect("run scripts/test-restate.sh installation_audit_replay");
-    let ingress = std::env::var("RESTATE_INGRESS_URL").unwrap();
-    let host = std::env::var("RESTATE_ENDPOINT_HOST").unwrap();
-    for _ in 0..100 {
-        if client.get(format!("{admin}/health")).send().await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let response = client
-        .post(format!("{admin}/deployments"))
-        .json(&json!({"uri":format!("http://{host}:{port}")}))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        response.status().is_success(),
-        "{}",
-        response.text().await.unwrap()
-    );
+    harness.restate.deploy(endpoint).await;
+    let ingress = harness.restate.ingress_url();
 
     let response = client
-        .post(format!("{ingress}/Installation/9/onboard"))
+        .post(format!("{ingress}/Installation/repo:9/onboard"))
         .json(&json!({
-            "installation_id": 9,
-            "actor_user_id": 7,
-            "account_id": 100,
-            "account_login": "acme",
-            "account_type": "Organization",
-            "selected_repos": "all",
-            "installed_at": "2026-05-04T12:00:00Z"
+            "operation_id": RequestId::new().to_string(),
+            "verified": {
+                "app": "repo",
+                "account": {
+                    "installation_id": 9,
+                    "account_id": 100,
+                    "account_login": "acme",
+                    "account_type": "Organization",
+                    "selected_repos": "all",
+                    "installed_at": "2026-01-01T00:00:00Z",
+                    "uninstalled_at": null
+                },
+                "permissions": {"administration":"write","metadata":"read"},
+                "suspended_at": null
+            }
         }))
         .send()
         .await
@@ -273,7 +308,11 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
     let created = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if acknowledgements.swallowed.load(Ordering::SeqCst) > 1
-                && storage.get_installation(9).await.unwrap().is_some()
+                && storage
+                    .app_installation(account::App::Repo, 9)
+                    .await
+                    .unwrap()
+                    .is_some()
             {
                 return installation_created_events(&storage).await;
             }
@@ -288,8 +327,8 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         "a retry must replay the retained audit identity, not mint a second one"
     );
 
-    server.abort();
     stub_server.abort();
+    harness.finish().await;
 }
 
 async fn installation_created_events(storage: &ghinvite_storage_sqlx::SqlxStorage) -> usize {
