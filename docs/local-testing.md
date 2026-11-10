@@ -204,6 +204,24 @@ Prerequisites:
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
 script. To upgrade Restate, update the shared image pin and rerun these commands.
 
+**Known issue on Restate 1.8.x (open).** The workerd suite `npm run test:admission`
+(`tests/worker`) fails deterministically against 1.8.1 at the step "exact deadline
+equality, overdue readmission without refund, request-owned terminal decision":
+with the workflow Worker paused, `InvitationRequest/tick_expire` keeps retrying
+(the wasm SDK reports `code: 599 "Suspended invocation" … behavior: Retry`) and the
+`decide` call on the same object key never completes within its 25 s client
+timeout. The same suite passes on Restate 1.7.9 with both SDK 0.12.1 and 0.13,
+and the native (bidi-stream) `authoritative_admission` suite passes 10/10 on 1.8.1,
+so the trigger is the request/response endpoint mode on 1.8.x. Restate 1.8.0
+turned on service protocol v7 (structured suspension events) and VQueues by
+default, both of which are candidates; `test:startup` and `retained_delivery` are
+unaffected.
+
+`scripts/test-restate.sh authoritative_admission` also runs all ten tests in
+parallel under the script's 150 s bound; on a 4-core host that is too tight
+(CI runs the same file with `--test-threads=2`, about 190 s). Use the CI command
+from `.github/workflows/ci.yml` on small machines.
+
 The script runs the GitHub stub HTTP contract tests (for `retained_delivery`),
 compiles the selected integration-test file, creates a uniquely named
 Compose project, and publishes admin/ingress on randomly allocated **loopback**

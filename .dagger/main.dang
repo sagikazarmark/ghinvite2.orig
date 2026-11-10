@@ -46,7 +46,20 @@ type Ghinvite {
     ["ghinvite-storage-d1", "ghinvite-web-worker", "ghinvite-workflows-worker"].each { package =>
       container = container.withExec(["cargo", "build", "--locked", "-p", package, "--target", "wasm32-unknown-unknown"])
     }
+    container = container.withExec(["cargo", "check", "--locked", "-p", "anykms-keyring", "--features", "js", "--target", "wasm32-unknown-unknown"])
     container.combinedOutput
+  }
+
+  """
+  The GitHub App toolkit is its own workspace under libs/octoauth.
+  """
+  toolkit: String! @check {
+    self.rust.withWorkdir("/work/src/libs/octoauth")
+      .withExec(["cargo", "fmt", "--check"])
+      .withExec(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"])
+      .withExec(["cargo", "test", "--workspace", "--locked"])
+      .withExec(["cargo", "check", "--locked", "-p", "octoauth", "-p", "octotoken", "-p", "octologin", "-p", "octoscrub", "--target", "wasm32-unknown-unknown"])
+      .combinedOutput
   }
 
   """

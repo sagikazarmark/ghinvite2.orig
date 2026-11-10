@@ -132,7 +132,7 @@ The 32 MiB transport limit does not enlarge the database's own limits.
 
 Use Node 22.23.2, Rust 1.98.0 with `wasm32-unknown-unknown`, and
 `wasm-bindgen-cli` 0.2.120. Install the pinned Node dependencies with
-`npm ci --prefix tests/worker`, from `implementation/ghinvite`.
+`npm ci --prefix tests/worker`, from the repository root.
 Extract the official Restate 1.8.1 executable from the same pinned image used in CI:
 
 ```sh

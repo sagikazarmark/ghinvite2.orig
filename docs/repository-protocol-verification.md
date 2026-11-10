@@ -91,7 +91,7 @@ are unchanged. Readers built before this variant do not understand new IP
 refusal receipts, so rollback compatibility requires keeping readers capable
 of decoding the new tag while such receipts are retained.
 
-Run from `implementation/ghinvite`:
+Run from the repository root:
 
 ```sh
 RESTATE_SERVER_BIN=/path/to/restate-server CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 \

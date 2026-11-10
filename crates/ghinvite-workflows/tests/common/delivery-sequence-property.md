@@ -37,7 +37,7 @@ team settlement are checked independently. Its self-test mutates actual runtime 
 
 ## Run and reproduce
 
-Run from `implementation/ghinvite`, with the normal integration environment and
+Run from the repository root, with the normal integration environment and
 an actual `RESTATE_SERVER_BIN` (or the supported owned runtime URLs):
 
 ```sh

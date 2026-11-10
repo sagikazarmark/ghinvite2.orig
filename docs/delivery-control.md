@@ -296,7 +296,7 @@ generated artifact are separate from the ordinary Worker bundle. Both CI
 workflows run this gate; `npm run test:cancellation --prefix tests/worker` builds
 the isolated artifact and current GitHub stub before running it.
 
-Worker commands from `implementation/ghinvite`:
+Worker commands from the repository root:
 
 ```sh
 WASM_BINDGEN=/tmp/p1-wasm-bindgen/wasm-bindgen ../../scripts/dev.sh node tests/worker/build.mjs cancellation-fixture

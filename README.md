@@ -39,9 +39,10 @@ dagger check ghinvite:fmt ghinvite:clippy ghinvite:test
 dagger check ghinvite:wasm
 dagger check ghinvite:css
 dagger check ghinvite:island ghinvite:web-worker ghinvite:workflows-worker
+dagger check ghinvite:toolkit
 ```
 
-`dagger check` runs all eight checks. The CSS check fails when the tracked
+`dagger check` runs all nine checks (including `ghinvite:toolkit` for `libs/octoauth`). The CSS check fails when the tracked
 stylesheet needs regeneration, just like CI. Builds run in containers and can be
 exported explicitly:
 
@@ -264,20 +265,31 @@ crates/
   ghinvite-web/          — axum app + Dioxus SSR of ghinvite-ui (runtime-agnostic, tested without Workers)
   ghinvite-web-server/   — native entry point wiring web + SqlxStorage + SQLite sessions
   ghinvite-web-worker/   — wasm32 entry point wiring web + D1
+  ghinvite-config/       — environment and GitHub App configuration parsing
+  ghinvite-email-vault/  — encrypted email escrow for bulk invites
+  ghinvite-e2e/          — Restate end-to-end harness glue (tests only)
+libs/
+  octoauth/          — the GitHub App toolkit, its own Cargo workspace: `octoauth`/`octotoken`
+                       (App JWT, installation tokens), `octologin` (sign-in), `octoscrub` (redaction)
+  kekring/           — `anykms-keyring`: provisioned local KEK + typed encryption context (stopgap, see its README)
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 scripts/           — build-island.sh: dx bundle → dist/public (Static Assets)
 wrangler/          — wrangler.toml configs for both workers
 docs/
   deploy.md        — production deployment guide
   local-testing.md — integration test procedure
+  adr/             — architecture decisions of this codebase
+  decisions/       — cross-cutting decisions inherited from the planning repository
+  specs/           — product and component specs, build plans and research the code was built from
 ```
 
-GitHub access is split between the octoauth crates (sibling
-`../octoauth`: `octoauth`/`octotoken` for App authentication and installation
-tokens, `octologin` for sign-in, `octoscrub` for redaction, `octoevents` for
-webhooks) and `crates/ghinvite-github`, ghinvite's own REST client: transport
+GitHub access is split between the toolkit crates in `libs/octoauth`
+(`octoauth`/`octotoken` for App authentication and installation tokens,
+`octologin` for sign-in, `octoscrub` for redaction; `octoevents` from crates.io
+for webhooks) and `crates/ghinvite-github`, ghinvite's own REST client: transport
 (native and Worker), typed endpoints and fixtures. Its `examples/stub.rs`
-supplies the GitHub API fixture for integration tests.
+supplies the GitHub API fixture for integration tests. Third-party sources,
+pinned forks and their reasons are listed in [`PROVENANCE.md`](PROVENANCE.md).
 
 ## CI
 
@@ -285,6 +297,7 @@ GitHub Actions runs on every push and PR to `main`:
 
 - **Test** — `cargo test --workspace`
 - **Lint** — `cargo fmt --check` + `cargo clippy`
+- **GitHub App toolkit** — fmt, clippy, tests and the wasm32 check of the `libs/octoauth` workspace
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
 - **Restate approval and delivery gate** — `bash scripts/test-restate.sh <target>` for `authoritative_admission`, `retained_delivery`, `installation_availability`, `installation_audit_replay` and `durable_projection`: digest-pinned disposable Restate, real GitHub HTTP client against a local GitHub stub, authoritative admission/lifecycle, retained delivery and projection recovery
