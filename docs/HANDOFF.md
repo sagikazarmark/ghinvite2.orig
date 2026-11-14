@@ -30,7 +30,7 @@ Working tree clean. `specs.orig` untouched (only gitignored `node_modules`/`targ
 | `cargo test -p ghinvite-workflows --features integration --test authoritative_admission` vs real `restate-server 1.8.1` (CI's step; harness 0.4) | 10/10 (≈190 s with `--test-threads=2`) |
 | `scripts/test-restate.sh retained_delivery` (compose, 1.8.1) | pass |
 | workerd `npm run test:startup` (62 cases) | pass |
-| workerd `npm run test:admission` | **FAIL at one step — test-fixture artefact, understood, not fixed** (see §3.2) |
+| workerd `npm run test:admission` | pass (26 steps, fixed 2026-11-14, see §3.2) |
 
 Not run: `test:production` (needs `worker-build`, which needs OpenSSL dev headers here), Playwright browser suites, the native-d1-bridge/cutover scripts, the other `test-restate.sh` targets, Dagger checks.
 
@@ -58,20 +58,13 @@ Read in this order if you need the reasoning: `PROVENANCE.md`, `docs/decisions/`
 ### 3.1 Land the branch
 Merge `consolidate` → `main`, push, watch the first `ci.yml` run (13 jobs; `native-d1-cutover` and `native-d1-bridge` have never run from this layout). Then decide what to do with `specs.orig/implementation/{ghinvite,octoauth}` so there is one source of truth (delete + pointer in `SOURCES.md`, or mark superseded).
 
-### 3.2 Fix the workerd `test:admission` fixture (root cause known)
-`tests/worker/admission.mjs` step "exact deadline equality, overdue readmission without refund, request-owned terminal decision" (around line 531–559) times out on Restate ≥ 1.8.
+### 3.2 Workerd `test:admission` fixture — done (2026-11-14)
+The step "exact deadline equality, overdue readmission without refund, request-owned terminal decision" now anchors its timeline at the real clock (option (a)), so `tick_expire`'s delayed self-sends stay in the future and lazy expiry does the work. The mechanism (pinned `Date.now()` + SDK `send_after` = past timers; VQueues starve the queued `decide`) is in `docs/local-testing.md`. Any new fixture step that schedules request expiry under `x-test-clock` must do the same. The optional `tick_expire` non-positive-delay guard was not added (unreachable in production).
 
-Mechanism (verified by bisect, see `docs/local-testing.md`): the fixture pins the Worker's `Date.now()` to a January-2026 timeline via the `x-test-clock` header (`tests/worker/workflows-shim.mjs`), and the SDK computes `send_after(delay)` as `Date.now() + delay` (`sdk-rust/src/endpoint/context.rs:528`). So `InvitationRequest/tick_expire`'s "7 days later" self-send (`crates/ghinvite-workflows/src/request_owner.rs:1251-1266`) is already months in the past for the real server and fires immediately, forming a self-send chain on one object key. The legacy inbox (≤ 1.7, or 1.7.9 with v7 but without VQueues) interleaved the ingress `decide` FIFO so the chain ended after four links; **VQueues** (unconditional since 1.8.0, no off switch) schedule due timers ahead of inboxed calls, so `decide` starves until the 25 s client timeout. SDK version is irrelevant (fork and upstream behave identically). Production clocks are real, so the loop cannot form there.
+**New, open:** `scripts/test-restate.sh authoritative_admission` (compose, one shared server) fails 8/10 at its defaults, and still 3/10 at `--test-threads=2` under 300 s. The same tests pass 10/10 against the native binary (CI's path). Signatures: injected request unavailability returns `200` instead of `503` (`control_replay.rs:60`, `authoritative_admission.rs:853`); `load_ordering.rs:169` "first admission occupies exclusive owner" times out. Likely the fault-injection/exclusive-owner assumptions need a per-test owned server. Either make those tests work against a shared server or drop `authoritative_admission` from the script (it is also the script's default target). Documented in `docs/local-testing.md`. The script is unchanged.
 
-Fix options: (a) anchor that step's fictional timeline near the real clock (e.g. `base = Date.now()` rounded; deadlines `base + 7d`; "advance to the deadline" sets `clock = deadline` which is still real-future, so timers stay inert and lazy expiry in `decide`/`request_status` does the work — the later step at line 565 already uses `Date.now() - 604800000 + 5000` for this reason); (b) make the shim not affect the SDK's absolute-time computation (hard: global `Date`). Prefer (a). Optionally also guard `tick_expire` against a non-positive computed delay (defence in depth; `expire_due` already makes it unreachable in production).
-
-Also pre-existing: `scripts/test-restate.sh` runs `authoritative_admission`'s 10 tests fully parallel under a hard 150 s bound, too tight on 4 cores (CI uses `--test-threads=2`, ~190 s). Either raise the bound or pass `--test-threads=2`.
-
-### 3.3 anykms upstream PRs (small, unblock the kekring redesign)
-1. #33: `docs/aad-format.md` (envelope-style status header, wire-fixed vs policy-cap table, the settled bytes, versioning story, "no decoder; bytes rebuilt never parsed", reader-first note, rationale vs AWS ESDK), `tests/vectors/aad_v1.json` built by an independent test-only encoder, a short "Choosing AAD" guide section, PLAN.md entry with the triggers.
-2. #38: conformance case + marker + two doc fixes + prelude export.
-3. PLAN.md: custody-out-of-identity non-goal, "community backends" note, `with_default_providers` excludes third parties.
-The reviewers asked to see the drafts; the user has ADMIN on `sagikazarmark/anykms` (gh is authenticated as that account).
+### 3.3 anykms upstream — done upstream
+All of it merged before this was picked up: #37 (AAD v1 byte spec, `docs/aad-format.md`, vectors in `crates/anykms-recipes/tests/vectors/aad_v1.json`, `PLAN.md` §29 triggers), #42 (KeyWrap unwrap conformance case), #43 (custody non-goal, `PLAN.md` §30), #44 (backend-author guide, third-party backends). #33 and #38 are closed; #35 (tracking, third-party KEK) stays open. **anykms 0.3.0** (2026-11-12) ships them; ghinvite still pins 0.2. Bump to 0.3 as part of §3.4 and run the new `keywrap` conformance case against kekring.
 
 ### 3.4 kekring redesign + ghinvite switch (one change, call sites move once)
 Apply the #35 amendment to `libs/kekring` (see §2 bullet). Keep `kekring` as the name unless the user picks another; derive labels from it (e.g. `kekring/v1/{kek,kid,fp}`, descriptor `kekring1;…`, blob magic for the AES-KW layout `magic ‖ u32be version ‖ kid[8] ‖ KW(DEK)` = 56 bytes). Implement `Aad` per the #33 spec bytes inside kekring until upstream ships a type. Write `docs/kekring-format.md` (three ONE-WAY contracts), JSON vectors re-derived by a Node+OpenSSL script (`id-aes256-wrap`), descriptor + blob fuzz targets, `validate_transition`, `compile_fail,E0080` doctests (no trybuild).
@@ -104,7 +97,7 @@ cargo check --locked -p kekring --features js --target wasm32-unknown-unknown
 (cd libs/octoauth && cargo test --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings)
 RESTATE_SERVER_BIN=/tmp/opencode/restate-server-1.8.1 cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
 bash scripts/test-restate.sh retained_delivery        # Docker
-(cd tests/worker && npm ci && npm run test:startup && npm run test:admission)   # the latter fails until §3.2
+(cd tests/worker && npm ci && npm run test:startup && npm run test:admission)
 ```
 
 Issue tracker: GitHub Issues on `sagikazarmark/ghinvite2.orig` (`AGENTS.md`, `docs/agents/`). Bisect logs and server binaries from this session: `/tmp/opencode/` (ephemeral).

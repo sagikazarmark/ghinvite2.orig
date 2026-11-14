@@ -204,29 +204,29 @@ Prerequisites:
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
 script. To upgrade Restate, update the shared image pin and rerun these commands.
 
-**Known issue on Restate 1.8.x (open, test fixture).** The workerd suite
-`npm run test:admission` (`tests/worker`) fails on 1.8.x at the step "exact
-deadline equality, overdue readmission without refund, request-owned terminal
-decision" (`admission.mjs:553`, 25 s client timeout on `InvitationRequest/decide`).
-Bisected: it passes on 1.7.9 (legacy inbox, with or without protocol v7) and fails
-on 1.7.9 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`, so the trigger is
-VQueues, which 1.8.0 made unconditional; the SDK version (fork or upstream
-`8a39311`) makes no difference. Mechanism: the fixture pins the Worker's
-`Date.now()` to a January-2026 timeline through the `x-test-clock` shim, and the
-SDK turns `send_after(delay)` into `Date.now() + delay`, so every "seven days
-later" `tick_expire` self-send is already months in the past for the real server
-and fires immediately, forming a self-send chain on one object key. The legacy
-inbox interleaved the ingress `decide` FIFO (the chain ended after four links);
-VQueues schedule due timers ahead of inboxed calls, so `decide` starves.
-Production clocks are real, so the loop cannot form there. Fix the fixture (a
-timeline anchored near the real clock so delayed sends stay in the future and
-lazy expiry does the work, as the later step at `admission.mjs:565` already does)
-rather than the server pin. `test:startup` and `retained_delivery` are unaffected.
+**Fixture clocks must keep delayed sends in the future (Restate >= 1.8).** The
+workerd suite pins the Worker's `Date.now()` through the `x-test-clock` shim, and
+the SDK turns `send_after(delay)` into `Date.now() + delay`. A fictional past
+timeline therefore makes every "seven days later" `tick_expire` self-send already
+due for the real server, forming a self-send chain on one object key. The legacy
+inbox (<= 1.7) interleaved inboxed ingress calls so the chain ended after a few
+links; VQueues (unconditional since 1.8.0) schedule due timers ahead of inboxed
+calls, so a queued `decide` starves until the client timeout. Bisected on 1.7.9
+with and without `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`; the SDK version makes
+no difference, and production clocks are real, so the loop cannot form there.
+Steps in `tests/worker/admission.mjs` that schedule request expiry therefore
+anchor their timeline at the real clock and let lazy expiry in
+`decide`/`request_status` do the work.
 
-`scripts/test-restate.sh authoritative_admission` also runs all ten tests in
-parallel under the script's 150 s bound; on a 4-core host that is too tight
-(CI runs the same file with `--test-threads=2`, about 190 s). Use the CI command
-from `.github/workflows/ci.yml` on small machines.
+**Run `authoritative_admission` against a native server, not compose.** CI does
+(`RESTATE_SERVER_BIN=… cargo test … --test authoritative_admission -- --test-threads=2`,
+about 190 s on 4 cores, 10/10 on 1.8.1). Through `scripts/test-restate.sh` (one
+shared compose server) it fails on this layout: 8/10 at the script's defaults
+(2026-11-14), with the injected-unavailability tests (`control_replay`,
+`abuse_window_…`) getting `200` where they expect `503` and the `load_ordering`
+tests timing out on "first admission occupies exclusive owner"; `--test-threads=2`
+under a 300 s bound still leaves 3 failures. The other targets CI runs through the
+script are unaffected by this.
 
 The script runs the GitHub stub HTTP contract tests (for `retained_delivery`),
 compiles the selected integration-test file, creates a uniquely named

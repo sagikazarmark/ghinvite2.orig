@@ -528,15 +528,21 @@ try {
   console.log('PASS undecided admission samples later clock after lazy-read interruption');
   // A clock sample belongs to the complete journaled decision, not a separate
   // timestamp read before suspension. Move time after the recorded decision.
+  // Anchor this timeline at the real clock. The SDK schedules `send_after` as
+  // the Worker's (pinned) Date.now() plus the delay, so a fictional past
+  // deadline would fire tick_expire immediately on the real server and, on
+  // Restate >= 1.8 (VQueues), starve the decide call queued behind it. Every
+  // deadline here stays in the real future, so lazy expiry does the work.
   pauseWorkflows = true;
-  clock = Date.parse('2026-01-01T00:00:00Z');
+  const timedBase = Math.floor(Date.now() / 60000) * 60000;
+  clock = timedBase;
   const timedInput = { ...creation(), max_uses: 5 };
   const timed = (handler, body) => http(`${ingress}/InvitationLink/${timedInput.link_id}/${handler}`, body);
   const timedLink = await timed('create', timedInput);
   const timedAttempt = { ...admitCapability(timedInput.link_id), link_id: timedInput.link_id, operation_id: id(), requester_id: 91 };
   const first = await timed('admit', timedAttempt);
-  assert.equal(first.decided_at, '2026-01-01T00:00:00Z');
-  assert.equal(first.result.decision_deadline, '2026-01-08T00:00:00Z');
+  assert.equal(Date.parse(first.decided_at), timedBase);
+  assert.equal(Date.parse(first.result.decision_deadline), timedBase + 604800000);
   clock = Date.parse(first.result.decision_deadline);
   const late = await http(`${ingress}/InvitationRequest/${first.result.request_id}/decide`, { link_id: timedInput.link_id, request_id: first.result.request_id,
     operation_id: id(), admin: timedInput.admin, action: { kind: 'approve' } });
