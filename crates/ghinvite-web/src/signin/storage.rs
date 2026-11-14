@@ -1,8 +1,6 @@
 //! Production pending-state adapter: encrypted envelopes and atomic SQL take.
 use super::{PendingSignIn, PendingSignInStore, StateUnavailable};
 use anykms_core::Ciphertext;
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -10,6 +8,8 @@ use ghinvite_core::clock::{Clock, SystemClock};
 use ghinvite_core::storage::pending_signin::{
     PendingSignInKey, PendingSignInStorage, StoredPendingSignIn,
 };
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use zeroize::Zeroizing;

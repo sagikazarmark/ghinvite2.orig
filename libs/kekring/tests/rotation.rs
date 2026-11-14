@@ -1,7 +1,7 @@
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 
 /// A one-row table with compare-and-swap semantics, standing in for the SQL
 /// `UPDATE ... WHERE id=? AND ciphertext=?` a migration sweep issues. (The fork's

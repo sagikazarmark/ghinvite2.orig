@@ -1,6 +1,6 @@
 #![cfg(feature = "std-loaders")]
-use anykms_keyring::Keyring;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use kekring::Keyring;
 use std::fmt::Write;
 fn descriptor() -> String {
     let k = Keyring::builder("loaders")

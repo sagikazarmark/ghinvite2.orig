@@ -1,6 +1,6 @@
-use anykms_keyring::EncryptionContext;
+use kekring::EncryptionContext;
 use proptest::prelude::*;
-anykms_keyring::purpose! { pub struct Fields<'a> = "properties" { left:&'a str, right:&'a str, number:u64, optional:Option<&'a str> } }
+kekring::purpose! { pub struct Fields<'a> = "properties" { left:&'a str, right:&'a str, number:u64, optional:Option<&'a str> } }
 fn make(left: &str, right: &str, number: u64, optional: Option<&str>) -> EncryptionContext {
     EncryptionContext::try_from(&Fields {
         left,

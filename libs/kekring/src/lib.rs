@@ -23,7 +23,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 fn err(kind: ErrorKind, op: Operation, msg: impl Into<String>) -> Error {
-    Error::new(kind, "anykms-keyring", op, msg.into())
+    Error::new(kind, "kekring", op, msg.into())
 }
 fn config(msg: impl Into<String>) -> Error {
     err(ErrorKind::Configuration, Operation::Configure, msg)
@@ -497,7 +497,7 @@ impl Describe for KeyringKek {
     // The portable trait is async; this local KEK completes in one poll and does no
     // work before it is polled (clippy::unused_async_trait_impl on newer toolchains).
     async fn describe(&self) -> Result<KeyInfo> {
-        Ok(KeyInfo::new("anykms-keyring", Capabilities::KEY_WRAP)
+        Ok(KeyInfo::new("kekring", Capabilities::KEY_WRAP)
             .with_primary_version(Some(KeyVersion::new(
                 self.ring.current_version().to_string(),
             )))

@@ -1,5 +1,4 @@
 //! AC-SES-1: rollout, retirement, binding, and operator diagnostics through HTTP.
-use anykms_keyring::Keyring;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -11,6 +10,7 @@ use ghinvite_web::{
 };
 use ghinvite_web_server::SqliteBackend;
 use http_body_util::BodyExt;
+use kekring::Keyring;
 use std::sync::Arc;
 use tower::ServiceExt;
 use tower_sessions::{
@@ -183,9 +183,9 @@ mod common;
 /// Seal `record` as deployments before GM-09 did: verbatim, so a session
 /// payload keeps whatever fields it was written with.
 async fn put_verbatim(backend: &SqliteBackend, keyring: &Keyring, record: &Record) {
-    use anykms_keyring::ContextEnvelopeSync;
-    use anykms_keyring::{EncryptionContext, purposes};
     use anykms_recipes::envelope::Padding;
+    use kekring::ContextEnvelopeSync;
+    use kekring::{EncryptionContext, purposes};
     let id = record.id.to_string();
     let context = EncryptionContext::try_from(&purposes::Session { session_id: &id }).unwrap();
     let ciphertext = keyring

@@ -3,7 +3,7 @@
 // Compatibility path; deployment roots can depend directly on ghinvite-config.
 pub use ghinvite_config::apps;
 
-use anykms_keyring::Keyring;
+use kekring::Keyring;
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 /// Configuration parsed at server boot. Production sources fields from

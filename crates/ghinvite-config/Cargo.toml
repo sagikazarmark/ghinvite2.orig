@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-anykms-keyring.workspace = true
+kekring.workspace = true
 base64.workspace = true
 ghinvite-github.workspace = true
 octoauth.workspace = true

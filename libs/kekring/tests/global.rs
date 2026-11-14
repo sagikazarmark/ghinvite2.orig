@@ -1,6 +1,6 @@
 #![cfg(feature = "global")]
 use anykms_core::ErrorKind;
-use anykms_keyring::{Keyring, global};
+use kekring::{Keyring, global};
 use std::sync::Arc;
 #[test]
 fn global_install_is_idempotent_and_rejects_conflict() {

@@ -48,7 +48,7 @@ async fn vault() -> (Arc<ghinvite_storage_sqlx::SqlxStorage>, EmailVault) {
             .unwrap(),
     );
     let ring = Arc::new(
-        anykms_keyring::Keyring::builder("p1-email")
+        kekring::Keyring::builder("p1-email")
             .generation(1, [7; 32])
             .unwrap()
             .current(1)

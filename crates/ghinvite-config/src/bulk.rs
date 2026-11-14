@@ -15,7 +15,7 @@ pub fn enabled(value: Option<&str>) -> Result<bool, AppDeploymentError> {
 pub fn email_keyring(
     required: bool,
     value: Option<String>,
-) -> Result<Option<Arc<anykms_keyring::Keyring>>, AppDeploymentError> {
+) -> Result<Option<Arc<kekring::Keyring>>, AppDeploymentError> {
     let error = || AppDeploymentError {
         field: "P1_EMAIL_KEYRING",
     };
@@ -23,7 +23,7 @@ pub fn email_keyring(
         return if required { Err(error()) } else { Ok(None) };
     };
     let value = Zeroizing::new(value);
-    let ring = anykms_keyring::Keyring::parse(&value).map_err(|_| error())?;
+    let ring = kekring::Keyring::parse(&value).map_err(|_| error())?;
     if ring.name() != "p1-email" {
         return Err(error());
     }
@@ -36,7 +36,7 @@ mod tests {
     fn dedicated_ring_validates_name_and_key_check_value() {
         use base64::Engine as _;
         for name in ["p1-email", "p1"] {
-            let ring = anykms_keyring::Keyring::builder(name)
+            let ring = kekring::Keyring::builder(name)
                 .generation(1, [7; 32])
                 .unwrap()
                 .current(1)

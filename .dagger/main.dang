@@ -46,7 +46,7 @@ type Ghinvite {
     ["ghinvite-storage-d1", "ghinvite-web-worker", "ghinvite-workflows-worker"].each { package =>
       container = container.withExec(["cargo", "build", "--locked", "-p", package, "--target", "wasm32-unknown-unknown"])
     }
-    container = container.withExec(["cargo", "check", "--locked", "-p", "anykms-keyring", "--features", "js", "--target", "wasm32-unknown-unknown"])
+    container = container.withExec(["cargo", "check", "--locked", "-p", "kekring", "--features", "js", "--target", "wasm32-unknown-unknown"])
     container.combinedOutput
   }
 

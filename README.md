@@ -271,7 +271,7 @@ crates/
 libs/
   octoauth/          — the GitHub App toolkit, its own Cargo workspace: `octoauth`/`octotoken`
                        (App JWT, installation tokens), `octologin` (sign-in), `octoscrub` (redaction)
-  kekring/           — `anykms-keyring`: provisioned local KEK + typed encryption context (stopgap, see its README)
+  kekring/           — `kekring`: provisioned local KEK + typed encryption context (stopgap, see its README)
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 scripts/           — build-island.sh: dx bundle → dist/public (Static Assets)
 wrangler/          — wrangler.toml configs for both workers

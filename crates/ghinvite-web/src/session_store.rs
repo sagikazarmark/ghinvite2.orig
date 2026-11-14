@@ -4,9 +4,9 @@
 //! authenticated independently of the envelope, preventing record substitution.
 
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_sessions::cookie::time::{Duration, OffsetDateTime};

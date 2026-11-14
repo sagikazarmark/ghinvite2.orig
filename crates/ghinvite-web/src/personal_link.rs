@@ -81,12 +81,12 @@ impl Drop for Recovery {
 fn context(
     scope: &crate::email_rows::EmailRowsScope,
     plan: &PersonalLink,
-) -> Result<anykms_keyring::EncryptionContext, crate::email_rows::PreparationError> {
+) -> Result<kekring::EncryptionContext, crate::email_rows::PreparationError> {
     use crate::email_rows::PreparationError;
     if plan.source.batch_id != scope.batch_id || plan.source.validate().is_err() {
         return Err(PreparationError::Unavailable);
     }
-    anykms_keyring::EncryptionContext::try_from(&anykms_keyring::purposes::AttemptContinuation {
+    kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
         scope: &format!(
             "bulk-personal-link/v1/{}/{}/{}/{}/{}",
             scope.batch_id, scope.account_id, scope.installation_id, plan.source.row, plan.link_id
@@ -96,7 +96,7 @@ fn context(
     .map_err(|_| PreparationError::Unavailable)
 }
 fn unavailable(
-    keyring: &anykms_keyring::Keyring,
+    keyring: &kekring::Keyring,
     error: anykms_core::Error,
 ) -> crate::email_rows::PreparationError {
     if error.kind() == anykms_core::ErrorKind::Configuration {
@@ -111,13 +111,13 @@ impl PreparedPersonalLink {
     /// ambiguously. Only this ciphertext belongs in the web continuation.
     pub fn seal(
         self,
-        keyring: &anykms_keyring::Keyring,
+        keyring: &kekring::Keyring,
         scope: &crate::email_rows::EmailRowsScope,
         now: i64,
     ) -> Result<String, crate::email_rows::PreparationError> {
         use crate::email_rows::PreparationError;
-        use anykms_keyring::ContextEnvelopeSync;
         use base64::Engine as _;
+        use kekring::ContextEnvelopeSync;
         if now <= 0 || scope.session_expires <= now {
             return Err(PreparationError::Unavailable);
         }
@@ -142,14 +142,14 @@ impl PreparedPersonalLink {
     }
     pub fn restore(
         ciphertext: &str,
-        keyring: &anykms_keyring::Keyring,
+        keyring: &kekring::Keyring,
         scope: &crate::email_rows::EmailRowsScope,
         expected: &PersonalLink,
         now: i64,
     ) -> Result<Self, crate::email_rows::PreparationError> {
         use crate::email_rows::PreparationError;
-        use anykms_keyring::ContextEnvelopeSync;
         use base64::Engine as _;
+        use kekring::ContextEnvelopeSync;
         if ciphertext.len() > 8192 || now <= 0 || scope.session_expires <= now {
             return Err(PreparationError::Unavailable);
         }
@@ -207,7 +207,7 @@ mod recovery_tests {
             installation_id: 20,
             session_expires: 1800010000,
         };
-        let ring = anykms_keyring::Keyring::builder("p1")
+        let ring = kekring::Keyring::builder("p1")
             .generation(1, [7; 32])
             .unwrap()
             .current(1)

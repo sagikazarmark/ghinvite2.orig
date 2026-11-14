@@ -216,7 +216,7 @@ jobs:
       - run: cargo build -p ghinvite-web-worker --target wasm32-unknown-unknown
       - run: cargo build -p ghinvite-workflows-worker --target wasm32-unknown-unknown
       # The provisioned KEK needs its `js` feature on a JS host (clocks, getrandom).
-      - run: cargo check -p anykms-keyring --features js --target wasm32-unknown-unknown
+      - run: cargo check -p kekring --features js --target wasm32-unknown-unknown
 
   worker-runtime:
     name: Worker session and admission runtime

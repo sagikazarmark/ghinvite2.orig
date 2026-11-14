@@ -177,7 +177,7 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
         ProtectedStore::new(
             backend,
             Arc::new(
-                anykms_keyring::Keyring::builder("p1")
+                kekring::Keyring::builder("p1")
                     .generation(2, [8; 32])
                     .unwrap()
                     .current(2)

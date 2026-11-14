@@ -18,7 +18,7 @@ link-secret-fixture = ["runtime-tests", "ghinvite-web/link-secret-fixture"]
 # `tracing-wasm`, and the wasm32-only D1 backing in `ghinvite-storage-d1` are gated to
 # wasm32. On native (`cargo check --workspace`) the lib.rs itself is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-anykms-keyring = { workspace = true, features = ["js"] }
+kekring = { workspace = true, features = ["js"] }
 tracing.workspace = true
 getrandom = { version = "0.4", features = ["wasm_js"] }
 async-trait.workspace = true

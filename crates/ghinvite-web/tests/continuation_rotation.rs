@@ -1,7 +1,5 @@
 //! Actual SQLite, envelope and protected-session boundaries for operator rotation.
 use anykms_core::Ciphertext;
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
 use ghinvite_core::storage::{
     ContinuationStorage, Error, Result,
@@ -10,6 +8,8 @@ use ghinvite_core::storage::{
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 use ghinvite_web::continuation_rotation::{Failure, Report, page};
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

@@ -1,4 +1,3 @@
-use anykms_keyring::Keyring;
 use ghinvite_core::{
     bulk::{BatchRef, BulkBatchId},
     email_delivery::EmailRef,
@@ -9,6 +8,7 @@ use ghinvite_core::{
 };
 use ghinvite_email_vault::{Address, EmailVault, Error};
 use ghinvite_storage_sqlx::SqlxStorage;
+use kekring::Keyring;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

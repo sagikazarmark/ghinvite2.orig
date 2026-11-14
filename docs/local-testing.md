@@ -204,18 +204,24 @@ Prerequisites:
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
 script. To upgrade Restate, update the shared image pin and rerun these commands.
 
-**Known issue on Restate 1.8.x (open).** The workerd suite `npm run test:admission`
-(`tests/worker`) fails deterministically against 1.8.1 at the step "exact deadline
-equality, overdue readmission without refund, request-owned terminal decision":
-with the workflow Worker paused, `InvitationRequest/tick_expire` keeps retrying
-(the wasm SDK reports `code: 599 "Suspended invocation" … behavior: Retry`) and the
-`decide` call on the same object key never completes within its 25 s client
-timeout. The same suite passes on Restate 1.7.9 with both SDK 0.12.1 and 0.13,
-and the native (bidi-stream) `authoritative_admission` suite passes 10/10 on 1.8.1,
-so the trigger is the request/response endpoint mode on 1.8.x. Restate 1.8.0
-turned on service protocol v7 (structured suspension events) and VQueues by
-default, both of which are candidates; `test:startup` and `retained_delivery` are
-unaffected.
+**Known issue on Restate 1.8.x (open, test fixture).** The workerd suite
+`npm run test:admission` (`tests/worker`) fails on 1.8.x at the step "exact
+deadline equality, overdue readmission without refund, request-owned terminal
+decision" (`admission.mjs:553`, 25 s client timeout on `InvitationRequest/decide`).
+Bisected: it passes on 1.7.9 (legacy inbox, with or without protocol v7) and fails
+on 1.7.9 with `RESTATE_EXPERIMENTAL_ENABLE_VQUEUES=true`, so the trigger is
+VQueues, which 1.8.0 made unconditional; the SDK version (fork or upstream
+`8a39311`) makes no difference. Mechanism: the fixture pins the Worker's
+`Date.now()` to a January-2026 timeline through the `x-test-clock` shim, and the
+SDK turns `send_after(delay)` into `Date.now() + delay`, so every "seven days
+later" `tick_expire` self-send is already months in the past for the real server
+and fires immediately, forming a self-send chain on one object key. The legacy
+inbox interleaved the ingress `decide` FIFO (the chain ended after four links);
+VQueues schedule due timers ahead of inboxed calls, so `decide` starves.
+Production clocks are real, so the loop cannot form there. Fix the fixture (a
+timeline anchored near the real clock so delayed sends stay in the future and
+lazy expiry does the work, as the later step at `admission.mjs:565` already does)
+rather than the server pin. `test:startup` and `retained_delivery` are unaffected.
 
 `scripts/test-restate.sh authoritative_admission` also runs all ten tests in
 parallel under the script's 150 s bound; on a 4-core host that is too tight

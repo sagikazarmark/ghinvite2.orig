@@ -1,11 +1,11 @@
 use anykms_core::Ciphertext;
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
 use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 use std::fmt::Write;
 fn bytes(s: &str) -> Vec<u8> {
     s.as_bytes()
@@ -127,7 +127,7 @@ fn parser_rules_and_hygiene() {
     }
 }
 
-anykms_keyring::purpose! { pub struct ContextVector<'a> = "vectors-context" { left:&'a str, right:&'a str } }
+kekring::purpose! { pub struct ContextVector<'a> = "vectors-context" { left:&'a str, right:&'a str } }
 #[test]
 fn context_golden_ambiguity_pairs() {
     let cases: Vec<serde_json::Value> =

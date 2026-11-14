@@ -2,13 +2,13 @@
 //! A completion is a point-in-time result at one database mutation epoch, not
 //! permission to retire a KEK while older writers or deployments remain active.
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
 use ghinvite_core::storage::{
     ContinuationStorage,
     continuation_rotation::{PAGE_SIZE, Phase, ScanRow},
 };
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 use serde::{Deserialize, Serialize};
 
 const TOKEN_SCOPE: &str = "operator-continuation-rotation-v1";

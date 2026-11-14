@@ -1,4 +1,4 @@
-# anykms-keyring (stopgap, `libs/kekring`)
+# kekring (stopgap)
 
 A provisioned local key-encryption key for anykms envelopes, lifted from the
 monorepo fork of anykms (`implementation/anykms/crates/anykms-keyring` plus
@@ -35,7 +35,7 @@ No application enables `raw-kek`. Use `scripts/check-keyring-wasm.sh` to check t
 production dependency graph and absence of raw access.
 
 ```rust
-use anykms_keyring::{ContextEnvelopeSync, EncryptionContext, Keyring, purposes::Session};
+use kekring::{ContextEnvelopeSync, EncryptionContext, Keyring, purposes::Session};
 use anykms_recipes::envelope::Padding;
 # fn example(descriptor: &str) -> anykms_core::Result<()> {
 let ring = Keyring::parse(descriptor)?;

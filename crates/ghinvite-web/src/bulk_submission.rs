@@ -147,7 +147,7 @@ impl PreparedSubmission {
     /// envelopes retain exact original capabilities for an uncertain response.
     pub fn protect(
         self,
-        keyring: &anykms_keyring::Keyring,
+        keyring: &kekring::Keyring,
         scope: &EmailRowsScope,
         now: i64,
     ) -> Result<ProtectedSubmission, PreparationError> {
@@ -182,7 +182,7 @@ impl ProtectedSubmission {
     /// personal-link creation, and after a durable one-time display claim.
     pub fn restore_personal_links(
         &self,
-        keyring: &anykms_keyring::Keyring,
+        keyring: &kekring::Keyring,
         scope: &EmailRowsScope,
         now: i64,
     ) -> Result<Vec<PreparedPersonalLink>, PreparationError> {
@@ -334,7 +334,7 @@ mod tests {
         assert_eq!(command.submission.emails[0].approved_by, 9);
         assert_eq!(review.manifest.admin.user_id, 7);
         assert_eq!(command.submission.personal_links[0].source.row, 2);
-        let ring = anykms_keyring::Keyring::builder("p1")
+        let ring = kekring::Keyring::builder("p1")
             .generation(1, [4; 32])
             .unwrap()
             .current(1)

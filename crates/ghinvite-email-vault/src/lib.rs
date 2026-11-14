@@ -5,13 +5,13 @@ mod address;
 mod review;
 pub use address::{Address, InvalidAddress};
 use anykms_core::Ciphertext;
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ghinvite_core::storage::email_vault::{
     EmailVaultBinding, EmailVaultRecord, EmailVaultStorage, NewEmailRecord,
 };
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 pub use review::ReviewEmail;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

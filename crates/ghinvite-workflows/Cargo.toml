@@ -42,7 +42,7 @@ tracing.workspace = true
 # shape, so it is enabled by `ghinvite-workflows-server` and by this crate's
 # own tests — never by the library itself.
 [dev-dependencies]
-anykms-keyring.workspace = true
+kekring.workspace = true
 # Restate payload encodings in the PD-8 journal tests.
 bytes = "1"
 ghinvite-e2e = { path = "../ghinvite-e2e" }

@@ -378,7 +378,7 @@ async fn callback_key_generation_retry_preserves_original_pending_operation() {
     let github = github(requests).await;
     let old = WebConfig::for_local_dev_with_secret([7; 32]).keyring;
     let new = Arc::new(
-        anykms_keyring::Keyring::builder("p1")
+        kekring::Keyring::builder("p1")
             .generation(1, [7; 32])
             .unwrap()
             .generation(2, [8; 32])

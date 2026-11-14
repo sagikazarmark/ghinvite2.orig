@@ -139,7 +139,7 @@ struct EmailFixture {
     sql: sqlx::SqlitePool,
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
     state: AppState,
-    ring: Arc<anykms_keyring::Keyring>,
+    ring: Arc<kekring::Keyring>,
     database: std::path::PathBuf,
 }
 impl EmailFixture {
@@ -197,7 +197,7 @@ async fn email_fixture() -> EmailFixture {
         sign_in::repo_identity(10,"acme/api",9001),
     ]);
     let ring = Arc::new(
-        anykms_keyring::Keyring::builder("p1-email")
+        kekring::Keyring::builder("p1-email")
             .generation(1, [6; 32])
             .unwrap()
             .current(1)
@@ -690,7 +690,7 @@ async fn retained_review_removal_and_lost_submit_ack_recover_identical_allocatio
 /// Test-side mutation of the real encrypted storage format. The session and
 /// outer continuation stay valid; only a nested envelope's lifetime elapses.
 async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
-    use anykms_keyring::ContextEnvelopeSync;
+    use kekring::ContextEnvelopeSync;
     use sqlx::Row;
     let row = sqlx::query(
         "SELECT scope,binding,payload,expires_at FROM attempt_continuations WHERE id=?",
@@ -702,12 +702,10 @@ async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
     assert!(row.get::<i64, _>("expires_at") > Utc::now().timestamp());
     let scope: String = row.get("scope");
     let binding: String = row.get("binding");
-    let context = anykms_keyring::EncryptionContext::try_from(
-        &anykms_keyring::purposes::AttemptContinuation {
-            scope: &scope,
-            binding: &binding,
-        },
-    )
+    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+        scope: &scope,
+        binding: &binding,
+    })
     .unwrap();
     let encrypted = anykms_core::Ciphertext::from_base64(&row.get::<String, _>("payload")).unwrap();
     let plain = f
@@ -719,14 +717,12 @@ async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
     (scope, binding, serde_json::from_slice(&plain).unwrap())
 }
 fn expire_nested(f: &EmailFixture, ciphertext: &str, context_scope: &str) -> String {
-    use anykms_keyring::ContextEnvelopeSync;
+    use kekring::ContextEnvelopeSync;
     let session = f.cookie.split_once('=').unwrap().1;
-    let context = anykms_keyring::EncryptionContext::try_from(
-        &anykms_keyring::purposes::AttemptContinuation {
-            scope: context_scope,
-            binding: session,
-        },
-    )
+    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+        scope: context_scope,
+        binding: session,
+    })
     .unwrap();
     let envelope = f
         .ring
@@ -744,10 +740,11 @@ fn expire_nested(f: &EmailFixture, ciphertext: &str, context_scope: &str) -> Str
         .to_base64()
 }
 async fn store_continuation(f: &EmailFixture, id: &str, scope: &str, binding: &str, value: &Value) {
-    use anykms_keyring::ContextEnvelopeSync;
-    let context = anykms_keyring::EncryptionContext::try_from(
-        &anykms_keyring::purposes::AttemptContinuation { scope, binding },
-    )
+    use kekring::ContextEnvelopeSync;
+    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+        scope,
+        binding,
+    })
     .unwrap();
     let encrypted = f
         .ring

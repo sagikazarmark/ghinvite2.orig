@@ -31,7 +31,7 @@ publish = false
 anykms-core = { version = "0.2", default-features = false }
 anykms-recipes = { version = "0.2", default-features = false, features = ["envelope"] }
 # Stopgap provisioned KEK + typed context (see libs/kekring/README.md).
-anykms-keyring = { path = "libs/kekring", default-features = false }
+kekring = { path = "libs/kekring", default-features = false }
 async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "tracing", "matched-path", "query"] }
 base64 = "0.22"
@@ -101,9 +101,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
-# Wasm clocks and input draining (restatedev/sdk-rust#128, declined upstream on
-# 2026-11-09): carried on the fork's `wasm` branch, rebased on each upstream
-# release. Cargo.lock pins the exact commit; `cargo update -p restate-sdk`
-# moves it deliberately.
+# Wasm clocks and input draining: merged upstream as restatedev/sdk-rust#141
+# (2026-11-10) but not yet in a release. Pinned to that commit, which is 0.13.0
+# plus the fix and nothing else (later main carries a breaking TerminalErrorExt
+# change, #132). Drop this patch when 0.13.1+ ships with it.
 [patch.crates-io]
-restate-sdk = { git = "https://github.com/sagikazarmark/restate-sdk-rust", branch = "wasm" }
+restate-sdk = { git = "https://github.com/restatedev/sdk-rust", rev = "8a39311" }

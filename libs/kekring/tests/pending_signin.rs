@@ -1,6 +1,6 @@
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::envelope::Padding;
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 
 #[test]
 fn additive_pending_signin_purpose_has_stable_context_and_rejects_substitution() {

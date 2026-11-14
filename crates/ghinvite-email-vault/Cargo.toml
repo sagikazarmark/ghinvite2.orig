@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 anykms-core.workspace = true
-anykms-keyring.workspace = true
+kekring.workspace = true
 anykms-recipes.workspace = true
 base64.workspace = true
 ghinvite-core.workspace = true

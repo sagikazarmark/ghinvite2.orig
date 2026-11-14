@@ -1,7 +1,7 @@
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_keyring::{ContextEnvelopeSync, Keyring};
-use anykms_keyring::{EncryptionContext, purposes};
 use anykms_recipes::{Envelope, envelope::Padding};
+use kekring::{ContextEnvelopeSync, Keyring};
+use kekring::{EncryptionContext, purposes};
 fn ring(current: u32, versions: &[u32]) -> Keyring {
     let mut b = Keyring::builder("tests");
     for v in versions {
@@ -178,7 +178,7 @@ fn fingerprint_changes_and_never_logs_keys() {
     );
     assert!(!format!("{r:?}").contains("AQEBAQEB"));
 }
-anykms_keyring::purpose! {pub struct Optional<'a> ="optional" { text:Option<&'a str>,number:Option<u64>,owned:Option<String> }}
+kekring::purpose! {pub struct Optional<'a> ="optional" { text:Option<&'a str>,number:Option<u64>,owned:Option<String> }}
 #[test]
 fn optional_macro() {
     let c = EncryptionContext::try_from(&Optional {
