@@ -41,10 +41,15 @@ fn rejected<V: AsRef<std::ffi::OsStr> + Copy>(
     let mut child = command.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        assert!(
-            TcpStream::connect(address).is_err(),
-            "{case}: refused root must never listen"
-        );
+        if let Ok(stream) = TcpStream::connect(address) {
+            // A free ephemeral port can self-connect (source port equals the
+            // destination); only a connection to another socket is a listener.
+            assert_eq!(
+                stream.local_addr().unwrap(),
+                address,
+                "{case}: refused root must never listen"
+            );
+        }
         if child.try_wait().unwrap().is_some() {
             break;
         }
