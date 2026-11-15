@@ -56,9 +56,10 @@ type Ghinvite {
   toolkit: String! @check {
     self.rust.withWorkdir("/work/src/libs/octoauth")
       .withExec(["cargo", "fmt", "--check"])
-      .withExec(["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"])
-      .withExec(["cargo", "test", "--workspace", "--locked"])
+      .withExec(["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"])
+      .withExec(["cargo", "test", "--workspace", "--all-features", "--locked"])
       .withExec(["cargo", "check", "--locked", "-p", "octoauth", "-p", "octotoken", "-p", "octologin", "-p", "octoscrub", "--target", "wasm32-unknown-unknown"])
+      .withExec(["cargo", "check", "--locked", "-p", "octoauth", "-p", "octotoken", "-p", "octologin", "-p", "octoscrub", "--all-features", "--target", "wasm32-unknown-unknown"])
       .combinedOutput
   }
 

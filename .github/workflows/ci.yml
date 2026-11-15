@@ -72,9 +72,11 @@ jobs:
         with:
           workspaces: libs/octoauth
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      # Includes the error-codes.txt check (crates/octoauth/tests/error_codes.rs).
+      - run: cargo test --workspace --all-features --locked
       - run: cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --target wasm32-unknown-unknown
+      - run: cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --all-features --target wasm32-unknown-unknown
 
   kekring:
     name: kekring formats, conformance and fuzz targets (libs/kekring)
