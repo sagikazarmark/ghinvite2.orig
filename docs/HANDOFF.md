@@ -27,7 +27,7 @@ Follow-ups on 2026-11-14/15, all on `main`:
 | `866ab98` | octoauth `wasm_dependencies` test: `cargo metadata --locked` instead of `--offline` (cold CI cache lacks wasm32-only packages) |
 | `926dd2a` | `link-pause.mjs` 21-way concurrent admission burst: 90 s client timeout (serialized at ~0.8 s per admit; hosted runners exceed 25 s) |
 
-`specs.orig`: `implementation/{ghinvite,octoauth}` and `.github/workflows/p1.yml` removed, pointer in `implementation/SOURCES.md` and `SESSION.md`. That is **commit `45edec2`, local only, not pushed**. The gitignored `implementation/ghinvite/.devenv` toolchain profile (on the PATH below) stays on disk and now shows as untracked there.
+`specs.orig`: `implementation/{ghinvite,octoauth}` and `.github/workflows/p1.yml` removed, pointer in `implementation/SOURCES.md` and `SESSION.md`. That is commit `45edec2`, pushed 2026-11-15. The gitignored `implementation/ghinvite/.devenv` toolchain profile (on the PATH below) stays on disk and now shows as untracked there.
 
 GitHub reports **30 Dependabot vulnerabilities** on `main` (13 high, 11 moderate, 6 low). The `gh` token cannot read the alerts API (403), so they are untriaged. Two Dependabot PRs were already open before the push.
 
@@ -82,7 +82,7 @@ The step "exact deadline equality, overdue readmission without refund, request-o
 ### 3.3 anykms upstream — done upstream
 All of it merged before this was picked up: #37 (AAD v1 byte spec, `docs/aad-format.md`, vectors in `crates/anykms-recipes/tests/vectors/aad_v1.json`, `PLAN.md` §29 triggers), #42 (KeyWrap unwrap conformance case), #43 (custody non-goal, `PLAN.md` §30), #44 (backend-author guide, third-party backends). #33 and #38 are closed; #35 (tracking, third-party KEK) stays open. **anykms 0.3.0** (2026-11-12) ships them; ghinvite uses 0.3 since §3.4, and kekring passes the new `keywrap` conformance case.
 
-### 3.4 kekring redesign + ghinvite switch — done (2026-11-15, branch `kekring-redesign`, not pushed)
+### 3.4 kekring redesign + ghinvite switch — done (2026-11-15, PR #125, merged)
 anykms 0.3.0 from crates.io; `libs/kekring` rebuilt per the #35 amendment; ghinvite switched in one go. Wire formats (spec and decisions: `libs/kekring/docs/kekring-format.md`):
 
 - **Labels** `kekring/v1/{salt,kek,kid,fp}` (HKDF-SHA256, info `label ‖ u8 len ‖ name ‖ u32be version`).
@@ -98,7 +98,7 @@ ghinvite: purposes in `ghinvite_core::purpose`; rollout skew via `kekring::Code:
 
 **Open follow-ups:** the external review of the three one-way formats (descriptor, blob, labels/AAD) is still outstanding and gates launch; real fuzzing with cargo-fuzz on nightly; crate/type naming is still a placeholder (labels would not change); push the branch and let CI run the new `kekring` job.
 
-### 3.5 Toolkit hardening (tier (a), `libs/octoauth`) — done (2026-11-15, branch `octoauth-hardening` off `kekring-redesign`, not pushed)
+### 3.5 Toolkit hardening (tier (a), `libs/octoauth`) — done (2026-11-15, PR #126)
 - **octotoken**: `DynInstallationTokenProvider` (boxed `TokenFuture`, blanket-implemented for every provider; `dyn` values implement `InstallationTokenProvider` again, so `with_token` takes them) with marker `DynSendSync`; opt-in `send-wrapper` feature (futures `Send` on wasm32 via `SendWrapper`); `ProviderRegistry` (`const fn new`, `provider(&App) -> AppTokenProvider`, keyed by App ID, first `App` kept).
 - **tracing** feature on octoauth (`installation_token_created`/`_failed`, `clock_skew_corrected`, `app_credential_signed`) and octotoken (`token_created`, `token_replaced`, `token_failed`; enables octoauth's): IDs, token IDs (digests), codes and seconds only; tests capture every event and check for secrets.
 - `LICENSE-MIT`/`LICENSE-APACHE` (anykms's texts; root copies, symlinked per crate), a `CHANGELOG.md` per crate; `error-codes.txt` (35 codes) diffed against the sources' `"gh:…"` literals by `crates/octoauth/tests/error_codes.rs` (also checks ER-01's grammar).
@@ -110,9 +110,17 @@ ghinvite: purposes in `ghinvite_core::purpose`; rollout skew via `kekring::Code:
 ### 3.6 Dependency pins to revisit
 - `restate-sdk`: when a release containing #141 ships (0.13.1+ or 0.14), drop the `[patch.crates-io]`; watch for #132's breaking `TerminalErrorExt` change when crossing that boundary.
 - `restate-e2e-harness` 0.4 is fine; `now_named_with` could still be upstreamed to `sagikazarmark/restate-toolkit` to delete the inlined copy (optional).
+- Checked 2026-11-15: restate-sdk's latest release is still 0.13.0, and upstream `main` is only #132 (breaking) and #142 past the pinned `8a39311`. Nothing to do yet.
+- **Dependabot:** GitHub reports 30 vulnerabilities on `main` (13 high) and 204 on `specs.orig`. They are untriaged because the `gh` token cannot read the alerts API (403).
+
+### 3.6a Known flakes and follow-ups found while landing
+- **#127:** the `request-history` Playwright fixture server sometimes starts returning 500s mid-run in CI. Seen once (PR #125's first run). It passed on rerun and 6/6 locally. Step 1: give the browser fixture servers a tracing subscriber.
+- `bridge_startup` never-listen check: a TCP self-connect on the reserved ephemeral port made `connect()` succeed with no listener (once, on PR #126). Fixed by ignoring self-connections.
+- Restate SDK debug-build panic (integer underflow, `endpoint/mod.rs:256`) on a Restate-signed request to a path with fewer than three segments. It poisons that Worker instance. Release builds are unaffected. Worth reporting upstream.
+- Throughput: about 45 Restate↔Worker round trips per admission on one link, and the Worker rebuilds the whole endpoint on every request. Fixes: build the endpoint once per instance, and use fewer rounds (needs deployment versioning). See §3.1.
 
 ### 3.7 Then the product gates
-Per the planning ledger (`specs.orig/plans/implementation-status.md`, stale and deliberately not imported), every live/deployed gate is unverified: M0/M1 acceptance against a real GitHub App installation, remote D1, Restate Cloud, the operator checklist in `docs/deploy.md`. The P1 spec and build plan in `docs/specs/` define them.
+**Blocked on an operator (checked 2026-11-15):** this machine has no Cloudflare, Restate Cloud or GitHub App credentials, and these gates are live deployments. Per the planning ledger (`specs.orig/plans/implementation-status.md`, stale and deliberately not imported), every live/deployed gate is unverified: M0/M1 acceptance against a real GitHub App installation, remote D1, Restate Cloud, the operator checklist in `docs/deploy.md`. The P1 spec and build plan in `docs/specs/` define them.
 
 ## 4. Deferred by decision (do not start without asking)
 - **P2 Dependaboard prerequisites** (tier (b) toolkit gaps): GitHub `rotcred_core::Refresher` + `user_token_context` next to `octologin` (the deleted 303-line reference is at `specs.orig` git `a7c4d86^:implementation/gh-toolkit/crates/gh-toolkit/src/signin/rotating.rs`), acting-grant exchange with `Acting` typestate, `check_token`/`delete_grant`, `list_user_installations`, `invalidate_installation`, GraphQL, extraction of ghinvite-github's generic transport/REST/pagination/credential/error/mock plumbing into the toolkit, rotcred's two Node lockfile fixes and hosted CI.
