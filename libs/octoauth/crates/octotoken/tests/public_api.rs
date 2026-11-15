@@ -2,9 +2,9 @@
 //! generic consumers that spawn work natively.
 
 use octotoken::{
-    Access, ApiError, AppId, AppTokenProvider, InstallationId, InstallationToken,
-    InstallationTokenProvider, OrganizationPermission, Permissions, TokenError, TokenParts,
-    TokenScope, WithTokenError, octoauth, with_token,
+    Access, ApiError, AppId, AppTokenProvider, DynInstallationTokenProvider, InstallationId,
+    InstallationToken, InstallationTokenProvider, OrganizationPermission, Permissions,
+    ProviderRegistry, TokenError, TokenParts, TokenScope, WithTokenError, octoauth, with_token,
 };
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -117,6 +117,53 @@ fn real_provider_is_spawnable(provider: Arc<AppTokenProvider>) {
         provider,
         Some(ApiError::NotFound),
     )));
+}
+
+/// Any provider, held without a type parameter: `Send` and `'static`, so a
+/// handler can spawn work with it, and usable with `with_token`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dyn_providers_work_with_spawned_consumers() {
+    let provider: Arc<dyn DynInstallationTokenProvider> = Arc::new(fixed());
+    let secret = tokio::spawn({
+        let provider = provider.clone();
+        async move {
+            let token =
+                DynInstallationTokenProvider::token(&*provider, InstallationId::new(42), &scope())
+                    .await
+                    .unwrap();
+            token.expose_secret().to_owned()
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(secret, "ghs_fixed");
+
+    let result = tokio::spawn(async move {
+        let scope = scope();
+        with_token(
+            &*provider,
+            InstallationId::new(42),
+            &scope,
+            ApiError::is_unauthorized,
+            |_| async { Err::<(), _>(ApiError::Unauthorized) },
+        )
+        .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(result, Err(WithTokenError::Token(TokenError::ForeignToken)));
+}
+
+/// A registry in a `static`, as a Worker keeps it.
+#[test]
+fn registries_live_in_statics() {
+    static PROVIDERS: ProviderRegistry = ProviderRegistry::new();
+    let pem = include_str!("fixtures/rsa2048.pem");
+    let app = octoauth::App::new(9, octoauth::SigningKey::from_pem(pem).unwrap());
+    let provider = PROVIDERS.provider(&app);
+    let dyn_provider: Arc<dyn DynInstallationTokenProvider> = Arc::new(PROVIDERS.provider(&app));
+    drop(dyn_provider);
+    assert_eq!(provider.app().id(), AppId::new(9));
 }
 
 #[test]

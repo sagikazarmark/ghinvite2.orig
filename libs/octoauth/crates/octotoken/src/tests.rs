@@ -1,7 +1,12 @@
 //! `AppTokenProvider` against a GitHub stand-in that creates numbered tokens.
 
 use crate::clock::Clock;
-use crate::{AppTokenProvider, InstallationTokenProvider, TokenError, WithTokenError, with_token};
+// Not `DynInstallationTokenProvider`: with both traits in scope, `token`
+// calls on a provider are ambiguous.
+use crate::{
+    AppTokenProvider, InstallationTokenProvider, ProviderRegistry, TokenError, WithTokenError,
+    with_token,
+};
 use octoauth::{
     Access, App, AppId, Error, InstallationId, InstallationToken, OrganizationPermission,
     Permissions, SigningKey, TokenParts, TokenScope, TransientKind,
@@ -522,3 +527,93 @@ fn with_token_errors_render_the_inner_error() {
     let error = WithTokenError::Call(octoauth::ApiError::NotFound);
     assert_eq!(error.to_string(), "gh:api:not_found");
 }
+
+#[tokio::test]
+async fn dyn_providers_use_the_providers_cache() {
+    let f = Fixture::new().await;
+    let tokens: Arc<dyn crate::DynInstallationTokenProvider> = Arc::new(f.provider.clone());
+    let first =
+        crate::DynInstallationTokenProvider::token(&*tokens, InstallationId::new(42), &scope())
+            .await
+            .unwrap();
+    assert_eq!(f.token().await.unwrap().id(), first.id(), "one cache");
+    assert_eq!(f.created(), 1);
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let second = crate::DynInstallationTokenProvider::replace(&*tokens, &first)
+        .await
+        .unwrap();
+    assert_ne!(second.id(), first.id());
+    assert_eq!(f.token().await.unwrap().id(), second.id());
+    assert_eq!(f.created(), 2);
+}
+
+#[tokio::test]
+async fn with_token_takes_a_dyn_provider() {
+    let f = Fixture::new().await;
+    let tokens: Arc<dyn crate::DynInstallationTokenProvider> = Arc::new(f.provider.clone());
+    let result = with_token(
+        &*tokens,
+        InstallationId::new(42),
+        &scope(),
+        unauthorized,
+        |token| {
+            let secret = token.expose_secret().to_owned();
+            async move {
+                match secret.as_str() {
+                    "ghs_1" => Err(Answer::Unauthorized),
+                    _ => Ok(secret),
+                }
+            }
+        },
+    )
+    .await;
+    assert_eq!(result.unwrap(), "ghs_2");
+    assert_eq!(f.created(), 2);
+}
+
+#[tokio::test]
+async fn registries_keep_one_provider_per_app_id() {
+    let f = Fixture::new().await;
+    let registry = ProviderRegistry::new();
+    let first = registry
+        .provider(f.provider.app())
+        .token(InstallationId::new(42), &scope())
+        .await
+        .unwrap();
+    let again = registry
+        .provider(f.provider.app())
+        .token(InstallationId::new(42), &scope())
+        .await
+        .unwrap();
+    assert_eq!(again.id(), first.id(), "the registered provider's cache");
+    assert_eq!(f.created(), 1);
+
+    // A later `App` with the same ID gets the first one's provider and `App`.
+    let key = || SigningKey::from_pem(PEM).unwrap();
+    let later = App::builder(7, key())
+        .base_url("http://127.0.0.1:1")
+        .build()
+        .unwrap();
+    let provider = registry.provider(&later);
+    assert_eq!(
+        format!("{:?}", provider.app()),
+        format!("{:?}", f.provider.app())
+    );
+    let cached = provider
+        .token(InstallationId::new(42), &scope())
+        .await
+        .unwrap();
+    assert_eq!(cached.id(), first.id());
+    assert_eq!(registry.len(), 1);
+
+    // Another App ID is another provider.
+    let other = registry.provider(&App::new(8, key()));
+    assert_eq!(other.app().id(), AppId::new(8));
+    assert_eq!(registry.len(), 2);
+    assert_eq!(
+        format!("{registry:?}"),
+        "ProviderRegistry { apps: [AppId(7), AppId(8)] }"
+    );
+}
+

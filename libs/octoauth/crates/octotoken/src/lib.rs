@@ -27,27 +27,46 @@
 //! redirects, errors converted at the boundary), each tested against a local
 //! GitHub stand-in.
 //!
+//! # Holding a provider
+//!
+//! - Generic code takes `impl InstallationTokenProvider`; to store any
+//!   provider without a type parameter (e.g. a fake in tests), hold an
+//!   `Arc<dyn` [`DynInstallationTokenProvider`]`>`, which every provider
+//!   implements.
+//! - Code that builds its context per request (Cloudflare Workers) gets its
+//!   providers from a `static` [`ProviderRegistry`], so tokens outlive the
+//!   request.
+//!
 //! # Platforms
 //!
 //! Natively, the futures are `Send` and concurrent requests for the same
 //! token wait for one creation. On Cloudflare Workers (`wasm32`) they are not
 //! `Send`, and a request never waits on another request's creation: concurrent
 //! misses may create duplicates, which is harmless. See [`MaybeSend`].
+//!
+//! # Features
+//!
+//! - `send-wrapper`: [`DynInstallationTokenProvider`]'s futures are `Send` on
+//!   wasm32 too (see there). No effect natively.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod app_provider;
 mod clock;
+mod dyn_provider;
 mod error;
 mod maybe_send;
+mod registry;
 mod with_token;
 
 #[cfg(test)]
 mod tests;
 
 pub use app_provider::{AppTokenProvider, AppTokenProviderBuilder};
+pub use dyn_provider::{DynInstallationTokenProvider, DynSendSync, TokenFuture};
 pub use error::TokenError;
 pub use maybe_send::{MaybeSend, MaybeSendSync};
+pub use registry::ProviderRegistry;
 pub use with_token::{WithTokenError, with_token};
 
 /// The low-level client, for building an [`App`](octoauth::App).
