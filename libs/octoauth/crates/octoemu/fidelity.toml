@@ -1,0 +1,50 @@
+# octoemu fidelity manifest: how far each implemented route and each modelled
+# behaviour is known to match GitHub. Compiled into the crate; printed by
+# `octoemu --fidelity` and served at `GET /__octoemu/fidelity`.
+#
+# Labels (docs/specs/github-emulator.md §3.5):
+#   label = "verified"    date = "YYYY-MM-DD", scenario = "<id>"  set by the live suite
+#   label = "documented"  doc = "https://…"                      GitHub documents it
+#   label = "assumed"     reason = "…"                           a guess; refused in
+#                                                                refuse-assumed mode
+#
+# [routes."METHOD /pattern"]: exactly one entry per route registered in
+# src/api.rs, in axum's `{param}` syntax. A test (and Emulator::start) fails
+# when a registered route has no entry or an entry names no registered route.
+#
+# [behaviours.<id>]: exactly one entry per cross-cutting behaviour listed in
+# `api::BEHAVIOURS`, checked the same way.
+
+[routes]
+# None yet: the first arrive in GE-02. Every unbuilt API and web route answers
+# 501 {"message": "octoemu: not implemented", "route": "<METHOD> <path>"}.
+
+[behaviours.date-header]
+label = "documented"
+doc = "https://www.rfc-editor.org/rfc/rfc9110#name-date"
+# Every response carries `Date` (IMF-fixdate) from the virtual clock; octoauth
+# reads it for JWT clock skew and token issued-at.
+
+[behaviours.json-content-type]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api#media-types"
+# JSON bodies are `application/json; charset=utf-8`.
+
+[behaviours.error-body]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
+# Errors are {"message", "documentation_url"}. Whether GitHub also sends
+# `status` is still to be measured (plan §3.2).
+
+[behaviours.validation-errors]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
+# 422 "Validation Failed" adds errors[{resource, field, code}].
+
+[behaviours.rate-limit-headers]
+label = "assumed"
+reason = "The x-ratelimit-* header names are documented; the values are a fixed stub (5000 limit, 5000 remaining, core, reset in 1 h) until GE-02 models per-credential budgets. Omitted in refuse-assumed mode."
+
+[behaviours.request-id-header]
+label = "assumed"
+reason = "GitHub sends X-GitHub-Request-Id on REST responses; the value is opaque and octoemu's format (port:pid:sequence) is its own. Omitted in refuse-assumed mode."

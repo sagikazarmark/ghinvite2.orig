@@ -11,8 +11,11 @@ publish = false
 
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
+octoscrub = { version = "0.1.0", path = "crates/octoscrub" }
 
 async-trait = "0.1"
+# octoemu only (native): the emulator's HTTP server.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 base64 = "0.22"
 bytes = "1.10.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -34,6 +37,8 @@ static_assertions = "1.1.0"
 subtle = "2.6.1"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util"] }
+# octoemu only: parses its `fidelity.toml` manifest.
+toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 url = "2.5.4"
 wiremock = "0.6"
