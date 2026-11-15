@@ -122,6 +122,9 @@ ghinvite: purposes in `ghinvite_core::purpose`; rollout skew via `kekring::Code:
 ### 3.7 Then the product gates
 **Blocked on an operator (checked 2026-11-15):** this machine has no Cloudflare, Restate Cloud or GitHub App credentials, and these gates are live deployments. Per the planning ledger (`specs.orig/plans/implementation-status.md`, stale and deliberately not imported), every live/deployed gate is unverified: M0/M1 acceptance against a real GitHub App installation, remote D1, Restate Cloud, the operator checklist in `docs/deploy.md`. The P1 spec and build plan in `docs/specs/` define them.
 
+### 3.8 GitHub emulator (planned 2026-11-15)
+Plan: `docs/specs/github-emulator.md` (`octoemu`, tasks GE-01…GE-10): a stateful GitHub App emulator modelled on aws/aws-emulator, kept honest by one fidelity suite run against both it and real GitHub, replacing `stub.rs` and the inline fakes in `tests/worker/*.mjs`. Not started: §7 of the plan lists the decisions it waits on (name and home overlap the §4 mock-plumbing deferral; live-target credentials).
+
 ## 4. Deferred by decision (do not start without asking)
 - **P2 Dependaboard prerequisites** (tier (b) toolkit gaps): GitHub `rotcred_core::Refresher` + `user_token_context` next to `octologin` (the deleted 303-line reference is at `specs.orig` git `a7c4d86^:implementation/gh-toolkit/crates/gh-toolkit/src/signin/rotating.rs`), acting-grant exchange with `Acting` typestate, `check_token`/`delete_grant`, `list_user_installations`, `invalidate_installation`, GraphQL, extraction of ghinvite-github's generic transport/REST/pagination/credential/error/mock plumbing into the toolkit, rotcred's two Node lockfile fixes and hosted CI.
 - Durable Object executor for rotcred; `anykms-keyring` graduation upstream (after external review of the formats).
