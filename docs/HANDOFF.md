@@ -1,15 +1,16 @@
 # Handoff: ghinvite consolidation and what comes next
 
-Written 2026-11-11 for the next agent. Everything referenced is in this
+Written 2026-11-11 for the next agent; updated 2026-11-15 (§3.1–§3.3 closed, see the session log in §1). Everything referenced is in this
 repository unless a path starts with `specs.orig/` (the private planning
 monorepo at `/home/laborant/ghinvite/specs.orig`, read-only context) or is a
 GitHub issue.
 
 ## 1. Where things stand
 
-Repository `/home/laborant/ghinvite/ghinvite2.orig`, branch **`consolidate`**
-(not merged to `main`, not pushed), three commits on top of the PoC
-(`89a67fa`, tagged `poc-89a67fa`):
+Repository `/home/laborant/ghinvite/ghinvite2.orig`. **`consolidate` is merged
+into `main` (fast-forward) and pushed**; the branch is kept locally and equals
+`main`. The consolidation is three commits on top of the PoC (`89a67fa`, tagged
+`poc-89a67fa`):
 
 | Commit | What |
 |---|---|
@@ -17,7 +18,18 @@ Repository `/home/laborant/ghinvite/ghinvite2.orig`, branch **`consolidate`**
 | `c47589f` | CI (`ci.yml`: ported `native-d1-bridge`/`native-d1-cutover`, new `toolkit` job, kekring wasm check), Dagger `ghinvite:toolkit`, `docs/decisions`, `docs/specs`, `PROVENANCE.md`, README/doc path fixes |
 | `642489b` | restate-sdk from upstream `restatedev/sdk-rust@8a39311` (#141 merged, unreleased); KEK crate renamed `kekring`; root cause of the workerd failure documented |
 
-Working tree clean. `specs.orig` untouched (only gitignored `node_modules`/`target` were created there and removed).
+Follow-ups on 2026-11-14/15, all on `main`:
+
+| Commit | What |
+|---|---|
+| `1766d43` | workerd `test:admission` fixture fix (§3.2); compose-mode `authoritative_admission` limitation documented |
+| `57111f9` | regenerated `styles.built.css` (CI CSS freshness; Tailwind auto-detects `isolate`/`row-0` in Rust sources) |
+| `866ab98` | octoauth `wasm_dependencies` test: `cargo metadata --locked` instead of `--offline` (cold CI cache lacks wasm32-only packages) |
+| `926dd2a` | `link-pause.mjs` 21-way concurrent admission burst: 90 s client timeout (serialized at ~0.8 s per admit; hosted runners exceed 25 s) |
+
+`specs.orig`: `implementation/{ghinvite,octoauth}` and `.github/workflows/p1.yml` removed, pointer in `implementation/SOURCES.md` and `SESSION.md`. That is **commit `45edec2`, local only, not pushed**. The gitignored `implementation/ghinvite/.devenv` toolchain profile (on the PATH below) stays on disk and now shows as untracked there.
+
+GitHub reports **30 Dependabot vulnerabilities** on `main` (13 high, 11 moderate, 6 low). The `gh` token cannot read the alerts API (403), so they are untriaged. Two Dependabot PRs were already open before the push.
 
 ### Verified state of `consolidate` HEAD (this machine: rustc 1.92, 4 cores)
 
@@ -55,8 +67,12 @@ Read in this order if you need the reasoning: `PROVENANCE.md`, `docs/decisions/`
 
 ## 3. Open items, in priority order
 
-### 3.1 Land the branch
-Merge `consolidate` → `main`, push, watch the first `ci.yml` run (13 jobs; `native-d1-cutover` and `native-d1-bridge` have never run from this layout). Then decide what to do with `specs.orig/implementation/{ghinvite,octoauth}` so there is one source of truth (delete + pointer in `SOURCES.md`, or mark superseded).
+### 3.1 Land the branch — done (2026-11-15)
+Merged and pushed. The first `ci.yml` runs (`1766d43`, `57111f9`) failed on three never-before-green steps, each fixed (table in §1): CSS freshness, the octoauth offline-metadata test, and the `PAUSE_ONLY` burst timeout. `native-d1-bridge` and `native-d1-cutover` passed on their first run from this layout. CI on `926dd2a` (run 43658076272): **all 12 jobs green**.
+
+Note: the `Worker session and admission runtime` job stops at its first failing step. The steps after `PAUSE_ONLY` (`DELIVERY_CONTROL_ONLY`, `CANCELLATION_ONLY`, `BUDGET_CAP_ONLY`, `test:admission`, `test:journey`, `test:delivery`, …) had never run on a hosted runner before `926dd2a`; all pass locally. The serialized ~0.8 s per admission on one link (identical on Restate 1.7.9 and 1.8.1) looks like a fixed per-call cost rather than CPU. It is worth a look before load-sensitive product gates, since it caps one link at ~1.3 admissions/s in this fixture.
+
+Still open: push `specs.orig` `45edec2` when the user agrees.
 
 ### 3.2 Workerd `test:admission` fixture — done (2026-11-14)
 The step "exact deadline equality, overdue readmission without refund, request-owned terminal decision" now anchors its timeline at the real clock (option (a)), so `tick_expire`'s delayed self-sends stay in the future and lazy expiry does the work. The mechanism (pinned `Date.now()` + SDK `send_after` = past timers; VQueues starve the queued `decide`) is in `docs/local-testing.md`. Any new fixture step that schedules request expiry under `x-test-clock` must do the same. The optional `tick_expire` non-positive-delay guard was not added (unreachable in production).

@@ -32,3 +32,6 @@ data/
 !.env.example
 .worktrees/
 __pycache__/
+
+# Worker runtime launcher evidence (tests/worker/run-runtime.mjs)
+.runtime-evidence/
