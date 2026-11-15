@@ -123,8 +123,9 @@ export async function linkPause({ ingress,githubUrl,http,db,id,creation,eventual
     await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user,`user-${user}`).run();
     attempts.push({link_id:unlimited.link_id,requester_id:user,operation_id:id(),...admitCapability(unlimited.link_id)});
   }
-  // The owner admits one at a time (~0.8 s each locally, slower on hosted
-  // runners), so the last of 21 waits for all others: give it room.
+  // The owner admits one at a time, so the last of 21 waits for all others:
+  // give it room. Each admission is ~45 request-response rounds on its critical
+  // path (~0.75 s locally, slower on hosted runners); see docs/local-testing.md.
   const outcomes=await Promise.all(attempts.map(input=>http(`${ingress}/InvitationLink/${unlimited.link_id}/admit`,input,'POST',90_000)));
   assert.equal(outcomes.filter(value=>value.result.kind==='accepted').length,20);
   assert.equal(outcomes.filter(value=>value.result.reason==='paused').length,1);
