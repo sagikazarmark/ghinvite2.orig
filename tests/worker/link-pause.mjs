@@ -123,7 +123,9 @@ export async function linkPause({ ingress,githubUrl,http,db,id,creation,eventual
     await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user,`user-${user}`).run();
     attempts.push({link_id:unlimited.link_id,requester_id:user,operation_id:id(),...admitCapability(unlimited.link_id)});
   }
-  const outcomes=await Promise.all(attempts.map(input=>http(`${ingress}/InvitationLink/${unlimited.link_id}/admit`,input)));
+  // The owner admits one at a time (~0.8 s each locally, slower on hosted
+  // runners), so the last of 21 waits for all others: give it room.
+  const outcomes=await Promise.all(attempts.map(input=>http(`${ingress}/InvitationLink/${unlimited.link_id}/admit`,input,'POST',90_000)));
   assert.equal(outcomes.filter(value=>value.result.kind==='accepted').length,20);
   assert.equal(outcomes.filter(value=>value.result.reason==='paused').length,1);
   const counted=await eventually(()=>db.prepare('SELECT * FROM invitation_links WHERE id=?').bind(unlimited.link_id).first(),v=>v?.state==='paused');

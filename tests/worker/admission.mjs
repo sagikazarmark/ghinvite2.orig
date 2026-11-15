@@ -145,9 +145,9 @@ const creation = () => {
     max_uses: 1, approval_required: true,
     targets: { organization: null, teams: [], repos: [{ repo_id: 10, repo_full_name: 'acme/api', grant: 'read' }] } };
 };
-const http = async (url, body, method = 'POST') => {
+const http = async (url, body, method = 'POST', timeout = 25_000) => {
   const response = await fetch(url, { method, headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), accept: 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(25_000) });
+    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout) });
   const text = await response.text();
   assert.ok(response.ok, `${method} ${new URL(url).pathname}: ${response.status} ${text}`);
   return text ? JSON.parse(text) : null;
