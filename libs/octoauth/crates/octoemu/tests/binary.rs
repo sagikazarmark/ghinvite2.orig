@@ -162,7 +162,8 @@ fn prints_the_fidelity_table() {
     assert!(table.contains("date-header"), "{table}");
     assert!(table.contains("documented"), "{table}");
     assert!(table.contains("assumed"), "{table}");
-    assert!(table.contains("routes: 0"), "{table}");
+    assert!(table.contains("GET /installation/repositories"), "{table}");
+    assert!(table.contains("routes: "), "{table}");
 }
 
 #[test]

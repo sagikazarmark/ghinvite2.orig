@@ -1,7 +1,8 @@
 //! Response basics every route uses: JSON bodies, GitHub's error shapes,
 //! rate-limit headers and the request ID.
 
-use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE};
+use axum::http::header::{CONTENT_TYPE, LINK};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -13,10 +14,6 @@ pub(crate) const JSON: &str = "application/json; charset=utf-8";
 pub(crate) const OCTOEMU_DOCS: &str = "https://github.com/sagikazarmark/ghinvite2.orig/blob/main/libs/octoauth/crates/octoemu/README.md";
 
 /// GitHub's REST documentation root, the default `documentation_url`.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the first route arrives in GE-02")
-)]
 pub(crate) const REST_DOCS: &str = "https://docs.github.com/rest";
 
 /// `X-GitHub-Request-Id`.
@@ -33,6 +30,20 @@ pub(crate) fn json<T: Serialize + ?Sized>(status: StatusCode, body: &T) -> Respo
             .into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// `status` with `body` as JSON and, for a list spanning several pages, a
+/// `Link` header (see `paginate`).
+pub(crate) fn json_with_link<T: Serialize + ?Sized>(
+    status: StatusCode,
+    body: &T,
+    link: Option<String>,
+) -> Response {
+    let mut response = json(status, body);
+    if let Some(value) = link.and_then(|link| HeaderValue::from_str(&link).ok()) {
+        response.headers_mut().insert(LINK, value);
+    }
+    response
 }
 
 /// GitHub's error body: `{"message", "documentation_url"}`.
@@ -55,10 +66,6 @@ pub(crate) fn error(status: StatusCode, message: &str, documentation_url: &str) 
 
 /// One entry of a 422's `errors`.
 #[derive(Debug, Clone, Serialize)]
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the first route arrives in GE-02")
-)]
 pub(crate) struct FieldError {
     pub(crate) resource: String,
     pub(crate) field: String,
@@ -70,10 +77,6 @@ pub(crate) struct FieldError {
 }
 
 /// A 422 `Validation Failed` with `errors`.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the first route arrives in GE-02")
-)]
 pub(crate) fn validation_failed(errors: &[FieldError], documentation_url: &str) -> Response {
     #[derive(Serialize)]
     struct Body<'a> {
@@ -123,7 +126,7 @@ pub(crate) struct RateLimit {
 }
 
 impl RateLimit {
-    /// The fixed stand-in until budgets are modelled (GE-02): a fresh
+    /// The fixed stand-in until budgets are modelled: a fresh
     /// 5000-request `core` window resetting in an hour.
     pub(crate) fn stub(now: DateTime<Utc>) -> Self {
         Self {

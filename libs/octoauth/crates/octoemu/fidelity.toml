@@ -15,9 +15,53 @@
 # [behaviours.<id>]: exactly one entry per cross-cutting behaviour listed in
 # `api::BEHAVIOURS`, checked the same way.
 
-[routes]
-# None yet: the first arrive in GE-02. Every unbuilt API and web route answers
-# 501 {"message": "octoemu: not implemented", "route": "<METHOD> <path>"}.
+# Every unbuilt API and web route answers 501
+# {"message": "octoemu: not implemented", "route": "<METHOD> <path>"}.
+
+# --- App (JWT) routes --------------------------------------------------------
+
+[routes."GET /app"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#get-the-authenticated-app"
+
+[routes."GET /app/installations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#list-installations-for-the-authenticated-app"
+
+[routes."GET /app/installations/{installation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#get-an-installation-for-the-authenticated-app"
+# 404 for an unknown installation or another App's.
+
+[routes."POST /app/installations/{installation_id}/access_tokens"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app"
+# 201 {token, expires_at, permissions, repository_selection, repositories?};
+# 404 unknown or another App's; 403 suspended; 422 a scope it cannot have.
+
+[routes."PUT /app/installations/{installation_id}/suspended"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#suspend-an-app-installation"
+
+[routes."DELETE /app/installations/{installation_id}/suspended"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#unsuspend-an-app-installation"
+
+[routes."GET /app/installation-requests"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#list-installation-requests-for-the-authenticated-app"
+
+# --- Installation-token routes -----------------------------------------------
+
+[routes."GET /installation/repositories"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation"
+# Needs metadata: read (as ghinvite-github's endpoint table declares). Only the
+# token's repositories; paged.
+
+[routes."DELETE /installation/token"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token"
 
 [behaviours.date-header]
 label = "documented"
@@ -43,8 +87,110 @@ doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-re
 
 [behaviours.rate-limit-headers]
 label = "assumed"
-reason = "The x-ratelimit-* header names are documented; the values are a fixed stub (5000 limit, 5000 remaining, core, reset in 1 h) until GE-02 models per-credential budgets. Omitted in refuse-assumed mode."
+reason = "The x-ratelimit-* header names are documented; the values are a fixed stub (5000 limit, 5000 remaining, core, reset in 1 h) until per-credential budgets are modelled. Omitted in refuse-assumed mode."
 
 [behaviours.request-id-header]
 label = "assumed"
 reason = "GitHub sends X-GitHub-Request-Id on REST responses; the value is opaque and octoemu's format (port:pid:sequence) is its own. Omitted in refuse-assumed mode."
+
+# --- Authentication (GE-02) ----------------------------------------------------
+
+[behaviours.app-jwt]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app"
+# `Authorization: Bearer <jwt>`, RS256, verified against any of the App's
+# registered keys; `iss` is the client ID or the App ID (string or number);
+# `iat` required; `exp` required, in the future and at most 10 minutes ahead
+# of the virtual clock. Rejections are 401. A JWT sent with the `token`
+# scheme is refused (the page says Bearer).
+
+[behaviours.jwt-error-messages]
+label = "assumed"
+reason = "The 401 texts are community-reported, not documented: 'A JSON web token could not be decoded' (malformed, not RS256, bad signature; also a non-JWT on a JWT route), 'Integration not found' (unknown iss), the 'Issued at' claim ('iat') must be an Integer… text (missing, non-integer or future iat), the 'Expiration time' claim ('exp') must be a numeric value… text (missing or expired exp) and 'Expiration time' claim ('exp') is too far in the future. Plan §4 [M] scenario 1 measures them. Replaced by 'octoemu: assumed message withheld' in refuse-assumed mode."
+
+[behaviours.jwt-iat-tolerance]
+label = "assumed"
+reason = "An iat up to 30 s in the future (jwt::IAT_FUTURE_TOLERANCE) is accepted, for a client clock slightly ahead; GitHub's tolerance is unmeasured (plan §4 [M] scenario 1). A JWT accepted only thanks to it is refused in refuse-assumed mode."
+
+[behaviours.jwt-exp-after-iat]
+label = "assumed"
+reason = "exp more than 600 s after iat is rejected even when it is within 10 minutes of now (community-reported; the docs only bound exp against the current time). Refused in refuse-assumed mode when it is the only reason to reject."
+
+[behaviours.bad-credentials]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
+# An unknown, malformed or expired token is 401 {"message": "Bad credentials"}.
+# User tokens (ghu_) are unknown until GE-05.
+
+[behaviours.requires-authentication]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-app-installation"
+# No credential on a route that needs one: 401 "Requires authentication".
+
+[behaviours.wrong-credential-kind]
+label = "assumed"
+reason = "A credential of the wrong kind (an installation token on a JWT route, a JWT on an installation-token route) is a 401, with 'A JSON web token could not be decoded' on JWT routes and 'Bad credentials' elsewhere. GitHub may answer some such calls with a 403 ('You must authenticate with an installation access token…'); unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.permission-enforcement]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
+# A token without the route's permission: 403 "Resource not accessible by
+# integration" with X-Accepted-GitHub-Permissions: <permission>=<level>.
+# Per-route permissions follow
+# https://docs.github.com/en/rest/authentication/permissions-required-for-github-apps
+
+[behaviours.private-resource-404]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
+# A private resource the caller cannot reach is a 404, never a 403
+# (auth::visible_repo; used by the repository routes from GE-03).
+
+# --- Installation tokens (GE-02) ------------------------------------------------
+
+[behaviours.installation-token-expiry]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app"
+# Tokens expire one hour after creation, on the virtual clock; an expired
+# token is 401 "Bad credentials".
+
+[behaviours.installation-token-format]
+label = "assumed"
+reason = "ghs_<APPID>_<JWT>, about 520 characters, follows GitHub's stateless-token rollout (https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/); the inner JWT (HS256 with a per-instance key; claims iss, sub, aud, app_id, installation_id, jti, iat, nbf, exp, pad) is octoemu's own. Informational: clients must treat tokens as opaque, so nothing is refused for it."
+
+[behaviours.installation-token-scope]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app"
+# `permissions` narrows and never widens; `repositories` (names) and
+# `repository_ids` narrow to repositories the installation can access, at
+# most 500; the response has permissions, repository_selection and, when
+# narrowed, repositories. Tokens are looked up on every call.
+
+[behaviours.token-error-messages]
+label = "assumed"
+reason = "The 422 texts for a scope a token cannot have are community-reported or invented: 'The permissions requested are not granted to this installation.' (an ungranted permission, a higher level, an unknown level), 'There is at least one repository that does not exist or is not accessible to the parent installation.' (an unknown repository) and a Validation Failed with a custom error for over 500 repositories. Plan §4 [M] scenario 2. Withheld in refuse-assumed mode."
+
+[behaviours.token-repositories-union]
+label = "assumed"
+reason = "With both repositories and repository_ids, the token covers the union of both. Undocumented; refused in refuse-assumed mode."
+
+[behaviours.token-implicit-metadata]
+label = "assumed"
+reason = "A token narrowed by permissions that omit metadata still gets metadata: read when the installation has it (GitHub adds it to repository-scoped tokens). Refused in refuse-assumed mode when it applies."
+
+[behaviours.token-revocation-immediate]
+label = "assumed"
+reason = "A revoked token (DELETE /installation/token) or one of an uninstalled installation is refused (401 Bad credentials) on its next use. Whether GitHub rejects stateless tokens immediately is unmeasured (plan §4 [M] scenario 3). Refused in refuse-assumed mode."
+
+[behaviours.suspended-installation]
+label = "assumed"
+reason = "Token creation for a suspended installation is the endpoint's documented 403; the message 'This installation has been suspended' is community-reported (plan §4 [M] scenario 4). Withheld in refuse-assumed mode."
+
+[behaviours.suspended-installation-tokens]
+label = "assumed"
+reason = "Tokens minted before a suspension are refused while it lasts, with the same 403 and message as token creation, and work again after unsuspension. GitHub documents that access is blocked; status, message and timing are unmeasured (plan §4 [M] scenarios 3-4). Refused in refuse-assumed mode."
+
+[behaviours.pagination]
+label = "documented"
+doc = "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api"
+# per_page defaults to 30 and silently caps at 100; page from 1; Link with
+# prev, next, last and first (absolute URLs on the request's Host).

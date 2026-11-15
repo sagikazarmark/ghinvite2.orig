@@ -1,61 +1,81 @@
 //! Everything an emulator instance holds: the world behind one lock, plus
 //! the fidelity manifest and activity tracking for the idle timeout.
 
+use crate::auth::Auth;
 use crate::calls::{Call, CallLog};
 use crate::clock::Clock;
 use crate::fidelity::{Fidelity, Manifest};
 use crate::response::{OCTOEMU_DOCS, json};
 use crate::seed::{Seed, SeedError};
+use crate::tokens::Tokens;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 pub(crate) type SharedState = Arc<Shared>;
 
-/// The emulated world. GE-02+ add their resources here.
+/// The emulated world. Later tasks add their resources here.
 #[derive(Debug)]
 pub(crate) struct State {
+    /// Seeded objects, changed in place (suspension, uninstalling, …).
     pub(crate) world: Seed,
     pub(crate) clock: Clock,
     pub(crate) calls: CallLog,
+    /// Installation tokens minted by this instance.
+    pub(crate) tokens: Tokens,
 }
+
+/// The `message` sent instead of an `assumed` one in refuse-assumed mode:
+/// the documented status stays, the guessed text does not.
+pub(crate) const WITHHELD: &str = "octoemu: assumed message withheld";
 
 /// One emulator instance's shared data.
 #[derive(Debug)]
 pub(crate) struct Shared {
     state: Mutex<State>,
     manifest: Arc<Manifest>,
-    /// `METHOD /pattern` of every registered GitHub route.
-    registered: BTreeSet<String>,
+    /// `METHOD /pattern` of every registered GitHub route, with what it
+    /// accepts.
+    registered: BTreeMap<String, Auth>,
+    /// `settings.refuse_assumed`, readable without the lock.
+    strict: AtomicBool,
     pub(crate) activity: Activity,
     sequence: AtomicU64,
     pub(crate) port: u16,
+    /// `http://host:port` as bound, for absolute URLs without a `Host`.
+    pub(crate) root: String,
 }
 
 impl Shared {
     pub(crate) fn new(
         world: Seed,
         manifest: Arc<Manifest>,
-        registered: BTreeSet<String>,
+        registered: BTreeMap<String, Auth>,
+        root: String,
         port: u16,
     ) -> Self {
         let clock = Clock::new(world.settings.start_time);
+        let strict = AtomicBool::new(world.settings.refuse_assumed);
         Self {
             state: Mutex::new(State {
                 world,
                 clock,
                 calls: CallLog::default(),
+                tokens: Tokens::default(),
             }),
             manifest,
             registered,
+            strict,
             activity: Activity::new(),
             sequence: AtomicU64::new(0),
             port,
+            root,
         }
     }
 
@@ -76,12 +96,15 @@ impl Shared {
         self.sequence.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    pub(crate) fn is_registered(&self, route: &str) -> bool {
-        self.registered.contains(route)
+    /// What a registered route accepts; `None` for an unregistered one.
+    pub(crate) fn auth_of(&self, route: &str) -> Option<Auth> {
+        self.registered.get(route).copied()
     }
 
+    /// Whether `assumed` behaviour is refused. Never takes the lock, so
+    /// handlers may ask while holding it.
     pub(crate) fn refuse_assumed(&self) -> bool {
-        self.state().world.settings.refuse_assumed
+        self.strict.load(Ordering::Relaxed)
     }
 
     /// Whether behaviour `id` may be used. Only refuse-assumed mode says no,
@@ -92,12 +115,19 @@ impl Shared {
 
     /// The enforcement point for handlers: the response to send instead
     /// when behaviour `id` is `assumed` and assumptions are refused.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "the first route arrives in GE-02")
-    )]
     pub(crate) fn refuse(&self, id: &str) -> Option<Response> {
         (!self.allows(id)).then(|| refusal("behaviour", id, self.manifest.behaviour(id)))
+    }
+
+    /// An error `message` whose text is behaviour `id`: the text, or
+    /// [`WITHHELD`] when that is `assumed` and assumptions are refused. For
+    /// errors whose status is documented but whose wording is a guess.
+    pub(crate) fn message<'a>(&self, id: &str, text: &'a str) -> Cow<'a, str> {
+        if self.allows(id) {
+            Cow::Borrowed(text)
+        } else {
+            Cow::Borrowed(WITHHELD)
+        }
     }
 
     /// The route-level enforcement point, run before every registered route.
@@ -114,6 +144,8 @@ impl Shared {
     pub(crate) fn merge(&self, more: Seed) -> Result<(), SeedError> {
         let mut state = self.state();
         state.world = state.world.merged(more)?;
+        self.strict
+            .store(state.world.settings.refuse_assumed, Ordering::Relaxed);
         Ok(())
     }
 
@@ -126,6 +158,8 @@ impl Shared {
             "now": state.clock.now(),
             "clock": {"advanced_seconds": state.clock.advanced_seconds()},
             "world": world,
+            // Redacted IDs and scopes only, never the tokens.
+            "tokens": state.tokens.records(),
             "calls": state.calls.calls().len(),
         })
     }

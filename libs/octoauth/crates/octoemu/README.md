@@ -8,13 +8,28 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: skeleton (GE-01)
+## Status: App auth (GE-02)
 
 Built: the server, the two modes, the seed model and its validation, the
-virtual clock, the admin API, the call log, the fidelity manifest, and the
-response basics later routes share.
+virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
+App JWT verification, stateless installation tokens with scoping,
+revocation and suspension, and per-route credential and permission checks
+(GE-02).
 
-**No GitHub route exists yet.** Every API and web route answers:
+### Implemented routes
+
+| Route | Credential | Notes |
+|---|---|---|
+| `GET /app` | App JWT | The authenticated App |
+| `GET /app/installations` | App JWT | Paged |
+| `GET /app/installations/{installation_id}` | App JWT | 404 for an unknown installation or another App's |
+| `POST /app/installations/{installation_id}/access_tokens` | App JWT | 201 `{token, expires_at, permissions, repository_selection, repositories?}`; body `permissions`, `repositories`, `repository_ids` narrow |
+| `PUT`/`DELETE /app/installations/{installation_id}/suspended` | App JWT | 204 |
+| `GET /app/installation-requests` | App JWT | Paged |
+| `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
+| `DELETE /installation/token` | installation token | 204; the token stops working |
+
+Every other API and web route answers:
 
 ```http
 HTTP/1.1 501 Not Implemented
@@ -24,9 +39,55 @@ content-type: application/json; charset=utf-8
 ```
 
 It is never a 404, which a client could take for GitHub's answer. Routes
-arrive with GE-02 (App auth), GE-03 (repositories), GE-04 (webhooks), GE-05
-(OAuth web flow, `/user`) and GE-06 (organizations); anything outside
-ghinvite's surface stays 501.
+arrive with GE-03 (repositories), GE-04 (webhooks), GE-05 (OAuth web flow,
+`/user`) and GE-06 (organizations); anything outside ghinvite's surface
+stays 501.
+
+### Auth model
+
+Every route declares what it accepts when it is registered; the credential
+is checked before the handler runs, in this order:
+
+1. **Verified, on every route.** A credential that is sent must be valid,
+   even where none is needed: otherwise 401.
+   - **App JWT** (`Authorization: Bearer <jwt>`): RS256, verified against
+     any of the App's `public_keys` (so a rotation can list old and new);
+     `iss` the client ID or the App ID (string or number); `iat` an integer
+     at most 30 s in the future; `exp` an integer, in the future, at most
+     600 s after the virtual clock's now and after `iat`. Rejections carry
+     GitHub's community-reported messages (`A JSON web token could not be
+     decoded`, `Integration not found`, the `'Issued at' claim ('iat')…` and
+     `'Expiration time' claim ('exp')…` texts). A JWT sent as `token <jwt>`
+     is refused. octoauth's skew correction works: the emulator's `Date`
+     tells it how far off it is.
+   - **Installation token** (`Bearer ghs_…` or `token ghs_…`): looked up on
+     every call. Unknown, forged, expired (1 h, on the virtual clock),
+     revoked or uninstalled: 401 `Bad credentials`. Suspended: 403 `This
+     installation has been suspended`, until unsuspended.
+   - Anything else (user tokens until GE-05, PATs, Basic): 401 `Bad
+     credentials`.
+2. **The right kind.** No credential on a route that needs one: 401
+   `Requires authentication`. The wrong kind: 401.
+3. **The route's permission**, for installation tokens: without it, 403
+   `Resource not accessible by integration` with
+   `X-Accepted-GitHub-Permissions: <permission>=<level>`.
+
+**Installation tokens** are GitHub's stateless format, `ghs_<APPID>_<JWT>`,
+about 520 characters, signed with a key drawn per instance (the inner
+claims are octoemu's own; treat tokens as opaque). A token's scope is the
+installation's grant (its `permissions`, else the App's; its repository
+selection) narrowed by the request:
+
+- `permissions` may only ask for granted permissions at granted levels or
+  lower; anything else is 422. A token narrowed without `metadata` keeps
+  `metadata: read` when the installation has it.
+- `repositories` (names) and `repository_ids` narrow to repositories the
+  installation can access, 500 at most; an unknown one is 422; both
+  together cover the union. A narrowed token reports
+  `repository_selection: "selected"` and lists its `repositories`.
+
+Many of these details are guesses, each labelled `assumed` in
+`fidelity.toml` (see below).
 
 ## Modes
 
@@ -45,7 +106,8 @@ let calls = emulator.calls();
 
 `Emulator::builder(seed)` adds `.bind(addr)`, `.idle_timeout(d)` and
 `.refuse_assumed()`. The handle also has `avatar_base`, `admin_base`, `now`,
-`seed` (merge more), `state`, `clear_calls` and `stopped`.
+`seed` (merge more), `state`, `clear_calls`, `stopped`,
+`suspend_installation`, `unsuspend_installation` and `uninstall`.
 
 **Binary**, for the Worker drivers, browser tests and other processes:
 
@@ -88,7 +150,10 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
             "callback_urls": ["http://127.0.0.1:8787/callback"],
             "permissions": {"members": "write", "metadata": "read"}, "events": ["member"]}],
   "installations": [{"id": 6, "app_id": 5, "account": "acme",
-                     "repository_selection": "selected", "repositories": ["acme/widgets"]}],
+                     "repository_selection": "selected", "repositories": ["acme/widgets"],
+                     "permissions": {"members": "write", "metadata": "read"},
+                     "suspended_at": null, "suspended_by": null}],
+  "installation_requests": [{"id": 7, "app_id": 5, "account": "acme", "requester": "octocat"}],
   "collaborators": [{"repo": "acme/widgets", "user": "octocat", "role": "push"}],
   "memberships": [{"org": "acme", "user": "octocat", "role": "admin", "state": "active"}],
   "team_memberships": [{"team": "acme/core", "user": "octocat", "role": "maintainer"}]
@@ -100,7 +165,8 @@ Validation reports every problem at once, each with its JSON path
 (users and organizations share one namespace, ignoring case), slugs and client
 IDs; that every reference resolves to the right kind of account; that
 installations only select their account's repositories and never widen the
-App's permissions or events; that App public keys parse as RSA; and that team
+App's permissions or events; that App public keys parse as RSA; that
+installation requests name an App, an account and a requesting user; and that team
 memberships rest on an organization membership (an active one for an active
 team membership). A merged seed is validated with the existing world and
 applies whole or not at all; it may not set `start_time`.
@@ -110,13 +176,17 @@ applies whole or not at all; it may not set `start_time`.
 | Route | Does |
 |---|---|
 | `GET /health` | `{"status": "ok", "version": …}` |
-| `GET /state` | The world, the virtual time and the call count; App client secrets and webhook secrets redacted |
+| `GET /state` | The world (as changed by suspensions and uninstalls), the virtual time, the call count, and minted tokens as redacted IDs with their scope and expiry (never the token); App client secrets and webhook secrets redacted |
 | `POST /seed` | Merges a seed; 422 `{"message": "octoemu: seed rejected", "errors": [{path, message}]}` |
 | `GET /clock` | `{"now", "advanced_seconds"}` |
 | `POST /clock/advance` | `{"seconds": N}` moves the clock forward (never back) |
 | `GET /calls` | `{"calls": […], "dropped": n}` |
 | `DELETE /calls` | Empties the call log (204) |
 | `GET /fidelity` | The manifest as JSON |
+| `POST /tokens/installation` | `{"installation_id", "permissions"?, "repositories"?, "repository_ids"?}`: mints an installation token without a JWT, answered (narrowed, refused) exactly as `POST /app/installations/{id}/access_tokens` |
+| `POST /installations/{id}/suspend` | Suspends an installation (204; 404 if unknown) |
+| `POST /installations/{id}/unsuspend` | Lifts a suspension |
+| `DELETE /installations/{id}` | Uninstalls: the installation disappears and its tokens stop working |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
 ticks with real time, and jumps on advance. Every response, admin included,
@@ -126,15 +196,22 @@ octoauth reads `Date` for JWT clock skew and token issued-at.
 **Call log.** One record per API, web or avatar request (admin requests are
 not recorded): `seq`, `at` (virtual), `method`, `path`, `surface`, `route`
 (the matched `METHOD /pattern`, `null` for the 501 fallback), `credential`,
-`status`, `request_id`. `credential` is the `Authorization` header's shape
-(`none`, `jwt`, `installation_token`, `user_token`, `oauth_token`,
-`personal_access_token`, `basic`, `unknown`), never its value. Query values
+`identity`, `status`, `request_id`. `credential` is the `Authorization`
+header's shape (`none`, `jwt`, `installation_token`, `user_token`,
+`oauth_token`, `personal_access_token`, `basic`, `unknown`), never its value.
+`identity` is who the route verified the caller to be:
+`{"kind": "app", "app_id"}` or `{"kind": "installation", "app_id",
+"installation_id", "token_id"}` (`token_id` is the first 16 bytes of the
+token's SHA-256 in hex, as octoauth's `TokenId` prints it), `null` without
+or with a rejected credential. Query values
 named like secrets (`code`, `state`, `client_secret`, `*token*`, …) become
 `<redacted>`, and octoscrub runs over the rest. Bodies are never recorded.
 The newest 10 000 records are kept.
 
-**Response basics.** API responses carry `x-ratelimit-*` (stub values until
-GE-02) and every response an `X-GitHub-Request-Id`. Errors use GitHub's
+**Response basics.** API responses carry `x-ratelimit-*` (stub values; no
+per-credential budget yet) and every response an `X-GitHub-Request-Id`. Lists
+are paged GitHub's way: `per_page` (default 30, silently capped at 100),
+`page`, and a `Link` header with `prev`, `next`, `last` and `first`. Errors use GitHub's
 `{"message", "documentation_url"}`; 422s add `errors[{resource, field, code}]`.
 
 ## Fidelity
@@ -156,8 +233,19 @@ an entry names nothing implemented.
 `--refuse-assumed`) makes guesses fail loudly: an `assumed` route answers 501
 `{"message": "octoemu: refusing assumed behaviour", "route": …, "reason": …}`,
 a handler relying on an `assumed` behaviour answers the same with
-`"behaviour"`, and `assumed` headers (today the rate-limit stub and the
-request ID) are left out.
+`"behaviour"` (a JWT accepted only on the `iat` tolerance, a revoked or
+suspended token's refusal, a token scope that relies on the union or the
+implicit `metadata`, …), `assumed` headers (today the rate-limit stub and
+the request ID) are left out, and an error whose status is documented but
+whose text is a guess keeps its status with the message
+`octoemu: assumed message withheld`.
+
+`assumed` today: `jwt-error-messages`, `jwt-iat-tolerance`,
+`jwt-exp-after-iat`, `wrong-credential-kind`, `installation-token-format`,
+`token-error-messages`, `token-repositories-union`,
+`token-implicit-metadata`, `token-revocation-immediate`,
+`suspended-installation`, `suspended-installation-tokens`,
+`rate-limit-headers` and `request-id-header`.
 
 ## Tests
 
@@ -166,3 +254,9 @@ cd libs/octoauth
 cargo test -p octoemu
 cargo clippy -p octoemu --all-targets -- -D warnings
 ```
+
+`tests/app_auth.rs` runs octoauth's App client and octotoken's provider
+against an embedded emulator: minting, pagination, expiry on the clock and
+`with_token`'s replacement, revocation, suspension, unknown installations,
+narrowing, clock-skew correction through `Date`, and the negative JWT and
+token cases.

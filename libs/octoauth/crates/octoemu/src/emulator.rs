@@ -1,12 +1,13 @@
 //! Starting and stopping an emulator instance.
 
 use crate::api::{self, Api};
+use crate::auth::Auth;
 use crate::calls::Call;
 use crate::fidelity::{Manifest, ManifestError, Mismatch};
 use crate::seed::{Seed, SeedError};
 use crate::state::{Shared, SharedState};
 use chrono::{DateTime, Utc};
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -68,10 +69,7 @@ impl Builder {
     pub async fn start(self) -> Result<Emulator, StartError> {
         let manifest = Manifest::embedded()?;
         let api = api::github();
-        manifest.check(
-            api.routes().iter().map(String::as_str),
-            api::BEHAVIOURS.iter().copied(),
-        )?;
+        manifest.check(api.route_names(), api::BEHAVIOURS.iter().copied())?;
         self.start_with(api, Arc::new(manifest.clone())).await
     }
 
@@ -84,8 +82,20 @@ impl Builder {
         self.seed.validate()?;
         let listener = TcpListener::bind(self.bind).await?;
         let addr = listener.local_addr()?;
-        let registered: BTreeSet<String> = api.routes().iter().cloned().collect();
-        let shared = Arc::new(Shared::new(self.seed, manifest, registered, addr.port()));
+        let registered: BTreeMap<String, Auth> = api.routes().iter().cloned().collect();
+        let host = match addr.ip() {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
+        };
+        let root = format!("http://{}", SocketAddr::new(host, addr.port()));
+        let shared = Arc::new(Shared::new(
+            self.seed,
+            manifest,
+            registered,
+            root.clone(),
+            addr.port(),
+        ));
         let app = crate::server::router(shared.clone(), api);
 
         let (stop, mut stop_requested) = watch::channel(false);
@@ -103,12 +113,6 @@ impl Builder {
             tokio::spawn(idle_watch(shared.clone(), after, stop.clone()));
         }
 
-        let host = match addr.ip() {
-            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-            ip => ip,
-        };
-        let root = format!("http://{}", SocketAddr::new(host, addr.port()));
         Ok(Emulator {
             shared,
             addr,
@@ -228,6 +232,24 @@ impl Emulator {
     /// The call log, oldest first.
     pub fn calls(&self) -> Vec<Call> {
         self.shared.state().calls.calls()
+    }
+
+    /// Suspends installation `id`, as `PUT /app/installations/{id}/suspended`
+    /// does: token creation is refused and existing tokens stop working.
+    /// `false` when there is no such installation.
+    pub fn suspend_installation(&self, id: u64) -> bool {
+        crate::apps::set_suspended(&self.shared, id, None, true)
+    }
+
+    /// Lifts a suspension. `false` when there is no such installation.
+    pub fn unsuspend_installation(&self, id: u64) -> bool {
+        crate::apps::set_suspended(&self.shared, id, None, false)
+    }
+
+    /// Uninstalls installation `id`: it disappears and its tokens stop
+    /// working. `false` when there is no such installation.
+    pub fn uninstall(&self, id: u64) -> bool {
+        crate::apps::uninstall(&self.shared, id)
     }
 
     /// Empties the call log.

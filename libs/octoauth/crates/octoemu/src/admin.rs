@@ -7,10 +7,12 @@ use crate::seed::Seed;
 use crate::state::SharedState;
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::Path;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -24,6 +26,13 @@ pub(crate) fn router() -> Router<SharedState> {
         .route("/__octoemu/clock/advance", post(advance))
         .route("/__octoemu/calls", get(calls).delete(clear_calls))
         .route("/__octoemu/fidelity", get(fidelity))
+        .route(
+            "/__octoemu/tokens/installation",
+            post(mint_installation_token),
+        )
+        .route("/__octoemu/installations/{id}", delete(uninstall))
+        .route("/__octoemu/installations/{id}/suspend", post(suspend))
+        .route("/__octoemu/installations/{id}/unsuspend", post(unsuspend))
 }
 
 /// A JSON body, or the 400 (in GitHub's error shape) to answer instead.
@@ -115,4 +124,65 @@ async fn clear_calls(State(shared): State<SharedState>) -> Response {
 
 async fn fidelity(State(shared): State<SharedState>) -> Response {
     json(StatusCode::OK, shared.manifest())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mint {
+    installation_id: u64,
+    #[serde(default)]
+    permissions: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    repositories: Option<Vec<String>>,
+    #[serde(default)]
+    repository_ids: Option<Vec<u64>>,
+}
+
+/// `POST /__octoemu/tokens/installation`: a token for any installation
+/// without an App JWT, answered (and narrowed, and refused) exactly as
+/// `POST /app/installations/{id}/access_tokens`.
+async fn mint_installation_token(
+    State(shared): State<SharedState>,
+    headers: HeaderMap,
+    bytes: Bytes,
+) -> Response {
+    let mint: Mint = match body(&bytes) {
+        Ok(mint) => mint,
+        Err(response) => return *response,
+    };
+    let request = crate::apps::TokenRequest {
+        permissions: mint.permissions,
+        repositories: mint.repositories,
+        repository_ids: mint.repository_ids,
+    };
+    let origin = crate::views::origin(&shared, &headers);
+    crate::apps::issue(&shared, None, mint.installation_id, &request, &origin)
+}
+
+fn no_installation() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "octoemu: no such installation",
+        OCTOEMU_DOCS,
+    )
+}
+
+fn done(found: bool) -> Response {
+    if found {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        no_installation()
+    }
+}
+
+async fn suspend(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    done(crate::apps::set_suspended(&shared, id, None, true))
+}
+
+async fn unsuspend(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    done(crate::apps::set_suspended(&shared, id, None, false))
+}
+
+async fn uninstall(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    done(crate::apps::uninstall(&shared, id))
 }

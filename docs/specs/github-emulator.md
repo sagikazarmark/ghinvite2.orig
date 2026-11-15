@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Project | `octoemu` (working name), a stateful local emulator of the GitHub surface a GitHub App uses: REST, App and installation auth, the OAuth web flow, webhook delivery |
-| Status | 2026-11-15. Plan accepted (§7); GE-01 done. Research: prior art, a code inventory, and GitHub's documented behaviour (sources linked inline) |
+| Status | 2026-11-15. Plan accepted (§7); GE-01 and GE-02 done. Research: prior art, a code inventory, and GitHub's documented behaviour (sources linked inline) |
 | Model | AWS's [aws/aws-emulator](https://github.com/aws/aws-emulator) (anykms CI already runs its AWS suite against it, anykms#45): real auth, explicit gaps, fidelity measured by one suite run against both the real service and the emulator |
 | Replaces | `crates/ghinvite-github/src/stub.rs` and the inline GitHub fakes in about 17 `tests/worker/*.mjs` drivers; later the wiremock OAuth fakes in `ghinvite-web` |
 | Does not replace | The live and deployed gates: SP-16, AC-LIVE-1/2/3, the `docs/deploy.md` checklist, #61. `deploy/github-apps/README.md` already says fixture proofs don't satisfy SP-19a |
@@ -204,7 +204,7 @@ Every route and every modelled behaviour has an entry in a checked-in manifest (
 | ID | Task | Depends | Exit |
 |---|---|---|---|
 | GE-01 | Crate skeleton: embedded and binary modes, seed, 501 fallback, admin `/state` `/calls` `/clock`, fidelity manifest | — | `cargo test -p octoemu`; startup line; 501 on any unbuilt route. **Done** (#131): `libs/octoauth/crates/octoemu` |
-| GE-02 | App auth: JWT verification, stateless installation tokens, scoping, revocation, suspension, permission enforcement | 01 | octoauth's and octotoken's flows pass against the emulator (a new test next to the wiremock ones) |
+| GE-02 | App auth: JWT verification, stateless installation tokens, scoping, revocation, suspension, permission enforcement | 01 | octoauth's and octotoken's flows pass against the emulator (a new test next to the wiremock ones). **Done** (#132): `crates/octoemu/tests/app_auth.rs` |
 | GE-03 | Repo surface: collaborators, permission, invitations, user-side accept and decline, expiry on the clock, `member` events | 02 | ghinvite-github endpoint tests pass in a parallel emulator-backed run |
 | GE-04 | Webhook delivery and the deliveries API; `installation` / `installation_repositories` events from admin actions | 02 | ghinvite-web webhook intake test fed by the emulator (signature, rotation, dedupe) |
 | GE-05 | OAuth web flow, user tokens, `/user`, `/user/emails`, revoke; the authorize page | 01 | octologin `sign_in` tests pass; a ghinvite-web sign-in test without wiremock |

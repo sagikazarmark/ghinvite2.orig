@@ -74,11 +74,11 @@ async fn unbuilt_routes_answer_501_never_404() {
     let cases = [
         (Method::GET, "/"),
         (Method::GET, "/repos/acme/widgets"),
-        (Method::GET, "/app/installations/5"),
-        (Method::POST, "/app/installations/5/access_tokens"),
+        (Method::DELETE, "/app/installations/5"),
+        (Method::GET, "/app/hook/deliveries"),
         (Method::PUT, "/repos/acme/widgets/collaborators/octocat"),
         (Method::PATCH, "/user/repository_invitations/1"),
-        (Method::DELETE, "/installation/token"),
+        (Method::POST, "/installation/token"),
         (Method::GET, "/totally/made/up"),
         (Method::GET, "/login/oauth/authorize"),
         (Method::POST, "/login/oauth/access_token"),
@@ -365,9 +365,11 @@ async fn the_call_log_records_requests_without_secrets() {
     assert_eq!(calls[0]["method"], "GET");
     assert_eq!(calls[0]["path"], "/installation/repositories?page=2");
     assert_eq!(calls[0]["surface"], "api");
-    assert_eq!(calls[0]["route"], Value::Null);
+    assert_eq!(calls[0]["route"], "GET /installation/repositories");
     assert_eq!(calls[0]["credential"], "installation_token");
-    assert_eq!(calls[0]["status"], 501);
+    // Not a token this emulator minted.
+    assert_eq!(calls[0]["identity"], Value::Null);
+    assert_eq!(calls[0]["status"], 401);
     assert!(calls[0]["request_id"].as_str().unwrap().contains(':'));
     assert!(
         calls[0]["at"]

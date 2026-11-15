@@ -58,6 +58,10 @@ pub struct Seed {
     /// App installations on accounts.
     #[serde(default)]
     pub installations: Vec<Installation>,
+    /// Pending requests to install an App, made by organization members who
+    /// cannot install it themselves.
+    #[serde(default)]
+    pub installation_requests: Vec<InstallationRequest>,
     /// Users with direct access to repositories.
     #[serde(default)]
     pub collaborators: Vec<Collaborator>,
@@ -563,9 +567,16 @@ pub struct Installation {
     /// When the installation was suspended, if it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<DateTime<Utc>>,
+    /// The user who suspended it (a login), if known; only with
+    /// `suspended_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspended_by: Option<String>,
     /// Creation time; the clock's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Last change (suspension, for one); `created_at` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 impl Installation {
@@ -581,7 +592,9 @@ impl Installation {
             permissions: None,
             events: None,
             suspended_at: None,
+            suspended_by: None,
             created_at: None,
+            updated_at: None,
         }
     }
 
@@ -617,6 +630,56 @@ impl Installation {
     #[must_use]
     pub fn suspended_at(mut self, at: DateTime<Utc>) -> Self {
         self.suspended_at = Some(at);
+        self
+    }
+
+    /// Names the user (a login) who suspended the installation.
+    #[must_use]
+    pub fn suspended_by(mut self, login: impl Into<String>) -> Self {
+        self.suspended_by = Some(login.into());
+        self
+    }
+}
+
+/// A request to install an App on an organization, made by a member who
+/// cannot install it (`GET /app/installation-requests`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallationRequest {
+    /// The request ID, unique across installation requests.
+    pub id: u64,
+    /// The requested App's ID.
+    pub app_id: u64,
+    /// The account (an organization's or user's login) to install on.
+    pub account: String,
+    /// The requesting user's login.
+    pub requester: String,
+    /// When it was requested; the clock's start when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+impl InstallationRequest {
+    /// `requester` asks for App `app_id` on `account`.
+    pub fn new(
+        id: u64,
+        app_id: u64,
+        account: impl Into<String>,
+        requester: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            app_id,
+            account: account.into(),
+            requester: requester.into(),
+            created_at: None,
+        }
+    }
+
+    /// Sets when it was requested.
+    #[must_use]
+    pub fn created_at(mut self, at: DateTime<Utc>) -> Self {
+        self.created_at = Some(at);
         self
     }
 }
@@ -835,6 +898,8 @@ impl Seed {
         app(App) => apps;
         /// Adds an installation.
         installation(Installation) => installations;
+        /// Adds an installation request.
+        installation_request(InstallationRequest) => installation_requests;
         /// Adds a collaborator.
         collaborator(Collaborator) => collaborators;
         /// Adds an organization membership.
@@ -888,6 +953,7 @@ impl Seed {
         all.repos.extend(more.repos);
         all.apps.extend(more.apps);
         all.installations.extend(more.installations);
+        all.installation_requests.extend(more.installation_requests);
         all.collaborators.extend(more.collaborators);
         all.memberships.extend(more.memberships);
         all.team_memberships.extend(more.team_memberships);
@@ -994,6 +1060,7 @@ impl Check {
         self.repos(seed);
         self.apps(seed);
         self.installations(seed);
+        self.installation_requests(seed);
         self.collaborators(seed);
         self.memberships(seed);
         self.team_memberships(seed);
@@ -1255,6 +1322,16 @@ impl Check {
                     Some(_) => {}
                 }
             }
+            if let Some(by) = &installation.suspended_by {
+                if installation.suspended_at.is_none() {
+                    self.problem(
+                        format!("{at}.suspended_by"),
+                        "only a suspended installation (with suspended_at) names who suspended it"
+                            .into(),
+                    );
+                }
+                self.account(format!("{at}.suspended_by"), by, Some(AccountKind::User));
+            }
             let Some(app) = app else { continue };
             for (name, access) in installation.permissions.iter().flatten() {
                 match app.permissions.get(name) {
@@ -1283,6 +1360,31 @@ impl Check {
                     );
                 }
             }
+        }
+    }
+
+    fn installation_requests(&mut self, seed: &Seed) {
+        let mut ids = HashSet::new();
+        for (i, request) in seed.installation_requests.iter().enumerate() {
+            let at = format!("installation_requests[{i}]");
+            self.id(
+                format!("{at}.id"),
+                request.id,
+                &mut ids,
+                "installation request",
+            );
+            if !self.apps.contains_key(&request.app_id) {
+                self.problem(
+                    format!("{at}.app_id"),
+                    format!("no App with ID {}", request.app_id),
+                );
+            }
+            self.account(format!("{at}.account"), &request.account, None);
+            self.account(
+                format!("{at}.requester"),
+                &request.requester,
+                Some(AccountKind::User),
+            );
         }
     }
 

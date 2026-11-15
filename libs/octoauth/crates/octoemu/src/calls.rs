@@ -26,6 +26,10 @@ pub struct Call {
     pub route: Option<String>,
     /// The shape of the `Authorization` header; never its value.
     pub credential: CredentialKind,
+    /// Who the route verified the caller to be; `None` without a credential,
+    /// when the credential was rejected, and on the 501 fallback.
+    #[serde(default)]
+    pub identity: Option<Identity>,
     /// The response status.
     pub status: u16,
     /// The `X-GitHub-Request-Id` the response carried.
@@ -65,8 +69,30 @@ impl Surface {
     }
 }
 
+/// A verified caller, as the call log records it: identities and a
+/// redacted token ID, never a secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Identity {
+    /// An App, by a JWT that verified against one of its keys.
+    App {
+        /// The App ID.
+        app_id: u64,
+    },
+    /// An installation, by a valid installation token.
+    Installation {
+        /// The App ID.
+        app_id: u64,
+        /// The installation ID.
+        installation_id: u64,
+        /// The token's redacted ID: the first 16 bytes of its SHA-256 in hex,
+        /// as octoauth's `TokenId` displays it.
+        token_id: String,
+    },
+}
+
 /// What an `Authorization` header looks like, judged by shape alone. It is
-/// not a verdict: GE-02 verifies credentials.
+/// not a verdict: [`Call::identity`] holds what the route verified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialKind {
@@ -263,6 +289,7 @@ mod tests {
             surface: Surface::Api,
             route: None,
             credential: CredentialKind::None,
+            identity: None,
             status: 501,
             request_id: String::new(),
         };

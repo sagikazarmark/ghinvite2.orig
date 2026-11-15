@@ -2,8 +2,8 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use octoemu::seed::{
-    Access, App, Collaborator, Installation, Membership, Org, OrgRole, Plan, Repo, Role, Seed,
-    Team, TeamMembership, TeamRole, User, Webhook,
+    Access, App, Collaborator, Installation, InstallationRequest, Membership, Org, OrgRole, Plan,
+    Repo, Role, Seed, Team, TeamMembership, TeamRole, User, Webhook,
 };
 
 const PUBLIC_KEY: &str = include_str!("fixtures/rsa2048.pub.pem");
@@ -40,7 +40,12 @@ fn world() -> Seed {
                 .selected(["acme/widgets"])
                 .permissions([("members", Access::Read)]),
         )
-        .installation(Installation::new(51, 40, "octocat"))
+        .installation(
+            Installation::new(51, 40, "octocat")
+                .suspended_at("2030-01-01T00:00:00Z".parse().unwrap())
+                .suspended_by("octocat"),
+        )
+        .installation_request(InstallationRequest::new(60, 40, "acme", "hubot"))
         .collaborator(Collaborator::new("acme/widgets", "hubot", Role::Push))
         .collaborator(Collaborator::new(
             "acme/widgets",
@@ -200,6 +205,28 @@ fn reports_installation_scope_problems() {
             "installations[1].account: App 5 is already installed on \"ACME\"",
             "installations[2].repositories: only an installation with repository_selection \"selected\" lists repositories",
             "installations[2].events[0]: App 5 does not subscribe to \"push\"",
+        ]
+    );
+}
+
+#[test]
+fn reports_installation_request_and_suspension_problems() {
+    let seed = Seed::new()
+        .user(User::new(1, "octocat"))
+        .org(Org::new(2, "acme"))
+        .app(app(5))
+        .installation(Installation::new(6, 5, "acme").suspended_by("acme"))
+        .installation_request(InstallationRequest::new(7, 9, "nobody", "acme"))
+        .installation_request(InstallationRequest::new(7, 5, "acme", "octocat"));
+    assert_eq!(
+        problems(&seed),
+        [
+            "installations[0].suspended_by: only a suspended installation (with suspended_at) names who suspended it",
+            "installations[0].suspended_by: \"acme\" is an organization, not a user",
+            "installation_requests[0].app_id: no App with ID 9",
+            "installation_requests[0].account: no user or organization \"nobody\"",
+            "installation_requests[0].requester: \"acme\" is an organization, not a user",
+            "installation_requests[1].id: installation request ID 7 is used twice",
         ]
     );
 }

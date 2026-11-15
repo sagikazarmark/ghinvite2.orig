@@ -1351,12 +1351,18 @@ name = "octoemu"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "chrono",
+ "getrandom 0.2.17",
+ "hmac",
+ "octoauth",
  "octoscrub",
+ "octotoken",
  "reqwest 0.12.28",
  "rsa",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "toml",

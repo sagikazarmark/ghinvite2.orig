@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
 octoscrub = { version = "0.1.0", path = "crates/octoscrub" }
+octotoken = { version = "0.1.0", path = "crates/octotoken" }
 
 async-trait = "0.1"
 # octoemu only (native): the emulator's HTTP server.
@@ -21,6 +22,8 @@ bytes = "1.10.0"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+# octoemu only (native): signs its installation tokens (HS256).
+hmac = "0.12"
 http = "1"
 js-sys = "0.3"
 jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }

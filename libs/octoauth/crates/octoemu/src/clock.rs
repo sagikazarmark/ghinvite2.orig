@@ -25,6 +25,12 @@ impl Clock {
         }
     }
 
+    /// Where the clock started: the default creation time of seeded
+    /// objects.
+    pub(crate) fn start(&self) -> DateTime<Utc> {
+        self.origin
+    }
+
     /// The current virtual time.
     pub(crate) fn now(&self) -> DateTime<Utc> {
         let elapsed = TimeDelta::from_std(self.started.elapsed()).unwrap_or(TimeDelta::MAX);

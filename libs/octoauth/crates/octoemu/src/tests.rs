@@ -1,7 +1,8 @@
 //! The route registry, the manifest check and the refuse-assumed enforcement
-//! points, exercised with a test-only route (no GitHub route exists yet).
+//! points, exercised with test-only routes.
 
 use crate::api::{self, Api, BEHAVIOURS};
+use crate::auth::Auth;
 use crate::fidelity::Manifest;
 use crate::response::{self, REQUEST_ID};
 use crate::seed::Seed;
@@ -17,22 +18,16 @@ fn every_registered_route_and_behaviour_has_a_manifest_entry() {
     let manifest = Manifest::embedded().unwrap();
     let api = api::github();
     manifest
-        .check(
-            api.routes().iter().map(String::as_str),
-            BEHAVIOURS.iter().copied(),
-        )
+        .check(api.route_names(), BEHAVIOURS.iter().copied())
         .unwrap();
 }
 
 #[test]
 fn the_check_catches_an_unlisted_route() {
     let manifest = Manifest::embedded().unwrap();
-    let api = Api::new().route(Method::GET, "/meta", async || "{}");
+    let api = Api::new().route(Method::GET, "/meta", Auth::Public, async || "{}");
     let error = manifest
-        .check(
-            api.routes().iter().map(String::as_str),
-            BEHAVIOURS.iter().copied(),
-        )
+        .check(api.route_names(), BEHAVIOURS.iter().copied())
         .unwrap_err();
     assert!(error.to_string().contains("\"GET /meta\""), "{error}");
 }
@@ -65,11 +60,16 @@ async fn guessed(State(shared): State<SharedState>) -> Response {
 
 fn test_api() -> Api {
     Api::new()
-        .route(Method::GET, "/meta", async || {
+        .route(Method::GET, "/meta", Auth::Public, async || {
             response::json(StatusCode::OK, &serde_json::json!({}))
         })
-        .route(Method::GET, "/zen", async || "Keep it logically awesome.")
-        .route(Method::GET, "/guessed", guessed)
+        .route(
+            Method::GET,
+            "/zen",
+            Auth::Public,
+            async || "Keep it logically awesome.",
+        )
+        .route(Method::GET, "/guessed", Auth::Public, guessed)
 }
 
 async fn start(seed: Seed) -> Emulator {
@@ -92,24 +92,31 @@ async fn registered_routes_are_logged_and_other_methods_answer_501() {
     let client = reqwest::Client::new();
     let base = emulator.api_base();
 
-    let ok = client
+    let ok = client.get(format!("{base}/zen")).send().await.unwrap();
+    assert_eq!(ok.status(), 200);
+    // A public route still verifies a credential that is sent.
+    let forged = client
         .get(format!("{base}/zen"))
         .bearer_auth("ghs_1_x")
         .send()
         .await
         .unwrap();
-    assert_eq!(ok.status(), 200);
+    assert_eq!(forged.status(), 401);
+    assert_eq!(forged.json_value().await["message"], "Bad credentials");
     let wrong_method = client.delete(format!("{base}/zen")).send().await.unwrap();
     assert_eq!(wrong_method.status(), 501);
     let body: serde_json::Value = wrong_method.json_value().await;
     assert_eq!(body["route"], "DELETE /zen");
 
     let calls = emulator.calls();
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
     assert_eq!(calls[0].route.as_deref(), Some("GET /zen"));
-    assert_eq!(calls[0].credential, CredentialKind::InstallationToken);
-    assert_eq!(calls[1].route, None);
-    assert_eq!(calls[1].status, 501);
+    assert_eq!(calls[0].credential, CredentialKind::None);
+    assert_eq!(calls[1].route.as_deref(), Some("GET /zen"));
+    assert_eq!(calls[1].credential, CredentialKind::InstallationToken);
+    assert_eq!(calls[1].identity, None);
+    assert_eq!(calls[2].route, None);
+    assert_eq!(calls[2].status, 501);
 }
 
 #[tokio::test]

@@ -3,7 +3,8 @@
 //! headers, call log, idle tracking).
 
 use crate::api::Api;
-use crate::calls::{Call, CredentialKind, Surface, redacted_path};
+use crate::auth;
+use crate::calls::{Call, CredentialKind, Identity, Surface, redacted_path};
 use crate::clock::http_date;
 use crate::response::{self, OCTOEMU_DOCS, REQUEST_ID, RateLimit};
 use crate::state::SharedState;
@@ -40,11 +41,12 @@ pub(crate) async fn fallback(method: Method, uri: Uri) -> Response {
     response::not_implemented(method.as_str(), uri.path())
 }
 
-/// Runs before each registered GitHub route: refuse-assumed enforcement and
-/// the route name for the call log.
+/// Runs before each registered GitHub route: refuse-assumed enforcement,
+/// the route's [`Auth`](crate::auth::Auth) (credential, kind, permission),
+/// and the route name and verified identity for the call log.
 pub(crate) async fn route_context(
     State(shared): State<SharedState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     // axum answers HEAD with the GET handler.
@@ -56,16 +58,31 @@ pub(crate) async fn route_context(
         .extensions()
         .get::<MatchedPath>()
         .map(|path| format!("{method} {}", path.as_str()))
-        .filter(|route| shared.is_registered(route));
-    let Some(route) = route else {
+        .and_then(|route| shared.auth_of(&route).map(|auth| (route, auth)));
+    let Some((route, auth)) = route else {
         // A registered path with an unregistered method: the 501 fallback.
         return next.run(request).await;
     };
-    let mut response = match shared.refuse_route(&route) {
-        Some(refusal) => refusal,
-        None => next.run(request).await,
+    let mut identity = None;
+    let mut response = if let Some(refusal) = shared.refuse_route(&route) {
+        refusal
+    } else {
+        match auth::authenticate(&shared, request.headers()).and_then(|caller| {
+            auth::admit(&shared, auth, &caller)?;
+            Ok(caller)
+        }) {
+            Err(rejection) => rejection,
+            Ok(caller) => {
+                identity = caller.identity();
+                request.extensions_mut().insert(caller);
+                next.run(request).await
+            }
+        }
     };
     response.extensions_mut().insert(MatchedRoute(route));
+    if let Some(identity) = identity {
+        response.extensions_mut().insert(identity);
+    }
     response
 }
 
@@ -102,6 +119,7 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
             .extensions()
             .get::<MatchedRoute>()
             .map(|route| route.0.clone());
+        let identity = response.extensions().get::<Identity>().cloned();
         shared.record(Call {
             seq: sequence,
             at: now,
@@ -110,6 +128,7 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
             surface,
             route,
             credential,
+            identity,
             status: response.status().as_u16(),
             request_id,
         });
