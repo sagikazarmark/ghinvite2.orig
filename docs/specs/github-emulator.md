@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | Project | `octoemu` (working name), a stateful local emulator of the GitHub surface a GitHub App uses: REST, App and installation auth, the OAuth web flow, webhook delivery |
-| Status | 2026-11-15. Plan only; nothing built. Research: prior art, a code inventory, and GitHub's documented behaviour (sources linked inline) |
+| Status | 2026-11-15. Plan accepted (§7); nothing built. Research: prior art, a code inventory, and GitHub's documented behaviour (sources linked inline) |
 | Model | AWS's [aws/aws-emulator](https://github.com/aws/aws-emulator) (anykms CI already runs its AWS suite against it, anykms#45): real auth, explicit gaps, fidelity measured by one suite run against both the real service and the emulator |
 | Replaces | `crates/ghinvite-github/src/stub.rs` and the inline GitHub fakes in about 17 `tests/worker/*.mjs` drivers; later the wiremock OAuth fakes in `ghinvite-web` |
 | Does not replace | The live and deployed gates: SP-16, AC-LIVE-1/2/3, the `docs/deploy.md` checklist, #61. `deploy/github-apps/README.md` already says fixture proofs don't satisfy SP-19a |
@@ -221,15 +221,17 @@ Every route and every modelled behaviour has an entry in a checked-in manifest (
 
 **Order with the live gates.** GE-08's first live run is the API-spike work from the live-gates answer. If credentials arrive early, run SP-01 first, without waiting for the emulator: its kill criterion decides whether M1 keeps org targets, which decides whether GE-06 is needed at all.
 
-## 7. Decisions needed
+## 7. Decisions
 
-1. **Name and home.**
-   - Working name `octoemu`. `octoemu`, `octofake`, `octosim`, `octostub`, `octomock` and `github-emulator` were all unregistered on crates.io on 2026-11-15.
-   - Recommended home: `libs/octoauth/crates/octoemu`, as a native-only crate. It isn't ghinvite-specific, and P2 (Dependaboard) would grow it with pull requests, checks and merge queues.
-   - HANDOFF §4 defers extracting ghinvite-github's *mock plumbing* into the toolkit, so this needs your OK. The alternative is `crates/ghinvite-emulator`, extracted later.
-2. **vercel-labs/emulate as a reference only, or also a source.** It is Apache-2.0, so porting route logic with attribution is allowed. Reference-only is the recommendation: its state model differs from GitHub's in places that matter here, such as membership state.
-3. **Live target.** You need to provide the test Apps, a fresh free org and an invitee account. Also decide whether CI gets them as repository secrets (for GE-08 and GE-10) or whether live runs stay local only.
-4. **Scope of the first release.** Recommendation: ghinvite's routes only, everything else 501.
+Accepted on 2026-11-15:
+
+1. **Name and home: `octoemu`, at `libs/octoauth/crates/octoemu`,** a native-only crate in the toolkit workspace. This lifts the HANDOFF §4 deferral for the emulator only. Extracting ghinvite-github's transport, REST and pagination plumbing stays deferred. On 2026-11-15, `octoemu`, `octofake`, `octosim`, `octostub`, `octomock` and `github-emulator` were all unregistered on crates.io.
+2. **vercel-labs/emulate is a design reference only.** No code is ported from it. Its state model differs from GitHub's in places that matter here, such as membership state.
+3. **The first release covers ghinvite's routes only.** Everything else returns 501.
+
+Still open:
+
+4. **Live target.** You need to provide the test Apps, a fresh free org and an invitee account. Also decide whether CI gets them as repository secrets (for GE-08 and GE-10) or whether live runs stay local only. GE-01 to GE-07 don't need this.
 
 ## 8. Risks
 
