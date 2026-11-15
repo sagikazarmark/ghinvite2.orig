@@ -71,6 +71,14 @@ pub struct Seed {
     /// Team memberships.
     #[serde(default)]
     pub team_memberships: Vec<TeamMembership>,
+    /// Organizations' custom repository roles.
+    #[serde(default)]
+    pub repository_roles: Vec<RepositoryRole>,
+    /// Pending (or expired) repository invitations. Changed in place by the
+    /// emulator: created by `PUT …/collaborators/{username}`, removed when
+    /// accepted, declined or deleted.
+    #[serde(default)]
+    pub repository_invitations: Vec<RepositoryInvitation>,
 }
 
 /// Emulator settings carried by a seed.
@@ -104,6 +112,29 @@ pub struct User {
     /// Account creation time; the clock's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// `User` (the default) or `Bot`, reported as `type`.
+    #[serde(rename = "type", default)]
+    pub kind: UserKind,
+}
+
+/// A user account's `type`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UserKind {
+    /// A person.
+    #[default]
+    User,
+    /// A bot account.
+    Bot,
+}
+
+impl UserKind {
+    /// GitHub's spelling: `User` or `Bot`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Bot => "Bot",
+        }
+    }
 }
 
 impl User {
@@ -115,7 +146,15 @@ impl User {
             name: None,
             email: None,
             created_at: None,
+            kind: UserKind::User,
         }
+    }
+
+    /// Makes the account a bot (`type: "Bot"`).
+    #[must_use]
+    pub fn bot(mut self) -> Self {
+        self.kind = UserKind::Bot;
+        self
     }
 
     /// Sets the display name.
@@ -340,9 +379,38 @@ pub struct Repo {
     /// Whether the repository is private.
     #[serde(default)]
     pub private: bool,
+    /// `public`, `private` or `internal`; derived from `private` when
+    /// absent. `private` or `internal` makes the repository private
+    /// whatever `private` says; `public` with `private: true` is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<Visibility>,
     /// Creation time; the clock's start when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+}
+
+/// A repository's visibility.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Visibility {
+    /// Anyone can see it.
+    Public,
+    /// Only those with access.
+    Private,
+    /// An organization's enterprise members (private to everyone else,
+    /// installation tokens included).
+    Internal,
+}
+
+impl Visibility {
+    /// GitHub's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Private => "private",
+            Self::Internal => "internal",
+        }
+    }
 }
 
 impl Repo {
@@ -353,6 +421,7 @@ impl Repo {
             owner: owner.into(),
             name: name.into(),
             private: false,
+            visibility: None,
             created_at: None,
         }
     }
@@ -362,6 +431,28 @@ impl Repo {
     pub fn private(mut self) -> Self {
         self.private = true;
         self
+    }
+
+    /// Sets the visibility (`private` follows it).
+    #[must_use]
+    pub fn visibility(mut self, visibility: Visibility) -> Self {
+        self.private = visibility != Visibility::Public;
+        self.visibility = Some(visibility);
+        self
+    }
+
+    /// The effective visibility.
+    pub fn effective_visibility(&self) -> Visibility {
+        match self.visibility {
+            Some(visibility) => visibility,
+            None if self.private => Visibility::Private,
+            None => Visibility::Public,
+        }
+    }
+
+    /// Whether only those with access can see it (`private` or `internal`).
+    pub fn is_private(&self) -> bool {
+        self.effective_visibility() != Visibility::Public
     }
 
     /// `owner/name`.
@@ -866,6 +957,126 @@ pub enum TeamRole {
     Maintainer,
 }
 
+/// An organization's custom repository role: a name over one of GitHub's
+/// base roles. Collaborators and invitations on the organization's
+/// repositories may name it as their role.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryRole {
+    /// The role ID, unique across custom roles.
+    pub id: u64,
+    /// The organization's login.
+    pub org: String,
+    /// The name, unique (ignoring case) in the organization and none of
+    /// GitHub's role names.
+    pub name: String,
+    /// The base role it extends.
+    pub base_role: BaseRole,
+}
+
+impl RepositoryRole {
+    /// A custom role `name` in `org` over `base_role`.
+    pub fn new(
+        id: u64,
+        org: impl Into<String>,
+        name: impl Into<String>,
+        base_role: BaseRole,
+    ) -> Self {
+        Self {
+            id,
+            org: org.into(),
+            name: name.into(),
+            base_role,
+        }
+    }
+}
+
+/// The base of a custom repository role (GitHub allows these four).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BaseRole {
+    /// Read.
+    Read,
+    /// Triage.
+    Triage,
+    /// Write.
+    Write,
+    /// Maintain.
+    Maintain,
+}
+
+impl BaseRole {
+    /// The built-in role it corresponds to.
+    pub fn role(self) -> Role {
+        match self {
+            Self::Read => Role::Pull,
+            Self::Triage => Role::Triage,
+            Self::Write => Role::Push,
+            Self::Maintain => Role::Maintain,
+        }
+    }
+}
+
+/// An invitation to collaborate on a repository.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryInvitation {
+    /// The invitation ID, unique across repository invitations.
+    pub id: u64,
+    /// The repository as `owner/name`.
+    pub repo: String,
+    /// The invited user's login. At most one invitation per user and
+    /// repository, and not to a collaborator.
+    pub invitee: String,
+    /// The inviting user's login, if a user invited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inviter: Option<String>,
+    /// The inviting App's ID, if an App invited (its bot account is
+    /// reported as the inviter). Not with `inviter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inviter_app_id: Option<u64>,
+    /// The offered role.
+    #[serde(default = "push")]
+    pub role: Role,
+    /// When it was sent; the clock's start when absent. It expires seven
+    /// days later on the virtual clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+fn push() -> Role {
+    Role::Push
+}
+
+impl RepositoryInvitation {
+    /// `invitee` invited to `repo` (`owner/name`) with `role`.
+    pub fn new(id: u64, repo: impl Into<String>, invitee: impl Into<String>, role: Role) -> Self {
+        Self {
+            id,
+            repo: repo.into(),
+            invitee: invitee.into(),
+            inviter: None,
+            inviter_app_id: None,
+            role,
+            created_at: None,
+        }
+    }
+
+    /// Names the inviting user.
+    #[must_use]
+    pub fn inviter(mut self, login: impl Into<String>) -> Self {
+        self.inviter = Some(login.into());
+        self
+    }
+
+    /// Sets when it was sent.
+    #[must_use]
+    pub fn created_at(mut self, at: DateTime<Utc>) -> Self {
+        self.created_at = Some(at);
+        self
+    }
+}
+
 macro_rules! adders {
     ($($(#[$doc:meta])* $method:ident($ty:ty) => $field:ident;)*) => {
         $(
@@ -906,6 +1117,10 @@ impl Seed {
         membership(Membership) => memberships;
         /// Adds a team membership.
         team_membership(TeamMembership) => team_memberships;
+        /// Adds a custom repository role.
+        repository_role(RepositoryRole) => repository_roles;
+        /// Adds a repository invitation.
+        repository_invitation(RepositoryInvitation) => repository_invitations;
     }
 
     /// Starts the virtual clock at `at`.
@@ -957,6 +1172,9 @@ impl Seed {
         all.collaborators.extend(more.collaborators);
         all.memberships.extend(more.memberships);
         all.team_memberships.extend(more.team_memberships);
+        all.repository_roles.extend(more.repository_roles);
+        all.repository_invitations
+            .extend(more.repository_invitations);
         if let Err(error) = all.validate() {
             problems.extend(error.problems);
         }
@@ -1037,6 +1255,10 @@ struct Check {
     apps: HashMap<u64, usize>,
     /// (lowercased org, lowercased user) → state.
     memberships: HashMap<(String, String), MembershipState>,
+    /// Lowercased org → lowercased custom role names.
+    roles: HashMap<String, HashSet<String>>,
+    /// (lowercased `owner/name`, lowercased user) of every collaborator.
+    collaborators: HashSet<(String, String)>,
 }
 
 impl Check {
@@ -1058,12 +1280,14 @@ impl Check {
         self.accounts(seed);
         self.teams(seed);
         self.repos(seed);
+        self.repository_roles(seed);
         self.apps(seed);
         self.installations(seed);
         self.installation_requests(seed);
         self.collaborators(seed);
         self.memberships(seed);
         self.team_memberships(seed);
+        self.repository_invitations(seed);
     }
 
     fn name(&mut self, path: String, what: &str, value: &str) {
@@ -1158,6 +1382,20 @@ impl Check {
             self.id(format!("{at}.id"), repo.id, &mut ids, "repository");
             self.name(format!("{at}.name"), "name", &repo.name);
             self.account(format!("{at}.owner"), &repo.owner, None);
+            if repo.visibility == Some(Visibility::Public) && repo.private {
+                self.problem(
+                    format!("{at}.visibility"),
+                    "a public repository cannot be private: true".into(),
+                );
+            }
+            if repo.visibility == Some(Visibility::Internal)
+                && self.accounts.get(&repo.owner.to_lowercase()) != Some(&AccountKind::Org)
+            {
+                self.problem(
+                    format!("{at}.visibility"),
+                    "only an organization's repositories can be internal".into(),
+                );
+            }
             let full_name = repo.full_name();
             if self
                 .repos
@@ -1169,6 +1407,67 @@ impl Check {
                     format!("{full_name} is used twice (names ignore case)"),
                 );
             }
+        }
+    }
+
+    fn repository_roles(&mut self, seed: &Seed) {
+        let mut ids = HashSet::new();
+        for (i, role) in seed.repository_roles.iter().enumerate() {
+            let at = format!("repository_roles[{i}]");
+            self.id(format!("{at}.id"), role.id, &mut ids, "repository role");
+            self.account(format!("{at}.org"), &role.org, Some(AccountKind::Org));
+            let name = role.name.to_lowercase();
+            if role.name.trim().is_empty() {
+                self.problem(format!("{at}.name"), "is empty".into());
+            } else if matches!(
+                name.as_str(),
+                "pull" | "triage" | "push" | "maintain" | "admin" | "read" | "write" | "none"
+            ) {
+                self.problem(
+                    format!("{at}.name"),
+                    format!("{:?} is one of GitHub's own role names", role.name),
+                );
+            } else if !self
+                .roles
+                .entry(role.org.to_lowercase())
+                .or_default()
+                .insert(name)
+            {
+                self.problem(
+                    format!("{at}.name"),
+                    format!("{:?} is used twice in {:?}", role.name, role.org),
+                );
+            }
+        }
+    }
+
+    /// Checks that a custom `role` on `repo` (lowercased `owner/name`) is
+    /// one of the owning organization's.
+    fn role(&mut self, path: String, repo: &str, role: &Role) {
+        let Role::Custom(name) = role else { return };
+        if name.is_empty() {
+            self.problem(path, "is empty".into());
+            return;
+        }
+        let Some(owner) = self.repos.get(repo).cloned() else {
+            return;
+        };
+        if self.accounts.get(&owner) != Some(&AccountKind::Org) {
+            self.problem(
+                path,
+                format!("{name:?}: custom roles exist only on organization repositories"),
+            );
+        } else if !self
+            .roles
+            .get(&owner)
+            .is_some_and(|roles| roles.contains(&name.to_lowercase()))
+        {
+            self.problem(
+                path,
+                format!(
+                    "{name:?} is neither a GitHub role nor a custom repository role of {owner:?}"
+                ),
+            );
         }
     }
 
@@ -1404,7 +1703,7 @@ impl Check {
                 &collaborator.user,
                 Some(AccountKind::User),
             );
-            if user_ok && !pairs.insert((repo, collaborator.user.to_lowercase())) {
+            if user_ok && !pairs.insert((repo.clone(), collaborator.user.to_lowercase())) {
                 self.problem(
                     format!("{at}.user"),
                     format!(
@@ -1413,11 +1712,70 @@ impl Check {
                     ),
                 );
             }
-            if let Role::Custom(name) = &collaborator.role
-                && name.is_empty()
-            {
-                self.problem(format!("{at}.role"), "is empty".into());
+            self.role(format!("{at}.role"), &repo, &collaborator.role);
+        }
+        self.collaborators = pairs;
+    }
+
+    fn repository_invitations(&mut self, seed: &Seed) {
+        let mut ids = HashSet::new();
+        let mut pairs = HashSet::new();
+        for (i, invitation) in seed.repository_invitations.iter().enumerate() {
+            let at = format!("repository_invitations[{i}]");
+            self.id(
+                format!("{at}.id"),
+                invitation.id,
+                &mut ids,
+                "repository invitation",
+            );
+            let repo = invitation.repo.to_lowercase();
+            if !self.repos.contains_key(&repo) {
+                self.problem(
+                    format!("{at}.repo"),
+                    format!("no repository {:?}", invitation.repo),
+                );
             }
+            let invitee_ok = self.account(
+                format!("{at}.invitee"),
+                &invitation.invitee,
+                Some(AccountKind::User),
+            );
+            let pair = (repo.clone(), invitation.invitee.to_lowercase());
+            if invitee_ok && self.collaborators.contains(&pair) {
+                self.problem(
+                    format!("{at}.invitee"),
+                    format!(
+                        "{:?} is already a collaborator on {:?}",
+                        invitation.invitee, invitation.repo
+                    ),
+                );
+            } else if invitee_ok && !pairs.insert(pair) {
+                self.problem(
+                    format!("{at}.invitee"),
+                    format!(
+                        "{:?} already has an invitation to {:?}",
+                        invitation.invitee, invitation.repo
+                    ),
+                );
+            }
+            if let Some(inviter) = &invitation.inviter {
+                self.account(format!("{at}.inviter"), inviter, Some(AccountKind::User));
+            }
+            if let Some(app) = invitation.inviter_app_id {
+                if invitation.inviter.is_some() {
+                    self.problem(
+                        format!("{at}.inviter_app_id"),
+                        "an invitation has one inviter: a user or an App".into(),
+                    );
+                }
+                if !self.apps.contains_key(&app) {
+                    self.problem(
+                        format!("{at}.inviter_app_id"),
+                        format!("no App with ID {app}"),
+                    );
+                }
+            }
+            self.role(format!("{at}.role"), &repo, &invitation.role);
         }
     }
 

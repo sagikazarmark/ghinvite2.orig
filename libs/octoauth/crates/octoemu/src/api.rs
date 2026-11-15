@@ -4,10 +4,10 @@
 //! route-level middleware: refuse-assumed enforcement, credential
 //! verification and permission checks (`crate::auth`).
 
-use crate::apps;
-use crate::auth::{Auth, Permission};
-use crate::seed::Access;
+use crate::auth::Auth;
+use crate::repos::{ADMINISTRATION_READ, ADMINISTRATION_WRITE};
 use crate::state::SharedState;
+use crate::{apps, repos, users};
 use axum::Router;
 use axum::handler::Handler;
 use axum::http::Method;
@@ -17,29 +17,50 @@ use axum::routing::{MethodFilter, on};
 /// `fidelity.toml`. Handlers check one with `Shared::refuse` (or
 /// `Shared::allows`, `Shared::message`) before relying on it.
 pub(crate) const BEHAVIOURS: &[&str] = &[
+    "accept-expired-invitation",
+    "app-bot-account",
     "app-jwt",
     "bad-credentials",
+    "collaborator-affiliation",
+    "collaborator-put-outcomes",
+    "custom-role-invitation-permissions",
     "date-header",
     "error-body",
+    "expired-invitations-listed",
     "installation-token-expiry",
     "installation-token-format",
     "installation-token-scope",
+    "invitation-alias-links",
+    "invitation-expiry",
+    "invitation-limit",
     "json-content-type",
     "jwt-error-messages",
     "jwt-exp-after-iat",
     "jwt-iat-tolerance",
+    "member-added-directly",
+    "member-edited-changes",
+    "member-events",
+    "out-of-scope-repository",
     "pagination",
     "permission-enforcement",
+    "permission-without-access",
     "private-resource-404",
     "rate-limit-headers",
+    "remove-non-collaborator",
+    "repo-error-messages",
+    "reput-expired-invitation",
+    "reput-pending-invitation",
     "request-id-header",
     "requires-authentication",
+    "role-names",
     "suspended-installation",
     "suspended-installation-tokens",
     "token-error-messages",
     "token-implicit-metadata",
     "token-repositories-union",
     "token-revocation-immediate",
+    "unknown-user-404",
+    "user-repo-permission-ignored",
     "validation-errors",
     "wrong-credential-kind",
 ];
@@ -111,7 +132,7 @@ impl Api {
 }
 
 /// `metadata: read`, which every repository-scoped installation route needs.
-const METADATA: Permission = Permission::new("metadata", Access::Read);
+use crate::repos::METADATA_READ as METADATA;
 
 /// Every GitHub route octoemu implements; everything else answers 501.
 pub(crate) fn github() -> Api {
@@ -167,4 +188,76 @@ pub(crate) fn github() -> Api {
             Auth::Installation(None),
             apps::revoke_token,
         )
+        // Repositories: docs.github.com/rest/repos/repos.
+        .route(
+            Method::GET,
+            "/repos/{owner}/{repo}",
+            Auth::Installation(Some(METADATA)),
+            repos::get_repo,
+        )
+        // Collaborators: docs.github.com/rest/collaborators/collaborators.
+        .route(
+            Method::GET,
+            "/repos/{owner}/{repo}/collaborators",
+            Auth::Installation(Some(METADATA)),
+            repos::list_collaborators,
+        )
+        .route(
+            Method::PUT,
+            "/repos/{owner}/{repo}/collaborators/{username}",
+            Auth::Installation(Some(ADMINISTRATION_WRITE)),
+            repos::put_collaborator,
+        )
+        .route(
+            Method::DELETE,
+            "/repos/{owner}/{repo}/collaborators/{username}",
+            Auth::Installation(Some(ADMINISTRATION_WRITE)),
+            repos::remove_collaborator,
+        )
+        .route(
+            Method::GET,
+            "/repos/{owner}/{repo}/collaborators/{username}/permission",
+            Auth::Installation(Some(METADATA)),
+            repos::collaborator_permission,
+        )
+        // Invitations: docs.github.com/rest/collaborators/invitations.
+        .route(
+            Method::GET,
+            "/repos/{owner}/{repo}/invitations",
+            Auth::Installation(Some(ADMINISTRATION_READ)),
+            repos::list_invitations,
+        )
+        .route(
+            Method::GET,
+            "/repositories/{repository_id}/invitations",
+            Auth::Installation(Some(ADMINISTRATION_READ)),
+            repos::list_invitations_by_id,
+        )
+        .route(
+            Method::PATCH,
+            "/repos/{owner}/{repo}/invitations/{invitation_id}",
+            Auth::Installation(Some(ADMINISTRATION_WRITE)),
+            repos::update_invitation,
+        )
+        .route(
+            Method::DELETE,
+            "/repos/{owner}/{repo}/invitations/{invitation_id}",
+            Auth::Installation(Some(ADMINISTRATION_WRITE)),
+            repos::delete_invitation,
+        )
+        // Users: docs.github.com/rest/users/users.
+        .route(
+            Method::GET,
+            "/users/{username}",
+            Auth::Public,
+            users::get_user,
+        )
+        .route(
+            Method::GET,
+            "/user/{account_id}",
+            Auth::Public,
+            users::get_user_by_id,
+        )
+        // Avatars (avatars.githubusercontent.com).
+        .route(Method::GET, "/avatars/u/{id}", Auth::Public, users::avatar)
 }

@@ -11,7 +11,7 @@ extracted to its own repository once a second product uses it.
 | `octotoken` | `InstallationTokenProvider` trait, the in-memory `AppTokenProvider` cache, `with_token` (one 401 → one replacement → one retry), the object-safe `DynInstallationTokenProvider` and the isolate-scope `ProviderRegistry` |
 | `octologin` | Sign-in web flow: authorize URL with state + PKCE, code exchange, `GET /user`, verified emails, token revocation. Never persists a token |
 | `octoscrub` | Pattern-based scrubbing of tokens, Basic/Bearer credentials and JWTs from log text |
-| `octoemu` | Test-only, native-only GitHub emulator (embedded or `octoemu` binary): seed, virtual clock, admin API, call log, fidelity manifest. Skeleton: every GitHub route answers 501 until GE-02+ (`../../docs/specs/github-emulator.md`, `crates/octoemu/README.md`) |
+| `octoemu` | Test-only, native-only GitHub emulator (embedded or `octoemu` binary): seed, virtual clock, admin API, call log, fidelity manifest, App auth (GE-02), repositories, collaborators and invitations with a webhook outbox (GE-03); every other route answers 501 (`../../docs/specs/github-emulator.md`, `crates/octoemu/README.md`) |
 
 Design and scope: `../../docs/decisions/0014-gh-toolkit2-scope-client-agnostic.md`
 (client-agnostic: no owned REST client, no transport seam, webhooks via

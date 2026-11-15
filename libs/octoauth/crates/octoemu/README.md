@@ -8,13 +8,15 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: App auth (GE-02)
+## Status: repositories (GE-03)
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
 App JWT verification, stateless installation tokens with scoping,
 revocation and suspension, and per-route credential and permission checks
-(GE-02).
+(GE-02); repositories, collaborators, permissions, repository invitations
+with expiry and the daily limit, the invitee's side (through the admin
+API until GE-05), users, avatars and the webhook event outbox (GE-03).
 
 ### Implemented routes
 
@@ -28,6 +30,18 @@ revocation and suspension, and per-route credential and permission checks
 | `GET /app/installation-requests` | App JWT | Paged |
 | `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
 | `DELETE /installation/token` | installation token | 204; the token stops working |
+| `GET /repos/{owner}/{repo}` | installation token, `metadata: read` | Private and internal repositories outside the token are 404 |
+| `GET /repos/{owner}/{repo}/collaborators` | installation token, `metadata: read` | Paged; `affiliation=direct\|outside\|all` (default all); each with `permissions` and `role_name` |
+| `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h |
+| `DELETE /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | 204 |
+| `GET /repos/{owner}/{repo}/collaborators/{username}/permission` | installation token, `metadata: read` | `permission` (`admin\|write\|read\|none`), `role_name` (exact, custom included), `user`; the highest role across sources |
+| `GET /repos/{owner}/{repo}/invitations` | installation token, `administration: read` | Paged; `Link` URLs on the alias below |
+| `GET /repositories/{repository_id}/invitations` | installation token, `administration: read` | The same list by repository ID |
+| `PATCH /repos/{owner}/{repo}/invitations/{invitation_id}` | installation token, `administration: write` | Body `{permissions}` (`read`, `write`, `triage`, `maintain`, `admin`); 200 with the invitation |
+| `DELETE /repos/{owner}/{repo}/invitations/{invitation_id}` | installation token, `administration: write` | 204 |
+| `GET /users/{username}` | none needed | Users and organizations |
+| `GET /user/{account_id}` | none needed | The same by numeric ID |
+| `GET /avatars/u/{id}` | none needed | A small PNG for any seeded account or App bot |
 
 Every other API and web route answers:
 
@@ -39,9 +53,43 @@ content-type: application/json; charset=utf-8
 ```
 
 It is never a 404, which a client could take for GitHub's answer. Routes
-arrive with GE-03 (repositories), GE-04 (webhooks), GE-05 (OAuth web flow,
-`/user`) and GE-06 (organizations); anything outside ghinvite's surface
-stays 501.
+arrive with GE-04 (webhooks), GE-05 (OAuth web flow, `/user`, the invitee's
+`/user/repository_invitations/{id}`) and GE-06 (organizations); anything
+outside ghinvite's surface stays 501.
+
+### Repository model
+
+- **Roles.** A collaborator or invitation has one of GitHub's five roles
+  (`pull < triage < push < maintain < admin`) or a custom role seeded in
+  `repository_roles` over a base (`read`, `triage`, `write`, `maintain`),
+  ranked as its base. The permission API reports the legacy `permission`
+  (maintain is `write`, triage `read`) and the exact `role_name` (`read`,
+  `triage`, `write`, `maintain`, `admin` or the custom name); invitations
+  report `permissions` the same way.
+- **Effective access** is the highest of: a direct collaboration, owning the
+  repository, owning its organization (admin), and the organization's base
+  permission for active members. Team grants arrive with GE-06.
+- **Invitations** expire 7 days after `created_at` on the virtual clock and
+  then show `expired: true` (they stay listed until deleted or replaced).
+  A repository gets at most 50 invitations per sliding 24 hours through
+  the API.
+- **What the App does** is attributed to its bot account
+  (`{slug}[bot]`, `type: "Bot"`, ID 1 000 000 000 + App ID).
+- **The invitee's side** (accept, decline, leave) are domain operations
+  (`src/collaboration.rs`), reached today through the admin API's `act`
+  routes; GE-05's user-token routes call the same functions.
+
+### Event outbox
+
+Every change GitHub would announce by webhook appends an event to an
+outbox: `{"id", "at", "event", "action", "targets": [{"app_id",
+"installation_id"}], "payload"}`. Targets are the non-suspended
+installations that can access the repository and subscribe to the event;
+the payload leaves out `installation`, which each delivery adds. Today:
+`member` `added` (an invitation accepted, or an organization member added
+directly), `edited` (a role change, with `changes`) and `removed`
+(`DELETE …/collaborators/{username}` or leaving). Read it at
+`GET /__octoemu/events` or `Emulator::events()`; GE-04 delivers it.
 
 ### Auth model
 
@@ -138,12 +186,14 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
 ```json
 {
   "settings": {"start_time": "2030-01-01T00:00:00Z", "refuse_assumed": false},
-  "users": [{"id": 1, "login": "octocat", "name": "The Octocat", "email": "octocat@example.com"}],
+  "users": [{"id": 1, "login": "octocat", "name": "The Octocat", "email": "octocat@example.com"},
+            {"id": 3, "login": "hubot", "type": "Bot"}],
   "orgs": [{"id": 2, "login": "acme", "plan": {"name": "team", "seats": 10},
             "created_at": "2020-01-01T00:00:00Z", "two_factor_requirement_enabled": false,
             "default_repository_permission": "read"}],
   "teams": [{"id": 3, "org": "acme", "slug": "core", "privacy": "closed"}],
-  "repos": [{"id": 4, "owner": "acme", "name": "widgets", "private": true}],
+  "repos": [{"id": 4, "owner": "acme", "name": "widgets", "private": true,
+             "visibility": "private"}],
   "apps": [{"id": 5, "slug": "invite-bot", "client_id": "Iv23.example", "client_secret": "…",
             "public_keys": ["-----BEGIN PUBLIC KEY-----\n…"],
             "webhook": {"url": "http://127.0.0.1:8787/webhooks", "secrets": ["…"]},
@@ -155,6 +205,10 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
                      "suspended_at": null, "suspended_by": null}],
   "installation_requests": [{"id": 7, "app_id": 5, "account": "acme", "requester": "octocat"}],
   "collaborators": [{"repo": "acme/widgets", "user": "octocat", "role": "push"}],
+  "repository_roles": [{"id": 8, "org": "acme", "name": "auditor", "base_role": "maintain"}],
+  "repository_invitations": [{"id": 9, "repo": "acme/widgets", "invitee": "hubot",
+                              "inviter": "octocat", "role": "auditor",
+                              "created_at": "2029-12-30T00:00:00Z"}],
   "memberships": [{"org": "acme", "user": "octocat", "role": "admin", "state": "active"}],
   "team_memberships": [{"team": "acme/core", "user": "octocat", "role": "maintainer"}]
 }
@@ -166,9 +220,12 @@ Validation reports every problem at once, each with its JSON path
 IDs; that every reference resolves to the right kind of account; that
 installations only select their account's repositories and never widen the
 App's permissions or events; that App public keys parse as RSA; that
-installation requests name an App, an account and a requesting user; and that team
+installation requests name an App, an account and a requesting user; that team
 memberships rest on an organization membership (an active one for an active
-team membership). A merged seed is validated with the existing world and
+team membership); that a custom role exists in the repository's organization
+and is not one of GitHub's names; that an invitation names a user who is
+neither a collaborator nor invited already, and one inviter (a user or an
+App); and that only an organization's repository is `internal`. A merged seed is validated with the existing world and
 applies whole or not at all; it may not set `start_time`.
 
 ## Admin API (`/__octoemu/`)
@@ -187,6 +244,10 @@ applies whole or not at all; it may not set `start_time`.
 | `POST /installations/{id}/suspend` | Suspends an installation (204; 404 if unknown) |
 | `POST /installations/{id}/unsuspend` | Lifts a suspension |
 | `DELETE /installations/{id}` | Uninstalls: the installation disappears and its tokens stop working |
+| `GET /events` | `{"events": […]}`: the webhook outbox, oldest first |
+| `POST /act/{login}/repository_invitations/{id}/accept` | The invitee accepts: collaborator with the invited role, `member.added` (204; 404 if not theirs or expired) |
+| `POST /act/{login}/repository_invitations/{id}/decline` | The invitee declines (204, no event) |
+| `POST /act/{login}/repos/{owner}/{repo}/leave` | A collaborator leaves (204, `member.removed`) |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
 ticks with real time, and jumps on advance. Every response, admin included,
@@ -245,7 +306,18 @@ whose text is a guess keeps its status with the message
 `token-error-messages`, `token-repositories-union`,
 `token-implicit-metadata`, `token-revocation-immediate`,
 `suspended-installation`, `suspended-installation-tokens`,
-`rate-limit-headers` and `request-id-header`.
+`rate-limit-headers`, `request-id-header`; and for repositories
+`reput-pending-invitation` (201 with the same invitation, role updated),
+`reput-expired-invitation` (replaced by a new one),
+`expired-invitations-listed`, `accept-expired-invitation` (refused),
+`invitation-alias-links`, `custom-role-invitation-permissions`,
+`collaborator-affiliation` (beyond `direct`), `permission-without-access`
+(`none`/`none`), `remove-non-collaborator` (204), `unknown-user-404`,
+`out-of-scope-repository` (403), `repo-error-messages`,
+`member-edited-changes` (left out of the payload in refuse-assumed mode),
+`member-added-directly` (not emitted in refuse-assumed mode) and
+`app-bot-account`; the routes `GET /repositories/{repository_id}/invitations`,
+`GET /user/{account_id}` and `GET /avatars/u/{id}`.
 
 ## Tests
 
@@ -254,6 +326,14 @@ cd libs/octoauth
 cargo test -p octoemu
 cargo clippy -p octoemu --all-targets -- -D warnings
 ```
+
+`tests/repos.rs` covers the repository surface over HTTP: the 201/204
+split, role mapping and custom roles, pagination and the alias `Link`,
+expiry and the daily limit on the clock, the admin `act` routes, the
+outbox, permission and scope refusals, 422s, users, avatars and
+refuse-assumed mode. In the ghinvite workspace,
+`crates/ghinvite-github/tests/emulator.rs` runs ghinvite-github's real
+repository client against an embedded emulator.
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

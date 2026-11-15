@@ -48,6 +48,11 @@ tokio = { workspace = true, features = ["net", "io-util", "time"] }
 # examples/stub.rs only:
 clap = { version = "4", features = ["derive"] }
 
+# The endpoint tests against the GitHub emulator (tests/emulator.rs). Native
+# only, and a dev-dependency only: never in a wasm32 or production graph.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+octoemu.workspace = true
+
 [[example]]
 name = "stub"
 required-features = ["test-stub"]

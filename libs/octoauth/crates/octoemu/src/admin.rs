@@ -33,6 +33,15 @@ pub(crate) fn router() -> Router<SharedState> {
         .route("/__octoemu/installations/{id}", delete(uninstall))
         .route("/__octoemu/installations/{id}/suspend", post(suspend))
         .route("/__octoemu/installations/{id}/unsuspend", post(unsuspend))
+        .route("/__octoemu/events", get(events))
+        .route(
+            "/__octoemu/act/{login}/repository_invitations/{id}/{action}",
+            post(act_on_invitation),
+        )
+        .route(
+            "/__octoemu/act/{login}/repos/{owner}/{repo}/leave",
+            post(leave_repository),
+        )
 }
 
 /// A JSON body, or the 400 (in GitHub's error shape) to answer instead.
@@ -185,4 +194,107 @@ async fn unsuspend(State(shared): State<SharedState>, Path(id): Path<u64>) -> Re
 
 async fn uninstall(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
     done(crate::apps::uninstall(&shared, id))
+}
+
+async fn events(State(shared): State<SharedState>) -> Response {
+    json(
+        StatusCode::OK,
+        &json!({"events": shared.state().events.events()}),
+    )
+}
+
+/// The answer to an `act` route: 204, or why nothing happened.
+fn acted(result: Result<(), crate::collaboration::Failure>, shared: &SharedState) -> Response {
+    use crate::collaboration::Failure;
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(Failure::NotFound) => error(
+            StatusCode::NOT_FOUND,
+            "octoemu: no such invitation, repository or collaborator for this user",
+            OCTOEMU_DOCS,
+        ),
+        Err(Failure::Expired) => error(
+            StatusCode::NOT_FOUND,
+            "octoemu: the invitation has expired",
+            OCTOEMU_DOCS,
+        ),
+        Err(Failure::Refused(behaviour)) => shared.refuse(behaviour).unwrap_or_else(|| {
+            error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "octoemu: refused",
+                OCTOEMU_DOCS,
+            )
+        }),
+        Err(other) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("octoemu: {other:?}"),
+            OCTOEMU_DOCS,
+        ),
+    }
+}
+
+/// `POST /__octoemu/act/{login}/repository_invitations/{id}/accept|decline`:
+/// the invitee's side of an invitation, as `PATCH`/`DELETE
+/// /user/repository_invitations/{id}` with their user token will do
+/// (GE-05). Same domain operations, same events.
+async fn act_on_invitation(
+    State(shared): State<SharedState>,
+    Path((login, id, action)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let Ok(id) = id.parse::<u64>() else {
+        return acted(Err(crate::collaboration::Failure::NotFound), &shared);
+    };
+    let origin = crate::views::origin(&shared, &headers);
+    let allows = |behaviour: &str| shared.allows(behaviour);
+    let ctx = crate::collaboration::Ctx {
+        origin: &origin,
+        allows: &allows,
+    };
+    let result = {
+        let mut state = shared.state();
+        match action.as_str() {
+            "accept" => crate::collaboration::accept_invitation(&mut state, &ctx, &login, id),
+            "decline" => crate::collaboration::decline_invitation(&mut state, &login, id),
+            _ => {
+                return error(
+                    StatusCode::NOT_FOUND,
+                    "octoemu: no such admin route",
+                    OCTOEMU_DOCS,
+                );
+            }
+        }
+    };
+    acted(result, &shared)
+}
+
+/// `POST /__octoemu/act/{login}/repos/{owner}/{repo}/leave`: a
+/// collaborator leaves a repository (`member.removed`, sent by them).
+async fn leave_repository(
+    State(shared): State<SharedState>,
+    Path((login, owner, repo)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let origin = crate::views::origin(&shared, &headers);
+    let allows = |behaviour: &str| shared.allows(behaviour);
+    let ctx = crate::collaboration::Ctx {
+        origin: &origin,
+        allows: &allows,
+    };
+    let result = {
+        let mut state = shared.state();
+        let repo_id = state
+            .world
+            .repos
+            .iter()
+            .find(|r| r.owner.eq_ignore_ascii_case(&owner) && r.name.eq_ignore_ascii_case(&repo))
+            .map(|r| r.id);
+        match repo_id {
+            Some(repo_id) => {
+                crate::collaboration::leave_repository(&mut state, &ctx, &login, repo_id)
+            }
+            None => Err(crate::collaboration::Failure::NotFound),
+        }
+    };
+    acted(result, &shared)
 }

@@ -2,8 +2,9 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use octoemu::seed::{
-    Access, App, Collaborator, Installation, InstallationRequest, Membership, Org, OrgRole, Plan,
-    Repo, Role, Seed, Team, TeamMembership, TeamRole, User, Webhook,
+    Access, App, BaseRole, Collaborator, Installation, InstallationRequest, Membership, Org,
+    OrgRole, Plan, Repo, RepositoryInvitation, RepositoryRole, Role, Seed, Team, TeamMembership,
+    TeamRole, User, Visibility, Webhook,
 };
 
 const PUBLIC_KEY: &str = include_str!("fixtures/rsa2048.pub.pem");
@@ -60,6 +61,18 @@ fn world() -> Seed {
             TeamRole::Maintainer,
         ))
         .team_membership(TeamMembership::new("acme/core", "hubot", TeamRole::Member).pending())
+        .user(User::new(4, "dependabot").bot())
+        .repo(Repo::new(32, "acme", "handbook").visibility(Visibility::Internal))
+        .repository_role(RepositoryRole::new(
+            70,
+            "acme",
+            "security-reviewer",
+            BaseRole::Triage,
+        ))
+        .repository_invitation(
+            RepositoryInvitation::new(80, "acme/handbook", "hubot", Role::Maintain)
+                .inviter("octocat"),
+        )
 }
 
 fn problems(seed: &Seed) -> Vec<String> {
@@ -310,7 +323,7 @@ fn merging_validates_the_whole_and_turns_refuse_assumed_on() {
     let merged = base
         .merged(Seed::new().user(User::new(3, "monalisa")).refuse_assumed())
         .unwrap();
-    assert_eq!(merged.users.len(), 3);
+    assert_eq!(merged.users.len(), 4);
     assert!(merged.settings.refuse_assumed);
 
     let error = base
@@ -318,7 +331,7 @@ fn merging_validates_the_whole_and_turns_refuse_assumed_on() {
         .unwrap_err();
     assert_eq!(
         error.problems()[0].to_string(),
-        "users[2].id: account ID 1 is used twice"
+        "users[3].id: account ID 1 is used twice"
     );
     // PKCS#1 keys are accepted too.
     let pkcs1 = include_str!("fixtures/rsa2048.pkcs1.pub.pem");
@@ -326,4 +339,64 @@ fn merging_validates_the_whole_and_turns_refuse_assumed_on() {
         .app(App::new(1, "a", "c", "s").public_key(pkcs1))
         .validate()
         .unwrap();
+}
+
+#[test]
+fn reports_role_invitation_and_visibility_problems() {
+    let mut public_but_private = Repo::new(33, "acme", "odd").private();
+    public_but_private.visibility = Some(Visibility::Public);
+    let seed = Seed::new()
+        .user(User::new(1, "octocat"))
+        .user(User::new(2, "hubot"))
+        .org(Org::new(10, "acme"))
+        .repo(Repo::new(30, "acme", "widgets"))
+        .repo(Repo::new(31, "octocat", "dotfiles").visibility(Visibility::Internal))
+        .repo(public_but_private)
+        .app(app(40))
+        .repository_role(RepositoryRole::new(70, "acme", "auditor", BaseRole::Read))
+        .repository_role(RepositoryRole::new(71, "acme", "AUDITOR", BaseRole::Write))
+        .repository_role(RepositoryRole::new(72, "acme", "push", BaseRole::Write))
+        .repository_role(RepositoryRole::new(73, "octocat", "x", BaseRole::Write))
+        .collaborator(Collaborator::new(
+            "acme/widgets",
+            "octocat",
+            Role::Custom("nobody".into()),
+        ))
+        .collaborator(Collaborator::new(
+            "octocat/dotfiles",
+            "hubot",
+            Role::Custom("auditor".into()),
+        ))
+        .repository_invitation(RepositoryInvitation::new(
+            80,
+            "acme/widgets",
+            "octocat",
+            Role::Push,
+        ))
+        .repository_invitation(
+            RepositoryInvitation::new(81, "acme/widgets", "hubot", Role::Custom("auditor".into()))
+                .inviter("acme"),
+        )
+        .repository_invitation({
+            let mut twice = RepositoryInvitation::new(81, "acme/widgets", "HUBOT", Role::Pull);
+            twice.inviter_app_id = Some(99);
+            twice
+        });
+    assert_eq!(
+        problems(&seed),
+        [
+            "repos[1].visibility: only an organization's repositories can be internal",
+            "repos[2].visibility: a public repository cannot be private: true",
+            "repository_roles[1].name: \"AUDITOR\" is used twice in \"acme\"",
+            "repository_roles[2].name: \"push\" is one of GitHub's own role names",
+            "repository_roles[3].org: \"octocat\" is a user, not an organization",
+            "collaborators[0].role: \"nobody\" is neither a GitHub role nor a custom repository role of \"acme\"",
+            "collaborators[1].role: \"auditor\": custom roles exist only on organization repositories",
+            "repository_invitations[0].invitee: \"octocat\" is already a collaborator on \"acme/widgets\"",
+            "repository_invitations[1].inviter: \"acme\" is an organization, not a user",
+            "repository_invitations[2].id: repository invitation ID 81 is used twice",
+            "repository_invitations[2].invitee: \"HUBOT\" already has an invitation to \"acme/widgets\"",
+            "repository_invitations[2].inviter_app_id: no App with ID 99",
+        ]
+    );
 }

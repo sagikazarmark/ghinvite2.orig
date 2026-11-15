@@ -73,16 +73,16 @@ async fn unbuilt_routes_answer_501_never_404() {
     let base = emulator.api_base();
     let cases = [
         (Method::GET, "/"),
-        (Method::GET, "/repos/acme/widgets"),
+        (Method::GET, "/repos/acme/widgets/branches"),
         (Method::DELETE, "/app/installations/5"),
         (Method::GET, "/app/hook/deliveries"),
-        (Method::PUT, "/repos/acme/widgets/collaborators/octocat"),
+        (Method::PUT, "/orgs/acme/memberships/octocat"),
         (Method::PATCH, "/user/repository_invitations/1"),
         (Method::POST, "/installation/token"),
         (Method::GET, "/totally/made/up"),
         (Method::GET, "/login/oauth/authorize"),
         (Method::POST, "/login/oauth/access_token"),
-        (Method::GET, "/avatars/u/1"),
+        (Method::GET, "/avatars/x/1"),
     ];
     for (method, path) in cases {
         let response = client

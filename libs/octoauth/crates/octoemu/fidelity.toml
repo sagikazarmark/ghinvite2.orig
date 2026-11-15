@@ -194,3 +194,181 @@ label = "documented"
 doc = "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api"
 # per_page defaults to 30 and silently caps at 100; page from 1; Link with
 # prev, next, last and first (absolute URLs on the request's Host).
+
+# --- Repositories, collaborators and invitations (GE-03) -----------------------
+
+[routes."GET /repos/{owner}/{repo}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/repos/repos#get-a-repository"
+# metadata: read. A private or internal repository outside the token's
+# repositories is a 404 (private-resource-404).
+
+[routes."GET /repos/{owner}/{repo}/collaborators"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#list-repository-collaborators"
+# metadata: read; paged; each user with `permissions` and `role_name`.
+# `affiliation` beyond `direct` is the collaborator-affiliation behaviour.
+
+[routes."PUT /repos/{owner}/{repo}/collaborators/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator"
+# administration: write. 201 with the invitation, 204 for a user who already
+# has access or a role change (collaborator-put-outcomes); 422 for an
+# invalid permission or the invitation limit.
+
+[routes."DELETE /repos/{owner}/{repo}/collaborators/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#remove-a-repository-collaborator"
+# administration: write; 204; member.removed.
+
+[routes."GET /repos/{owner}/{repo}/collaborators/{username}/permission"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user"
+# metadata: read. `permission` (admin|write|read|none), `role_name` and
+# `user`; the highest role across direct collaboration, ownership and the
+# organization's owners and base permission (teams from GE-06).
+
+[routes."GET /repos/{owner}/{repo}/invitations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#list-repository-invitations"
+# administration: read; paged. Link URLs: invitation-alias-links.
+
+[routes."GET /repositories/{repository_id}/invitations"]
+label = "assumed"
+reason = "The repository-ID alias of the invitation list, which ghinvite's pagination follows when a Link points at it. GitHub serves /repositories/{id}/… aliases for repository routes, but this one is not documented. Same permission (administration: read) and body as the named route."
+
+[routes."PATCH /repos/{owner}/{repo}/invitations/{invitation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#update-a-repository-invitation"
+# administration: write; `permissions` is read, write, maintain, triage or
+# admin (anything else 422); 200 with the invitation; 404 for another
+# repository's invitation.
+
+[routes."DELETE /repos/{owner}/{repo}/invitations/{invitation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#delete-a-repository-invitation"
+# administration: write; 204.
+
+# --- Users (GE-03) ---------------------------------------------------------------
+
+[routes."GET /users/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/users/users#get-a-user"
+# Public (any valid credential or none). Users and organizations.
+
+[routes."GET /user/{account_id}"]
+label = "assumed"
+reason = "Numeric user lookup as ghinvite spells it (its endpoint table flags the path UNVERIFIED). GitHub's docs describe 'Get a user using their ID' at this path; the live suite (GE-08) has not confirmed it. Same body as GET /users/{username}."
+
+[routes."GET /avatars/u/{id}"]
+label = "assumed"
+reason = "avatars.githubusercontent.com/u/{id} is how GitHub's avatar_url points at an image, but the CDN is undocumented. octoemu answers a small PNG (image/png) for any seeded account or App bot, ignoring s and v, and 404 otherwise."
+
+# --- Repository collaboration (GE-03) ----------------------------------------------
+
+[behaviours.collaborator-put-outcomes]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator"
+# 201 with the new invitation; 204 when an existing collaborator is added
+# again or an organization member is added as an individual collaborator
+# (who becomes a direct collaborator without an invitation); a role change
+# of a collaborator is a 204. `permission` defaults to push.
+
+[behaviours.user-repo-permission-ignored]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator"
+# `permission` is only valid on organization-owned repositories: on a
+# user's repository it is ignored and the collaborator gets push.
+
+[behaviours.role-names]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user"
+# `permission` is the legacy admin|write|read|none (maintain is write,
+# triage is read); `role_name` the exact role (read, triage, write,
+# maintain, admin or a custom role's name). Invitation `permissions` use
+# read|write|triage|maintain|admin. A custom role ranks as its base.
+
+[behaviours.invitation-expiry]
+label = "documented"
+doc = "https://docs.github.com/en/account-and-profile/setting-up-and-managing-your-personal-account-on-github/managing-access-to-your-personal-repositories/inviting-collaborators-to-a-personal-repository"
+# An invitation expires 7 days after it was sent, on the virtual clock, and
+# then reports expired: true.
+
+[behaviours.invitation-limit]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/collaborators#add-a-repository-collaborator"
+# At most 50 invitations to a repository per 24 hours (sliding, on the
+# virtual clock, counting invitations sent through the API; deleting one
+# does not give it back). Organization members added directly do not
+# count. Beyond it: 422 (the body is repo-error-messages).
+
+[behaviours.member-events]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#member"
+# member.added when an invitee accepts ("accepted an invitation to a
+# repository"), with changes.permission.to and changes.role_name.to;
+# member.edited when a collaborator's role changes; member.removed when one
+# is removed or leaves. Appended to the outbox for the installations that
+# can access the repository and subscribe to `member` (GE-04 delivers).
+# Which permission GitHub requires to deliver member events is an open
+# documentation conflict (plan §4); octoemu does not filter by permission.
+
+[behaviours.member-edited-changes]
+label = "assumed"
+reason = "member.edited carries changes {old_permission: {from}, permission: {from, to}} with role names; the shape is unmeasured (plan §4 [M] scenario 14). Left out of the payload in refuse-assumed mode."
+
+[behaviours.member-added-directly]
+label = "assumed"
+reason = "An organization member added by PUT …/collaborators/{username} (204, no invitation) emits member.added with the sender being the App's bot. Whether GitHub announces it is unmeasured. Not emitted in refuse-assumed mode."
+
+[behaviours.reput-pending-invitation]
+label = "assumed"
+reason = "PUT …/collaborators/{username} for a user with a pending invitation answers 201 with that same invitation (same ID and created_at) and sets its permissions to the requested role; it does not count against the 50-per-day limit. Unmeasured (SP-07, plan §4 [M] scenario 8). Refused in refuse-assumed mode."
+
+[behaviours.reput-expired-invitation]
+label = "assumed"
+reason = "PUT …/collaborators/{username} for a user whose invitation has expired deletes it and sends a new one (201, new ID and created_at, counts against the limit). Unmeasured (plan §4 [M] scenario 9). Refused in refuse-assumed mode."
+
+[behaviours.expired-invitations-listed]
+label = "assumed"
+reason = "An expired invitation stays in GET …/invitations with expired: true until it is deleted or replaced. Unmeasured (plan §4 [M] scenario 9). A list that would show one is refused in refuse-assumed mode."
+
+[behaviours.accept-expired-invitation]
+label = "assumed"
+reason = "Accepting an expired invitation fails and leaves it in place (the admin act route answers 404 'octoemu: the invitation has expired'; GE-05's user route will map it). Unmeasured (plan §4 [M] scenario 9). Refused in refuse-assumed mode."
+
+[behaviours.invitation-alias-links]
+label = "assumed"
+reason = "The invitation list's Link URLs point at /repositories/{repository_id}/invitations whichever path was asked, as ghinvite's pagination expects (crates/ghinvite-github/src/endpoints/invitation_alias.rs). GitHub's actual next-link form is unmeasured. A multi-page list on the named path is refused in refuse-assumed mode."
+
+[behaviours.custom-role-invitation-permissions]
+label = "assumed"
+reason = "An invitation offering a custom repository role reports the role's name in `permissions` (the documented enum lists only the five built-in names). Rendering one is refused in refuse-assumed mode."
+
+[behaviours.collaborator-affiliation]
+label = "assumed"
+reason = "affiliation=outside lists direct collaborators who are not members of the owning organization; all (the default) lists everyone with access through any source (direct, ownership, organization owners and base permission; teams from GE-06), each with their effective role. Only direct is relied on by ghinvite; the rest is unmeasured. Refused in refuse-assumed mode unless affiliation=direct."
+
+[behaviours.permission-without-access]
+label = "assumed"
+reason = "GET …/collaborators/{username}/permission for a seeded user without access (including one with only a pending invitation) answers 200 {permission: none, role_name: none} with every flag false. Whether GitHub reports read on public repositories, or 404, is unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.remove-non-collaborator]
+label = "assumed"
+reason = "DELETE …/collaborators/{username} for a user who is not a direct collaborator answers 204 and changes nothing. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.unknown-user-404]
+label = "assumed"
+reason = "A collaborator route naming a login that is no user answers 404 Not Found. GitHub documents no 404 for PUT; unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.out-of-scope-repository]
+label = "assumed"
+reason = "A public repository outside the installation token's repositories is visible (GET /repos/{owner}/{repo}) but its collaborator and invitation routes answer 403 Resource not accessible by integration with X-Accepted-GitHub-Permissions. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.repo-error-messages]
+label = "assumed"
+reason = "The 422 bodies of the repository routes are guesses: Validation Failed with errors [{resource: Repository, field: permission|permissions|affiliation, code: invalid}] for a value outside the documented set, and [{resource: Repository, field: base, code: custom, message: …50 invitations…}] for the invitation limit (plan §4 [M] scenario 10). Withheld in refuse-assumed mode (status kept)."
+
+[behaviours.app-bot-account]
+label = "assumed"
+reason = "What an installation token does is attributed to the App's bot account: login {slug}[bot], type Bot, ID 1000000000 + the App ID (octoemu's own; GitHub's bot IDs are unrelated numbers). It is the inviter of invitations and the sender of member events the App causes. Informational: nothing is refused for it."

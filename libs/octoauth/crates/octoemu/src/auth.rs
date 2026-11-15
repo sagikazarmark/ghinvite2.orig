@@ -31,7 +31,6 @@ use axum::response::Response;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Auth {
     /// Anyone; a credential, if sent, must still be valid.
-    #[cfg_attr(not(test), allow(dead_code, reason = "GE-03+ public routes"))]
     Public,
     /// An App's JWT (`Authorization: Bearer <jwt>`).
     App,
@@ -285,14 +284,22 @@ pub(crate) fn find_installation(world: &Seed, id: u64) -> Option<&Installation> 
     world.installations.iter().find(|i| i.id == id)
 }
 
+/// Whether `repo` is one of `token`'s repositories: its installation can
+/// access it and the token was not narrowed away from it.
+pub(crate) fn in_scope(world: &Seed, token: &TokenRecord, repo: &Repo) -> bool {
+    find_installation(world, token.installation_id).is_some_and(|installation| {
+        crate::apps::installation_repos(world, installation)
+            .iter()
+            .any(|r| r.id == repo.id)
+            && token.covers(repo.id)
+    })
+}
+
 /// The private-resource rule (documented): a repository the caller cannot
 /// see is a 404, never a 403, so its existence does not leak. `Ok` with the
 /// repository when `token` reaches it (it is in the token's repositories)
-/// or it is public; otherwise the 404 to send.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the repository routes arrive in GE-03")
-)]
+/// or it is public; otherwise the 404 to send. Private and internal
+/// repositories are both hidden.
 pub(crate) fn visible_repo<'a>(
     world: &'a Seed,
     token: &TokenRecord,
@@ -303,15 +310,7 @@ pub(crate) fn visible_repo<'a>(
         .repos
         .iter()
         .find(|r| r.owner.eq_ignore_ascii_case(owner) && r.name.eq_ignore_ascii_case(name));
-    let reachable = |repo: &Repo| {
-        !repo.private
-            || find_installation(world, token.installation_id).is_some_and(|installation| {
-                crate::apps::installation_repos(world, installation)
-                    .iter()
-                    .any(|r| r.id == repo.id)
-                    && token.covers(repo.id)
-            })
-    };
+    let reachable = |repo: &Repo| !repo.is_private() || in_scope(world, token, repo);
     match repo {
         Some(repo) if reachable(repo) => Ok(repo),
         _ => Err(not_found()),

@@ -4,6 +4,7 @@
 use crate::auth::Auth;
 use crate::calls::{Call, CallLog};
 use crate::clock::Clock;
+use crate::events::Outbox;
 use crate::fidelity::{Fidelity, Manifest};
 use crate::response::{OCTOEMU_DOCS, json};
 use crate::seed::{Seed, SeedError};
@@ -29,6 +30,14 @@ pub(crate) struct State {
     pub(crate) calls: CallLog,
     /// Installation tokens minted by this instance.
     pub(crate) tokens: Tokens,
+    /// Events GitHub would announce by webhook, for delivery (GE-04).
+    pub(crate) events: Outbox,
+    /// Repository invitations sent through the API: (repository ID, when),
+    /// for the 50-per-24-hours limit.
+    pub(crate) invitations_sent: Vec<(u64, DateTime<Utc>)>,
+    /// The highest repository invitation ID handed out, so a deleted
+    /// invitation's ID is never reused.
+    pub(crate) last_invitation_id: u64,
 }
 
 /// The `message` sent instead of an `assumed` one in refuse-assumed mode:
@@ -68,6 +77,9 @@ impl Shared {
                 clock,
                 calls: CallLog::default(),
                 tokens: Tokens::default(),
+                events: Outbox::default(),
+                invitations_sent: Vec::new(),
+                last_invitation_id: 0,
             }),
             manifest,
             registered,
@@ -161,6 +173,7 @@ impl Shared {
             // Redacted IDs and scopes only, never the tokens.
             "tokens": state.tokens.records(),
             "calls": state.calls.calls().len(),
+            "events": state.events.events().len(),
         })
     }
 }

@@ -84,6 +84,8 @@ ghinvite-config = { path = "crates/ghinvite-config" }
 ghinvite-github = { path = "crates/ghinvite-github" }
 octoauth = { path = "libs/octoauth/crates/octoauth" }
 octotoken = { path = "libs/octoauth/crates/octotoken" }
+# Test-only, native-only GitHub emulator: dev-dependency of ghinvite-github.
+octoemu = { path = "libs/octoauth/crates/octoemu" }
 ghinvite-storage-sqlx = { path = "crates/ghinvite-storage-sqlx" }
 ghinvite-storage-d1 = { path = "crates/ghinvite-storage-d1" }
 ghinvite-workflows = { path = "crates/ghinvite-workflows" }

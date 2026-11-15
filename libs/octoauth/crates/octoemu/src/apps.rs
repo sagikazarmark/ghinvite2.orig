@@ -63,11 +63,12 @@ pub(crate) fn installation_repos<'a>(
     repos
 }
 
-fn view<'a>(state: &'a World, origin: &'a str) -> View<'a> {
+pub(crate) fn view<'a>(state: &'a World, origin: &'a str) -> View<'a> {
     View {
         world: &state.world,
         origin,
         start: state.clock.start(),
+        now: state.clock.now(),
     }
 }
 

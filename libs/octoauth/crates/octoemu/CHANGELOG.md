@@ -11,6 +11,20 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- Repositories (GE-03): `GET /repos/{owner}/{repo}`; collaborators (`GET`
+  list with `affiliation`, `PUT` with the 201/204 split, `DELETE`,
+  `GET …/permission` with `permission` and `role_name`); repository
+  invitations (`GET` list and its `/repositories/{repository_id}/invitations`
+  alias, `PATCH`, `DELETE`) with 7-day expiry and 50 per repository per 24 h
+  on the virtual clock; `GET /users/{username}`, `GET /user/{account_id}`
+  and PNG avatars at `/avatars/u/{id}`.
+- `events`: a webhook outbox (`member` `added`/`edited`/`removed`), at
+  `GET /__octoemu/events` and `Emulator::events`.
+- Admin API `act` routes: accept or decline a repository invitation, leave
+  a repository, as a seeded user.
+- Seed: `repository_roles` (custom roles), `repository_invitations`, a
+  user's `type` (`User`/`Bot`) and a repository's `visibility` (with
+  `internal`); custom collaborator roles must now name a seeded custom role.
 - App auth (GE-02): App JWT verification (RS256 against any registered key,
   `iss`, `iat`, `exp` on the virtual clock); stateless installation tokens
   (`ghs_<APPID>_<JWT>`, 1 h) narrowed by `permissions`, `repositories` and

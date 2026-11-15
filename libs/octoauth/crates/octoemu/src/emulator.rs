@@ -252,6 +252,12 @@ impl Emulator {
         crate::apps::uninstall(&self.shared, id)
     }
 
+    /// The webhook outbox: every event GitHub would announce, oldest first
+    /// (`GET /__octoemu/events`).
+    pub fn events(&self) -> Vec<crate::events::Event> {
+        self.shared.state().events.events().to_vec()
+    }
+
     /// Empties the call log.
     pub fn clear_calls(&self) {
         self.shared.state().calls.clear();

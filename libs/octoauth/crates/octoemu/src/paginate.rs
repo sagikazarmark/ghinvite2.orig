@@ -85,6 +85,12 @@ impl<T> Paged<T> {
     /// keep `uri`'s other query parameters. `None` when the list fits on the
     /// first page.
     pub(crate) fn link(&self, origin: &str, uri: &Uri) -> Option<String> {
+        self.link_at(origin, uri.path(), uri)
+    }
+
+    /// [`link`](Self::link), with the URLs on `path` instead of `uri`'s
+    /// (for a list GitHub pages on another of its paths).
+    pub(crate) fn link_at(&self, origin: &str, path: &str, uri: &Uri) -> Option<String> {
         let page = self.pagination.page;
         let last = self.last_page();
         if page == 1 && last == 1 {
@@ -96,7 +102,7 @@ impl<T> Paged<T> {
                 .map(|(name, value)| format!("{name}={value}"))
                 .collect();
             query.push(format!("page={number}"));
-            format!("<{origin}{}?{}>", uri.path(), query.join("&"))
+            format!("<{origin}{path}?{}>", query.join("&"))
         };
         let mut rels = Vec::new();
         if page > 1 {
