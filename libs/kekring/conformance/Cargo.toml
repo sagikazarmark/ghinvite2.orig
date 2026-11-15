@@ -14,8 +14,8 @@ members = ["."]
 
 [dev-dependencies]
 kekring = { path = ".." }
-anykms-core = "0.3"
-anykms-conformance = { version = "0.3", features = ["fixture-helpers"] }
+anykms-core = "0.4"
+anykms-conformance = { version = "0.4", features = ["fixture-helpers"] }
 getrandom = "0.4"
 
 [[test]]

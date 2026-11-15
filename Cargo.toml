@@ -30,8 +30,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-anykms-core = { version = "0.3", default-features = false }
-# anykms-recipes (0.3, `default-features = false, features = ["envelope"]`, `js` on wasm32) is
+anykms-core = { version = "0.4", default-features = false }
+# anykms-recipes (0.4, `default-features = false, features = ["envelope"]`, `js` on wasm32) is
 # kekring's dependency only: the application reaches the envelope through kekring.
 # Provisioned versioned KEK + canonical AAD (see libs/kekring/README.md).
 kekring = { path = "libs/kekring", default-features = false }

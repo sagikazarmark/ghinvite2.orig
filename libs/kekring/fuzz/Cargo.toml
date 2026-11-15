@@ -19,7 +19,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 kekring = { path = ".." }
-anykms-core = "0.3"
+anykms-core = "0.4"
 
 [workspace]
 members = ["."]

@@ -1,4 +1,4 @@
-//! anykms 0.3 conformance for `KekringProvider` (registry path) and `ProviderKey` (typed path).
+//! anykms 0.4 conformance for `KekringProvider` (registry path) and `ProviderKey` (typed path).
 //!
 //! A keyring is immutable for the life of a process (rotation is a new descriptor and a
 //! redeploy), so the fixture provisions every keyring before the run, as an operator would, and

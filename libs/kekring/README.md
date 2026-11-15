@@ -122,7 +122,7 @@ alone keeps the exposed data keys.
   transition, provider, async/sync, the vectors below.
 - `node scripts/kekring-vectors.mjs --check`: re-derives `tests/vectors/kekring-v1.json` with
   Node/OpenSSL (`id-aes256-wrap`, HKDF, SHA-256, AES-GCM), byte for byte, and its AAD encoder
-  against upstream's `tests/vectors/aad_v1.json` (copied unchanged from anykms 0.3.0).
-- `conformance/`: the anykms 0.3 conformance suite against `KekringProvider` (its own workspace,
+  against upstream's `tests/vectors/aad_v1.json` (copied from anykms 0.3.0; unchanged in 0.4.0).
+- `conformance/`: the anykms 0.4 conformance suite against `KekringProvider` (its own workspace,
   because the suite pulls in an RSA backend the application must not build).
 - `fuzz/`: cargo-fuzz targets for the descriptor parser and the blob reader.

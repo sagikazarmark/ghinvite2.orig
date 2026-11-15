@@ -98,7 +98,7 @@ jobs:
       # Independent Node/OpenSSL re-derivation of tests/vectors/kekring-v1.json (byte-exact).
       - run: node libs/kekring/scripts/kekring-vectors.mjs --check
       - run: cargo test --locked -p kekring --all-features
-      # anykms 0.3 conformance; its own workspace keeps aws-lc-rs out of the application graph.
+      # anykms 0.4 conformance; its own workspace keeps aws-lc-rs out of the application graph.
       - run: cargo fmt --check --manifest-path libs/kekring/conformance/Cargo.toml
       - run: cargo clippy --locked --all-targets --manifest-path libs/kekring/conformance/Cargo.toml -- -D warnings
       - run: cargo test --locked --manifest-path libs/kekring/conformance/Cargo.toml

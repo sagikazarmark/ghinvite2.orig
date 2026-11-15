@@ -101,9 +101,9 @@ dependencies = [
 
 [[package]]
 name = "anykms-conformance"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad7dff719f01e9032230debe2e08460f1dcf72e66dd6eed06a552610351815c9"
+checksum = "ed8bb919fcb273d92894b0d4e22e31de19477fcdf81f8e32703f4416528cfce3"
 dependencies = [
  "aes-gcm",
  "anykms-core",
@@ -119,21 +119,22 @@ dependencies = [
 
 [[package]]
 name = "anykms-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0641e34d3273a765a83ac18298ce2b3fba4658c6d30dcfb2071273f69a8569f9"
+checksum = "ae780e66935a2ace23966dddfba47742ce27d6ab51113fd2f892334e869a7a3a"
 dependencies = [
  "base64",
  "sha2",
+ "subtle",
  "trait-variant",
  "zeroize",
 ]
 
 [[package]]
 name = "anykms-recipes"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27af3ab8851f64d2e899c01a6523fdf22a7bbb56f38990864fb6e9c2872ef147"
+checksum = "a878ae3fd48f92acae5dcae0cf011b48c1b841c8be7a59b86d170f2ed2a1cd54"
 dependencies = [
  "aes-gcm",
  "anykms-core",
