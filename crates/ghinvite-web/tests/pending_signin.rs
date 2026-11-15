@@ -1,7 +1,7 @@
 //! Actual SQLite atomic consumption and production keyring envelopes.
-use anykms_recipes::envelope::Padding;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ghinvite_core::clock::Clock;
+use ghinvite_core::purpose;
 use ghinvite_core::storage::{
     self,
     pending_signin::{PendingSignInKey, PendingSignInStorage, StoredPendingSignIn},
@@ -9,8 +9,7 @@ use ghinvite_core::storage::{
 use ghinvite_web::signin::{
     PendingSignIn, PendingSignInStore, StateUnavailable, storage::SqlPendingSignInStore,
 };
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Keyring};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -66,9 +65,7 @@ impl Fixture {
             ring: Arc::new(
                 Keyring::builder("p1")
                     .generation(1, [7; 32])
-                    .unwrap()
                     .current(1)
-                    .unwrap()
                     .build()
                     .unwrap(),
             ),
@@ -187,11 +184,10 @@ async fn moved_session_and_other_purpose_ciphertexts_cannot_be_consumed() {
         .bind(key(&b).as_hex()).bind(key(&a).as_hex()).execute(&f.pool).await.unwrap();
     assert!(store.take(&b).await.is_err());
     assert!(store.take(&a).await.unwrap().is_some());
-    let context = EncryptionContext::try_from(&purposes::Session { session_id: &a }).unwrap();
+    let context = Aad::try_from(&purpose::Session { session_id: &a }).unwrap();
     let ciphertext = f
         .ring
-        .context_envelope(Padding::NONE)
-        .unwrap()
+        .envelope()
         .encrypt_sync(
             &serde_json::to_vec(&pending(f.clock.now())).unwrap(),
             &context,
@@ -306,17 +302,14 @@ async fn replacement_and_bounded_expiry_cleanup_keep_one_live_pending_record() {
 }
 
 #[tokio::test]
-async fn lagging_generation_and_wrong_key_configuration_preserve_retryable_row() {
+async fn lagging_generation_and_wrong_root_preserve_retryable_row() {
     let f = Fixture::new().await;
     let id = tower_sessions::session::Id::default().to_string();
     let newer = Arc::new(
         Keyring::builder("p1")
             .generation(1, [7; 32])
-            .unwrap()
             .generation(2, [8; 32])
-            .unwrap()
             .current(2)
-            .unwrap()
             .build()
             .unwrap(),
     );
@@ -335,9 +328,7 @@ async fn lagging_generation_and_wrong_key_configuration_preserve_retryable_row()
     let wrong = Arc::new(
         Keyring::builder("p1")
             .generation(1, [9; 32])
-            .unwrap()
             .current(1)
-            .unwrap()
             .build()
             .unwrap(),
     );

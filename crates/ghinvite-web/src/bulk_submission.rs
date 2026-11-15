@@ -336,9 +336,7 @@ mod tests {
         assert_eq!(command.submission.personal_links[0].source.row, 2);
         let ring = kekring::Keyring::builder("p1")
             .generation(1, [4; 32])
-            .unwrap()
             .current(1)
-            .unwrap()
             .build()
             .unwrap();
         let scope = EmailRowsScope {

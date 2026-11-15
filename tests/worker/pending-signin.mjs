@@ -10,11 +10,12 @@ const VERIFIER = 'PKCE_MARKER_pending_signin_01234567890123456789012345678901234
 const CODE = 'CODE_MARKER_pending_signin_0123456789';
 const TOKEN = 'ghu_MARKER_pending_signin_012345678901234567890123456789';
 const DB_DETAIL = 'DATABASE_PRIVATE_MARKER_pending_signin';
-const ring = (current, roots) => `akr1;name=p1;current=${current};${roots.map(([generation, byte]) => {
+// kekring v1 descriptor (libs/kekring/docs/kekring-format.md).
+const ring = (current, roots) => `kekring1;name=p1;current=${current};hwm=${Math.max(...roots.map(([generation]) => generation))};${roots.map(([generation, byte]) => {
   const root = Buffer.alloc(32, byte), version = Buffer.alloc(4); version.writeUInt32BE(generation);
-  const info = Buffer.concat([Buffer.from('anykms-keyring/v1/kcv'), Buffer.from([2]), Buffer.from('p1'), version]);
-  const kcv = Buffer.from(hkdfSync('sha256', root, Buffer.from('anykms-keyring/v1/salt'), info, 8));
-  return `k${generation}=${root.toString('base64url')}.${kcv.toString('hex')}`;
+  const info = Buffer.concat([Buffer.from('kekring/v1/kid'), Buffer.from([2]), Buffer.from('p1'), version]);
+  const kid = Buffer.from(hkdfSync('sha256', root, Buffer.from('kekring/v1/salt'), info, 8));
+  return `k${generation}=${root.toString('base64url')}.${kid.toString('hex')}`;
 }).join(';')}`;
 const session = () => randomBytes(16).toString('base64url');
 const lookup = id => createHash('sha256').update('p1:pending-signin:v1\0').update(id).digest('hex');
@@ -104,7 +105,7 @@ try {
   await put(id); const beforeWrong=await row(id);
   await call('take',{session_id:id},503,'wrong'); assert.deepEqual(await row(id),beforeWrong);
   assert.deepEqual(await call('take',{session_id:id}),{found:true});
-  console.log('PASS actual Worker lagging generation and wrong-key KCV configuration preserve the row for a correct isolate');
+  console.log('PASS actual Worker lagging generation (VersionAboveHighWaterMark) and wrong-root key id (KeyIdMismatch) preserve the row for a correct isolate');
 
   id=session(); await put(id); const old=await row(id); await put(id); const replacement=await row(id);
   assert.notEqual(old.ciphertext,replacement.ciphertext);
@@ -131,7 +132,9 @@ try {
     assert.ok(!JSON.stringify(rows).includes(needle),'D1 plaintext marker');
     assert.ok(!logs.includes(needle),'runtime log plaintext marker');
   }
-  assert.match(logs,/p1_keyring_configuration/,'configuration alert emitted');
+  // A wrong root is a caller-class DecryptFailed with a stable code, never a configuration alert.
+  assert.match(logs,/KeyIdMismatch/,'wrong-root key id code logged');
+  assert.match(logs,/VersionAboveHighWaterMark/,'lagging-reader code logged');
   assert.match(logs,/fingerprint/,'nonsecret keyring fingerprint emitted');
   console.log('PASS pending-signin raw D1 rows and complete bounded runtime logs contain no state, PKCE, code, token or private DB error markers');
 } finally { await mf.dispose(); }

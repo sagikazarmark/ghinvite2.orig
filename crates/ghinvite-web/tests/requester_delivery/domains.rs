@@ -380,11 +380,8 @@ async fn callback_key_generation_retry_preserves_original_pending_operation() {
     let new = Arc::new(
         kekring::Keyring::builder("p1")
             .generation(1, [7; 32])
-            .unwrap()
             .generation(2, [8; 32])
-            .unwrap()
             .current(2)
-            .unwrap()
             .build()
             .unwrap(),
     );

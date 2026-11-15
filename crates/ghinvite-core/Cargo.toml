@@ -14,6 +14,7 @@ test-suite = ["dep:rand_chacha"]
 async-trait.workspace = true
 chrono.workspace = true
 idna.workspace = true
+kekring.workspace = true
 rand.workspace = true
 rand_chacha = { workspace = true, optional = true }
 schemars.workspace = true
@@ -30,6 +31,8 @@ ulid.workspace = true
 getrandom = { version = "0.3", features = ["wasm_js"] }
 # `clock::SystemClock` reads `Date.now()`; `SystemTime` panics on wasm32.
 js-sys = "0.3"
+# The `purpose` records' AAD builders: kekring's JS clocks and RNG backend.
+kekring = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 rand_chacha.workspace = true

@@ -6,12 +6,12 @@ import { installedWebApp, signinApp } from './app-config.mjs';
 
 const bindings = {
   ...installedWebApp, P1_HOST: 'startup.test',
-  P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29',
+  P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',
   RESTATE_INGRESS_URL: 'https://ingress.test', RESTATE_INGRESS_TOKEN: 'INGRESS_SECRET_MARKER',
   ...signinApp,
   GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/fixture/installations/new',
 };
-const emailRing = 'akr1;name=p1-email;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.81678c3e040a46b7';
+const emailRing = 'kekring1;name=p1-email;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.6b3451284885d811';
 const org = {P1_APP_STAGE:'repo-and-org',GH_ORG_APP_ID:'456',GH_ORG_CLIENT_ID:'Iv.fixture-org',GH_ORG_PRIVATE_KEYS:installedWebApp.GH_REPO_PRIVATE_KEYS,GH_ORG_WEBHOOK_SECRETS:'org-hook-fixture',GH_ORG_DELIVERY_ENABLED:'true'};
 const cases = [
   ['bulk repo',{GH_BULK_ENABLED:'true'},200],

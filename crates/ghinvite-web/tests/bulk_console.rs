@@ -199,9 +199,7 @@ async fn email_fixture() -> EmailFixture {
     let ring = Arc::new(
         kekring::Keyring::builder("p1-email")
             .generation(1, [6; 32])
-            .unwrap()
             .current(1)
-            .unwrap()
             .build()
             .unwrap(),
     );
@@ -690,7 +688,6 @@ async fn retained_review_removal_and_lost_submit_ack_recover_identical_allocatio
 /// Test-side mutation of the real encrypted storage format. The session and
 /// outer continuation stay valid; only a nested envelope's lifetime elapses.
 async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
-    use kekring::ContextEnvelopeSync;
     use sqlx::Row;
     let row = sqlx::query(
         "SELECT scope,binding,payload,expires_at FROM attempt_continuations WHERE id=?",
@@ -702,7 +699,7 @@ async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
     assert!(row.get::<i64, _>("expires_at") > Utc::now().timestamp());
     let scope: String = row.get("scope");
     let binding: String = row.get("binding");
-    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+    let context = kekring::Aad::try_from(&ghinvite_core::purpose::AttemptContinuation {
         scope: &scope,
         binding: &binding,
     })
@@ -710,24 +707,19 @@ async fn continuation(f: &EmailFixture, id: &str) -> (String, String, Value) {
     let encrypted = anykms_core::Ciphertext::from_base64(&row.get::<String, _>("payload")).unwrap();
     let plain = f
         .ring
-        .context_envelope(anykms_recipes::envelope::Padding::NONE)
-        .unwrap()
+        .envelope()
         .decrypt_sync(&encrypted, &context)
         .unwrap();
     (scope, binding, serde_json::from_slice(&plain).unwrap())
 }
 fn expire_nested(f: &EmailFixture, ciphertext: &str, context_scope: &str) -> String {
-    use kekring::ContextEnvelopeSync;
     let session = f.cookie.split_once('=').unwrap().1;
-    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+    let context = kekring::Aad::try_from(&ghinvite_core::purpose::AttemptContinuation {
         scope: context_scope,
         binding: session,
     })
     .unwrap();
-    let envelope = f
-        .ring
-        .context_envelope(anykms_recipes::envelope::Padding::NONE)
-        .unwrap();
+    let envelope = f.ring.envelope();
     let encrypted = anykms_core::Ciphertext::from_base64(ciphertext).unwrap();
     let plain = envelope.decrypt_sync(&encrypted, &context).unwrap();
     let mut value: Value = serde_json::from_slice(&plain).unwrap();
@@ -740,16 +732,12 @@ fn expire_nested(f: &EmailFixture, ciphertext: &str, context_scope: &str) -> Str
         .to_base64()
 }
 async fn store_continuation(f: &EmailFixture, id: &str, scope: &str, binding: &str, value: &Value) {
-    use kekring::ContextEnvelopeSync;
-    let context = kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
-        scope,
-        binding,
-    })
-    .unwrap();
+    let context =
+        kekring::Aad::try_from(&ghinvite_core::purpose::AttemptContinuation { scope, binding })
+            .unwrap();
     let encrypted = f
         .ring
-        .context_envelope(anykms_recipes::envelope::Padding::NONE)
-        .unwrap()
+        .envelope()
         .encrypt_sync(&serde_json::to_vec(value).unwrap(), &context)
         .unwrap();
     let result = sqlx::query("UPDATE attempt_continuations SET payload=? WHERE scope=? AND id=?")

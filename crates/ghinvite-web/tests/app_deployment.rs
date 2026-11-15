@@ -308,7 +308,7 @@ fn installed_web_apps_require_only_installed_app_credentials() {
 fn production_values() -> BTreeMap<&'static str, String> {
     let mut input = values();
     input.extend([
-        ("P1_KEYRING", "akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29".into()),
+        ("P1_KEYRING", "kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7".into()),
         ("RESTATE_INGRESS_URL", "https://ingress.example.com/prefix".into()),
         ("RESTATE_INGRESS_TOKEN", "INGRESS_SECRET_MARKER".into()),
         ("GHINVITE_GITHUB_INSTALL_URL", "https://github.com/apps/example/installations/new".into()),

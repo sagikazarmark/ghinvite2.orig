@@ -303,8 +303,8 @@ impl EmailRowsScope {
             session_expires: tower.expiry_date().unix_timestamp(),
         })
     }
-    fn context(&self) -> Result<kekring::EncryptionContext, PreparationError> {
-        kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+    fn context(&self) -> Result<kekring::Aad, PreparationError> {
+        kekring::Aad::try_from(&ghinvite_core::purpose::AttemptContinuation {
             scope: &format!(
                 "bulk-email-plan/v1/{}/{}/{}",
                 self.batch_id, self.account_id, self.installation_id
@@ -339,7 +339,7 @@ fn envelope_error(keyring: &kekring::Keyring, error: anykms_core::Error) -> Prep
     if error.kind() == anykms_core::ErrorKind::Configuration {
         tracing::error!(alert="p1_keyring_configuration",kind=?error.kind(),fingerprint=?keyring.fingerprint(),"email preparation encryption unavailable");
     } else {
-        tracing::warn!(kind=?error.kind(),fingerprint=?keyring.fingerprint(),"email preparation encryption unavailable");
+        tracing::warn!(kind=?error.kind(),code=?kekring::Code::of(&error),fingerprint=?keyring.fingerprint(),"email preparation encryption unavailable");
     }
     PreparationError::Unavailable
 }
@@ -353,7 +353,6 @@ impl PreparedEmailRows {
         now: i64,
     ) -> Result<String, PreparationError> {
         use base64::Engine as _;
-        use kekring::ContextEnvelopeSync;
         if now <= 0
             || scope.session_expires <= now
             || self.unique.iter().any(|e| {
@@ -385,8 +384,8 @@ impl PreparedEmailRows {
         );
         let context = scope.context()?;
         let encrypted = keyring
-            .context_envelope(anykms_recipes::envelope::Padding::NONE)
-            .and_then(|e| e.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map_err(|e| envelope_error(keyring, e))?;
         Ok(base64::engine::general_purpose::STANDARD.encode(encrypted.as_bytes()))
     }
@@ -397,7 +396,6 @@ impl PreparedEmailRows {
         now: i64,
     ) -> Result<Self, PreparationError> {
         use base64::Engine as _;
-        use kekring::ContextEnvelopeSync;
         if ciphertext.len() > 262144 || now <= 0 || scope.session_expires <= now {
             return Err(PreparationError::Unavailable);
         }
@@ -406,8 +404,8 @@ impl PreparedEmailRows {
             .map_err(|_| PreparationError::Unavailable)?;
         let context = scope.context()?;
         let plaintext = keyring
-            .context_envelope(anykms_recipes::envelope::Padding::NONE)
-            .and_then(|e| e.decrypt_sync(&anykms_core::Ciphertext::from(bytes), &context))
+            .envelope()
+            .decrypt_sync(&anykms_core::Ciphertext::from(bytes), &context)
             .map_err(|e| envelope_error(keyring, e))?;
         let plaintext = Zeroizing::new(plaintext);
         let payload: RecoveryPlan =
@@ -482,9 +480,7 @@ mod recovery_tests {
     fn ring() -> kekring::Keyring {
         kekring::Keyring::builder("p1")
             .generation(1, [7; 32])
-            .unwrap()
             .current(1)
-            .unwrap()
             .build()
             .unwrap()
     }

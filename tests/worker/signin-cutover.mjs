@@ -8,7 +8,8 @@ import {Miniflare,Response,Log,LogLevel} from 'miniflare';
 import {installedWebApp} from './app-config.mjs';
 const token='ghu_CUTOVER_PRIVATE_TOKEN_012345678901234567890123456789';
 const code='CUTOVER_PRIVATE_CODE',verifier='CUTOVER_PRIVATE_PKCE_'.padEnd(64,'x');
-const ring=(current,roots)=>`akr1;name=p1;current=${current};${roots.map(([v,b])=>{const version=Buffer.alloc(4);version.writeUInt32BE(v);const root=Buffer.alloc(32,b);const kcv=Buffer.from(hkdfSync('sha256',root,Buffer.from('anykms-keyring/v1/salt'),Buffer.concat([Buffer.from('anykms-keyring/v1/kcv'),Buffer.from([2]),Buffer.from('p1'),version]),8));return `k${v}=${root.toString('base64url')}.${kcv.toString('hex')}`;}).join(';')}`;
+// kekring v1 descriptor (libs/kekring/docs/kekring-format.md): the kid is HKDF(root, kekring/v1/kid ‖ len ‖ name ‖ u32 version).
+const ring=(current,roots)=>`kekring1;name=p1;current=${current};hwm=${Math.max(...roots.map(([v])=>v))};${roots.map(([v,b])=>{const version=Buffer.alloc(4);version.writeUInt32BE(v);const root=Buffer.alloc(32,b);const kid=Buffer.from(hkdfSync('sha256',root,Buffer.from('kekring/v1/salt'),Buffer.concat([Buffer.from('kekring/v1/kid'),Buffer.from([2]),Buffer.from('p1'),version]),8));return `k${v}=${root.toString('base64url')}.${kid.toString('hex')}`;}).join(';')}`;
 let logs='',overflow=false,stateMarker='';const counts={exchange:0,user:0,revoke:0};
 const outboundService=async request=>{const url=new URL(request.url);
  if(url.pathname==='/login/oauth/access_token'){counts.exchange++;const form=new URLSearchParams(await request.text());assert.equal(form.get('code'),code);assert.equal(form.get('code_verifier'),verifier);return Response.json({access_token:token,token_type:'bearer'});}

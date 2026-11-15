@@ -18,9 +18,9 @@ impl EmailVault {
     fn review_storage(&self) -> Result<&dyn EmailReviewStorage, Error> {
         self.review.as_deref().ok_or(Error::Unavailable)
     }
-    fn review_context(binding: &EmailVaultBinding) -> Result<EncryptionContext, Error> {
+    fn review_context(binding: &EmailVaultBinding) -> Result<Aad, Error> {
         binding.validate().map_err(|_| Error::Conflict)?;
-        EncryptionContext::try_from(&purposes::BulkEmailReview {
+        Aad::try_from(&purpose::BulkEmailReview {
             email_ref: &binding.email_ref.as_hex(),
             batch_id: &binding.batch.batch_id.to_string(),
             row: u64::from(binding.batch.row),
@@ -48,8 +48,8 @@ impl EmailVault {
         let context = Self::review_context(binding)?;
         let plaintext = Zeroizing::new(
             self.keyring
-                .context_envelope(Padding::block(256))
-                .and_then(|e| e.decrypt_sync(&Ciphertext::from(bytes), &context))
+                .envelope()
+                .decrypt_sync(&Ciphertext::from(bytes), &context)
                 .map_err(|e| self.keyring_error(e))?,
         );
         #[derive(Deserialize)]
@@ -108,8 +108,8 @@ impl EmailVault {
             let context = Self::review_context(entry.binding)?;
             let encrypted = self
                 .keyring
-                .context_envelope(Padding::block(256))
-                .and_then(|e| e.encrypt_sync(&plaintext, &context))
+                .envelope()
+                .encrypt_sync(&plaintext, &context)
                 .map_err(|e| self.keyring_error(e))?;
             let record = NewReviewEmail {
                 binding: entry.binding.clone(),

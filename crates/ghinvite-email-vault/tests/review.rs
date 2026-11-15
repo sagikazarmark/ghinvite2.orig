@@ -22,9 +22,7 @@ fn ring(generation: u32) -> Arc<Keyring> {
     Arc::new(
         Keyring::builder("p1-email")
             .generation(generation, [generation as u8; 32])
-            .unwrap()
             .current(generation)
-            .unwrap()
             .build()
             .unwrap(),
     )
@@ -157,9 +155,7 @@ async fn rollout_configuration_and_ciphertext_purpose_context_failures_preserve_
     let wrong = Arc::new(
         Keyring::builder("p1-email")
             .generation(2, [99; 32])
-            .unwrap()
             .current(2)
-            .unwrap()
             .build()
             .unwrap(),
     );

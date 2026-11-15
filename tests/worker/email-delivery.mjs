@@ -4,7 +4,7 @@ import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Response} from 'miniflare';
 import {bulkEmailHandoff} from './bulk-email-handoff.mjs';
-export const emailRing='akr1;name=p1-email;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.81678c3e040a46b7';
+export const emailRing='kekring1;name=p1-email;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.6b3451284885d811';
 const MAIL='EMAIL_WORKER_PRIVACY_MARKER+tag@example.com',MAIL2='EMAIL_WORKER_PRIVACY_MARKER+second@example.com',TOKEN='ghs_EMAIL_WORKER_TOKEN_MARKER';
 export function emailVaultWorker(){return {
   name:'email-vault-web',modules:true,scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),

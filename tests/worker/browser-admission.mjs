@@ -23,7 +23,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
     ratelimits: { RL_IP: { simple: { limit: 30, period: 60 } }, RL_USER: { simple: { limit: 10, period: 60 } }, AUTHZ_RL: { simple: { limit: 10, period: 60 } } },
     bindings: {
       P1_HOST: 'browser.test',
-      P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29', RESTATE_INGRESS_URL: 'https://ingress.fixture.test',
+      P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7', RESTATE_INGRESS_URL: 'https://ingress.fixture.test',
       RESTATE_INGRESS_TOKEN: ingressApiKey,
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
       ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',

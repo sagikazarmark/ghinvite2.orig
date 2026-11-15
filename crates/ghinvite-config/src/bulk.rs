@@ -33,30 +33,19 @@ pub fn email_keyring(
 mod tests {
     use super::*;
     #[test]
-    fn dedicated_ring_validates_name_and_key_check_value() {
-        use base64::Engine as _;
+    fn dedicated_ring_validates_name_and_key_id() {
         for name in ["p1-email", "p1"] {
-            let ring = kekring::Keyring::builder(name)
+            let descriptor = kekring::Keyring::builder(name)
                 .generation(1, [7; 32])
-                .unwrap()
                 .current(1)
-                .unwrap()
                 .build()
-                .unwrap();
-            let kcv = ring
-                .key_check_value(1)
                 .unwrap()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>();
-            let descriptor = format!(
-                "akr1;name={name};current=1;k1={}.{kcv}",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7; 32])
-            );
+                .to_descriptor()
+                .to_string();
             let parsed = email_keyring(true, Some(descriptor));
             assert_eq!(parsed.is_ok(), name == "p1-email");
         }
-        let wrong = "akr1;name=p1-email;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.0000000000000000";
+        let wrong = "kekring1;name=p1-email;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.0000000000000000";
         assert_eq!(
             email_keyring(true, Some(wrong.into())).unwrap_err().field,
             "P1_EMAIL_KEYRING"

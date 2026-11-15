@@ -5,13 +5,12 @@ mod address;
 mod review;
 pub use address::{Address, InvalidAddress};
 use anykms_core::Ciphertext;
-use anykms_recipes::envelope::Padding;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use ghinvite_core::purpose;
 use ghinvite_core::storage::email_vault::{
     EmailVaultBinding, EmailVaultRecord, EmailVaultStorage, NewEmailRecord,
 };
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Keyring};
 pub use review::ReviewEmail;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -42,9 +41,9 @@ impl EmailVault {
             review: None,
         }
     }
-    fn context(binding: &EmailVaultBinding) -> Result<EncryptionContext, Error> {
+    fn context(binding: &EmailVaultBinding) -> Result<Aad, Error> {
         binding.validate().map_err(|_| Error::Unavailable)?;
-        EncryptionContext::try_from(&purposes::BulkEmail {
+        Aad::try_from(&purpose::BulkEmail {
             email_ref: &binding.email_ref.as_hex(),
             batch_id: &binding.batch.batch_id.to_string(),
             row: u64::from(binding.batch.row),
@@ -57,7 +56,7 @@ impl EmailVault {
         if error.kind() == anykms_core::ErrorKind::Configuration {
             tracing::error!(alert="p1_keyring_configuration",kind=?error.kind(),fingerprint=?self.keyring.fingerprint(),"email recovery encryption unavailable");
         } else {
-            tracing::warn!(kind=?error.kind(),fingerprint=?self.keyring.fingerprint(),"email recovery encryption unavailable");
+            tracing::warn!(kind=?error.kind(),code=?kekring::Code::of(&error),fingerprint=?self.keyring.fingerprint(),"email recovery encryption unavailable");
         }
         Error::Unavailable
     }
@@ -92,8 +91,8 @@ impl EmailVault {
             Zeroizing::new(serde_json::to_vec(&payload).map_err(|_| Error::Unavailable)?);
         let ciphertext = self
             .keyring
-            .context_envelope(Padding::block(256))
-            .and_then(|e| e.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map_err(|e| self.keyring_error(e))?;
         let record = NewEmailRecord {
             binding: binding.clone(),
@@ -173,8 +172,8 @@ impl EmailVault {
         );
         let plaintext = self
             .keyring
-            .context_envelope(Padding::block(256))
-            .and_then(|e| e.decrypt_sync(&ciphertext, &context))
+            .envelope()
+            .decrypt_sync(&ciphertext, &context)
             .map_err(|e| self.keyring_error(e))?;
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]

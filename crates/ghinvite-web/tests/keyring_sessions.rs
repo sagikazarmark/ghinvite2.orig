@@ -21,9 +21,9 @@ use tower_sessions::{
 fn ring(current: u32, generations: &[(u32, u8)]) -> Arc<Keyring> {
     let mut builder = Keyring::builder("p1");
     for (version, byte) in generations {
-        builder = builder.generation(*version, [*byte; 32]).unwrap();
+        builder = builder.generation(*version, [*byte; 32]);
     }
-    Arc::new(builder.current(current).unwrap().build().unwrap())
+    Arc::new(builder.current(current).build().unwrap())
 }
 async fn backend() -> SqliteBackend {
     let backend = SqliteBackend::new(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
@@ -129,7 +129,7 @@ async fn generations_overlap_then_retire_without_extending_lifetime() {
     assert!(!backend.is_revoked(&id).await.unwrap());
 }
 #[tokio::test]
-async fn lagging_isolate_returns_503_preserves_cookie_and_record_configuration_returns_500() {
+async fn lagging_isolate_returns_503_preserves_cookie_and_record_other_root_confers_nothing() {
     let backend = backend().await;
     let current = ring(2, &[(1, 7), (2, 8)]);
     let id = create(ProtectedStore::new(backend.clone(), current), 42).await;
@@ -140,12 +140,16 @@ async fn lagging_isolate_returns_503_preserves_cookie_and_record_configuration_r
     assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(backend.get(&id).await.unwrap().unwrap(), raw);
     assert!(!backend.is_revoked(&id).await.unwrap());
+    // Other root material under a listed version: KeyIdMismatch, a caller-class failure. The
+    // record confers no session and is neither changed nor revoked (it may belong to a correct
+    // deployment), and nothing is reported as a configuration error.
     let changed_bytes = app(backend.clone(), ring(2, &[(2, 9)])).await;
     assert_eq!(
         get(&changed_bytes, Some(id)).await.status(),
-        StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::NOT_FOUND
     );
     assert_eq!(backend.get(&id).await.unwrap().unwrap(), raw);
+    assert!(!backend.is_revoked(&id).await.unwrap());
 }
 #[tokio::test]
 async fn diagnostic_is_numeric_operator_only_and_session_copy_confers_no_authority() {
@@ -183,14 +187,13 @@ mod common;
 /// Seal `record` as deployments before GM-09 did: verbatim, so a session
 /// payload keeps whatever fields it was written with.
 async fn put_verbatim(backend: &SqliteBackend, keyring: &Keyring, record: &Record) {
-    use anykms_recipes::envelope::Padding;
-    use kekring::ContextEnvelopeSync;
-    use kekring::{EncryptionContext, purposes};
+    use ghinvite_core::purpose;
+    use kekring::Aad;
     let id = record.id.to_string();
-    let context = EncryptionContext::try_from(&purposes::Session { session_id: &id }).unwrap();
+    let context = Aad::try_from(&purpose::Session { session_id: &id }).unwrap();
     let ciphertext = keyring
-        .context_envelope(Padding::NONE)
-        .and_then(|envelope| envelope.encrypt_sync(&serde_json::to_vec(record).unwrap(), &context))
+        .envelope()
+        .encrypt_sync(&serde_json::to_vec(record).unwrap(), &context)
         .unwrap();
     backend
         .put(

@@ -1,15 +1,14 @@
 //! Production pending-state adapter: encrypted envelopes and atomic SQL take.
 use super::{PendingSignIn, PendingSignInStore, StateUnavailable};
 use anykms_core::Ciphertext;
-use anykms_recipes::envelope::Padding;
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ghinvite_core::clock::{Clock, SystemClock};
+use ghinvite_core::purpose;
 use ghinvite_core::storage::pending_signin::{
     PendingSignInKey, PendingSignInStorage, StoredPendingSignIn,
 };
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Code, Keyring};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -43,20 +42,19 @@ impl SqlPendingSignInStore {
         self
     }
     fn keyring_error(&self, error: anykms_core::Error) -> StateUnavailable {
+        let code = Code::of(&error);
         if error.kind() == anykms_core::ErrorKind::Configuration {
-            tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), fingerprint = ?self.keyring.fingerprint(), "pending sign-in encryption unavailable");
+            tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), code = ?code, fingerprint = ?self.keyring.fingerprint(), "pending sign-in encryption unavailable");
         } else {
-            tracing::warn!(kind = ?error.kind(), fingerprint = ?self.keyring.fingerprint(), "pending sign-in encryption unavailable");
+            tracing::warn!(kind = ?error.kind(), code = ?code, fingerprint = ?self.keyring.fingerprint(), "pending sign-in encryption unavailable");
         }
-        if error.kind() == anykms_core::ErrorKind::UnknownKeyVersion {
+        if code == Some(Code::VersionAboveHighWaterMark) {
             StateUnavailable::KeyringRetry
         } else {
             StateUnavailable::Unavailable
         }
     }
-    fn binding(
-        session_id: &str,
-    ) -> Result<(PendingSignInKey, EncryptionContext), StateUnavailable> {
+    fn binding(session_id: &str) -> Result<(PendingSignInKey, Aad), StateUnavailable> {
         let id = session_id
             .parse::<tower_sessions::session::Id>()
             .map_err(|_| StateUnavailable::Unavailable)?;
@@ -67,7 +65,7 @@ impl SqlPendingSignInStore {
         hash.update(b"p1:pending-signin:v1\0");
         hash.update(session_id.as_bytes());
         let key = PendingSignInKey::from_bytes(hash.finalize().into());
-        let context = EncryptionContext::try_from(&purposes::PendingSignIn { session_id })
+        let context = Aad::try_from(&purpose::PendingSignIn { session_id })
             .map_err(|_| StateUnavailable::Unavailable)?;
         Ok((key, context))
     }
@@ -93,8 +91,8 @@ impl PendingSignInStore for SqlPendingSignInStore {
         );
         let ciphertext = self
             .keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| envelope.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map_err(|error| self.keyring_error(error))?;
         let record = StoredPendingSignIn {
             ciphertext: STANDARD.encode(ciphertext.as_bytes()),
@@ -132,8 +130,8 @@ impl PendingSignInStore for SqlPendingSignInStore {
         );
         let plaintext = self
             .keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| envelope.decrypt_sync(&ciphertext, &context))
+            .envelope()
+            .decrypt_sync(&ciphertext, &context)
             .map_err(|error| self.keyring_error(error))?;
         let pending: PendingSignIn =
             serde_json::from_slice(&plaintext).map_err(|_| StateUnavailable::Unavailable)?;
@@ -167,11 +165,9 @@ pub fn verify_context_separation(
     let (_, context) = SqlPendingSignInStore::binding(session_id)?;
     let other = tower_sessions::session::Id::default().to_string();
     let (_, other_context) = SqlPendingSignInStore::binding(&other)?;
-    let session_context = EncryptionContext::try_from(&purposes::Session { session_id })
+    let session_context = Aad::try_from(&purpose::Session { session_id })
         .map_err(|_| StateUnavailable::Unavailable)?;
-    let envelope = keyring
-        .context_envelope(Padding::NONE)
-        .map_err(|_| StateUnavailable::Unavailable)?;
+    let envelope = keyring.envelope();
     let ciphertext = envelope
         .encrypt_sync(b"pending-signin-context-fixture", &context)
         .map_err(|_| StateUnavailable::Unavailable)?;

@@ -16,7 +16,7 @@ const valid = {
   P1_HOST: 'startup.test', GH_REPO_APP_ID: '123',
   GH_REPO_CLIENT_ID: 'Iv.explicit-startup-fixture', GH_REPO_PRIVATE_KEYS: `fixture:${key}`,
 };
-const emailRing = 'akr1;name=p1-email;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.81678c3e040a46b7';
+const emailRing = 'kekring1;name=p1-email;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.6b3451284885d811';
 const org = {...valid,P1_APP_STAGE:'repo-and-org',GH_ORG_APP_ID:'456',GH_ORG_CLIENT_ID:'Iv.fixture-org',GH_ORG_PRIVATE_KEYS:`fixture:${key}`,GH_ORG_DELIVERY_ENABLED:'true'};
 const cases = [
   ['bulk-repo',{...valid,GH_BULK_ENABLED:'true'},200],

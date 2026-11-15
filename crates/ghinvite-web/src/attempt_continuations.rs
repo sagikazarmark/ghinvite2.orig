@@ -5,12 +5,11 @@
 //! outcome means stays with each flow.
 use crate::{AppState, WebError};
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_recipes::envelope::Padding;
 use chrono::Utc;
+use ghinvite_core::purpose;
 use ghinvite_core::storage::ContinuationStorage;
 use ghinvite_core::storage::attempt_continuations::StoredContinuation;
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Code, Keyring};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -192,15 +191,15 @@ impl<'a> AttemptContinuations<'a> {
         binding: &str,
         payload: &T,
     ) -> crate::Result<String> {
-        let context = EncryptionContext::try_from(&purposes::AttemptContinuation {
+        let context = Aad::try_from(&purpose::AttemptContinuation {
             scope: &scope.key,
             binding,
         })
         .map_err(crypto_error)?;
         let plaintext = serde_json::to_vec(payload).map_err(unavailable)?;
         self.keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| envelope.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map(|ciphertext| ciphertext.to_base64())
             .map_err(crypto_error)
     }
@@ -213,7 +212,7 @@ impl<'a> AttemptContinuations<'a> {
         if stored.scope != scope.key {
             return Err(WebError::Unauthenticated);
         }
-        let context = EncryptionContext::try_from(&purposes::AttemptContinuation {
+        let context = Aad::try_from(&purpose::AttemptContinuation {
             scope: &stored.scope,
             binding: &stored.binding,
         })
@@ -221,16 +220,19 @@ impl<'a> AttemptContinuations<'a> {
         let ciphertext = Ciphertext::from_base64(&stored.payload).map_err(crypto_error)?;
         let plaintext = self
             .keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| envelope.decrypt_sync(&ciphertext, &context))
+            .envelope()
+            .decrypt_sync(&ciphertext, &context)
             .map_err(crypto_error)?;
         serde_json::from_slice(&plaintext).map_err(unavailable)
     }
 }
 
 fn crypto_error(error: anykms_core::Error) -> WebError {
+    // Rollout skew is a code on a DecryptFailed, so it is matched before the kind.
+    if Code::of(&error) == Some(Code::VersionAboveHighWaterMark) {
+        return WebError::KeyringRetry;
+    }
     match error.kind() {
-        ErrorKind::UnknownKeyVersion => WebError::KeyringRetry,
         ErrorKind::KeyVersionUnusable | ErrorKind::DecryptFailed => WebError::Unauthenticated,
         _ => {
             tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), "P1 continuation encryption unavailable");
@@ -519,9 +521,9 @@ mod rotation_tests {
     fn ring(current: u32, generations: &[(u32, u8)]) -> Arc<Keyring> {
         let mut builder = Keyring::builder("p1");
         for (v, k) in generations {
-            builder = builder.generation(*v, [*k; 32]).unwrap();
+            builder = builder.generation(*v, [*k; 32]);
         }
-        Arc::new(builder.current(current).unwrap().build().unwrap())
+        Arc::new(builder.current(current).build().unwrap())
     }
     #[tokio::test]
     async fn continuation_rotation_classifies_failures_without_losing_retained_input() {
@@ -572,9 +574,11 @@ mod rotation_tests {
             storage: &storage,
             keyring: ring(2, &[(2, 9)]),
         };
+        // Another root under a listed version is KeyIdMismatch: a DecryptFailed, not a
+        // configuration error.
         assert!(matches!(
             changed.load::<String>(&scope, "new").await,
-            Err(WebError::KeyringConfig)
+            Err(WebError::Unauthenticated)
         ));
         let stored = storage
             .get_attempt_continuation(&scope.key, "new", Utc::now().timestamp())

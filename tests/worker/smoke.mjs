@@ -17,7 +17,7 @@ const options = {
   d1Databases: ['DB'],
   bindings: {
     P1_HOST: 'session.test',
-    P1_KEYRING: 'akr1;name=p1;current=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.74c0aab4b913ee29',
+    P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',
     RESTATE_INGRESS_URL: 'https://restate.invalid',
     RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
@@ -71,6 +71,13 @@ try {
   assert.equal(raw.subarray(0, 3).toString(), 'AKE', 'anykms envelope magic');
   assert.equal(raw[3], 1, 'anykms envelope v1');
   assert.ok(raw.length > 100, 'wrapped DEK, authenticated header and encrypted record');
+  // Key-wrapping slot: kek_id is the keyring name, then a 56-byte kekring v1 blob (krw1 magic).
+  const kekId = raw.subarray(50, 50 + raw[49]).toString();
+  const slot = 50 + raw[49];
+  assert.equal(kekId, 'p1', 'envelope kek_id is the keyring name');
+  assert.equal(raw.readUInt16BE(slot), 56, 'kekring wrapped key is 56 bytes');
+  assert.equal(raw.subarray(slot + 2, slot + 6).toString(), 'krw1', 'kekring blob magic');
+  assert.equal(raw.readUInt32BE(slot + 6), 1, 'wrapped under generation 1');
   assert.ok(keys[0].expiration <= Math.floor(Date.now() / 1000) + 30 * 24 * 60 * 60, 'session TTL bounded by thirty days');
   for (const plaintext of [state, 'ghinvite_lifetime', '/console']) {
     assert.equal(raw.includes(Buffer.from(plaintext)), false, `plaintext leak: ${plaintext}`);

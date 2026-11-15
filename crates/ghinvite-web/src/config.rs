@@ -157,9 +157,7 @@ impl WebConfig {
         Self::with_keyring(Arc::new(
             Keyring::builder("p1")
                 .generation(1, secret)
-                .unwrap()
                 .current(1)
-                .unwrap()
                 .build()
                 .unwrap(),
         ))
@@ -298,7 +296,7 @@ impl std::fmt::Debug for WebConfig {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("P1_KEYRING must be a valid akr1 descriptor")]
+#[error("P1_KEYRING must be a valid kekring1 descriptor")]
 pub struct SessionKeyError;
 
 /// Errors name the configuration field, never its secret contents.
@@ -328,9 +326,9 @@ mod tests {
     use super::*;
     #[test]
     fn strict_configuration_and_redaction() {
-        for bad in ["", "ab", "akr1:bad", "secret-value"] {
+        for bad in ["", "ab", "akr1:bad", "kekring1;bad", "secret-value"] {
             let error = parse_keyring(bad).unwrap_err().to_string();
-            assert_eq!(error, "P1_KEYRING must be a valid akr1 descriptor");
+            assert_eq!(error, "P1_KEYRING must be a valid kekring1 descriptor");
         }
         assert_eq!(parse_operator_ids("42,7").unwrap(), BTreeSet::from([7, 42]));
         assert!(parse_operator_ids("").unwrap().is_empty());

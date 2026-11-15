@@ -5,11 +5,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Log, LogLevel } from 'miniflare';
 const NOW=Math.floor(Date.now()/1000), MAIL='REVIEW_ESCROW_PRIVATE_MARKER+tag@example.com';
-const ring=(current,keys)=>`akr1;name=p1-email;current=${current};${keys.map(([n,byte])=>{
+// kekring v1 descriptor (libs/kekring/docs/kekring-format.md).
+const ring=(current,keys)=>`kekring1;name=p1-email;current=${current};hwm=${Math.max(...keys.map(([n])=>n))};${keys.map(([n,byte])=>{
  const key=Buffer.alloc(32,byte),version=Buffer.alloc(4);version.writeUInt32BE(n);
- const name=Buffer.from('p1-email');const info=Buffer.concat([Buffer.from('anykms-keyring/v1/kcv'),Buffer.from([name.length]),name,version]);
- const kcv=Buffer.from(hkdfSync('sha256',key,Buffer.from('anykms-keyring/v1/salt'),info,8));
- return `k${n}=${key.toString('base64url')}.${kcv.toString('hex')}`;
+ const name=Buffer.from('p1-email');const info=Buffer.concat([Buffer.from('kekring/v1/kid'),Buffer.from([name.length]),name,version]);
+ const kid=Buffer.from(hkdfSync('sha256',key,Buffer.from('kekring/v1/salt'),info,8));
+ return `k${n}=${key.toString('base64url')}.${kid.toString('hex')}`;
 }).join(';')}`;
 let logs='',overflow=false,outbound=0;
 const worker=(name,keyring)=>({name,modules:true,scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'email-review-shared'},bindings:{P1_EMAIL_KEYRING:keyring},outboundService(){outbound++;throw new Error('review proof has no network effects');}});

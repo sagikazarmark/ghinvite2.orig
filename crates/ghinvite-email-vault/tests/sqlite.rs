@@ -18,9 +18,7 @@ fn ring(generation: u32) -> Arc<Keyring> {
     Arc::new(
         Keyring::builder("p1")
             .generation(generation, [generation as u8; 32])
-            .unwrap()
             .current(generation)
-            .unwrap()
             .build()
             .unwrap(),
     )

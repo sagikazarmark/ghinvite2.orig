@@ -4,9 +4,8 @@
 //! authenticated independently of the envelope, preventing record substitution.
 
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_recipes::envelope::Padding;
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use ghinvite_core::purpose;
+use kekring::{Aad, Code, Keyring};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tower_sessions::cookie::time::{Duration, OffsetDateTime};
@@ -160,37 +159,45 @@ impl<B: Backend> ProtectedStore<B> {
         record.expiry_date = OffsetDateTime::from_unix_timestamp(expiry)
             .map_err(|_| backend_error("invalid expiry"))?;
         let id = record.id.to_string();
-        let context = EncryptionContext::try_from(&purposes::Session { session_id: &id })
-            .map_err(keyring_error)?;
+        let context =
+            Aad::try_from(&purpose::Session { session_id: &id }).map_err(keyring_error)?;
         let plaintext = serde_json::to_vec(&record)
             .map_err(|_| Error::Encode("session encoding failed".into()))?;
         let ciphertext = self
             .keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| envelope.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map_err(keyring_error)?;
         Ok((ciphertext.into_bytes(), expiry))
     }
 
     fn open(&self, id: &Id, ciphertext: &[u8]) -> Result<Option<Record>> {
         let requested_id = id.to_string();
-        let context = EncryptionContext::try_from(&purposes::Session {
+        let context = Aad::try_from(&purpose::Session {
             session_id: &requested_id,
         })
         .map_err(keyring_error)?;
         let plaintext = match self
             .keyring
-            .context_envelope(Padding::NONE)
-            .and_then(|envelope| {
-                envelope.decrypt_sync(&Ciphertext::from(ciphertext.to_vec()), &context)
-            }) {
+            .envelope()
+            .decrypt_sync(&Ciphertext::from(ciphertext.to_vec()), &context)
+        {
             Ok(plaintext) => plaintext,
+            // A newer generation than this reader's descriptor: rollout skew, not a bad session.
+            Err(error) if Code::of(&error) == Some(Code::VersionAboveHighWaterMark) => {
+                return Err(keyring_error(error));
+            }
             Err(error)
                 if matches!(
                     error.kind(),
                     ErrorKind::KeyVersionUnusable | ErrorKind::DecryptFailed
                 ) =>
             {
+                // A removed generation or another root's key id: diagnosable, never an alert
+                // (anyone who can edit a stored record could trigger it).
+                if let Some(code) = Code::of(&error) {
+                    tracing::warn!(%code, "session record unreadable under this keyring");
+                }
                 return Ok(None);
             }
             Err(error) => return Err(keyring_error(error)),
@@ -266,7 +273,7 @@ impl<B: Backend> SessionStore for ProtectedStore<B> {
 // owns the envelope format they both store opaquely.
 
 fn keyring_error(error: anykms_core::Error) -> Error {
-    if error.kind() == ErrorKind::UnknownKeyVersion {
+    if Code::of(&error) == Some(Code::VersionAboveHighWaterMark) {
         backend_error(KEYRING_RETRY)
     } else {
         tracing::error!(alert = "p1_keyring_configuration", kind = ?error.kind(), "P1 session encryption unavailable");

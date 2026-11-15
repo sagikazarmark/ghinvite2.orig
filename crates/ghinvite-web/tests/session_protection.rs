@@ -66,6 +66,8 @@ async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destro
     session.save().await.unwrap();
     let id = session.id().unwrap();
     let raw = backend.get(&id).await.unwrap().unwrap();
+    // Another root under the same version is KeyIdMismatch, a caller-class failure: the record
+    // confers no session, and is left in place for the deployment that can read it.
     assert!(
         ProtectedStore::new(
             backend.clone(),
@@ -73,7 +75,8 @@ async fn wrong_keys_tampering_and_unencrypted_records_fail_closed_without_destro
         )
         .load(&id)
         .await
-        .is_err()
+        .unwrap()
+        .is_none()
     );
     assert_eq!(backend.get(&id).await.unwrap().unwrap(), raw);
 

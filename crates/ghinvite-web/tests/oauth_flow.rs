@@ -179,9 +179,7 @@ async fn key_rotation_rejects_old_cookies_and_allows_fresh_login_without_destruc
             Arc::new(
                 kekring::Keyring::builder("p1")
                     .generation(2, [8; 32])
-                    .unwrap()
                     .current(2)
-                    .unwrap()
                     .build()
                     .unwrap(),
             ),

@@ -2,13 +2,12 @@
 //! A completion is a point-in-time result at one database mutation epoch, not
 //! permission to retire a KEK while older writers or deployments remain active.
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_recipes::envelope::Padding;
+use ghinvite_core::purpose;
 use ghinvite_core::storage::{
     ContinuationStorage,
     continuation_rotation::{PAGE_SIZE, Phase, ScanRow},
 };
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Code, Keyring};
 use serde::{Deserialize, Serialize};
 
 const TOKEN_SCOPE: &str = "operator-continuation-rotation-v1";
@@ -75,8 +74,8 @@ pub enum Failure {
     RestartRequired,
     Unavailable,
 }
-fn context(operator: u64) -> Result<EncryptionContext, Failure> {
-    EncryptionContext::try_from(&purposes::AttemptContinuation {
+fn context(operator: u64) -> Result<Aad, Failure> {
+    Aad::try_from(&purpose::AttemptContinuation {
         scope: TOKEN_SCOPE,
         binding: &operator.to_string(),
     })
@@ -85,8 +84,8 @@ fn context(operator: u64) -> Result<EncryptionContext, Failure> {
 fn encode(ring: &Keyring, value: &Progress) -> Result<String, Failure> {
     let bytes = serde_json::to_vec(value).map_err(|_| Failure::Unavailable)?;
     let ctx = context(value.operator)?;
-    ring.context_envelope(Padding::NONE)
-        .and_then(|e| e.encrypt_sync(&bytes, &ctx))
+    ring.envelope()
+        .encrypt_sync(&bytes, &ctx)
         .map(|c| c.to_base64())
         .map_err(|_| Failure::Unavailable)
 }
@@ -103,8 +102,7 @@ fn decode(
     let ct = Ciphertext::from_base64(token).map_err(|_| Failure::InvalidProgress)?;
     let ctx = context(operator)?;
     let bytes = ring
-        .context_envelope(Padding::NONE)
-        .map_err(|_| Failure::Unavailable)?
+        .envelope()
         .decrypt_sync(&ct, &ctx)
         .map_err(|_| Failure::InvalidProgress)?;
     let p: Progress = serde_json::from_slice(&bytes).map_err(|_| Failure::InvalidProgress)?;
@@ -122,8 +120,8 @@ fn decode(
     }
     Ok(p)
 }
-fn row_context(row: &ScanRow) -> Result<EncryptionContext, RowFailure> {
-    EncryptionContext::try_from(&purposes::AttemptContinuation {
+fn row_context(row: &ScanRow) -> Result<Aad, RowFailure> {
+    Aad::try_from(&purpose::AttemptContinuation {
         scope: row.scope.as_deref().ok_or(RowFailure::InvalidContext)?,
         binding: row.binding.as_deref().ok_or(RowFailure::InvalidContext)?,
     })
@@ -140,18 +138,17 @@ fn inspect(
     let ct = Ciphertext::from_base64(row.payload.as_deref().ok_or(RowFailure::InvalidEnvelope)?)
         .map_err(|_| RowFailure::InvalidEnvelope)?;
     let ctx = row_context(row)?;
-    let envelope = ring
-        .context_envelope(Padding::NONE)
-        .map_err(|_| RowFailure::InvalidEnvelope)?;
-    let classify = |e: anykms_core::Error| match e.kind() {
-        ErrorKind::UnknownKeyVersion => RowFailure::UnknownKeyVersion,
-        ErrorKind::KeyVersionUnusable => RowFailure::RemovedKeyVersion,
+    let envelope = ring.envelope();
+    // Rollout skew is a code on a DecryptFailed; a removed generation is its own kind.
+    let classify = |e: anykms_core::Error| match (Code::of(&e), e.kind()) {
+        (Some(Code::VersionAboveHighWaterMark), _) => RowFailure::UnknownKeyVersion,
+        (_, ErrorKind::KeyVersionUnusable) => RowFailure::RemovedKeyVersion,
         _ => RowFailure::InvalidEnvelope,
     };
     // Verify the complete payload and its stored context even when no rewrap is
     // needed. Plaintext is zeroizing and immediately dropped, never deserialized.
     drop(envelope.decrypt_sync(&ct, &ctx).map_err(classify)?);
-    let old = ring.needs_rewrap(&ct).map_err(classify)?;
+    let old = envelope.needs_rewrap(&ct).map_err(classify)?;
     let replacement = if old && phase == Phase::Rewrap {
         // Verified above against these exact immutable bytes. This operation
         // changes only the committed wrapping slot, not the payload/DEK/context.
@@ -280,22 +277,21 @@ pub async fn verify_runtime(storage: &dyn ContinuationStorage) -> Result<(), Fai
     fn ring(v: u32, keys: &[(u32, u8)]) -> Keyring {
         let mut b = Keyring::builder("p1");
         for (n, k) in keys {
-            b = b.generation(*n, [*k; 32]).unwrap();
+            b = b.generation(*n, [*k; 32]);
         }
-        b.current(v).unwrap().build().unwrap()
+        b.current(v).build().unwrap()
     }
     let old = ring(1, &[(1, 11)]);
     let new = ring(2, &[(1, 11), (2, 22)]);
     for i in 0..6 {
         let binding = format!("runtime-{i}");
-        let ctx = EncryptionContext::try_from(&purposes::AttemptContinuation {
+        let ctx = Aad::try_from(&purpose::AttemptContinuation {
             scope: "rotation-runtime",
             binding: &binding,
         })
         .unwrap();
         let value = old
-            .context_envelope(Padding::NONE)
-            .unwrap()
+            .envelope()
             .encrypt_sync(b"ROTATION_RUNTIME_PRIVATE_MARKER", &ctx)
             .unwrap()
             .to_base64();
@@ -348,8 +344,7 @@ pub async fn verify_runtime(storage: &dyn ContinuationStorage) -> Result<(), Fai
             (&row.scope, &row.id, &row.binding, row.expires_at)
         );
         let bytes = removed
-            .context_envelope(Padding::NONE)
-            .unwrap()
+            .envelope()
             .decrypt_sync(
                 &Ciphertext::from_base64(row.payload.as_ref().unwrap()).unwrap(),
                 &row_context(&row).map_err(|_| Failure::Unavailable)?,

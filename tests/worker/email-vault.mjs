@@ -6,11 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { Miniflare, Log, LogLevel } from 'miniflare';
 const NOW=1_800_000_000;
 const EMAIL='PRIVATE_EMAIL_VAULT_MARKER+tag@example.com';
-const ring=(current,keys)=>`akr1;name=p1;current=${current};${keys.map(([n,byte])=>{
+// kekring v1 descriptor (libs/kekring/docs/kekring-format.md).
+const ring=(current,keys)=>`kekring1;name=p1;current=${current};hwm=${Math.max(...keys.map(([n])=>n))};${keys.map(([n,byte])=>{
   const root=Buffer.alloc(32,byte),version=Buffer.alloc(4);version.writeUInt32BE(n);
-  const info=Buffer.concat([Buffer.from('anykms-keyring/v1/kcv'),Buffer.from([2]),Buffer.from('p1'),version]);
-  const kcv=Buffer.from(hkdfSync('sha256',root,Buffer.from('anykms-keyring/v1/salt'),info,8));
-  return `k${n}=${root.toString('base64url')}.${kcv.toString('hex')}`;
+  const info=Buffer.concat([Buffer.from('kekring/v1/kid'),Buffer.from([2]),Buffer.from('p1'),version]);
+  const kid=Buffer.from(hkdfSync('sha256',root,Buffer.from('kekring/v1/salt'),info,8));
+  return `k${n}=${root.toString('base64url')}.${kid.toString('hex')}`;
 }).join(';')}`;
 let logs='',overflow=false;
 const worker=(name,keyring)=>({name,modules:true,scriptPath:fileURLToPath(new URL('./worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:'email-vault-shared'},bindings:{P1_KEYRING:keyring},outboundService(){throw new Error('vault proof must not send network requests');}});

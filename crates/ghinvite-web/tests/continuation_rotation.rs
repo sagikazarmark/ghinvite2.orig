@@ -1,6 +1,6 @@
 //! Actual SQLite, envelope and protected-session boundaries for operator rotation.
 use anykms_core::Ciphertext;
-use anykms_recipes::envelope::Padding;
+use ghinvite_core::purpose;
 use ghinvite_core::storage::{
     ContinuationStorage, Error, Result,
     attempt_continuations::StoredContinuation,
@@ -8,8 +8,7 @@ use ghinvite_core::storage::{
 };
 use ghinvite_storage_sqlx::SqlxStorage;
 use ghinvite_web::continuation_rotation::{Failure, Report, page};
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Keyring};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,20 +17,19 @@ use std::sync::{
 fn ring(current: u32, keys: &[(u32, u8)]) -> Keyring {
     let mut b = Keyring::builder("p1");
     for (version, key) in keys {
-        b = b.generation(*version, [*key; 32]).unwrap();
+        b = b.generation(*version, [*key; 32]);
     }
-    b.current(current).unwrap().build().unwrap()
+    b.current(current).build().unwrap()
 }
-fn context(binding: &str) -> EncryptionContext {
-    EncryptionContext::try_from(&purposes::AttemptContinuation {
+fn context(binding: &str) -> Aad {
+    Aad::try_from(&purpose::AttemptContinuation {
         scope: "rotate-test",
         binding,
     })
     .unwrap()
 }
 fn seal(ring: &Keyring, binding: &str) -> String {
-    ring.context_envelope(Padding::NONE)
-        .unwrap()
+    ring.envelope()
         .encrypt_sync(b"ROTATION_PRIVATE_PLAINTEXT", &context(binding))
         .unwrap()
         .to_base64()
@@ -84,8 +82,7 @@ async fn add_promote_rewrap_verify_remove_includes_expired_rows_without_changing
         let ct = Ciphertext::from_base64(after.payload.as_ref().unwrap()).unwrap();
         assert_eq!(
             &*removed
-                .context_envelope(Padding::NONE)
-                .unwrap()
+                .envelope()
                 .decrypt_sync(&ct, &context(after.binding.as_ref().unwrap()))
                 .unwrap(),
             b"ROTATION_PRIVATE_PLAINTEXT"

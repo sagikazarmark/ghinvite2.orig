@@ -81,12 +81,12 @@ impl Drop for Recovery {
 fn context(
     scope: &crate::email_rows::EmailRowsScope,
     plan: &PersonalLink,
-) -> Result<kekring::EncryptionContext, crate::email_rows::PreparationError> {
+) -> Result<kekring::Aad, crate::email_rows::PreparationError> {
     use crate::email_rows::PreparationError;
     if plan.source.batch_id != scope.batch_id || plan.source.validate().is_err() {
         return Err(PreparationError::Unavailable);
     }
-    kekring::EncryptionContext::try_from(&kekring::purposes::AttemptContinuation {
+    kekring::Aad::try_from(&ghinvite_core::purpose::AttemptContinuation {
         scope: &format!(
             "bulk-personal-link/v1/{}/{}/{}/{}/{}",
             scope.batch_id, scope.account_id, scope.installation_id, plan.source.row, plan.link_id
@@ -102,7 +102,7 @@ fn unavailable(
     if error.kind() == anykms_core::ErrorKind::Configuration {
         tracing::error!(alert="p1_keyring_configuration",kind=?error.kind(),fingerprint=?keyring.fingerprint(),"personal invitation recovery unavailable");
     } else {
-        tracing::warn!(kind=?error.kind(),fingerprint=?keyring.fingerprint(),"personal invitation recovery unavailable");
+        tracing::warn!(kind=?error.kind(),code=?kekring::Code::of(&error),fingerprint=?keyring.fingerprint(),"personal invitation recovery unavailable");
     }
     crate::email_rows::PreparationError::Unavailable
 }
@@ -117,7 +117,6 @@ impl PreparedPersonalLink {
     ) -> Result<String, crate::email_rows::PreparationError> {
         use crate::email_rows::PreparationError;
         use base64::Engine as _;
-        use kekring::ContextEnvelopeSync;
         if now <= 0 || scope.session_expires <= now {
             return Err(PreparationError::Unavailable);
         }
@@ -135,8 +134,8 @@ impl PreparedPersonalLink {
             serde_json::to_vec(&payload).map_err(|_| PreparationError::Unavailable)?,
         );
         let encrypted = keyring
-            .context_envelope(anykms_recipes::envelope::Padding::NONE)
-            .and_then(|e| e.encrypt_sync(&plaintext, &context))
+            .envelope()
+            .encrypt_sync(&plaintext, &context)
             .map_err(|e| unavailable(keyring, e))?;
         Ok(base64::engine::general_purpose::STANDARD.encode(encrypted.as_bytes()))
     }
@@ -149,7 +148,6 @@ impl PreparedPersonalLink {
     ) -> Result<Self, crate::email_rows::PreparationError> {
         use crate::email_rows::PreparationError;
         use base64::Engine as _;
-        use kekring::ContextEnvelopeSync;
         if ciphertext.len() > 8192 || now <= 0 || scope.session_expires <= now {
             return Err(PreparationError::Unavailable);
         }
@@ -158,8 +156,8 @@ impl PreparedPersonalLink {
             .map_err(|_| PreparationError::Unavailable)?;
         let context = context(scope, expected)?;
         let plaintext = keyring
-            .context_envelope(anykms_recipes::envelope::Padding::NONE)
-            .and_then(|e| e.decrypt_sync(&anykms_core::Ciphertext::from(bytes), &context))
+            .envelope()
+            .decrypt_sync(&anykms_core::Ciphertext::from(bytes), &context)
             .map_err(|e| unavailable(keyring, e))?;
         let plaintext = Zeroizing::new(plaintext);
         let payload: Recovery =
@@ -209,9 +207,7 @@ mod recovery_tests {
         };
         let ring = kekring::Keyring::builder("p1")
             .generation(1, [7; 32])
-            .unwrap()
             .current(1)
-            .unwrap()
             .build()
             .unwrap();
         let encrypted = prepared.seal(&ring, &scope, 1800000000).unwrap();

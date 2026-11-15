@@ -30,6 +30,7 @@ pub mod org_eligibility;
 pub mod org_observation;
 pub mod org_webhook;
 pub mod permission;
+pub mod purpose;
 pub mod repository_identity;
 pub mod request_completion;
 pub mod request_control;

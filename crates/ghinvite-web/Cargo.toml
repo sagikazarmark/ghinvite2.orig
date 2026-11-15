@@ -19,7 +19,6 @@ link-secret-fixture = ["runtime-tests"]
 
 [dependencies]
 anykms-core.workspace = true
-anykms-recipes.workspace = true
 kekring.workspace = true
 async-trait.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tracing", "matched-path", "query"] }
