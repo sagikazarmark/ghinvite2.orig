@@ -120,7 +120,7 @@ impl<T> Paged<T> {
 }
 
 /// `name=value` pairs of `uri`'s query, undecoded.
-fn query_pairs(uri: &Uri) -> impl Iterator<Item = (&str, &str)> {
+pub(crate) fn query_pairs(uri: &Uri) -> impl Iterator<Item = (&str, &str)> {
     uri.query()
         .unwrap_or_default()
         .split('&')

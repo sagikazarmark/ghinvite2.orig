@@ -4,6 +4,8 @@
 //! (minting, suspension, uninstalling).
 
 use crate::auth::{self, AppCaller, InstallationCaller, SUSPENDED, find_installation};
+use crate::collaboration::Actor;
+use crate::events;
 use crate::paginate::Pagination;
 use crate::response::{self, FieldError, json, json_with_link};
 use crate::seed::{Access, Installation, Repo, RepositorySelection, Seed};
@@ -161,9 +163,9 @@ pub(crate) async fn suspend(
     AppCaller(app_id): AppCaller,
     Path(raw): Path<String>,
 ) -> Response {
-    no_content_or_404(
-        installation_id(&raw).is_some_and(|id| set_suspended(&shared, id, Some(app_id), true)),
-    )
+    no_content_or_404(installation_id(&raw).is_some_and(|id| {
+        set_suspended(&shared, id, Some(app_id), true, Some(Actor::App { app_id }))
+    }))
 }
 
 /// `DELETE /app/installations/{installation_id}/suspended`.
@@ -172,9 +174,15 @@ pub(crate) async fn unsuspend(
     AppCaller(app_id): AppCaller,
     Path(raw): Path<String>,
 ) -> Response {
-    no_content_or_404(
-        installation_id(&raw).is_some_and(|id| set_suspended(&shared, id, Some(app_id), false)),
-    )
+    no_content_or_404(installation_id(&raw).is_some_and(|id| {
+        set_suspended(
+            &shared,
+            id,
+            Some(app_id),
+            false,
+            Some(Actor::App { app_id }),
+        )
+    }))
 }
 
 fn no_content_or_404(found: bool) -> Response {
@@ -488,50 +496,205 @@ fn refusal(shared: &SharedState, refused: Refused) -> Response {
     }
 }
 
-// --- suspension and uninstalling ----------------------------------------------
+// --- installation lifecycle ------------------------------------------------------
+//
+// Each change announces itself (`crate::events`): `installation.*` and
+// `installation_repositories.*`, attributed to `actor` or, without one, to
+// `events::default_sender`.
 
 /// Suspends or unsuspends installation `id` (of App `app_id`, unless the
-/// admin API asks). `false` when there is no such installation.
+/// admin API asks), announcing `installation.suspend` / `unsuspend` when
+/// it changes. `false` when there is no such installation.
 pub(crate) fn set_suspended(
     shared: &SharedState,
     id: u64,
     app_id: Option<u64>,
     suspended: bool,
+    actor: Option<Actor>,
 ) -> bool {
     let mut state = shared.state();
     let now = DateTime::from_timestamp(state.clock.now().timestamp(), 0);
-    let Some(installation) = state
+    let Some(index) = state
         .world
         .installations
-        .iter_mut()
-        .find(|i| i.id == id && app_id.is_none_or(|app| app == i.app_id))
+        .iter()
+        .position(|i| i.id == id && app_id.is_none_or(|app| app == i.app_id))
     else {
         return false;
     };
-    match (suspended, installation.suspended_at.is_some()) {
+    let actor = actor.unwrap_or_else(|| {
+        events::default_sender(&state.world, &state.world.installations[index].account)
+    });
+    let installation = &mut state.world.installations[index];
+    let action = match (suspended, installation.suspended_at.is_some()) {
         (true, false) => {
             installation.suspended_at = now;
+            installation.suspended_by = match &actor {
+                Actor::User(login) => Some(login.clone()),
+                Actor::App { .. } => None,
+            };
             installation.updated_at = now;
+            "suspend"
         }
         (false, true) => {
             installation.suspended_at = None;
             installation.suspended_by = None;
             installation.updated_at = now;
+            "unsuspend"
         }
-        _ => {}
-    }
+        _ => return true,
+    };
+    let installation = installation.clone();
+    events::emit_installation(&mut state, &shared.root, action, &installation, &actor);
     true
 }
 
-/// Removes installation `id` and revokes its tokens. `false` when there is
-/// no such installation.
-pub(crate) fn uninstall(shared: &SharedState, id: u64) -> bool {
+/// Removes installation `id` and revokes its tokens, announcing
+/// `installation.deleted`. `false` when there is no such installation.
+pub(crate) fn uninstall(shared: &SharedState, id: u64, actor: Option<Actor>) -> bool {
     let mut state = shared.state();
-    let before = state.world.installations.len();
-    state.world.installations.retain(|i| i.id != id);
-    if state.world.installations.len() == before {
+    let Some(installation) = find_installation(&state.world, id).cloned() else {
         return false;
-    }
+    };
+    let actor =
+        actor.unwrap_or_else(|| events::default_sender(&state.world, &installation.account));
+    events::emit_installation(&mut state, &shared.root, "deleted", &installation, &actor);
+    state.world.installations.retain(|i| i.id != id);
     state.tokens.revoke_installation(id);
     true
+}
+
+/// Why an admin lifecycle change was refused.
+#[derive(Debug)]
+pub(crate) enum LifecycleError {
+    NotFound,
+    Invalid(crate::seed::SeedError),
+}
+
+/// `world` with the installation of `changed`'s ID replaced by it,
+/// validated.
+fn validated(world: &Seed, changed: Installation) -> Result<Seed, LifecycleError> {
+    let mut next = world.clone();
+    match next.installations.iter_mut().find(|i| i.id == changed.id) {
+        Some(slot) => *slot = changed,
+        None => next.installations.push(changed),
+    }
+    next.validate().map_err(LifecycleError::Invalid)?;
+    Ok(next)
+}
+
+/// Installs an App: adds `installation` (validated as a seed entry) and
+/// announces `installation.created`.
+pub(crate) fn install(
+    shared: &SharedState,
+    mut installation: Installation,
+    actor: Option<Actor>,
+) -> Result<(), crate::seed::SeedError> {
+    let mut state = shared.state();
+    let now = DateTime::from_timestamp(state.clock.now().timestamp(), 0);
+    installation.created_at = installation.created_at.or(now);
+    let world = state
+        .world
+        .merged(Seed::new().installation(installation.clone()))?;
+    state.world = world;
+    let actor =
+        actor.unwrap_or_else(|| events::default_sender(&state.world, &installation.account));
+    events::emit_installation(&mut state, &shared.root, "created", &installation, &actor);
+    Ok(())
+}
+
+/// The installation's owner accepts new permissions: they become the
+/// installation's grant (never wider than the App's), announced as
+/// `installation.new_permissions_accepted`.
+pub(crate) fn accept_permissions(
+    shared: &SharedState,
+    id: u64,
+    permissions: BTreeMap<String, Access>,
+    actor: Option<Actor>,
+) -> Result<(), LifecycleError> {
+    let mut state = shared.state();
+    let mut installation = find_installation(&state.world, id)
+        .cloned()
+        .ok_or(LifecycleError::NotFound)?;
+    installation.permissions = Some(permissions);
+    installation.updated_at = DateTime::from_timestamp(state.clock.now().timestamp(), 0);
+    state.world = validated(&state.world, installation.clone())?;
+    let actor =
+        actor.unwrap_or_else(|| events::default_sender(&state.world, &installation.account));
+    events::emit_installation(
+        &mut state,
+        &shared.root,
+        "new_permissions_accepted",
+        &installation,
+        &actor,
+    );
+    Ok(())
+}
+
+/// Changes which repositories installation `id` covers. Announces
+/// `installation_repositories.added` for newly reachable repositories and
+/// `removed` for lost ones, one event each (behaviour
+/// `installation-repositories-events`).
+pub(crate) fn set_repositories(
+    shared: &SharedState,
+    id: u64,
+    selection: RepositorySelection,
+    repositories: Vec<String>,
+    actor: Option<Actor>,
+) -> Result<(), LifecycleError> {
+    let mut state = shared.state();
+    let before = find_installation(&state.world, id)
+        .cloned()
+        .ok_or(LifecycleError::NotFound)?;
+    let mut installation = before.clone();
+    installation.repository_selection = selection;
+    installation.repositories = match selection {
+        RepositorySelection::All => Vec::new(),
+        RepositorySelection::Selected => repositories,
+    };
+    installation.updated_at = DateTime::from_timestamp(state.clock.now().timestamp(), 0);
+    state.world = validated(&state.world, installation.clone())?;
+    let old: Vec<Repo> = installation_repos(&state.world, &before)
+        .into_iter()
+        .cloned()
+        .collect();
+    let new: Vec<Repo> = installation_repos(&state.world, &installation)
+        .into_iter()
+        .cloned()
+        .collect();
+    let added: Vec<Repo> = new
+        .iter()
+        .filter(|r| !old.iter().any(|o| o.id == r.id))
+        .cloned()
+        .collect();
+    let removed: Vec<Repo> = old
+        .iter()
+        .filter(|r| !new.iter().any(|n| n.id == r.id))
+        .cloned()
+        .collect();
+    let actor =
+        actor.unwrap_or_else(|| events::default_sender(&state.world, &installation.account));
+    if !added.is_empty() {
+        events::emit_installation_repositories(
+            &mut state,
+            &shared.root,
+            "added",
+            &installation,
+            &added,
+            &[],
+            &actor,
+        );
+    }
+    if !removed.is_empty() {
+        events::emit_installation_repositories(
+            &mut state,
+            &shared.root,
+            "removed",
+            &installation,
+            &[],
+            &removed,
+            &actor,
+        );
+    }
+    Ok(())
 }

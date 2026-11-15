@@ -88,3 +88,8 @@ sha2.workspace = true
 tracing-subscriber.workspace = true
 hex = "0.4"
 wiremock.workspace = true
+
+# The webhook intake test fed by the GitHub emulator (tests/emulator_webhooks.rs).
+# Native only, and a dev-dependency only: never in a wasm32 or production graph.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+octoemu.workspace = true

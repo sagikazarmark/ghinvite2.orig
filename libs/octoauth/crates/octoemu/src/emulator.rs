@@ -6,6 +6,7 @@ use crate::calls::Call;
 use crate::fidelity::{Manifest, ManifestError, Mismatch};
 use crate::seed::{Seed, SeedError};
 use crate::state::{Shared, SharedState};
+use crate::webhooks::{Delivery, Dispatch};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeMap;
 use std::io;
@@ -41,6 +42,8 @@ pub struct Builder {
     bind: SocketAddr,
     idle_timeout: Option<Duration>,
     refuse_assumed: bool,
+    dispatch: Dispatch,
+    webhook_timeout: Duration,
 }
 
 impl Builder {
@@ -62,6 +65,20 @@ impl Builder {
     /// seed's `settings.refuse_assumed`.
     pub fn refuse_assumed(mut self) -> Self {
         self.refuse_assumed = true;
+        self
+    }
+
+    /// When webhooks are sent: [`Dispatch::Auto`] (the default) or
+    /// [`Dispatch::Manual`].
+    pub fn dispatch(mut self, dispatch: Dispatch) -> Self {
+        self.dispatch = dispatch;
+        self
+    }
+
+    /// How long a webhook delivery may take before it is recorded as failed
+    /// (GitHub's 10 s by default; shorten it to test timeouts quickly).
+    pub fn webhook_timeout(mut self, timeout: Duration) -> Self {
+        self.webhook_timeout = timeout;
         self
     }
 
@@ -96,6 +113,11 @@ impl Builder {
             root.clone(),
             addr.port(),
         ));
+        {
+            let mut state = shared.state();
+            state.deliveries.mode = self.dispatch;
+            state.deliveries.timeout = self.webhook_timeout;
+        }
         let app = crate::server::router(shared.clone(), api);
 
         let (stop, mut stop_requested) = watch::channel(false);
@@ -109,6 +131,10 @@ impl Builder {
             let _ = stopped_tx.send(true);
             result
         });
+        tokio::spawn(crate::webhooks::dispatcher(
+            shared.clone(),
+            stop.subscribe(),
+        ));
         if let Some(after) = self.idle_timeout {
             tokio::spawn(idle_watch(shared.clone(), after, stop.clone()));
         }
@@ -175,13 +201,16 @@ impl Emulator {
         Self::builder(seed).start().await
     }
 
-    /// Options beyond the seed: bind address, idle timeout, refuse-assumed.
+    /// Options beyond the seed: bind address, idle timeout, refuse-assumed,
+    /// webhook dispatch and timeout.
     pub fn builder(seed: Seed) -> Builder {
         Builder {
             seed,
             bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
             idle_timeout: None,
             refuse_assumed: false,
+            dispatch: Dispatch::Auto,
+            webhook_timeout: crate::webhooks::DEFAULT_TIMEOUT,
         }
     }
 
@@ -235,21 +264,69 @@ impl Emulator {
     }
 
     /// Suspends installation `id`, as `PUT /app/installations/{id}/suspended`
-    /// does: token creation is refused and existing tokens stop working.
-    /// `false` when there is no such installation.
+    /// does: token creation is refused, existing tokens stop working, and
+    /// `installation.suspend` is announced. `false` when there is no such
+    /// installation.
     pub fn suspend_installation(&self, id: u64) -> bool {
-        crate::apps::set_suspended(&self.shared, id, None, true)
+        crate::apps::set_suspended(&self.shared, id, None, true, None)
     }
 
-    /// Lifts a suspension. `false` when there is no such installation.
+    /// Lifts a suspension (`installation.unsuspend`). `false` when there is
+    /// no such installation.
     pub fn unsuspend_installation(&self, id: u64) -> bool {
-        crate::apps::set_suspended(&self.shared, id, None, false)
+        crate::apps::set_suspended(&self.shared, id, None, false, None)
     }
 
-    /// Uninstalls installation `id`: it disappears and its tokens stop
-    /// working. `false` when there is no such installation.
+    /// Uninstalls installation `id`: it disappears, its tokens stop working
+    /// and `installation.deleted` is announced. `false` when there is no
+    /// such installation.
     pub fn uninstall(&self, id: u64) -> bool {
-        crate::apps::uninstall(&self.shared, id)
+        crate::apps::uninstall(&self.shared, id, None)
+    }
+
+    /// Installs an App (`installation.created`), as
+    /// `POST /__octoemu/installations` does; validated like a seed entry.
+    pub fn install(&self, installation: crate::seed::Installation) -> Result<(), SeedError> {
+        crate::apps::install(&self.shared, installation, None)
+    }
+
+    /// Every webhook delivery attempt, oldest first
+    /// (`GET /__octoemu/deliveries`).
+    pub fn deliveries(&self) -> Vec<Delivery> {
+        self.shared.state().deliveries.attempts().cloned().collect()
+    }
+
+    /// Sends the deliveries held in [`Dispatch::Manual`] mode; returns how
+    /// many were released.
+    pub fn dispatch_deliveries(&self) -> usize {
+        crate::webhooks::dispatch(&self.shared)
+    }
+
+    /// Switches the dispatch mode; switching to auto releases held
+    /// deliveries.
+    pub fn set_dispatch(&self, dispatch: Dispatch) {
+        self.shared.state().deliveries.set_mode(dispatch);
+        self.shared.wake.notify_one();
+    }
+
+    /// Replaces App `app_id`'s webhook (`None` removes it): a new URL, or
+    /// new secrets, the first of which signs from now on. `false` when there
+    /// is no such App.
+    pub fn set_webhook(&self, app_id: u64, webhook: Option<crate::seed::Webhook>) -> bool {
+        let mut state = self.shared.state();
+        match state.world.apps.iter_mut().find(|app| app.id == app_id) {
+            Some(app) => {
+                app.webhook = webhook;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Waits until no webhook delivery is queued or being sent (held ones
+    /// excepted), at most `timeout`; `true` once idle.
+    pub async fn wait_for_deliveries(&self, timeout: Duration) -> bool {
+        crate::webhooks::wait_idle(&self.shared, timeout).await
     }
 
     /// The webhook outbox: every event GitHub would announce, oldest first

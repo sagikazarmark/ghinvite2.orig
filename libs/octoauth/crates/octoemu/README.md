@@ -8,7 +8,7 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: repositories (GE-03)
+## Status: webhooks (GE-04)
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
@@ -16,7 +16,10 @@ App JWT verification, stateless installation tokens with scoping,
 revocation and suspension, and per-route credential and permission checks
 (GE-02); repositories, collaborators, permissions, repository invitations
 with expiry and the daily limit, the invitee's side (through the admin
-API until GE-05), users, avatars and the webhook event outbox (GE-03).
+API until GE-05), users, avatars and the webhook event outbox (GE-03);
+webhook delivery with GitHub's headers and signatures, recorded attempts,
+the deliveries API and the App's hook configuration, and `installation` /
+`installation_repositories` events from admin actions (GE-04).
 
 ### Implemented routes
 
@@ -28,6 +31,11 @@ API until GE-05), users, avatars and the webhook event outbox (GE-03).
 | `POST /app/installations/{installation_id}/access_tokens` | App JWT | 201 `{token, expires_at, permissions, repository_selection, repositories?}`; body `permissions`, `repositories`, `repository_ids` narrow |
 | `PUT`/`DELETE /app/installations/{installation_id}/suspended` | App JWT | 204 |
 | `GET /app/installation-requests` | App JWT | Paged |
+| `GET /app/hook/config` | App JWT | `{url, content_type: "json", secret: "********", insecure_ssl}`; 404 without a webhook |
+| `PATCH /app/hook/config` | App JWT | `url`, `content_type` (`json` only), `secret` (replaces every seeded secret; `""` stops signing), `insecure_ssl` |
+| `GET /app/hook/deliveries` | App JWT | Newest first; `per_page`, `cursor` (`next`/`prev` in `Link`), `status=success\|failure` (200–399 is a success) |
+| `GET /app/hook/deliveries/{delivery_id}` | App JWT | With `url`, `request {headers, payload}`, `response {headers, payload}`; 404 for another App's |
+| `POST /app/hook/deliveries/{delivery_id}/attempts` | App JWT | 202 `{}`; the same body and GUID again, `redelivery: true` |
 | `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
 | `DELETE /installation/token` | installation token | 204; the token stops working |
 | `GET /repos/{owner}/{repo}` | installation token, `metadata: read` | Private and internal repositories outside the token are 404 |
@@ -53,7 +61,7 @@ content-type: application/json; charset=utf-8
 ```
 
 It is never a 404, which a client could take for GitHub's answer. Routes
-arrive with GE-04 (webhooks), GE-05 (OAuth web flow, `/user`, the invitee's
+arrive with GE-05 (OAuth web flow, `/user`, the invitee's
 `/user/repository_invitations/{id}`) and GE-06 (organizations); anything
 outside ghinvite's surface stays 501.
 
@@ -83,13 +91,64 @@ outside ghinvite's surface stays 501.
 
 Every change GitHub would announce by webhook appends an event to an
 outbox: `{"id", "at", "event", "action", "targets": [{"app_id",
-"installation_id"}], "payload"}`. Targets are the non-suspended
-installations that can access the repository and subscribe to the event;
-the payload leaves out `installation`, which each delivery adds. Today:
-`member` `added` (an invitation accepted, or an organization member added
-directly), `edited` (a role change, with `changes`) and `removed`
-(`DELETE …/collaborators/{username}` or leaving). Read it at
-`GET /__octoemu/events` or `Emulator::events()`; GE-04 delivers it.
+"installation_id"}], "payload"}`. Read it at `GET /__octoemu/events` or
+`Emulator::events()`. Today:
+
+- `member` `added` (an invitation accepted, or an organization member
+  added directly), `edited` (a role change, with `changes`) and `removed`
+  (`DELETE …/collaborators/{username}` or leaving). Targets: the
+  non-suspended installations that can access the repository and
+  subscribe to `member`. The payload leaves out `installation`, which
+  each delivery adds as `{"id", "node_id"}`.
+- `installation` `created`, `deleted`, `suspend`, `unsuspend`,
+  `new_permissions_accepted` and `installation_repositories` `added`,
+  `removed`, from the admin API, the handle and `PUT`/`DELETE
+  /app/installations/{id}/suspended`. They go to the installation's App
+  whatever it subscribes to (documented), suspended or not (assumed), and
+  carry the full `installation`, `repositories` (or `repository_selection`,
+  `repositories_added`, `repositories_removed` as `{id, node_id, name,
+  full_name, private}`), `requester: null` and `sender`. Without a named
+  sender, the account itself or an organization's first active owner is
+  the sender; the App's own suspension route names its bot.
+
+### Webhook delivery
+
+Each target whose App has an active `webhook` becomes a delivery: a POST
+to the App's URL with `Content-Type: application/json`, `User-Agent:
+GitHub-Hookshot/octoemu`, `X-GitHub-Event`, `X-GitHub-Delivery` (a random
+GUID), `X-GitHub-Hook-ID`, `X-GitHub-Hook-Installation-Target-Type:
+integration`, `X-GitHub-Hook-Installation-Target-ID: <App ID>` and, with a
+secret, `X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body>` and the
+legacy `X-Hub-Signature: sha1=…`.
+
+- **Rotation model (assumed).** GitHub keeps one current secret per App.
+  octoemu signs with the first of `webhook.secrets`, read at send time; the
+  others are never used. To test a receiver mid-rotation, configure it with
+  `[new, old]` and switch the emulator's secret
+  (`PUT /__octoemu/apps/{id}/webhook`, `Emulator::set_webhook`,
+  `PATCH /app/hook/config`).
+- **Order.** One sender per App sends that App's deliveries one at a time
+  in event order (assumed); Apps send concurrently.
+- **Failure.** A non-2xx response, a refused connection or no complete
+  response within 10 s (`Builder::webhook_timeout` shortens it for tests)
+  is a failed delivery. Nothing is retried (documented).
+- **Dispatch.** `auto` (default) sends at once; `manual`
+  (`Builder::dispatch(Dispatch::Manual)`, `POST /__octoemu/deliveries/mode`)
+  holds deliveries until `POST /__octoemu/deliveries/dispatch`.
+  `POST /__octoemu/deliveries/wait` (or `Emulator::wait_for_deliveries`)
+  returns once nothing is queued or in flight, so a test can assert right
+  after it.
+- **Attempts** are recorded with `id`, `guid`, `delivered_at` (virtual
+  clock), `redelivery`, `duration` (real seconds), `status` (`OK`, `Invalid
+  HTTP Response: <code>`, `timed out`, `Couldn't connect to server`; the
+  last three assumed and withheld in refuse-assumed mode), `status_code` (0
+  without a response), `event`, `action`, `installation_id`,
+  `repository_id`, `url`, the request's headers and payload and the
+  response's headers and body (first 64 KiB), plus `app_id` and
+  `event_id`. They are kept for the instance's life and all can be
+  redelivered (GitHub's 3-day window is not modelled). The deliveries API
+  serves them to their App; `GET /__octoemu/deliveries` and
+  `Emulator::deliveries()` serve all of them.
 
 ### Auth model
 
@@ -152,10 +211,13 @@ let calls = emulator.calls();
 // Stops when dropped, or: emulator.shutdown().await?;
 ```
 
-`Emulator::builder(seed)` adds `.bind(addr)`, `.idle_timeout(d)` and
-`.refuse_assumed()`. The handle also has `avatar_base`, `admin_base`, `now`,
-`seed` (merge more), `state`, `clear_calls`, `stopped`,
-`suspend_installation`, `unsuspend_installation` and `uninstall`.
+`Emulator::builder(seed)` adds `.bind(addr)`, `.idle_timeout(d)`,
+`.refuse_assumed()`, `.dispatch(Dispatch::Manual)` and
+`.webhook_timeout(d)`. The handle also has `avatar_base`, `admin_base`,
+`now`, `seed` (merge more), `state`, `clear_calls`, `stopped`,
+`suspend_installation`, `unsuspend_installation`, `uninstall`, `install`,
+`events`, `deliveries`, `dispatch_deliveries`, `set_dispatch`,
+`set_webhook` and `wait_for_deliveries`.
 
 **Binary**, for the Worker drivers, browser tests and other processes:
 
@@ -241,10 +303,19 @@ applies whole or not at all; it may not set `start_time`.
 | `DELETE /calls` | Empties the call log (204) |
 | `GET /fidelity` | The manifest as JSON |
 | `POST /tokens/installation` | `{"installation_id", "permissions"?, "repositories"?, "repository_ids"?}`: mints an installation token without a JWT, answered (narrowed, refused) exactly as `POST /app/installations/{id}/access_tokens` |
-| `POST /installations/{id}/suspend` | Suspends an installation (204; 404 if unknown) |
-| `POST /installations/{id}/unsuspend` | Lifts a suspension |
-| `DELETE /installations/{id}` | Uninstalls: the installation disappears and its tokens stop working |
+| `POST /installations` | `{"installation": <seed installation>, "sender"?: login}` installs an App: 201 and `installation.created`; 422 with the seed problems |
+| `POST /installations/{id}/suspend` | Suspends an installation (204; 404 if unknown), `installation.suspend`; optional body `{"sender"}` |
+| `POST /installations/{id}/unsuspend` | Lifts a suspension, `installation.unsuspend` |
+| `DELETE /installations/{id}` | Uninstalls: the installation disappears, its tokens stop working, `installation.deleted` |
+| `POST /installations/{id}/permissions` | `{"permissions", "sender"?}`: the owner accepts them (never wider than the App's), `installation.new_permissions_accepted` |
+| `POST /installations/{id}/repositories` | `{"repository_selection"? (default `selected`), "repositories", "sender"?}`: the new selection; `installation_repositories.added` for gained and `removed` for lost repositories |
+| `PUT /apps/{id}/webhook` | A seed webhook (`{"url", "secrets", "active"}`) replaces the App's (204) |
+| `DELETE /apps/{id}/webhook` | No more deliveries for the App |
 | `GET /events` | `{"events": […]}`: the webhook outbox, oldest first |
+| `GET /deliveries` | `{"deliveries": […], "mode", "held", "pending"}`: every attempt, oldest first |
+| `POST /deliveries/dispatch` | Sends what manual mode holds: `{"dispatched": n}` |
+| `POST /deliveries/wait` | `{"timeout_ms"?}` (default 30 000): 200 `{"idle": true}` once nothing is queued or in flight (held ones aside), 504 at the timeout |
+| `POST /deliveries/mode` | `{"mode": "auto"\|"manual"}`; switching to auto sends what was held |
 | `POST /act/{login}/repository_invitations/{id}/accept` | The invitee accepts: collaborator with the invited role, `member.added` (204; 404 if not theirs or expired) |
 | `POST /act/{login}/repository_invitations/{id}/decline` | The invitee declines (204, no event) |
 | `POST /act/{login}/repos/{owner}/{repo}/leave` | A collaborator leaves (204, `member.removed`) |
@@ -316,7 +387,13 @@ whose text is a guess keeps its status with the message
 `out-of-scope-repository` (403), `repo-error-messages`,
 `member-edited-changes` (left out of the payload in refuse-assumed mode),
 `member-added-directly` (not emitted in refuse-assumed mode) and
-`app-bot-account`; the routes `GET /repositories/{repository_id}/invitations`,
+`app-bot-account`; for webhooks `webhook-secret-rotation`,
+`webhook-ordering`, `webhook-delivery-retention`, `webhook-hook-id`,
+`webhook-status-texts` (withheld), `webhook-deliveries-cursor` (refused
+with a cursor), `webhook-config-details`, `installation-event-sender`,
+`installation-events-while-suspended`, `installation-repositories-events`
+and `suspended-installation-webhooks` (delivery runs in the background,
+so most of these are labels only, not refused); the routes `GET /repositories/{repository_id}/invitations`,
 `GET /user/{account_id}` and `GET /avatars/u/{id}`.
 
 ## Tests
@@ -334,6 +411,17 @@ outbox, permission and scope refusals, 422s, users, avatars and
 refuse-assumed mode. In the ghinvite workspace,
 `crates/ghinvite-github/tests/emulator.rs` runs ghinvite-github's real
 repository client against an embedded emulator.
+
+`tests/webhooks.rs` runs a local axum receiver: the signature (checked
+against the docs' test vector), the header set, payloads, unsigned and
+inactive webhooks, the rotation model, manual and auto dispatch with
+`wait`, failures on a 500, a stall past the timeout and a refused
+connection, no retries, the deliveries API (cursor pages, `status`,
+redelivery, cross-App 404s), the hook configuration, the installation
+events of every admin action, the suspension rule and `member` events. In
+the ghinvite workspace, `crates/ghinvite-web/tests/emulator_webhooks.rs`
+feeds ghinvite-web's real webhook intake from the emulator (signature,
+rotation, dedupe).
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

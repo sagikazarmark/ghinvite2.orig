@@ -7,7 +7,7 @@
 use crate::auth::Auth;
 use crate::repos::{ADMINISTRATION_READ, ADMINISTRATION_WRITE};
 use crate::state::SharedState;
-use crate::{apps, repos, users};
+use crate::{apps, hooks, repos, users};
 use axum::Router;
 use axum::handler::Handler;
 use axum::http::Method;
@@ -27,6 +27,10 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "date-header",
     "error-body",
     "expired-invitations-listed",
+    "installation-event-sender",
+    "installation-events",
+    "installation-events-while-suspended",
+    "installation-repositories-events",
     "installation-token-expiry",
     "installation-token-format",
     "installation-token-scope",
@@ -55,6 +59,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "role-names",
     "suspended-installation",
     "suspended-installation-tokens",
+    "suspended-installation-webhooks",
     "token-error-messages",
     "token-implicit-metadata",
     "token-repositories-union",
@@ -62,6 +67,18 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "unknown-user-404",
     "user-repo-permission-ignored",
     "validation-errors",
+    "webhook-config-details",
+    "webhook-deliveries-cursor",
+    "webhook-delivery-headers",
+    "webhook-delivery-retention",
+    "webhook-hook-id",
+    "webhook-no-retry",
+    "webhook-ordering",
+    "webhook-redelivery",
+    "webhook-secret-rotation",
+    "webhook-signature",
+    "webhook-status-texts",
+    "webhook-timeout",
     "wrong-credential-kind",
 ];
 
@@ -174,6 +191,37 @@ pub(crate) fn github() -> Api {
             "/app/installation-requests",
             Auth::App,
             apps::installation_requests,
+        )
+        // The App's webhook: docs.github.com/rest/apps/webhooks.
+        .route(
+            Method::GET,
+            "/app/hook/config",
+            Auth::App,
+            hooks::get_config,
+        )
+        .route(
+            Method::PATCH,
+            "/app/hook/config",
+            Auth::App,
+            hooks::patch_config,
+        )
+        .route(
+            Method::GET,
+            "/app/hook/deliveries",
+            Auth::App,
+            hooks::list_deliveries,
+        )
+        .route(
+            Method::GET,
+            "/app/hook/deliveries/{delivery_id}",
+            Auth::App,
+            hooks::get_delivery,
+        )
+        .route(
+            Method::POST,
+            "/app/hook/deliveries/{delivery_id}/attempts",
+            Auth::App,
+            hooks::redeliver,
         )
         // Installation-token routes: docs.github.com/rest/apps/installations.
         .route(

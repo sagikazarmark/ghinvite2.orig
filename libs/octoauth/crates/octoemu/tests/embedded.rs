@@ -75,7 +75,7 @@ async fn unbuilt_routes_answer_501_never_404() {
         (Method::GET, "/"),
         (Method::GET, "/repos/acme/widgets/branches"),
         (Method::DELETE, "/app/installations/5"),
-        (Method::GET, "/app/hook/deliveries"),
+        (Method::DELETE, "/app/hook/deliveries/1"),
         (Method::PUT, "/orgs/acme/memberships/octocat"),
         (Method::PATCH, "/user/repository_invitations/1"),
         (Method::POST, "/installation/token"),

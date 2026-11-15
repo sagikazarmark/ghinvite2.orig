@@ -1,16 +1,32 @@
 //! The webhook outbox: every state change GitHub would announce by webhook
-//! appends an [`Event`] here, with the installations it would go to and its
-//! payload. Webhook delivery (GE-04) reads it; until then it is observable at
+//! appends an [`Event`] here, with the installations it goes to and its
+//! payload. Webhook delivery (`crate::webhooks`, GE-04) turns each target
+//! into a delivery; the outbox itself is observable at
 //! `GET /__octoemu/events` and [`Emulator::events`](crate::Emulator::events).
 //!
-//! Emitted today (GE-03): `member` with `added` (an invitation accepted, or
-//! an organization member added directly), `edited` (a collaborator's role
-//! changed) and `removed`.
+//! Emitted today: `member` with `added` (an invitation accepted, or an
+//! organization member added directly), `edited` (a collaborator's role
+//! changed) and `removed` (GE-03); `installation` with `created`, `deleted`,
+//! `suspend`, `unsuspend` and `new_permissions_accepted`, and
+//! `installation_repositories` with `added` and `removed` (GE-04).
+//!
+//! **Emitting an event** (for later tasks): build the payload without
+//! `installation` (deliveries add `{"id", "node_id"}` unless the payload
+//! carries a full one, as the installation events do), compute the targets
+//! (`repository_targets` for a repository's events; an organization's
+//! events need an `organization_targets` and `organization` in the
+//! payload), and `state.events.push(…)`. The push wakes the dispatcher;
+//! nothing else is needed for delivery.
 
-use crate::seed::{Repo, Seed};
+use crate::collaboration::Actor;
+use crate::seed::{Installation, Repo, Seed, UserKind};
+use crate::state::State;
+use crate::views::View;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// One announced change, before delivery.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -46,6 +62,8 @@ pub struct Target {
 #[derive(Debug, Default)]
 pub(crate) struct Outbox {
     events: Vec<Event>,
+    /// Notified on every push: the delivery dispatcher waits on it.
+    wake: Arc<Notify>,
 }
 
 impl Outbox {
@@ -67,11 +85,17 @@ impl Outbox {
             targets,
             payload,
         });
+        self.wake.notify_one();
         id
     }
 
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
+    }
+
+    /// What the delivery dispatcher waits on.
+    pub(crate) fn waker(&self) -> Arc<Notify> {
+        self.wake.clone()
     }
 }
 
@@ -107,4 +131,123 @@ pub(crate) fn repository_targets(world: &Seed, repo: &Repo, event: &str) -> Vec<
         .collect();
     targets.sort_by_key(|t| t.installation_id);
     targets
+}
+
+/// Who an installation change is attributed to when nobody is named: the
+/// account itself for a user account; for an organization, its first
+/// active owner, else the organization (behaviour
+/// `installation-event-sender`).
+pub(crate) fn default_sender(world: &Seed, account: &str) -> Actor {
+    let is_user = world
+        .users
+        .iter()
+        .any(|u| u.login.eq_ignore_ascii_case(account) && u.kind == UserKind::User);
+    if is_user {
+        return Actor::User(account.to_owned());
+    }
+    world
+        .memberships
+        .iter()
+        .find(|m| {
+            m.org.eq_ignore_ascii_case(account)
+                && m.role == crate::seed::OrgRole::Admin
+                && m.state == crate::seed::MembershipState::Active
+        })
+        .map_or_else(
+            || Actor::User(account.to_owned()),
+            |m| Actor::User(m.user.clone()),
+        )
+}
+
+fn view<'a>(state: &'a State, origin: &'a str) -> View<'a> {
+    View {
+        world: &state.world,
+        origin,
+        start: state.clock.start(),
+        now: state.clock.now(),
+    }
+}
+
+fn sender(view: &View<'_>, actor: &Actor) -> Value {
+    match actor {
+        Actor::App { app_id } => view.app_bot(*app_id),
+        Actor::User(login) => view.account(login).unwrap_or_default(),
+    }
+}
+
+/// An installation's own event: to its App whatever the App subscribes to
+/// (documented: "All GitHub Apps receive this event by default") and
+/// whether or not it is suspended (behaviour
+/// `installation-events-while-suspended`).
+fn installation_target(installation: &Installation) -> Vec<Target> {
+    vec![Target {
+        app_id: installation.app_id,
+        installation_id: installation.id,
+    }]
+}
+
+/// Appends `installation.<action>` for `installation` (as it is now; call
+/// before removing it for `deleted`). The payload carries the full
+/// installation, the repositories it can access, `requester: null` and
+/// `sender` (documented shape).
+pub(crate) fn emit_installation(
+    state: &mut State,
+    origin: &str,
+    action: &str,
+    installation: &Installation,
+    actor: &Actor,
+) {
+    let view = view(state, origin);
+    let repositories: Vec<Value> = crate::apps::installation_repos(&state.world, installation)
+        .into_iter()
+        .map(|repo| view.repo_ref(repo))
+        .collect();
+    let payload = json!({
+        "action": action,
+        "installation": view.installation(installation),
+        "repositories": repositories,
+        "requester": null,
+        "sender": sender(&view, actor),
+    });
+    let now = state.clock.now();
+    state.events.push(
+        now,
+        "installation",
+        Some(action),
+        installation_target(installation),
+        payload,
+    );
+}
+
+/// Appends `installation_repositories.<action>` (`added` or `removed`)
+/// with `repository_selection`, `repositories_added` and
+/// `repositories_removed` (both always present) as documented.
+pub(crate) fn emit_installation_repositories(
+    state: &mut State,
+    origin: &str,
+    action: &str,
+    installation: &Installation,
+    added: &[Repo],
+    removed: &[Repo],
+    actor: &Actor,
+) {
+    let view = view(state, origin);
+    let refs = |repos: &[Repo]| repos.iter().map(|r| view.repo_ref(r)).collect::<Vec<_>>();
+    let payload = json!({
+        "action": action,
+        "installation": view.installation(installation),
+        "repository_selection": installation.repository_selection,
+        "repositories_added": refs(added),
+        "repositories_removed": refs(removed),
+        "requester": null,
+        "sender": sender(&view, actor),
+    });
+    let now = state.clock.now();
+    state.events.push(
+        now,
+        "installation_repositories",
+        Some(action),
+        installation_target(installation),
+        payload,
+    );
 }

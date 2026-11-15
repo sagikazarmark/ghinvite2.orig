@@ -25,7 +25,7 @@ pub(crate) fn timestamp(at: DateTime<Utc>) -> String {
 }
 
 /// A legacy global node ID (`base64("04:User1")`), GitHub's older format.
-fn node_id(kind: &str, id: u64) -> String {
+pub(crate) fn node_id(kind: &str, id: u64) -> String {
     let prefix = match kind {
         "User" => "04",
         "Organization" => "012",
@@ -124,6 +124,19 @@ impl View<'_> {
             "disabled": false,
             "created_at": created,
             "updated_at": created,
+        })
+    }
+
+    /// A repository as webhook lists carry it (`repositories_added`,
+    /// `installation.repositories`): `{id, node_id, name, full_name,
+    /// private}`.
+    pub(crate) fn repo_ref(&self, repo: &Repo) -> Value {
+        json!({
+            "id": repo.id,
+            "node_id": node_id("Repository", repo.id),
+            "name": repo.name,
+            "full_name": repo.full_name(),
+            "private": repo.is_private(),
         })
     }
 

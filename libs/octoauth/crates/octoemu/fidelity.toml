@@ -372,3 +372,118 @@ reason = "The 422 bodies of the repository routes are guesses: Validation Failed
 [behaviours.app-bot-account]
 label = "assumed"
 reason = "What an installation token does is attributed to the App's bot account: login {slug}[bot], type Bot, ID 1000000000 + the App ID (octoemu's own; GitHub's bot IDs are unrelated numbers). It is the inviter of invitations and the sender of member events the App causes. Informational: nothing is refused for it."
+
+# --- Webhooks (GE-04) ---------------------------------------------------------
+
+[routes."GET /app/hook/config"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/webhooks#get-a-webhook-configuration-for-an-app"
+# {url, content_type: "json", secret: "********" (null when unsigned), insecure_ssl}.
+
+[routes."PATCH /app/hook/config"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/webhooks#update-a-webhook-configuration-for-an-app"
+# url, content_type (json only; form is a 422), secret (replaces every seeded
+# secret; "" stops signing), insecure_ssl (0 or 1, stored, not acted on).
+
+[routes."GET /app/hook/deliveries"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/webhooks#list-deliveries-for-an-app-webhook"
+# per_page, cursor (next/prev in Link), status=success (200-399) | failure.
+
+[routes."GET /app/hook/deliveries/{delivery_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/webhooks#get-a-delivery-for-an-app-webhook"
+
+[routes."POST /app/hook/deliveries/{delivery_id}/attempts"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/webhooks#redeliver-a-delivery-for-an-app-webhook"
+# 202 {}; the redelivery is queued like any delivery.
+
+[behaviours.webhook-delivery-headers]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#delivery-headers"
+# POST with Content-Type: application/json, User-Agent: GitHub-Hookshot/octoemu,
+# X-GitHub-Event, X-GitHub-Delivery (a version-4 GUID), X-GitHub-Hook-ID,
+# X-GitHub-Hook-Installation-Target-Type: integration and
+# X-GitHub-Hook-Installation-Target-ID: <App ID>. The payload gains
+# installation {id, node_id} unless it carries the full installation.
+
+[behaviours.webhook-signature]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries"
+# X-Hub-Signature-256: sha256=<hex HMAC-SHA256 of the body> and the legacy
+# X-Hub-Signature: sha1=<hex HMAC-SHA1>, when a secret is set; the page's test
+# vector is a unit test (src/webhooks.rs).
+
+[behaviours.webhook-timeout]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries"
+# "takes longer than 10 seconds to respond, GitHub will record the delivery as
+# a failure"; a non-2xx response or a connection failure fails too
+# (`Builder::webhook_timeout` shortens the 10 s for tests).
+
+[behaviours.webhook-no-retry]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries"
+# "GitHub does not automatically redeliver failed webhook deliveries."
+
+[behaviours.webhook-redelivery]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks#use-the-x-github-delivery-header"
+# A redelivery resends the same body with the same X-GitHub-Delivery and
+# redelivery: true.
+
+[behaviours.installation-events]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#installation"
+# installation (created, deleted, suspend, unsuspend, new_permissions_accepted)
+# and installation_repositories (added, removed): "All GitHub Apps receive this
+# event by default", whatever they subscribe to. Payloads: the full
+# installation, repositories, requester: null and sender; installation_
+# repositories adds repository_selection, repositories_added and
+# repositories_removed ({id, node_id, name, full_name, private}).
+
+[behaviours.installation-events-while-suspended]
+label = "assumed"
+reason = "installation events reach the App even while the installation is suspended (suspend itself, then unsuspend or deleted); GitHub documents the suspend action but not its delivery to a suspended installation."
+
+[behaviours.suspended-installation-webhooks]
+label = "assumed"
+reason = "a suspended installation is no target of any other event; GitHub documents only that a suspended App cannot access the account's resources."
+
+[behaviours.installation-repositories-events]
+label = "assumed"
+reason = "a selection change announces one added event (repositories_removed empty) and one removed event (repositories_added empty) rather than one event with both lists; switching all/selected is diffed the same way."
+
+[behaviours.installation-event-sender]
+label = "assumed"
+reason = "sender for admin actions without one named: the user account itself, or an organization's first active owner (else the organization); the App's bot for PUT/DELETE /app/installations/{id}/suspended."
+
+[behaviours.webhook-secret-rotation]
+label = "assumed"
+reason = "rotation model: GitHub keeps one current secret per App, so octoemu signs with the first of webhook.secrets only (at send time, so a redelivery after a change uses the new one); the rest are never used."
+
+[behaviours.webhook-ordering]
+label = "assumed"
+reason = "each App's deliveries are sent one at a time in event order; GitHub documents no ordering."
+
+[behaviours.webhook-delivery-retention]
+label = "assumed"
+reason = "attempts are kept for the instance's life and every one can be redelivered; GitHub's docs mention a 3-day window for redelivery, not modelled."
+
+[behaviours.webhook-hook-id]
+label = "assumed"
+reason = "X-GitHub-Hook-ID is 400000000 plus the App ID; GitHub's App hook IDs are unrelated numbers."
+
+[behaviours.webhook-status-texts]
+label = "assumed"
+reason = "status texts other than OK (Invalid HTTP Response: <code>, timed out, Couldn't connect to server) are recalled from GitHub's UI; withheld in refuse-assumed mode. Status code 0 without a response, which status=failure matches."
+
+[behaviours.webhook-deliveries-cursor]
+label = "assumed"
+reason = "the list runs newest first and the cursor is v1_<delivery id>; a bad cursor or status is a 400 with a guessed message. Refused with a cursor in refuse-assumed mode."
+
+[behaviours.webhook-config-details]
+label = "assumed"
+reason = "GET /app/hook/config for an App without a webhook is a 404, and PATCH errors are 422 Validation Failed on the field."

@@ -9,6 +9,7 @@ use crate::fidelity::{Fidelity, Manifest};
 use crate::response::{OCTOEMU_DOCS, json};
 use crate::seed::{Seed, SeedError};
 use crate::tokens::Tokens;
+use crate::webhooks::Deliveries;
 use axum::http::StatusCode;
 use axum::response::Response;
 use chrono::{DateTime, Utc};
@@ -30,8 +31,10 @@ pub(crate) struct State {
     pub(crate) calls: CallLog,
     /// Installation tokens minted by this instance.
     pub(crate) tokens: Tokens,
-    /// Events GitHub would announce by webhook, for delivery (GE-04).
+    /// Events GitHub would announce by webhook.
     pub(crate) events: Outbox,
+    /// Their deliveries: queues and recorded attempts (`crate::webhooks`).
+    pub(crate) deliveries: Deliveries,
     /// Repository invitations sent through the API: (repository ID, when),
     /// for the 50-per-24-hours limit.
     pub(crate) invitations_sent: Vec<(u64, DateTime<Utc>)>,
@@ -59,6 +62,12 @@ pub(crate) struct Shared {
     pub(crate) port: u16,
     /// `http://host:port` as bound, for absolute URLs without a `Host`.
     pub(crate) root: String,
+    /// Wakes the delivery dispatcher (the outbox notifies it on every push).
+    pub(crate) wake: Arc<tokio::sync::Notify>,
+    /// Bumped whenever delivery work starts or finishes, for `wait`.
+    pub(crate) settled: tokio::sync::watch::Sender<u64>,
+    /// The HTTP client webhooks are delivered with (no redirects).
+    pub(crate) client: reqwest::Client,
 }
 
 impl Shared {
@@ -71,13 +80,20 @@ impl Shared {
     ) -> Self {
         let clock = Clock::new(world.settings.start_time);
         let strict = AtomicBool::new(world.settings.refuse_assumed);
+        let events = Outbox::default();
+        let wake = events.waker();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap_or_default();
         Self {
             state: Mutex::new(State {
                 world,
                 clock,
                 calls: CallLog::default(),
                 tokens: Tokens::default(),
-                events: Outbox::default(),
+                events,
+                deliveries: Deliveries::default(),
                 invitations_sent: Vec::new(),
                 last_invitation_id: 0,
             }),
@@ -88,6 +104,9 @@ impl Shared {
             sequence: AtomicU64::new(0),
             port,
             root,
+            wake,
+            settled: tokio::sync::watch::Sender::new(0),
+            client,
         }
     }
 
@@ -174,6 +193,7 @@ impl Shared {
             "tokens": state.tokens.records(),
             "calls": state.calls.calls().len(),
             "events": state.events.events().len(),
+            "deliveries": state.deliveries.attempts().count(),
         })
     }
 }

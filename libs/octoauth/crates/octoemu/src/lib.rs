@@ -2,13 +2,15 @@
 //! uses (REST, App and installation auth, the OAuth web flow, webhooks), for
 //! tests. Native only.
 //!
-//! **Repositories (GE-03).** The server, seed, virtual clock, admin API,
+//! **Webhooks (GE-04).** The server, seed, virtual clock, admin API,
 //! call log and fidelity manifest (GE-01); App JWTs, stateless installation
 //! tokens with scoping, revocation and suspension, per-route credential and
 //! permission checks, and the `/app…` and `/installation…` routes (GE-02);
 //! repositories, collaborators, permissions, repository invitations (expiry
 //! and the daily limit on the clock), users, avatars, the invitee's side
-//! through the admin API and the webhook outbox ([`events`]) (GE-03). Every
+//! through the admin API and the webhook outbox ([`events`]) (GE-03);
+//! webhook delivery, the deliveries API and installation events
+//! ([`webhooks`]) (GE-04). Every
 //! other API and web route answers
 //! `501 {"message": "octoemu: not implemented", "route": …}`, never 404. The
 //! plan is `docs/specs/github-emulator.md` in the ghinvite repository.
@@ -28,10 +30,11 @@
 //! One port, routed by path: the API at `/`, github.com's pages at
 //! `/login/oauth/*`, avatars at `/avatars/*`, and the admin API at
 //! `/__octoemu/` (`health`, `state`, `seed`, `clock`, `clock/advance`,
-//! `calls`, `fidelity`, `tokens/installation`, `installations/{id}…`,
-//! `events`, `act/{login}/…`). Every response carries `Date` from the virtual
-//! clock. The binary (`octoemu --port 0`) prints one JSON line with the base
-//! URLs once it listens.
+//! `calls`, `fidelity`, `tokens/installation`, `installations…`,
+//! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`). Every
+//! response carries `Date` from the virtual clock. The binary
+//! (`octoemu --port 0`) prints one JSON line with the base URLs once it
+//! listens.
 //!
 //! **Fidelity.** `fidelity.toml` labels every route and modelled behaviour
 //! `verified`, `documented` or `assumed` ([`fidelity`]). In refuse-assumed
@@ -54,6 +57,7 @@ mod collaboration;
 mod emulator;
 pub mod events;
 pub mod fidelity;
+mod hooks;
 mod jwt;
 mod paginate;
 mod repos;
@@ -64,6 +68,7 @@ mod state;
 mod tokens;
 mod users;
 mod views;
+pub mod webhooks;
 
 pub use emulator::{Builder, Emulator, StartError};
 

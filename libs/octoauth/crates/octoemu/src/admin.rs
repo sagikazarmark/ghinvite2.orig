@@ -2,6 +2,7 @@
 //! of GitHub's surface.
 
 use crate::clock::MAX_ADVANCE_SECONDS;
+use crate::collaboration::Actor;
 use crate::response::{OCTOEMU_DOCS, error, json};
 use crate::seed::Seed;
 use crate::state::SharedState;
@@ -12,7 +13,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, post, put};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -30,10 +31,27 @@ pub(crate) fn router() -> Router<SharedState> {
             "/__octoemu/tokens/installation",
             post(mint_installation_token),
         )
+        .route("/__octoemu/installations", post(install))
         .route("/__octoemu/installations/{id}", delete(uninstall))
         .route("/__octoemu/installations/{id}/suspend", post(suspend))
         .route("/__octoemu/installations/{id}/unsuspend", post(unsuspend))
+        .route(
+            "/__octoemu/installations/{id}/permissions",
+            post(accept_permissions),
+        )
+        .route(
+            "/__octoemu/installations/{id}/repositories",
+            post(set_repositories),
+        )
+        .route(
+            "/__octoemu/apps/{id}/webhook",
+            put(set_webhook).delete(remove_webhook),
+        )
         .route("/__octoemu/events", get(events))
+        .route("/__octoemu/deliveries", get(deliveries))
+        .route("/__octoemu/deliveries/dispatch", post(dispatch))
+        .route("/__octoemu/deliveries/wait", post(wait))
+        .route("/__octoemu/deliveries/mode", post(set_mode))
         .route(
             "/__octoemu/act/{login}/repository_invitations/{id}/{action}",
             post(act_on_invitation),
@@ -184,16 +202,316 @@ fn done(found: bool) -> Response {
     }
 }
 
-async fn suspend(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
-    done(crate::apps::set_suspended(&shared, id, None, true))
+/// An optional `{"sender": login}` body: who an installation change is
+/// attributed to (otherwise `events::default_sender`).
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct By {
+    #[serde(default)]
+    sender: Option<String>,
 }
 
-async fn unsuspend(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
-    done(crate::apps::set_suspended(&shared, id, None, false))
+/// The body (empty allowed) as `T`.
+fn optional_body<T: DeserializeOwned + Default>(bytes: &Bytes) -> Result<T, Box<Response>> {
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        Ok(T::default())
+    } else {
+        body(bytes)
+    }
 }
 
-async fn uninstall(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
-    done(crate::apps::uninstall(&shared, id))
+/// `sender` as an actor; a login that names no account is a 422.
+fn actor(shared: &SharedState, sender: Option<String>) -> Result<Option<Actor>, Box<Response>> {
+    let Some(login) = sender else {
+        return Ok(None);
+    };
+    let state = shared.state();
+    let known = state
+        .world
+        .users
+        .iter()
+        .map(|u| &u.login)
+        .chain(state.world.orgs.iter().map(|o| &o.login))
+        .find(|l| l.eq_ignore_ascii_case(&login))
+        .cloned();
+    match known {
+        Some(login) => Ok(Some(Actor::User(login))),
+        None => Err(Box::new(error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("octoemu: no account {login:?} to send the event"),
+            OCTOEMU_DOCS,
+        ))),
+    }
+}
+
+/// The parsed body's sender, or the response to send instead.
+macro_rules! sender_of {
+    ($shared:expr, $bytes:expr) => {
+        match optional_body::<By>(&$bytes).and_then(|by| actor(&$shared, by.sender)) {
+            Ok(actor) => actor,
+            Err(response) => return *response,
+        }
+    };
+}
+
+async fn suspend(State(shared): State<SharedState>, Path(id): Path<u64>, bytes: Bytes) -> Response {
+    let actor = sender_of!(shared, bytes);
+    done(crate::apps::set_suspended(&shared, id, None, true, actor))
+}
+
+async fn unsuspend(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    let actor = sender_of!(shared, bytes);
+    done(crate::apps::set_suspended(&shared, id, None, false, actor))
+}
+
+async fn uninstall(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    let actor = sender_of!(shared, bytes);
+    done(crate::apps::uninstall(&shared, id, actor))
+}
+
+fn rejected(errors: &crate::seed::SeedError) -> Response {
+    json(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &json!({
+            "message": "octoemu: seed rejected",
+            "errors": errors.problems(),
+            "documentation_url": OCTOEMU_DOCS,
+        }),
+    )
+}
+
+fn lifecycle(result: Result<(), crate::apps::LifecycleError>) -> Response {
+    match result {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(crate::apps::LifecycleError::NotFound) => no_installation(),
+        Err(crate::apps::LifecycleError::Invalid(errors)) => rejected(&errors),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Install {
+    installation: crate::seed::Installation,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+/// `POST /__octoemu/installations`: `{"installation": <seed installation>,
+/// "sender"?}` installs an App (`installation.created`); 201, or 422 with
+/// the seed problems.
+async fn install(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let Install {
+        installation,
+        sender,
+    } = match body(&bytes) {
+        Ok(install) => install,
+        Err(response) => return *response,
+    };
+    let actor = match actor(&shared, sender) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    match crate::apps::install(&shared, installation, actor) {
+        Ok(()) => StatusCode::CREATED.into_response(),
+        Err(errors) => rejected(&errors),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Permissions {
+    permissions: std::collections::BTreeMap<String, crate::seed::Access>,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+/// `POST /__octoemu/installations/{id}/permissions`: `{"permissions",
+/// "sender"?}`, the owner accepts new permissions
+/// (`installation.new_permissions_accepted`).
+async fn accept_permissions(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    let Permissions {
+        permissions,
+        sender,
+    } = match body(&bytes) {
+        Ok(permissions) => permissions,
+        Err(response) => return *response,
+    };
+    let actor = match actor(&shared, sender) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    lifecycle(crate::apps::accept_permissions(
+        &shared,
+        id,
+        permissions,
+        actor,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Repositories {
+    #[serde(default = "selected")]
+    repository_selection: crate::seed::RepositorySelection,
+    #[serde(default)]
+    repositories: Vec<String>,
+    #[serde(default)]
+    sender: Option<String>,
+}
+
+fn selected() -> crate::seed::RepositorySelection {
+    crate::seed::RepositorySelection::Selected
+}
+
+/// `POST /__octoemu/installations/{id}/repositories`:
+/// `{"repository_selection"? (default selected), "repositories", "sender"?}`
+/// replaces the selection (`installation_repositories.added` / `removed`).
+async fn set_repositories(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    let Repositories {
+        repository_selection,
+        repositories,
+        sender,
+    } = match body(&bytes) {
+        Ok(repositories) => repositories,
+        Err(response) => return *response,
+    };
+    let actor = match actor(&shared, sender) {
+        Ok(actor) => actor,
+        Err(response) => return *response,
+    };
+    lifecycle(crate::apps::set_repositories(
+        &shared,
+        id,
+        repository_selection,
+        repositories,
+        actor,
+    ))
+}
+
+fn no_app() -> Response {
+    error(StatusCode::NOT_FOUND, "octoemu: no such App", OCTOEMU_DOCS)
+}
+
+fn replace_webhook(
+    shared: &SharedState,
+    id: u64,
+    webhook: Option<crate::seed::Webhook>,
+) -> Response {
+    let mut state = shared.state();
+    match state.world.apps.iter_mut().find(|app| app.id == id) {
+        Some(app) => {
+            app.webhook = webhook;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => no_app(),
+    }
+}
+
+/// `PUT /__octoemu/apps/{id}/webhook`: a seed webhook (`{"url",
+/// "secrets", "active"}`) replaces the App's; the first secret signs from
+/// now on.
+async fn set_webhook(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    match body(&bytes) {
+        Ok(webhook) => replace_webhook(&shared, id, Some(webhook)),
+        Err(response) => *response,
+    }
+}
+
+/// `DELETE /__octoemu/apps/{id}/webhook`: no more deliveries for the App.
+async fn remove_webhook(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    replace_webhook(&shared, id, None)
+}
+
+/// `GET /__octoemu/deliveries`: every attempt, oldest first, with the
+/// queue's state.
+async fn deliveries(State(shared): State<SharedState>) -> Response {
+    let mut state = shared.state();
+    crate::webhooks::pump(&mut state);
+    let deliveries = &state.deliveries;
+    json(
+        StatusCode::OK,
+        &json!({
+            "deliveries": deliveries.attempts().collect::<Vec<_>>(),
+            "mode": deliveries.mode,
+            "held": deliveries.held(),
+            "pending": deliveries.pending(),
+        }),
+    )
+}
+
+/// `POST /__octoemu/deliveries/dispatch`: sends what manual mode holds.
+async fn dispatch(State(shared): State<SharedState>) -> Response {
+    let released = crate::webhooks::dispatch(&shared);
+    json(StatusCode::OK, &json!({"dispatched": released}))
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Wait {
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+/// `POST /__octoemu/deliveries/wait` (`{"timeout_ms"?}`, default 30 000):
+/// 200 once nothing is queued or being sent (held deliveries excepted),
+/// else 504 at the timeout.
+async fn wait(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let Wait { timeout_ms } = match optional_body(&bytes) {
+        Ok(wait) => wait,
+        Err(response) => return *response,
+    };
+    let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000));
+    if crate::webhooks::wait_idle(&shared, timeout).await {
+        let state = shared.state();
+        json(
+            StatusCode::OK,
+            &json!({"idle": true, "held": state.deliveries.held()}),
+        )
+    } else {
+        error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "octoemu: deliveries still in flight",
+            OCTOEMU_DOCS,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Mode {
+    mode: crate::webhooks::Dispatch,
+}
+
+/// `POST /__octoemu/deliveries/mode` (`{"mode": "auto"|"manual"}`);
+/// switching to auto sends what was held.
+async fn set_mode(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let Mode { mode } = match body(&bytes) {
+        Ok(mode) => mode,
+        Err(response) => return *response,
+    };
+    shared.state().deliveries.set_mode(mode);
+    shared.wake.notify_one();
+    json(StatusCode::OK, &json!({"mode": mode}))
 }
 
 async fn events(State(shared): State<SharedState>) -> Response {

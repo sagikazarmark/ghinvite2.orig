@@ -11,6 +11,26 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- Webhooks (GE-04): every outbox event is delivered to each target App's
+  active webhook (`X-GitHub-*` headers, `X-Hub-Signature-256` and the
+  legacy `X-Hub-Signature`, signed with the first secret; 10 s timeout, no
+  retry), in event order per App, with `auto` and `manual` dispatch
+  (`Builder::dispatch`, `Builder::webhook_timeout`); every attempt is
+  recorded (`webhooks::Delivery`, `Emulator::deliveries`).
+- Routes `GET`/`PATCH /app/hook/config`, `GET /app/hook/deliveries` (cursor
+  pages, `status` filter), `GET /app/hook/deliveries/{delivery_id}` and
+  `POST /app/hook/deliveries/{delivery_id}/attempts` (redelivery).
+- `installation` (`created`, `deleted`, `suspend`, `unsuspend`,
+  `new_permissions_accepted`) and `installation_repositories` (`added`,
+  `removed`) events from the admin API, the handle and the App's
+  suspension routes.
+- Admin API: `POST /installations`, `POST /installations/{id}/permissions`,
+  `POST /installations/{id}/repositories`, `PUT`/`DELETE
+  /apps/{id}/webhook`, `GET /deliveries`, `POST /deliveries/dispatch`,
+  `/wait` and `/mode`; the suspend, unsuspend and uninstall routes take an
+  optional `{"sender"}`. Handle methods `install`, `deliveries`,
+  `dispatch_deliveries`, `set_dispatch`, `set_webhook` and
+  `wait_for_deliveries`.
 - Repositories (GE-03): `GET /repos/{owner}/{repo}`; collaborators (`GET`
   list with `affiliation`, `PUT` with the 201/204 split, `DELETE`,
   `GET …/permission` with `permission` and `role_name`); repository
