@@ -13,12 +13,18 @@ fn wasm32_builds_do_not_link_wasm_streams() {
             "1",
             "--filter-platform",
             "wasm32-unknown-unknown",
-            "--offline",
+            // Not `--offline`: wasm32-only packages are absent from a cache
+            // that only built the host graph.
+            "--locked",
         ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("cargo runs");
-    assert!(output.status.success(), "cargo metadata failed");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let linked: Vec<&str> = metadata["resolve"]["nodes"]
         .as_array()
