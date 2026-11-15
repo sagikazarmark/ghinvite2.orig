@@ -174,8 +174,9 @@ blocked (see `tests/browser/README.md`).
 From the repository root, run the same targets as CI:
 
 ```bash
-bash scripts/test-restate.sh authoritative_admission   # also the default target
-bash scripts/test-restate.sh request_owner
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows \
+  --features integration --test authoritative_admission -- --test-threads=2
+bash scripts/test-restate.sh request_owner   # also the default target
 bash scripts/test-restate.sh canonical_link
 bash scripts/test-restate.sh retained_delivery
 bash scripts/test-restate.sh approved_delivery
@@ -218,15 +219,30 @@ Steps in `tests/worker/admission.mjs` that schedule request expiry therefore
 anchor their timeline at the real clock and let lazy expiry in
 `decide`/`request_status` do the work.
 
-**Run `authoritative_admission` against a native server, not compose.** CI does
-(`RESTATE_SERVER_BIN=… cargo test … --test authoritative_admission -- --test-threads=2`,
-about 190 s on 4 cores, 10/10 on 1.8.1). Through `scripts/test-restate.sh` (one
-shared compose server) it fails on this layout: 8/10 at the script's defaults
-(2026-11-14), with the injected-unavailability tests (`control_replay`,
-`abuse_window_…`) getting `200` where they expect `503` and the `load_ordering`
-tests timing out on "first admission occupies exclusive owner"; `--test-threads=2`
-under a 300 s bound still leaves 3 failures. The other targets CI runs through the
-script are unaffected by this.
+**`authoritative_admission` needs a Restate server per test.** Each of its tests
+deploys its own endpoint, with its own fault handles and in-memory storage, under the
+same service names. On one shared server that breaks two ways (reproduced on 1.8.1,
+2026-11-15):
+
+- Restate routes every new invocation of a service to the latest registered
+  deployment. Two tests started together (`abuse_window_…` and `control_replay`,
+  `--test-threads=2`) registered 32 ms apart, and `InvitationLink` then pointed at
+  the second; the first test's armed fault never ran, so it got `200` where it
+  expected `503`. The `load_ordering` timeouts are the same cross-routing.
+- Object state outlives the test. Every test onboards `AccountInstallation/repo:100`;
+  on a server where that key is already onboarded, `onboard` is a no-op and emits no
+  `InstallationProjection/repo:100/apply`, so the new test's empty storage never gets
+  the installation/account rows and its link/request projections retry forever.
+  `requester_message` therefore passes on a fresh server and fails the second time
+  on the same one, even alone (`--test-threads=1` over all ten: 9/10, 318 s).
+
+So the suite uses `Harness::start_owned()` (`ReusePolicy::Never`: it spawns
+`RESTATE_SERVER_BIN` per test and ignores `RESTATE_ADMIN_URL`/`RESTATE_INGRESS_URL`),
+and `scripts/test-restate.sh authoritative_admission` refuses with the native
+command. CI runs it natively: about 190 s on 4 cores at `--test-threads=2`, 10/10 on
+1.8.1. To get the binary, copy `/usr/local/bin/restate-server` out of the pinned
+image (see `.github/workflows/ci.yml`). The script's other targets are single-test
+files, one endpoint per runtime, so sharing is safe for them.
 
 The script runs the GitHub stub HTTP contract tests (for `retained_delivery`),
 compiles the selected integration-test file, creates a uniquely named

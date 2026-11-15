@@ -119,12 +119,13 @@ after commit. Focused deadline/concurrency and interruption cases remain in
 ## Native acceptance
 
 ```sh
-bash scripts/test-restate.sh authoritative_admission
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
 bash scripts/test-restate.sh request_owner
 bash scripts/test-restate.sh canonical_link
 ```
 
-Runners own isolated pinned Restate instances and fresh SQLite. See
+Runners own isolated pinned Restate instances and fresh SQLite; `authoritative_admission`
+spawns one native server per test (see [local testing](local-testing.md)). See
 [local testing](local-testing.md) for tools and bounds, and the
 [clean prelaunch replacement](invitation-ownership.md#clean-prelaunch-replacement)
 for setup. Automatic scheduling remains #86; rollout remains #61.

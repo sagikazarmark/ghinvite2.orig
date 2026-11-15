@@ -88,7 +88,7 @@ remains separate work. Assembled acceptance bypasses that fake.
 ```sh
 bash scripts/test-restate.sh canonical_link
 bash scripts/test-restate.sh request_owner
-bash scripts/test-restate.sh authoritative_admission
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
 bash scripts/test-restate.sh retained_delivery
 bash scripts/test-restate.sh approved_delivery
 bash scripts/test-restate.sh durable_projection

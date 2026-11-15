@@ -85,6 +85,27 @@ impl Harness {
     pub async fn start_with_github_router(router: axum::Router) -> Self {
         let launcher = launcher_or_skip(ReusePolicy::Allowed)
             .expect("P1 workflow verification requires RESTATE_SERVER_BIN or both Restate URLs");
+        Self::launch(launcher, router).await
+    }
+
+    /// [`Harness::start`] on a server this test spawns and owns, ignoring
+    /// `RESTATE_ADMIN_URL` / `RESTATE_INGRESS_URL`.
+    ///
+    /// For suites whose tests each deploy their own endpoint (own fault
+    /// handles, own in-memory storage) under the same service names. A shared
+    /// server routes every new invocation of a service to the latest
+    /// registered deployment, so concurrent tests drive each other's
+    /// endpoints, and retained object state (e.g. an already onboarded
+    /// account key) suppresses the effects a later test's fresh storage needs.
+    pub async fn start_owned() -> Self {
+        let launcher = launcher_or_skip(ReusePolicy::Never).expect(
+            "this suite needs a Restate server per test: set RESTATE_SERVER_BIN \
+             (RESTATE_ADMIN_URL / RESTATE_INGRESS_URL are ignored)",
+        );
+        Self::launch(launcher, ghinvite_github::stub::router()).await
+    }
+
+    async fn launch(launcher: restate_e2e_harness::Launcher, router: axum::Router) -> Self {
         let restate = launcher.launch(&SERVER).await;
         let client = reqwest::Client::builder()
             .no_proxy()

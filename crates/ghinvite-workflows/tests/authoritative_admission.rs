@@ -18,7 +18,9 @@ impl Runtime {
         Self::start_mode(false).await
     }
     async fn start_mode(cascade: bool) -> Self {
-        let harness = ghinvite_e2e::Harness::start().await;
+        // Each test binds its own faults and storage under the shared service
+        // names, so it cannot share a Restate server with another test.
+        let harness = ghinvite_e2e::Harness::start_owned().await;
         let ingress = harness.restate.ingress_url().to_owned();
         let admin = harness.restate.admin_url().to_owned();
         let client = harness.client.clone();

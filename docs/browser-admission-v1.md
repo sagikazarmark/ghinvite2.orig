@@ -110,7 +110,7 @@ The shared SQLx/D1 projection updates metadata using monotonic link revisions.
 ```sh
 cargo test -p ghinvite-web --test invitation_resolution
 cargo test -p ghinvite-web --test console_flow
-bash scripts/test-restate.sh authoritative_admission
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
 bash scripts/test-restate.sh canonical_link
 # From tests/browser:
 npx playwright test --config admission.config.mjs

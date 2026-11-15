@@ -2,10 +2,18 @@
 set -euo pipefail
 
 # Run from the repository root. GNU timeout is `gtimeout` on macOS (coreutils).
-target=${1:-authoritative_admission}
+target=${1:-request_owner}
 case "$target" in
-  request_owner|canonical_link|authoritative_admission|durable_projection|retained_delivery|approved_delivery|installation_availability|installation_audit_replay) ;;
-  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [request_owner|canonical_link|authoritative_admission|durable_projection|retained_delivery|approved_delivery|installation_availability|installation_audit_replay]' >&2; exit 2 ;;
+  request_owner|canonical_link|durable_projection|retained_delivery|approved_delivery|installation_availability|installation_audit_replay) ;;
+  authoritative_admission)
+    # Its tests each deploy their own endpoint (fault handles, storage) under
+    # the same service names; one shared server routes to whichever registered
+    # last, and retained state from earlier tests leaks into later ones.
+    printf '%s\n' 'authoritative_admission needs a Restate server per test, not this shared runtime. Run:' \
+      '  RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2' \
+      'See docs/local-testing.md.' >&2
+    exit 2 ;;
+  *) printf '%s\n' 'Usage: bash scripts/test-restate.sh [request_owner|canonical_link|durable_projection|retained_delivery|approved_delivery|installation_availability|installation_audit_replay]' >&2; exit 2 ;;
 esac
 export RESTATE_PROOF_CLEANUP_INTERVAL=1s
 deadline=$(command -v timeout || command -v gtimeout) || {

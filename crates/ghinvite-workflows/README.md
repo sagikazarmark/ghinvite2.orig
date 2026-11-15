@@ -37,7 +37,8 @@ functions directly, so none of them needs a Restate runtime.
 
 The durable timer path requires the real Restate runtime. From the repository
 root, run `bash scripts/test-restate.sh [target]` to register the current endpoint and
-run that target (default `authoritative_admission`) against it. This feature-gated
+run that target (default `request_owner`) against it. `authoritative_admission`
+needs a server per test and runs natively with `RESTATE_SERVER_BIN` instead. This feature-gated
 test is excluded from normal workspace tests; when enabled it fails if the
 runtime is absent. See [local testing](../../docs/local-testing.md) for the
 host/container topology, prerequisites, deadlines, and cleanup.
