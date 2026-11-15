@@ -1,6 +1,6 @@
 # Handoff: ghinvite consolidation and what comes next
 
-Written 2026-11-11 for the next agent; updated 2026-11-15 (§3.1–§3.3 closed, see the session log in §1). Everything referenced is in this
+Written 2026-11-11 for the next agent; updated 2026-11-15 (§3.1–§3.5 closed, see the session log in §1). Everything referenced is in this
 repository unless a path starts with `specs.orig/` (the private planning
 monorepo at `/home/laborant/ghinvite/specs.orig`, read-only context) or is a
 GitHub issue.
@@ -98,8 +98,14 @@ ghinvite: purposes in `ghinvite_core::purpose`; rollout skew via `kekring::Code:
 
 **Open follow-ups:** the external review of the three one-way formats (descriptor, blob, labels/AAD) is still outstanding and gates launch; real fuzzing with cargo-fuzz on nightly; crate/type naming is still a placeholder (labels would not change); push the branch and let CI run the new `kekring` job.
 
-### 3.5 Toolkit hardening (tier (a), `libs/octoauth`)
-`DynInstallationTokenProvider` (boxed futures) + opt-in `send-wrapper` feature so consumers stop re-writing `crates/ghinvite-github/src/apps.rs:123-171`; an isolate-scope `ProviderRegistry` keyed by `AppId` replacing `apps.rs:236-266`; optional `tracing` feature / event hook on `App` and `AppTokenProvider`; LICENSE-MIT/APACHE + CHANGELOG per crate; consider a committed `error-codes.txt` with a CI diff; relax `dependency_boundary.rs` to forbid `rotcred-*` only among ghinvite crates' direct deps (needed once octologin gains the L1 adapter).
+### 3.5 Toolkit hardening (tier (a), `libs/octoauth`) — done (2026-11-15, branch `octoauth-hardening` off `kekring-redesign`, not pushed)
+- **octotoken**: `DynInstallationTokenProvider` (boxed `TokenFuture`, blanket-implemented for every provider; `dyn` values implement `InstallationTokenProvider` again, so `with_token` takes them) with marker `DynSendSync`; opt-in `send-wrapper` feature (futures `Send` on wasm32 via `SendWrapper`); `ProviderRegistry` (`const fn new`, `provider(&App) -> AppTokenProvider`, keyed by App ID, first `App` kept).
+- **tracing** feature on octoauth (`installation_token_created`/`_failed`, `clock_skew_corrected`, `app_credential_signed`) and octotoken (`token_created`, `token_replaced`, `token_failed`; enables octoauth's): IDs, token IDs (digests), codes and seconds only; tests capture every event and check for secrets.
+- `LICENSE-MIT`/`LICENSE-APACHE` (anykms's texts; root copies, symlinked per crate), a `CHANGELOG.md` per crate; `error-codes.txt` (35 codes) diffed against the sources' `"gh:…"` literals by `crates/octoauth/tests/error_codes.rs` (also checks ER-01's grammar).
+- **ghinvite**: `TokenSource` is a re-export of `octotoken::DynInstallationTokenProvider` (adapter deleted); on wasm32 one `ProviderRegistry` per slot replaces the `thread_local` cache (same `(slot, App ID)` key). `dependency_boundary.rs` forbids `rotcred-*` only in the `ghinvite-*` and workspace manifests (key, `package =` rename, dotted table; unit-tested predicate), `gh-toolkit` still in the whole lockfile.
+- CI `toolkit` job (and `dagger check ghinvite:toolkit`): clippy and tests with `--all-features`, plus an `--all-features` wasm32 check.
+
+**Gates (this machine):** toolkit fmt, clippy `--all-features -D warnings` clean, `cargo test --workspace --all-features --locked` **156 passed** (151 with default features; was 143), wasm32 checks with and without `--all-features` pass; root fmt and clippy clean, `cargo test --workspace --locked` **1333 passed, 0 failed, 9 ignored** (+2 boundary tests), wasm32 checks of `ghinvite-web-worker` and `ghinvite-workflows-worker` pass. ghinvite does not enable the `tracing` feature yet.
 
 ### 3.6 Dependency pins to revisit
 - `restate-sdk`: when a release containing #141 ships (0.13.1+ or 0.14), drop the `[patch.crates-io]`; watch for #132's breaking `TerminalErrorExt` change when crossing that boundary.
@@ -118,13 +124,13 @@ Per the planning ledger (`specs.orig/plans/implementation-status.md`, stale and 
 ```bash
 export PATH="$HOME/.cargo/bin:/home/laborant/ghinvite/specs.orig/implementation/ghinvite/.devenv/profile/bin:$PATH"
 cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --locked                       # 1331 / 0 / 9 (since §3.4)
+cargo test --workspace --locked                       # 1333 / 0 / 9 (since §3.5)
 for p in ghinvite-web-worker ghinvite-workflows-worker ghinvite-ui ghinvite-island; do cargo check --locked -p $p --target wasm32-unknown-unknown; done
 cargo check --locked -p kekring --features js --target wasm32-unknown-unknown
 node libs/kekring/scripts/kekring-vectors.mjs --check
 ANYKMS_FAIL_ON_SKIP=1 cargo test --locked --manifest-path libs/kekring/conformance/Cargo.toml --target-dir target
 cargo check --locked --manifest-path libs/kekring/fuzz/Cargo.toml --target-dir target
-(cd libs/octoauth && cargo test --workspace --locked && cargo clippy --workspace --all-targets --locked -- -D warnings)
+(cd libs/octoauth && cargo test --workspace --all-features --locked && cargo clippy --workspace --all-targets --all-features --locked -- -D warnings)
 RESTATE_SERVER_BIN=/tmp/opencode/restate-server-1.8.1 cargo test --locked -p ghinvite-workflows --features integration --test authoritative_admission -- --test-threads=2
 bash scripts/test-restate.sh retained_delivery        # Docker
 (cd tests/worker && npm ci && npm run test:startup && npm run test:admission)
