@@ -1,0 +1,39 @@
+# Stable error codes returned by the toolkit's `code()` methods (octoauth,
+# octotoken, octologin), one per line, sorted. Apps may journal them, so they
+# are append-only: `crates/octoauth/tests/error_codes.rs` fails when the
+# sources and this list differ.
+gh:api:conflict
+gh:api:forbidden
+gh:api:not_found
+gh:api:rate_limited:primary
+gh:api:rate_limited:secondary
+gh:api:server
+gh:api:spammed
+gh:api:status
+gh:api:unauthorized
+gh:api:validation
+gh:app_credentials_rejected
+gh:config:invalid
+gh:decode
+gh:forbidden
+gh:installation_gone
+gh:installation_suspended
+gh:permissions_not_granted
+gh:provider:foreign_token
+gh:rate_limited:primary
+gh:rate_limited:secondary
+gh:redirected
+gh:signin:decode
+gh:signin:foreign_token
+gh:signin:incomplete
+gh:signin:invalid_input
+gh:signin:provider
+gh:signin:randomness
+gh:signin:redirected
+gh:signin:state_mismatch
+gh:signin:transient
+gh:signing
+gh:signing:failed
+gh:signing:invalid_time
+gh:transient
+gh:unexpected
