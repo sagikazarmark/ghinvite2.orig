@@ -81,6 +81,13 @@
 //!   `reqwest_middleware::ClientWithMiddleware` (plain clients are wrapped), and
 //!   `AppBuilder::middleware_client` accepts your own stack, e.g. with
 //!   `reqwest-tracing` for spans or a retry middleware.
+//! - `tracing`: `tracing` events at target `octoauth`, field `event`:
+//!   `installation_token_created` (`info`; `app_id`, `installation_id`,
+//!   `token_id`), `installation_token_failed` (`warn`; `app_id`,
+//!   `installation_id`, `code`: [`Error::code`]), `clock_skew_corrected`
+//!   (`warn`; `app_id`, `skew`, `correction` in seconds) and
+//!   `app_credential_signed` (`debug`; `app_id`, `correction`). Fields never
+//!   hold a token, a credential, key material or upstream text.
 //!
 //! # Secrets
 //!
@@ -97,6 +104,7 @@
 mod api;
 mod app;
 mod error;
+mod event;
 mod id;
 mod installation;
 mod permissions;

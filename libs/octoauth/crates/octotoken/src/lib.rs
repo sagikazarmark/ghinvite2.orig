@@ -48,6 +48,12 @@
 //!
 //! - `send-wrapper`: [`DynInstallationTokenProvider`]'s futures are `Send` on
 //!   wasm32 too (see there). No effect natively.
+//! - `tracing`: `tracing` events at target `octotoken`, field `event`:
+//!   `token_created` and `token_replaced` (`info`; `app_id`,
+//!   `installation_id`, `token_id`, and `rejected_token_id` for a
+//!   replacement) and `token_failed` (`warn`; `app_id`, `installation_id`,
+//!   `replacing`, `code`: [`TokenError::code`]). Also enables octoauth's
+//!   events. Fields never hold a token.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -55,6 +61,7 @@ mod app_provider;
 mod clock;
 mod dyn_provider;
 mod error;
+mod event;
 mod maybe_send;
 mod registry;
 mod with_token;

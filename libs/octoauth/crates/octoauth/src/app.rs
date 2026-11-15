@@ -208,6 +208,7 @@ impl App {
         if !(clock_caused && fixable) {
             return Err(rejected_with(skew));
         }
+        crate::event::clock_skew_corrected(self.inner.id, skew, correction);
         let credential = self.signed(Some((correction, &rejected)))?;
         let response = self
             .send(self.build(method, segments, json, &credential))
@@ -273,6 +274,7 @@ impl App {
             signed_at: now,
             correction,
         });
+        crate::event::credential_signed(inner.id, correction);
         Ok(credential)
     }
 

@@ -181,12 +181,15 @@ impl AppTokenProvider {
                 *cached = None;
             }
         }
-        let token = self
+        let result = self
             .shared
             .app
             .installation(installation)
             .access_token(scope.permissions())
-            .await?;
+            .await
+            .map_err(TokenError::from);
+        crate::event::created(self.shared.app.id(), installation, rejected, &result);
+        let token = result?;
         let deadline = deadline(&token, self.shared.clock.now());
         let mut cached = lock(&slot.cached);
         if cached
@@ -224,7 +227,10 @@ impl InstallationTokenProvider for AppTokenProvider {
 
     async fn replace(&self, rejected: &InstallationToken) -> Result<InstallationToken, TokenError> {
         if rejected.app_id() != self.shared.app.id() {
-            return Err(TokenError::ForeignToken);
+            let error = TokenError::ForeignToken;
+            let installation = rejected.installation_id();
+            crate::event::failed(self.shared.app.id(), installation, Some(rejected), &error);
+            return Err(error);
         }
         let installation = rejected.installation_id();
         let scope = rejected.scope();

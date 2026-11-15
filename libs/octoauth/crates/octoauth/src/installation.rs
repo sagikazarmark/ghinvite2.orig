@@ -64,6 +64,12 @@ impl Installation {
         &self,
         permissions: &Permissions,
     ) -> Result<InstallationToken, Error> {
+        let result = self.create_token(permissions).await;
+        crate::event::token_created(self.app.id(), self.id, &result);
+        result
+    }
+
+    async fn create_token(&self, permissions: &Permissions) -> Result<InstallationToken, Error> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             permissions: &'a Permissions,

@@ -1452,3 +1452,75 @@ mod middleware {
         );
     }
 }
+
+/// The `tracing` feature's events: names and fields, never a secret.
+#[cfg(feature = "tracing")]
+mod events {
+    use super::*;
+    use std::fmt::Write as _;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber, field};
+
+    thread_local! {
+        /// The events of this thread, while a test captures them.
+        static LINES: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Records octoauth's events as `LEVEL field=value…` into [`LINES`].
+    /// Global, because callsite interest is cached process-wide and other
+    /// tests run in parallel.
+    struct Capture;
+
+    impl Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            metadata.target() == "octoauth"
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            struct Line(String);
+            impl field::Visit for Line {
+                fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
+                    write!(self.0, " {}={value:?}", field.name()).unwrap();
+                }
+            }
+            let mut line = Line(event.metadata().level().to_string());
+            event.record(&mut line);
+            LINES.with_borrow_mut(|lines| lines.as_mut().map(|lines| lines.push(line.0)));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[tokio::test]
+    async fn token_creation_and_clock_correction_are_reported() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| tracing::subscriber::set_global_default(Capture).unwrap());
+        LINES.set(Some(Vec::new()));
+
+        let (app, _, _server, _) = skewed(660, created("ghs_secret")).await;
+        let token = create(&app).await.unwrap();
+        let server = serve(vec![("POST", CREATE, ResponseTemplate::new(404))]).await;
+        create(&app_for(&server.uri())).await.unwrap_err();
+
+        let lines = LINES.take().unwrap();
+        assert_eq!(
+            lines,
+            [
+                r#"DEBUG event="app_credential_signed" app_id=7 correction=0"#.to_owned(),
+                r#"WARN event="clock_skew_corrected" app_id=7 skew=660 correction=660"#.into(),
+                r#"DEBUG event="app_credential_signed" app_id=7 correction=660"#.into(),
+                format!(
+                    r#"INFO event="installation_token_created" app_id=7 installation_id=42 token_id={}"#,
+                    token.id()
+                ),
+                r#"DEBUG event="app_credential_signed" app_id=7 correction=0"#.into(),
+                r#"WARN event="installation_token_failed" app_id=7 installation_id=42 code="gh:installation_gone""#.into(),
+            ]
+        );
+        assert!(lines.iter().all(|line| !line.contains("ghs_")));
+    }
+}

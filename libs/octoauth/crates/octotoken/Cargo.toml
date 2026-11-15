@@ -13,10 +13,14 @@ default = []
 # `send_wrapper::SendWrapper` (for hosts such as Restate's `ctx.run` that
 # demand `Send`; a Worker isolate is single-threaded). No effect natively.
 send-wrapper = ["dep:send_wrapper"]
+# `tracing` events for token creation, replacement and failure (and
+# octoauth's).
+tracing = ["dep:tracing", "octoauth/tracing"]
 
 [dependencies]
 octoauth.workspace = true
 thiserror.workspace = true
+tracing = { workspace = true, optional = true }
 
 # Combining concurrent token creation is native-only: on Workers a request must never
 # wait on another request's I/O.

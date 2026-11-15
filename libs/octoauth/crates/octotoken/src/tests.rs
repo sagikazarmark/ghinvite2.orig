@@ -617,3 +617,118 @@ async fn registries_keep_one_provider_per_app_id() {
     );
 }
 
+/// The `tracing` feature's events: names and fields, never a secret.
+#[cfg(feature = "tracing")]
+mod events {
+    use super::*;
+    use std::fmt::Write as _;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber, field};
+
+    thread_local! {
+        /// The events of this thread, while a test captures them.
+        static LINES: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Records the toolkit's events (not the HTTP stack's) as `LEVEL target
+    /// field=value…` into [`LINES`]. Global, because callsite interest is
+    /// cached process-wide and other tests run in parallel.
+    struct Capture;
+
+    impl Subscriber for Capture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            ["octoauth", "octotoken"].contains(&metadata.target())
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            struct Line(String);
+            impl field::Visit for Line {
+                fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
+                    write!(self.0, " {}={value:?}", field.name()).unwrap();
+                }
+            }
+            let metadata = event.metadata();
+            let mut line = Line(format!("{} {}", metadata.level(), metadata.target()));
+            event.record(&mut line);
+            LINES.with_borrow_mut(|lines| lines.as_mut().map(|lines| lines.push(line.0)));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    /// Capture this thread's events from now on.
+    fn capture() {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| tracing::subscriber::set_global_default(Capture).unwrap());
+        LINES.set(Some(Vec::new()));
+    }
+
+    /// The events captured since the last call.
+    fn take() -> Vec<String> {
+        LINES.with_borrow_mut(|lines| std::mem::take(lines.as_mut().unwrap()))
+    }
+
+    fn names(lines: &[String]) -> Vec<&str> {
+        lines
+            .iter()
+            .map(|line| {
+                let start = line.find("event=\"").unwrap() + 7;
+                &line[start..start + line[start..].find('"').unwrap()]
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn creation_replacement_and_failure_are_reported() {
+        capture();
+        let f = Fixture::new().await;
+
+        let first = f.token().await.unwrap();
+        let created = take();
+        assert_eq!(
+            names(&created),
+            [
+                "app_credential_signed",
+                "installation_token_created",
+                "token_created"
+            ]
+        );
+        let id = first.id().to_string();
+        assert!(created[2].starts_with("INFO octotoken "), "{created:?}");
+        assert!(created[2].contains(" app_id=7 installation_id=42 "));
+        assert!(created[2].ends_with(&format!(" token_id={id}")));
+
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let second = f.provider.replace(&first).await.unwrap();
+        let replaced = take();
+        assert_eq!(
+            names(&replaced),
+            ["installation_token_created", "token_replaced"]
+        );
+        assert!(
+            replaced[1].ends_with(&format!(" token_id={} rejected_token_id={id}", second.id()))
+        );
+
+        *f.github.fail.lock().unwrap() = Some(ResponseTemplate::new(503));
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        f.provider.replace(&second).await.unwrap_err();
+        let failed = take();
+        assert_eq!(
+            names(&failed),
+            ["installation_token_failed", "token_failed"]
+        );
+        assert!(failed[0].starts_with("WARN octoauth "), "{failed:?}");
+        assert!(failed[1].ends_with(" replacing=true code=\"gh:transient\""));
+
+        let all = [created, replaced, failed].concat();
+        for line in &all {
+            for secret in ["ghs_", "eyJ", "PRIVATE KEY", "Bearer"] {
+                assert!(!line.contains(secret), "{line}");
+            }
+        }
+    }
+}
