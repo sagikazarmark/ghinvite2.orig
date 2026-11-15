@@ -1,5 +1,14 @@
 # Component spec: anykms production local keyring and typed encryption context
 
+> **Superseded (2026-11-15).** The design was revised on
+> [anykms#35](https://github.com/sagikazarmark/anykms/issues/35) (incubated outside anykms as
+> `libs/kekring`) and [anykms#33](https://github.com/sagikazarmark/anykms/issues/33) (canonical AAD
+> v1). The formats this spec defines (`akr1` descriptor, KCV, AES-256-GCM `akr1` wrapped key,
+> `anykms-keyring/v1/*` labels, `anykms-ctx/v1` context bytes) and its error table
+> (`UnknownKeyVersion` with a retry hint, KCV mismatch as `Configuration`) are **not** what the
+> code implements. The current contract is `libs/kekring/docs/kekring-format.md`; operator steps
+> are in `docs/deploy.md` ("Session keyring"). This file is kept as planning history.
+
 - **Status:** draft, revision 2, 2026-10-15. This is a Phase 4 component spec (`PLAN.md` §4). Revision 2 addresses the review objections listed in §13.
 - **Implements:** ADR 0001 (`decisions/0001-anykms-envelope-over-cryptbox.md`, `PLAN.md` §9 D1). It also covers the keyring parts of ADR 0003 and ADR 0004.
 - **Lives in:** the `sagikazarmark/anykms` repo (`PLAN.md` §9, "Work in existing repos"). It is a **prerequisite for P1** (planning sequence step 1).

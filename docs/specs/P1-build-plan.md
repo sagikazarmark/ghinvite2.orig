@@ -9,6 +9,12 @@
 | Baseline | The PoC `sagikazarmark/ghinvite2.orig` at `89a67fa`, extended in place (ADR 0006). Called **the P1 repo** below |
 | Evidence read for this plan | The PoC at `89a67fa` (`Cargo.toml`, `.github/workflows/ci.yml`, `crates/`, `scripts/`, `tests/`); `sagikazarmark/restate-toolkit` (`Cargo.toml`, `crates/restate-e2e-harness/README.md`, `crates/restate-ext/src/`); `sagikazarmark/restate-worker` (`Cargo.toml`, `README.md`); `sagikazarmark/anykms` (`crates/`); branches of `sagikazarmark/restate-sdk-rust`; releases of `restatedev/sdk-rust`. All read 2026-10-15 |
 
+> **Keyring note (2026-11-15).** References below to the `akr1` descriptor, KCVs, the
+> `UnknownKeyVersion` retry and the `raw-kek` check describe the superseded keyring spec
+> (`docs/specs/anykms-local-keyring.md`). The implemented keyring is kekring v1:
+> `libs/kekring/docs/kekring-format.md` (rollout skew is `DecryptFailed` with code
+> `VersionAboveHighWaterMark`; a wrong root is `KeyIdMismatch`, not a configuration error).
+
 **Conventions.**
 - Build task IDs are `BK-nn` (anykms keyring), `BH-nn` (platform hygiene), `B0-nn` / `B1-nn` / `B2-nn` (milestones M0 / M1 / M2) and `BX-nn` (L2 readiness). They are deliberately different from the spec's "M0 step N" numbering (spec §17, §18.2) and from the test-layer IDs `T1`–`T6` (spec §19) and keyring tests `T1`–`T15` (keyring §11). §2.3 maps tasks to spec steps.
 - `AC-…`, `REQ-…`, `PD-…` and `OQ-…` are spec IDs. `KR-…`, `CX-…` and "keyring OQ-n" are keyring-spec IDs. `R-…` are rows of `analysis/risks.md`. `SP-…`/`SD-…` are spikes in `analysis/spikes-pending.md`; **SP-19a** is the spike the spec added (spec §16.1).

@@ -8,12 +8,14 @@ date: 2026-09-12
 ## P1 amendment (2026-10-16)
 
 P1 spec §11.3 replaces the single XChaCha key and strict hex variable below with
-an immutable anykms keyring loaded from the `P1_KEYRING` akr1 descriptor. Sessions
-use envelope v1 with registered `session` context derived from the requested KV
+an immutable keyring loaded from the `P1_KEYRING` descriptor (kekring v1 since
+2026-11-15, `libs/kekring/docs/kekring-format.md`). Sessions use anykms envelope
+v1 with the canonical AAD of the `session` purpose derived from the requested KV
 ID. All session KV writes have TTL ≤30 days. Add/read/promote/retire generation
-rollouts preserve old sessions until expiry; an unknown newer version returns503
-without sign-out, removed/corrupt ciphertext invalidates, and configuration/KCV
-mismatch returns500 with an operator alert. Fingerprints are logged once/isolate
+rollouts preserve old sessions until expiry; a record under a version above the
+reader's high-water mark (code `VersionAboveHighWaterMark`) returns503 without
+sign-out, removed/corrupt ciphertext or another root's key id invalidates, and a
+malformed descriptor fails startup with500 and an operator alert. Fingerprints are logged once/isolate
 and exposed only to numeric `P1_OPERATOR_IDS` members at `/console/keyring`.
 The historical single-key/global-rotation text below is superseded only on these
 points; fixed lifetimes, independent revocations, nondestructive reads, and explicit

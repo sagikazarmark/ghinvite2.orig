@@ -4,22 +4,30 @@ Local implementation checkpoint, 2026-10-16. This records B0-19's implemented
 crypto/storage boundary; it does not declare the complete P1 sign-in milestone or
 production gate complete.
 
+Amended 2026-11-15: the keyring is now kekring v1 (anykms#35 redesign,
+[`libs/kekring/docs/kekring-format.md`](../libs/kekring/docs/kekring-format.md)).
+The contract below is updated; the 2026-10-16 measurements further down were taken
+on the earlier format and are kept as history.
+
 ## Implemented contract
 
-- `P1_KEYRING` is a required validated akr1 descriptor. Native boot parses once;
+- `P1_KEYRING` is a required validated kekring v1 descriptor. Native boot parses once;
   Workers publish one immutable `Arc<Keyring>` per isolate, only after successful
   parsing. Failures publish nothing and return startup 500 with a bounded operator
   alert. Successful loads log only the fingerprint.
-- Sessions use anykms envelope v1 and typed `Session` context from the requested
+- Sessions use anykms envelope v1 and canonical AAD v1 of the `Session` purpose from the requested
   session ID. Lifetime metadata remains inside authenticated plaintext; fixed
   30-day/30-minute deadlines and independent 31-day revocation markers are retained.
   Session KV writes use relative TTL bounded by 30 days.
-- Continuation payloads use typed `AttemptContinuation` context from the stored
+- Continuation payloads use the `AttemptContinuation` purpose from the stored
   scope/binding columns. Shared core SQL returns those columns for both SQLite and
   D1; the schema and first-writer-wins/conflict/Bound/release semantics are unchanged.
-- Unknown newer generations return 503 without clearing the browser cookie or
-  changing stored records. Removed/corrupt sessions confer no identity. Root/KCV
-  configuration mismatches return 500 and log an operator alert. Invitation recovery
+- Records wrapped under a generation above the deployment's high-water mark
+  (`DecryptFailed` with code `VersionAboveHighWaterMark`) return 503 without
+  clearing the browser cookie or changing stored records. Removed generations,
+  key ids of other root material (`KeyIdMismatch`) and corrupt sessions confer no
+  identity and log their code without an alert. A descriptor whose key ids do not
+  match its roots fails startup with 500 and an operator alert. Invitation recovery
   propagates crypto errors instead of treating retained input as absent.
 - `/console/keyring` exposes only the fingerprint, with private/no-store caching,
   to authenticated numeric GitHub IDs explicitly listed in `P1_OPERATOR_IDS`.
@@ -40,13 +48,13 @@ protection tests, 15 OAuth tests, and existing console/invitation recovery suite
 `cargo check -p ghinvite-web-worker --target wasm32-unknown-unknown`: passed.
 This check is compilation evidence, separate from actual Worker execution.
 
-`scripts/check-keyring-features.sh`: passed native and Wasm production dependency
-graphs; `raw-kek` is absent. The root monorepo P1 workflow runs this check.
-`Cargo.lock` no longer includes `chacha20poly1305`. Locked package metadata declares
+`scripts/check-keyring-features.sh` (removed with the kekring redesign, which has
+no `raw-kek` feature left to guard): passed native and Wasm production dependency
+graphs. `Cargo.lock` no longer includes `chacha20poly1305`. Locked package metadata declares
 no dependency MSRV above the P1 CI Rust 1.92 version; the local compiler is 1.98.
 
 Native cases cover overlap 1 → 2 + 1, writes under 2, retirement of 1, old-isolate 503,
-unchanged ciphertext/cookie on retry, KCV mismatch 500, copied session ID rejection,
+unchanged ciphertext/cookie on retry, wrong-root rejection, copied session ID rejection,
 continuation scope/binding substitution, retained logical binding under rotation,
 operator denial, and existing sign-out/storage failure behavior.
 

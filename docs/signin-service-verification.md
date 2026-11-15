@@ -54,9 +54,11 @@ SQLx commits before acknowledging success. Pending material is returned only
 after acknowledged deletion; uncertainty drops it, so an uncertain committed
 consume cannot exchange a token on retry. Concurrent callbacks have one winner;
 a replacement between decryption and deletion survives and the stale callback
-gets no pending state. Unknown key generations and configuration/KCV failures
-leave the row retryable; diagnostics carry only fixed kind and nonsecret keyring
-fingerprint, with a configuration operator alert. Corrupt/context-mismatched
+gets no pending state. Generations above the high-water mark
+(`VersionAboveHighWaterMark`) and other keyring failures (`KeyIdMismatch`,
+removed generations) leave the row retryable; diagnostics carry only the fixed
+kind, the kekring code and the nonsecret keyring fingerprint, and only a
+configuration-class failure raises the operator alert. Corrupt/context-mismatched
 records also remain until bounded expiry cleanup. Expired records can be removed
 only by exact comparison. Each replacement cleans at most 100 expired rows;
 there is one live record per session and no unbounded callback history.
@@ -111,15 +113,15 @@ Pending adapter verification (2026-10-16):
 - `node tests/worker/pending-signin.mjs` passes on the ordinary runtime-test Worker.
   Two independent Worker isolates share real D1; exactly one callback exchanges
   the code, reads the user and revokes the token. Actual D1 DELETE abort and lost
-  committed ACK prevent exchange; gen2-on-gen1 and wrong-root KCV retry preserve
+  committed ACK prevent exchange; gen2-on-gen1 and wrong-root key id retry preserve
   rows; a deterministic replacement between decrypt and CAS survives; fixed
   expiry and cross-session/purpose failures release no authority.
 - The Worker proof scans raw D1 rows and complete runtime logs (1 MiB cap, failing
   on overflow) for raw/base64/URL-encoded state, PKCE, OAuth-code, token and private
-  database-error markers. It verifies fixed configuration alerts/fingerprints.
+  database-error markers. It verifies the logged kekring codes and fingerprints.
   This is fixture-local evidence, not a deployed browser or platform-log claim.
-- The additive anykms test verifies exact context bytes, unchanged Session bytes
-  and bidirectional cross-purpose/cross-session rejection. Native web strict
+- `ghinvite-core`'s `purpose` tests pin the exact canonical AAD bytes of every
+  purpose, and bidirectional cross-purpose/cross-session rejection is checked. Native web strict
   Clippy and actual web-worker runtime-tests wasm strict Clippy pass.
 
 Evidence logs: `/tmp/platform-pending-signin-sqlite-final.log`,

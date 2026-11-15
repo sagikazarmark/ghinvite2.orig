@@ -7,6 +7,12 @@
 | Baseline | The ghinvite PoC, `sagikazarmark/ghinvite2.orig` at `89a67fa`, extended in place (ADR 0006, **Proposed**). The ADR 0006 restart-trigger assessment and the PoC delta are in §18 |
 | Inputs | `ideas/P1-github-invite.md`, `analysis/poc-ghinvite.md`, PoC `CONTEXT.md` / `PRODUCT.md` / `docs/adr/`, `research/github-invitations.md`, `research/github-app-tokens.md`, `research/link-security-and-gh-terms.md`, `research/restate.md`, `analysis/feasibility.md` §2.1, `analysis/risks.md` (P1 rows), `analysis/spikes-pending.md`, `decisions/0001`–`0010` |
 
+> **Keyring note (2026-11-15).** References below to the `akr1` descriptor, KCVs, the
+> `UnknownKeyVersion` retry and the `raw-kek` check describe the superseded keyring spec
+> (`docs/specs/anykms-local-keyring.md`). The implemented keyring is kekring v1:
+> `libs/kekring/docs/kekring-format.md` (rollout skew is `DecryptFailed` with code
+> `VersionAboveHighWaterMark`; a wrong root is `KeyIdMismatch`, not a configuration error).
+
 **Conventions.**
 - "PoC `path`" is a path in the PoC repo. Every other path is relative to this planning repo.
 - `R-…` IDs are rows in `analysis/risks.md`. `SP-…`/`SD-…` IDs are spikes in `analysis/spikes-pending.md`. `ADR NNNN` is `decisions/NNNN-*.md`. "PoC ADR NNNN" is PoC `docs/adr/NNNN-*.md`.

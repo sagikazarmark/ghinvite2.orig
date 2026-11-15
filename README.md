@@ -189,12 +189,12 @@ curl --fail-with-body --max-time 20 -X POST http://localhost:9070/deployments \
 
 **Terminal 3 — web**
 
-Generate a local session secret once in this shell (or keep it in your local
-secret manager). Both native and Worker deployments require exactly 64 hex
-characters; there is no built-in development key.
+Generate a local keyring descriptor once in this shell (or keep it in your local
+secret manager). Both native and Worker deployments require a valid kekring v1
+descriptor (`libs/kekring/README.md`); there is no built-in development key.
 
 ```bash
-export P1_KEYRING="$(akr new p1)"
+export P1_KEYRING="$(cargo run -q -p kekring --example descriptor -- new p1)"
 ```
 
 ```bash
@@ -271,7 +271,8 @@ crates/
 libs/
   octoauth/          — the GitHub App toolkit, its own Cargo workspace: `octoauth`/`octotoken`
                        (App JWT, installation tokens), `octologin` (sign-in), `octoscrub` (redaction)
-  kekring/           — `kekring`: provisioned local KEK + typed encryption context (stopgap, see its README)
+  kekring/           — `kekring`: provisioned versioned KEK (AES-256-KW) + canonical AAD for anykms envelopes;
+                       formats in docs/kekring-format.md, fuzz/ and conformance/ are workspaces of their own
 migrations/        — Shared SQL migration files (sqlx + wrangler D1)
 scripts/           — build-island.sh: dx bundle → dist/public (Static Assets)
 wrangler/          — wrangler.toml configs for both workers

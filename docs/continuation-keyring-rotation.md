@@ -11,7 +11,8 @@ It preserves every continuation row and adds one mutation epoch plus three trigg
 Do not reset that epoch, disable its triggers, or restore a database while a pass
 is active. Any such administrative action requires a fresh pass afterward.
 
-Follow Add and Promote with the keyring CLI and private descriptor files. Keep the
+Follow Add and Promote with the kekring `descriptor` tool and private descriptor
+files, checking each step with `descriptor check` ([deploy.md](deploy.md#session-keyring)). Keep the
 old generation readable. Establish all three KR-18a checks for every Worker: one newly created active
 version at 100% with no gradual rollout, 20 consecutive matching diagnostic
 fingerprints, then ten minutes without an older fingerprint in keyring load/error

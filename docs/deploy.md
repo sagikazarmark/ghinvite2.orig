@@ -172,8 +172,8 @@ In `wrangler/web.toml`, update `[vars]`:
 ### 6. Set secrets
 
 ```bash
-# Local keyring descriptor (install the companion anykms `akr` CLI):
-akr new p1 | wrangler secret put P1_KEYRING --config wrangler/web.toml
+# Keyring descriptor (kekring v1, see libs/kekring/README.md), piped straight into the secret:
+cargo run -q -p kekring --example descriptor -- new p1 | wrangler secret put P1_KEYRING --config wrangler/web.toml
 
 # Sign-in App (from its GitHub App settings; the client ID may be a var):
 wrangler secret put GH_SIGNIN_CLIENT_ID --config wrangler/web.toml
@@ -332,8 +332,9 @@ affirmative or blocked verdict before live producers are reopened.
 
 ### 1. Set up `.dev.vars`
 
-Use `.dev.vars` for local Worker secrets. Generate a descriptor with `akr new p1`
-and set `P1_KEYRING` to its complete `akr1;name=...` output; native development
+Use `.dev.vars` for local Worker secrets. Generate a descriptor with
+`cargo run -q -p kekring --example descriptor -- new p1` and set `P1_KEYRING` to
+its complete `kekring1;name=...` output; native development
 reads the same descriptor from the environment. Keep this file out of version
 control. Missing or malformed descriptors fail startup, with no default key or
 legacy hex-key fallback. The keyring is immutable for the Worker isolate's life.
@@ -429,32 +430,47 @@ Rotate `RESTATE_IDENTITY_KEYS` separately using Restate's endpoint-signing proce
 
 ### Session keyring
 
-Sessions and attempt continuations use the anykms v1 envelope under `P1_KEYRING`.
-The session cookie remains a bearer ID. Session AAD is `purpose=session` plus the
-requested KV session ID; continuation AAD is `purpose=attempt-continuation` plus
-the stored plaintext scope and binding columns. No legacy XChaCha decoder exists.
-Existing PoC sessions and continuations require fresh sign-in/recovery.
+Sessions and attempt continuations use the anykms v1 envelope under `P1_KEYRING`,
+a kekring v1 descriptor: versioned AES-256-KW key-encryption keys derived from
+provisioned roots, with a high-water mark (format and security notes:
+[`libs/kekring/docs/kekring-format.md`](../libs/kekring/docs/kekring-format.md)).
+The session cookie remains a bearer ID. Session AAD is the anykms canonical AAD v1
+of purpose `session` with the requested KV session ID; continuation AAD is purpose
+`attempt-continuation` with the stored plaintext scope and binding columns
+(`ghinvite_core::purpose`). No legacy decoder exists: envelopes from earlier
+pre-launch builds do not decrypt, so existing sessions and continuations require
+fresh sign-in/recovery (reset local databases).
 
-Routine rotation must use the companion `akr` CLI and private descriptor files:
-add a generation, deploy it as readable with the old current version, verify every
-serving deployment, then promote it in a second rollout. Keep old generations
+Routine rotation uses `cargo run -q -p kekring --example descriptor` (below:
+`descriptor`) on private descriptor files, never command arguments:
+`descriptor add < old > next` adds generation `hwm+1`; deploy it as readable with
+the old current version, verify every serving deployment, then
+`descriptor promote N < next > promoted` and roll that out. Keep old generations
 readable until every consumer completion gate is satisfied after the **last
 possible old-generation write**, including pinned older deployments. For session
 KV, wait at least 30 days plus one hour after the verified Promote boundary;
 every session write sets a TTL no longer than 30 days. For D1 continuations,
 perform the [verified CAS sweep and separate full scan](continuation-keyring-rotation.md)
 with zero old and zero bad rows, including retained expired rows. Session lifetime
-or opportunistic cleanup does not substitute for that full scan. Run `akr diff
-OLD NEW` before deployment. Never reuse a version or change its root bytes.
-Never lower the current version or roll back across Promote.
+or opportunistic cleanup does not substitute for that full scan. Only then
+`descriptor remove N` the old generation; the high-water mark keeps its version
+retired. Run `descriptor check OLD NEW` (`kekring::validate_transition`) before
+every deployment: it refuses a reused version, changed root bytes, a lowered
+high-water mark, removal of the current generation, backwards promotion and
+promotion in the step that adds a generation. Never roll back across Promote.
 
-`GET /console/keyring` returns only the keyring fingerprint for signed-in numeric
-IDs in `P1_OPERATOR_IDS`; all others receive 404. Compare it with the fingerprint
-logged once per isolate and the expected `akr show` result, including every
-serving version, before promoting or retiring generations. A newer unknown
-version returns HTTP 503 and preserves the cookie and record. A removed generation
-or corrupted ciphertext confers no session authority. A KCV/configuration mismatch
-returns HTTP 500 and logs an operator alert, never an anonymous-session fallback.
+`GET /console/keyring` returns only the keyring fingerprint (name, current,
+high-water mark, versions, digest over their key ids) for signed-in numeric IDs in
+`P1_OPERATOR_IDS`; all others receive 404. Compare it with the fingerprint logged
+once per isolate and the expected `descriptor show` result, including every
+serving version, before promoting or retiring generations. A record wrapped under
+a version above this deployment's high-water mark (error code
+`VersionAboveHighWaterMark`: the deployment lags a rollout) returns HTTP 503 and
+preserves the cookie and record. A removed generation (`GenerationRemoved`), a key
+id from other root material (`KeyIdMismatch`) or corrupted ciphertext confers no
+session authority; these are logged with their code but raise no alert, because
+anyone who can edit a stored row could trigger them. A descriptor whose key ids do
+not match its roots, or that is malformed, fails startup with HTTP 500.
 
 For suspected key compromise, close ingress, drain old deployments/in-flight
 requests, replace all exposed generations with a fresh higher generation, and
@@ -643,9 +659,12 @@ record drops it. Sign-ins in flight across the deploy fail once ("no sign-in in
 progress") and restart. Tokens legacy OAuth issued were never revoked by
 ghinvite; revoke them in the legacy OAuth App's settings if wanted. See
 [ADR0002](adr/0002-session-protection-and-invalidation.md).
-An unknown pending-state key generation returns503 without consuming the exact
-pending row or exchanging its code, allowing the same callback to retry after
-keyring rollout. KCV/configuration failures return500 with the fixed operator alert.
+A pending-state record wrapped under a generation above this deployment's
+high-water mark returns 503 without consuming the exact pending row or exchanging
+its code, allowing the same callback to retry after keyring rollout. Other keyring
+failures (another root, a removed generation, tampering) also leave the row in
+place and are logged with their kekring code; only a configuration-class failure
+raises the fixed operator alert.
 
 
 Deployment decision, 2026-10-16: the installed-app registry needs both an actual
@@ -680,11 +699,11 @@ Bulk issuance is a separate opt-in: `GH_BULK_ENABLED=true` enables the Console
 capability and standard BulkInviteBatch owner; absent or exact `false` disables
 it, and every other value fails startup. Configure both web and workflow
 runtimes consistently. Repository-only bulk needs no mailbox key. Bulk with
-`GH_ORG_DELIVERY_ENABLED=true` also requires `P1_EMAIL_KEYRING`, an `akr1`
+`GH_ORG_DELIVERY_ENABLED=true` also requires `P1_EMAIL_KEYRING`, a kekring v1
 descriptor whose ring name is exactly `p1-email`. Use the same current and
 retained generations in web and workflow deployments, with the normal staged
-key rollout; do not reuse the `p1` web-session descriptor. Its key check value and
-shape are verified before startup, and diagnostics name only the field. The
+key rollout; do not reuse the `p1` web-session descriptor. Its grammar and key
+ids are verified before startup, and diagnostics name only the field. The
 web stages encrypted, fully bound mailbox records; only the email delivery's
 fenced write run can load an activated record. Both owners use the real shared
 invitation budget. These local capability flags do not establish SP-07/SP-18

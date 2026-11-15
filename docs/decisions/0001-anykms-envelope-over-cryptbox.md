@@ -67,6 +67,7 @@ These record refinements made by later specs. They don't change the decision.
 - **Session encryption is now decided:** P1 sessions and attempt continuations move to the envelope (P1 spec PD-G, §11.3; purposes `session` and `attempt-continuation`). The "Not decided here" bullet above is closed.
 - **Reading note resolved:** `PLAN.md` §8 now says the decorator uses the anykms envelope.
 - **Binding types:** the keyring spec covers Worker secrets and Secrets Store values; `secret_key` (non-extractable `CryptoKey`) bindings are out of v1 (keyring §5.4, OQ-3, pending SD-07).
+- **Keyring location and format (2026-11-15):** anykms recorded software key custody as a non-goal, so the production local keyring incubates outside anykms as a third-party backend (`libs/kekring`, [anykms#35](https://github.com/sagikazarmark/anykms/issues/35) as amended): AES-256-KW instead of AES-GCM wrapping, `kid` instead of a KCV, a high-water mark, stable unwrap codes, and anykms canonical AAD v1 instead of the keyring spec's context bytes. Formats: `libs/kekring/docs/kekring-format.md`. Decision 2's "built in the anykms repo" is superseded on that point; the envelope choice stands.
 
 ## Evidence
 
