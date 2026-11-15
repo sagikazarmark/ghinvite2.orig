@@ -1,0 +1,24 @@
+# The anykms conformance suite against kekring. A workspace of its own (with its own lockfile):
+# the suite depends on anykms-recipes' RSA backend (aws-lc-rs), which must stay out of the
+# application's dependency graph and its feature unification. Run from the repository root:
+#
+#   ANYKMS_FAIL_ON_SKIP=1 cargo test --locked --manifest-path libs/kekring/conformance/Cargo.toml --target-dir target
+[package]
+name = "kekring-conformance"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+members = ["."]
+
+[dev-dependencies]
+kekring = { path = ".." }
+anykms-core = "0.3"
+anykms-conformance = { version = "0.3", features = ["fixture-helpers"] }
+getrandom = "0.4"
+
+[[test]]
+name = "conformance"
+path = "tests/conformance.rs"
+harness = false

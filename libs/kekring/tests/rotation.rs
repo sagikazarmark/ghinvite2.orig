@@ -1,7 +1,11 @@
 use anykms_core::{Ciphertext, ErrorKind};
-use anykms_recipes::envelope::Padding;
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
+use kekring::{Aad, Keyring, Purpose};
+
+struct Session;
+impl Purpose for Session {
+    const NAME: &'static str = "session";
+    const FIELDS: &'static [&'static str] = &["session_id"];
+}
 
 /// A one-row table with compare-and-swap semantics, standing in for the SQL
 /// `UPDATE ... WHERE id=? AND ciphertext=?` a migration sweep issues. (The fork's
@@ -29,31 +33,27 @@ impl Row {
 fn sweep_cas_completion_and_compromise() {
     let old = Keyring::builder("rotation")
         .generation(1, [1; 32])
-        .unwrap()
         .current(1)
-        .unwrap()
         .build()
         .unwrap();
     let promoted = Keyring::builder("rotation")
         .generation(1, [1; 32])
-        .unwrap()
         .generation(2, [2; 32])
-        .unwrap()
         .current(2)
-        .unwrap()
         .build()
         .unwrap();
     let final_ring = Keyring::builder("rotation")
         .generation(2, [2; 32])
-        .unwrap()
         .current(2)
-        .unwrap()
         .build()
         .unwrap();
-    let a = old.context_envelope(Padding::NONE).unwrap();
-    let b = promoted.context_envelope(Padding::NONE).unwrap();
-    let final_env = final_ring.context_envelope(Padding::NONE).unwrap();
-    let c = EncryptionContext::try_from(&purposes::Session { session_id: "row1" }).unwrap();
+    let a = old.envelope();
+    let b = promoted.envelope();
+    let final_env = final_ring.envelope();
+    let c = Aad::builder::<Session>()
+        .str("session_id", "row1")
+        .build()
+        .unwrap();
     let ct = a.encrypt_sync(b"initial", &c).unwrap();
     assert!(!a.needs_rewrap(&ct).unwrap());
     assert!(b.needs_rewrap(&ct).unwrap());
@@ -62,6 +62,8 @@ fn sweep_cas_completion_and_compromise() {
     let moved = b
         .rewrap_current_sync(&Ciphertext::from(read.clone()))
         .unwrap();
+    // Deterministic: a second sweep over an already moved row writes nothing new.
+    assert_eq!(b.rewrap_current_sync(&moved).unwrap(), moved);
     let concurrent = b.encrypt_sync(b"concurrent", &c).unwrap();
     row.set(concurrent.as_bytes());
     let changed = row.compare_and_swap(moved.as_bytes(), &read);
@@ -75,16 +77,10 @@ fn sweep_cas_completion_and_compromise() {
     );
     let other = Keyring::builder("foreign")
         .generation(1, [3; 32])
-        .unwrap()
         .current(1)
-        .unwrap()
         .build()
         .unwrap();
-    let foreign = other
-        .context_envelope(Padding::NONE)
-        .unwrap()
-        .encrypt_sync(b"x", &c)
-        .unwrap();
+    let foreign = other.envelope().encrypt_sync(b"x", &c).unwrap();
     assert_eq!(
         b.needs_rewrap(&foreign).unwrap_err().kind(),
         ErrorKind::DecryptFailed

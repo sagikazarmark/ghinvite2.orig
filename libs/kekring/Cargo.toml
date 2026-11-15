@@ -5,25 +5,27 @@ edition = "2024"
 rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 publish = false
-description = "Provisioned local KEK for anykms envelopes (stopgap; see README)"
+description = "Provisioned versioned KEK (AES-256-KW) for anykms envelopes, with canonical AAD"
 
 [features]
 default = []
-global = []
+# `Keyring::from_env` / `from_file` (native only; Workers read their secret binding themselves).
 std-loaders = []
-# wasm32-unknown-unknown on a JS host (Cloudflare Workers): JS clocks in
-# anykms-core and `crypto.getRandomValues()` for nonces.
+# wasm32-unknown-unknown on a JS host (Cloudflare Workers, browsers): JS clocks in anykms-core
+# and `crypto.getRandomValues()` for data keys and nonces.
 js = ["anykms-core/js", "anykms-recipes/js", "getrandom/wasm_js"]
 
 [dependencies]
-anykms-core = { version = "0.2", default-features = false }
-anykms-recipes = { version = "0.2", default-features = false, features = ["envelope"] }
-aes-gcm = { version = "0.11", features = ["zeroize"] }
+anykms-core = { version = "0.3", default-features = false }
+# Without default features: the default `rsa-aws-lc-rs` does not build for wasm32.
+anykms-recipes = { version = "0.3", default-features = false, features = ["envelope"] }
+aes-kw = { version = "0.3", default-features = false, features = ["zeroize"] }
 hkdf = "0.13"
 sha2 = { version = "0.11", features = ["zeroize"] }
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 subtle = "2.6"
-getrandom = { version = "0.4", features = ["sys_rng"] }
+# Only so `js` can select the wasm backend for the recipes' random draws.
+getrandom = "0.4"
 base64 = "0.23"
 
 [dev-dependencies]

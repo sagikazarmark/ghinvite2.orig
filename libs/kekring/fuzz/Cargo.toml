@@ -1,0 +1,42 @@
+# cargo-fuzz targets for kekring's two parsers. A workspace of its own (with its own lockfile), as
+# cargo-fuzz expects. With nightly and cargo-fuzz:
+#
+#   cargo +nightly fuzz run descriptor   # from libs/kekring
+#   cargo +nightly fuzz run blob
+#
+# On stable they only build, which CI checks:
+#
+#   cargo check --locked --manifest-path libs/kekring/fuzz/Cargo.toml --target-dir target
+[package]
+name = "kekring-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kekring = { path = ".." }
+anykms-core = "0.3"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "descriptor"
+path = "fuzz_targets/descriptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blob"
+path = "fuzz_targets/blob.rs"
+test = false
+doc = false
+bench = false

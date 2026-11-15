@@ -1,12 +1,11 @@
-use anykms_core::Ciphertext;
-use anykms_recipes::envelope::Padding;
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
-use kekring::{ContextEnvelopeSync, Keyring};
-use kekring::{EncryptionContext, purposes};
-use std::fmt::Write;
+//! The committed vectors: `kekring-v1.json`, re-derived by `scripts/kekring-vectors.mjs` with
+//! Node/OpenSSL (`node scripts/kekring-vectors.mjs --check`), and upstream anykms's
+//! `aad_v1.json`, copied unchanged.
+use anykms_core::{Ciphertext, ErrorKind, KeyWrap};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use kekring::{Aad, Code, Keyring, Padding, Purpose, aad::Rule};
+use serde_json::Value;
+
 fn bytes(s: &str) -> Vec<u8> {
     s.as_bytes()
         .as_chunks::<2>()
@@ -15,208 +14,300 @@ fn bytes(s: &str) -> Vec<u8> {
         .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
         .collect()
 }
+
+fn load(json: &str) -> Value {
+    serde_json::from_str(json).unwrap()
+}
+
+fn kekring() -> Value {
+    load(include_str!("vectors/kekring-v1.json"))
+}
+
+fn str_of(v: &Value) -> &str {
+    v.as_str().unwrap()
+}
+
+/// Polls once: every kekring future completes on its first poll.
+fn ready<T>(f: impl std::future::Future<Output = T>) -> T {
+    let mut f = std::pin::pin!(f);
+    match f
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(v) => v,
+        std::task::Poll::Pending => panic!("pending"),
+    }
+}
+
+fn kind(e: &anykms_core::Error) -> String {
+    format!("{:?}", e.kind())
+}
+
 #[test]
-fn independent_openssl_vectors() {
-    let cases: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("vectors/keyring-v1.json")).unwrap();
-    for v in cases {
-        let mut builder = Keyring::builder(v["name"].as_str().unwrap());
-        for (i, root) in v["root_hex"].as_array().unwrap().iter().enumerate() {
-            let version = u32::try_from(i).unwrap() + 1;
-            if v["present_versions"]
-                .as_array()
-                .is_none_or(|vs| vs.iter().any(|n| n.as_u64() == Some(u64::from(version))))
-            {
-                builder = builder
-                    .generation(version, bytes(root.as_str().unwrap()).try_into().unwrap())
-                    .unwrap();
-            }
-        }
-        let ring = builder
-            .current(u32::try_from(v["current"].as_u64().unwrap()).unwrap())
-            .unwrap()
+fn derivation_through_kid_and_wrap() {
+    let v = kekring();
+    for d in v["derivation"].as_array().unwrap() {
+        let version = u32::try_from(d["version"].as_u64().unwrap()).unwrap();
+        let root: [u8; 32] = bytes(str_of(&d["root_hex"])).try_into().unwrap();
+        let ring = Keyring::builder(str_of(&d["name"]))
+            .generation(version, root)
+            .current(version)
             .build()
             .unwrap();
         assert_eq!(
-            ring.fingerprint().digest,
-            v["fingerprint"].as_str().unwrap()
+            ring.kid(version).unwrap().to_vec(),
+            bytes(str_of(&d["kid_hex"]))
         );
-        if let Some(kcv) = ring.key_check_value(1) {
-            assert_eq!(kcv.to_vec(), bytes(v["kcv_hex"].as_str().unwrap()));
-        }
-        let context = EncryptionContext::try_from(&purposes::Session {
-            session_id: v["context"]["session_id"].as_str().unwrap(),
-        })
-        .unwrap();
-        let e = ring.context_envelope(Padding::NONE).unwrap();
-        let ct = Ciphertext::from(
-            STANDARD
-                .decode(v["envelope_b64"].as_str().unwrap())
-                .unwrap(),
+    }
+    // The KEK itself is never exposed: a wrap under it, reproduced by AES-KW in Node, pins it.
+    for w in v["wraps"].as_array().unwrap() {
+        let ring = Keyring::parse(str_of(&w["descriptor"])).unwrap();
+        let blob = ready(ring.kek().wrap_key(&bytes(str_of(&w["dek_hex"])))).unwrap();
+        assert_eq!(
+            blob.as_bytes(),
+            bytes(str_of(&w["blob_hex"])),
+            "{}",
+            w["id"]
         );
-        let result = e.decrypt_sync(&ct, &context);
-        if let Some(kind) = v["expected_error"].as_str() {
-            assert_eq!(
-                format!("{:?}", result.unwrap_err().kind()),
-                kind,
-                "{}",
-                v["id"]
-            );
-            if v["id"] == "swapped-dek" {
-                assert_eq!(
-                    format!("{:?}", e.rewrap_current_sync(&ct).unwrap_err().kind()),
-                    kind
-                );
-            }
-        } else {
-            assert_eq!(
-                &*result.unwrap(),
-                &bytes(v["plaintext_hex"].as_str().unwrap())
-            );
-            assert_eq!(context.as_aad(), bytes(v["aad_hex"].as_str().unwrap()));
-        }
+        assert_eq!(blob.as_bytes().len(), kekring::BLOB_LEN);
+        assert_eq!(
+            *ready(ring.kek().unwrap_key(&blob)).unwrap(),
+            bytes(str_of(&w["dek_hex"]))
+        );
     }
 }
+
 #[test]
-fn parser_rules_and_hygiene() {
-    let v: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("vectors/keyring-v1.json")).unwrap();
-    let root = bytes(v[0]["root_hex"][0].as_str().unwrap());
-    let key = URL_SAFE_NO_PAD.encode(root);
-    let descriptor = format!(
-        "akr1;name=vectors;current=1;k1={key}.{}",
-        v[0]["kcv_hex"].as_str().unwrap()
-    );
-    let ring = Keyring::parse(&descriptor).unwrap();
-    assert_eq!(
-        Keyring::parse(&(descriptor.clone() + "\n"))
+fn valid_descriptors() {
+    for d in kekring()["descriptors"].as_array().unwrap() {
+        let text = str_of(&d["descriptor"]);
+        let ring = Keyring::parse(text).unwrap();
+        let fp = ring.fingerprint();
+        assert_eq!(fp.name, str_of(&d["name"]));
+        assert_eq!(u64::from(fp.current), d["current"].as_u64().unwrap());
+        assert_eq!(u64::from(fp.high_water_mark), d["hwm"].as_u64().unwrap());
+        let versions: Vec<u64> = d["versions"]
+            .as_array()
             .unwrap()
-            .fingerprint(),
-        ring.fingerprint()
-    );
-    let mut fields: Vec<_> = descriptor.split(';').collect();
-    fields[1..].reverse();
-    assert_eq!(
-        Keyring::parse(&fields.join(";")).unwrap().fingerprint(),
-        ring.fingerprint()
-    );
-    let invalids = [
-        descriptor.replace("akr1", "akr2"),
-        descriptor.replace("vectors", "other"),
-        descriptor.replace("current=1", "current=01"),
-        descriptor.replace("current=1", "current=0"),
-        descriptor.replace("current=1", "current=2"),
-        descriptor.replace("k1=", "k2="),
-        descriptor.replace("k1=", "k01="),
-        descriptor.replace("name=vectors", "name=Vectors"),
-        descriptor.replace(&key, &format!("{key}=")),
-        descriptor.clone() + ";current=1",
-        descriptor.clone() + ";extra=x",
-        descriptor.clone() + "\n\n",
-        descriptor.clone() + " ",
-        descriptor.replace(&key, &"A".repeat(43)),
-        descriptor.replace("k1=", "k0="),
-    ];
-    for bad in invalids {
-        let e = Keyring::parse(&bad).unwrap_err();
-        assert_eq!(e.kind(), anykms_core::ErrorKind::Configuration);
+            .iter()
+            .map(|v| v.as_u64().unwrap())
+            .collect();
+        assert_eq!(
+            fp.versions
+                .iter()
+                .map(|v| u64::from(*v))
+                .collect::<Vec<_>>(),
+            versions
+        );
+        for (v, kid) in versions.iter().zip(d["kids_hex"].as_array().unwrap()) {
+            let v = u32::try_from(*v).unwrap();
+            assert_eq!(ring.kid(v).unwrap().to_vec(), bytes(str_of(kid)));
+        }
+        assert_eq!(fp.digest, str_of(&d["fingerprint"]), "{}", d["id"]);
+        // The grammar is canonical: one text per keyring, less the optional newline.
+        assert_eq!(
+            &*ring.to_descriptor(),
+            text.strip_suffix('\n').unwrap_or(text)
+        );
+    }
+}
+
+#[test]
+fn invalid_descriptors() {
+    let v = kekring();
+    let invalid = v["invalid_descriptors"].as_array().unwrap();
+    let mut rules = std::collections::BTreeSet::new();
+    for d in invalid {
+        let e = Keyring::parse(str_of(&d["descriptor"])).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::Configuration, "{}", d["id"]);
+        assert_eq!(
+            e.detail().and_then(|d| d.code()),
+            d["rule"].as_str(),
+            "{}",
+            d["id"]
+        );
         assert!(std::error::Error::source(&e).is_none());
-        for s in key.as_bytes().windows(8) {
-            assert!(!format!("{e:?} {e}").contains(std::str::from_utf8(s).unwrap()));
+        // No root material in any rendering: not even 8 characters of a base64url root.
+        let rendered = format!("{e:?} {e}");
+        for root in str_of(&d["descriptor"])
+            .split(';')
+            .filter_map(|f| f.split_once('=').map(|(_, v)| v))
+            .filter_map(|v| v.split_once('.').map(|(r, _)| r))
+        {
+            for w in root.as_bytes().windows(8) {
+                assert!(
+                    !rendered.contains(std::str::from_utf8(w).unwrap()),
+                    "{}",
+                    d["id"]
+                );
+            }
+        }
+        rules.insert(str_of(&d["rule"]).to_owned());
+    }
+    // Every parser rule has at least one negative vector.
+    for rule in [
+        "length",
+        "charset",
+        "prefix",
+        "field_order",
+        "name",
+        "version",
+        "generation_order",
+        "generation_count",
+        "root",
+        "kid",
+        "kid_mismatch",
+        "zero_root",
+        "duplicate_root",
+        "current",
+        "high_water_mark",
+    ] {
+        assert!(rules.contains(&format!("descriptor:{rule}")), "{rule}");
+    }
+}
+
+#[test]
+fn unwrap_reader_rules() {
+    for u in kekring()["unwrap"].as_array().unwrap() {
+        let ring = Keyring::parse(str_of(&u["descriptor"])).unwrap();
+        let result = ready(
+            ring.kek()
+                .unwrap_key(&Ciphertext::from(bytes(str_of(&u["blob_hex"])))),
+        );
+        match u.get("dek_hex") {
+            Some(dek) => assert_eq!(*result.unwrap(), bytes(str_of(dek))),
+            None => {
+                let e = result.unwrap_err();
+                assert_eq!(kind(&e), str_of(&u["kind"]), "{}", u["id"]);
+                assert_eq!(
+                    Code::of(&e).map(Code::as_str),
+                    u["code"].as_str(),
+                    "{}",
+                    u["id"]
+                );
+                assert_eq!(e.retry_hint(), None);
+                assert_eq!(e.resource(), Some("kekring:vectors"));
+            }
         }
     }
 }
 
-kekring::purpose! { pub struct ContextVector<'a> = "vectors-context" { left:&'a str, right:&'a str } }
-#[test]
-fn context_golden_ambiguity_pairs() {
-    let cases: Vec<serde_json::Value> =
-        serde_json::from_str(include_str!("vectors/context-v1.json")).unwrap();
-    let mut seen = std::collections::BTreeSet::new();
-    for v in cases {
-        let ctx = EncryptionContext::try_from(&ContextVector {
-            left: v["context"]["left"].as_str().unwrap(),
-            right: v["context"]["right"].as_str().unwrap(),
-        })
-        .unwrap();
-        assert_eq!(ctx.as_aad(), bytes(v["aad_hex"].as_str().unwrap()));
-        assert!(seen.insert(ctx.as_aad().to_vec()));
-    }
+struct VectorSession;
+impl Purpose for VectorSession {
+    const NAME: &'static str = "vector-session";
+    const FIELDS: &'static [&'static str] = &["session_id"];
 }
-fn descriptor(name: &str, current: u32, roots: &[(u32, [u8; 32])]) -> String {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let mut out = format!("akr1;name={name};current={current}");
-    for (v, root) in roots {
-        let mut info = b"anykms-keyring/v1/kcv".to_vec();
-        info.push(u8::try_from(name.len()).unwrap());
-        info.extend(name.as_bytes());
-        info.extend(v.to_be_bytes());
-        let mut kcv = [0; 8];
-        Hkdf::<Sha256>::new(Some(b"anykms-keyring/v1/salt"), root)
-            .expand(&info, &mut kcv)
-            .unwrap();
-        write!(out, ";k{v}={}.", URL_SAFE_NO_PAD.encode(root)).unwrap();
-        for b in kcv {
-            write!(out, "{b:02x}").unwrap();
+struct VectorEmail;
+impl Purpose for VectorEmail {
+    const NAME: &'static str = "vector-email";
+    const FIELDS: &'static [&'static str] = &["row", "batch_id", "account_id"];
+    const PADDING: Padding = Padding::block(256);
+}
+
+fn typed_aad<P: Purpose>(fields: &Value) -> Aad {
+    let mut b = Aad::builder::<P>();
+    for f in fields.as_array().unwrap() {
+        let key = P::FIELDS.iter().find(|k| **k == str_of(&f[0])).unwrap();
+        b = b.str(key, str_of(&f[1]));
+    }
+    b.build().unwrap()
+}
+
+#[test]
+fn envelopes() {
+    for e in kekring()["envelopes"].as_array().unwrap() {
+        let ring = Keyring::parse(str_of(&e["descriptor"])).unwrap();
+        let envelope = ring.envelope();
+        let (written, read) = match str_of(&e["purpose"]) {
+            "vector-session" => (
+                typed_aad::<VectorSession>(&e["fields"]),
+                typed_aad::<VectorSession>(&e["read_fields"]),
+            ),
+            "vector-email" => (
+                typed_aad::<VectorEmail>(&e["fields"]),
+                typed_aad::<VectorEmail>(&e["read_fields"]),
+            ),
+            other => panic!("{other}"),
+        };
+        assert_eq!(
+            written.as_bytes(),
+            bytes(str_of(&e["aad_hex"])),
+            "{}",
+            e["id"]
+        );
+        let ct = Ciphertext::from(STANDARD.decode(str_of(&e["envelope_b64"])).unwrap());
+        let plaintext = bytes(str_of(&e["plaintext_hex"]));
+        match e["expect"].as_object() {
+            None => {
+                assert_eq!(*envelope.decrypt_sync(&ct, &read).unwrap(), plaintext);
+                // Rewrapping a current envelope is byte-identical (AES-KW is deterministic).
+                assert_eq!(envelope.rewrap_current_sync(&ct).unwrap(), ct);
+                // And this implementation writes what Node wrote, for the same plaintext length.
+                let ours = envelope.encrypt_sync(&plaintext, &written).unwrap();
+                assert_eq!(ours.as_bytes().len(), ct.as_bytes().len());
+            }
+            Some(expect) => {
+                let err = envelope.decrypt_sync(&ct, &read).unwrap_err();
+                assert_eq!(kind(&err), str_of(&expect["kind"]), "{}", e["id"]);
+                assert_eq!(
+                    Code::of(&err).map(Code::as_str),
+                    expect["code"].as_str(),
+                    "{}",
+                    e["id"]
+                );
+                assert_eq!(err.retry_hint(), None);
+            }
+        }
+        if e["id"] == "swapped_slot" {
+            let err = envelope.rewrap_current_sync(&ct).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DecryptFailed);
         }
     }
-    out
 }
+
 #[test]
-fn complete_descriptor_boundaries() {
-    let valid = descriptor("boundary", 1, &[(1, [1; 32])]);
-    assert!(Keyring::parse(&valid).is_ok());
-    let roots: Vec<_> = (1..=64)
-        .map(|v| (v, [u8::try_from(v).unwrap(); 32]))
-        .collect();
-    assert_eq!(
-        Keyring::parse(&descriptor("boundary", 64, &roots))
+fn upstream_aad_v1() {
+    let v = load(include_str!("vectors/aad_v1.json"));
+    assert_eq!(bytes(str_of(&v["label"])), kekring::aad::LABEL);
+    let pairs = |f: &Value| -> Vec<(String, String)> {
+        f.as_array()
             .unwrap()
-            .versions()
-            .len(),
-        64
-    );
-    let mut too_many = roots.clone();
-    too_many.push((65, [65; 32]));
-    let invalids = vec![
-        descriptor("boundary", 1, &[]),
-        descriptor("boundary", 1, &[(1, [0; 32])]),
-        descriptor("boundary", 1, &[(1, [1; 32]), (2, [1; 32])]),
-        descriptor("boundary", 1, &[(1, [1; 32]), (1, [2; 32])]),
-        descriptor("boundary", 65, &too_many),
-        descriptor("", 1, &[(1, [1; 32])]),
-        descriptor("-a", 1, &[(1, [1; 32])]),
-        descriptor(&"a".repeat(65), 1, &[(1, [1; 32])]),
-        valid.replace("current=1", "current=4294967296"),
-        valid.replace("current=1", "current=+1"),
-        valid.replace("name=boundary", "name=boundary;name=boundary"),
-        valid.clone() + ";",
-        valid.clone() + "\r\n",
-        valid.replace(";current=1", ""),
-        valid.replace(";name=boundary", ""),
-        valid.replace("k1=", "key1="),
-        valid.replace("k1=", "k4294967296="),
-        valid.replace("AQEBA", "!QEBA"),
-        valid.replace("AQEBA", "AQ EB"),
-    ];
-    for value in invalids {
-        let e = Keyring::parse(&value).unwrap_err();
-        assert_eq!(e.kind(), anykms_core::ErrorKind::Configuration);
-        assert!(std::error::Error::source(&e).is_none());
+            .iter()
+            .map(|p| (str_of(&p[0]).to_owned(), str_of(&p[1]).to_owned()))
+            .collect()
+    };
+    for case in v["valid"].as_array().unwrap() {
+        let fields = pairs(&case["fields"]);
+        let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (&**k, &**v)).collect();
+        let encoded = Aad::encode(str_of(&case["purpose"]), &refs).unwrap();
+        assert_eq!(encoded, bytes(str_of(&case["aad"])), "{}", case["name"]);
+        let mut reversed = refs.clone();
+        reversed.reverse();
+        assert_eq!(
+            Aad::encode(str_of(&case["purpose"]), &reversed).unwrap(),
+            encoded
+        );
     }
-    assert!(Keyring::parse(&descriptor(&"a".repeat(64), 1, &[(1, [1; 32])])).is_ok());
-    let base = Keyring::parse(&valid).unwrap().fingerprint();
-    assert_ne!(
-        base,
-        Keyring::parse(&descriptor("other", 1, &[(1, [1; 32])]))
-            .unwrap()
-            .fingerprint()
-    );
-    assert_ne!(
-        base,
-        Keyring::parse(&descriptor("boundary", 1, &[(1, [2; 32])]))
-            .unwrap()
-            .fingerprint()
-    );
+    for case in v["invalid"].as_array().unwrap() {
+        let fields = pairs(&case["fields"]);
+        let refs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (&**k, &**v)).collect();
+        let e = Aad::encode(str_of(&case["purpose"]), &refs).unwrap_err();
+        assert_eq!(e.kind(), ErrorKind::InvalidArgument);
+        assert_eq!(
+            Rule::of(&e).map(Rule::as_str),
+            case["rule"].as_str(),
+            "{}",
+            case["name"]
+        );
+        // An error never carries a value.
+        for (_, value) in &fields {
+            if value.len() >= 4 {
+                assert!(
+                    !format!("{e:?} {e}").contains(value.as_str()),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
 }
