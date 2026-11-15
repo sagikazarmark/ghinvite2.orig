@@ -20,7 +20,8 @@ test-stub = ["dep:axum"]
 chrono.workspace = true
 http = "1"
 octoauth.workspace = true
-octotoken.workspace = true
+# `send-wrapper`: `TokenSource` futures are `Send` on wasm32 too (PD-3).
+octotoken = { workspace = true, features = ["send-wrapper"] }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,8 +1,8 @@
 //! ghinvite's GitHub Apps and their tokens: [`GithubApps`].
 //!
 //! [`GithubApps`] holds, per installed app ([`AppSlot`]), the `octoauth::App`,
-//! a [`TokenSource`] (an `octotoken` provider behind an object-safe trait)
-//! and the [`RestEnv`] its calls go through. [`GithubApps::app`] hands out a
+//! a [`TokenSource`] (an `octotoken` provider behind octotoken's object-safe
+//! `DynInstallationTokenProvider`) and the [`RestEnv`] its calls go through. [`GithubApps::app`] hands out a
 //! [`GithubApp`], whose operations replace gh-toolkit's `Broker`:
 //!
 //! | Operation | Replaces | Behaviour |
@@ -24,9 +24,10 @@
 //!   per app. Build the context once at startup and keep it (e.g. in
 //!   `AppState`): clones share the providers and their caches, and concurrent
 //!   misses for one token wait for one creation.
-//! - **On Workers (wasm32)** the providers live in an isolate-scope static
-//!   keyed by slot and App ID (PD-4), so a context built per request still
-//!   reuses the warm isolate's tokens (and app credential). The first
+//! - **On Workers (wasm32)** the providers live in isolate-scope statics, one
+//!   `octotoken::ProviderRegistry` per slot, keyed by App ID (PD-4), so a
+//!   context built per request still reuses the warm isolate's tokens (and
+//!   app credential). The first
 //!   `octoauth::App` built for a key in an isolate is the one used; a new
 //!   deployment (new code or secrets) runs in new isolates. Concurrent misses
 //!   may create duplicate tokens: requests never wait on each other.
@@ -36,8 +37,9 @@
 //! Every future here is `Send` on both targets, so it can run inside Restate's
 //! `ctx.run`. On wasm32 the provider's and octoauth's futures hold JavaScript
 //! promises and are not `Send`; they are wrapped in
-//! `send_wrapper::SendWrapper` (PD-3). A Worker isolate is single-threaded,
-//! so the wrapper's thread check never fires.
+//! `send_wrapper::SendWrapper` (PD-3): by octotoken's `send-wrapper` feature
+//! for [`TokenSource`], here for octoauth's. A Worker isolate is
+//! single-threaded, so the wrapper's thread check never fires.
 //!
 //! # Token errors
 //!
@@ -68,7 +70,7 @@ use crate::{
     rest::{Rest, RestEnv},
 };
 use octoauth::{InstallationToken, TokenScope};
-use octotoken::{InstallationTokenProvider, TokenError};
+use octotoken::TokenError;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,41 +124,13 @@ pub struct InstalledApp {
 
 /// An object-safe source of installation tokens, so [`GithubApps`] can hold
 /// any `octotoken::InstallationTokenProvider` (tests inject a fake, e.g.
-/// `mocks::FixedTokens`). Implemented for every provider that is
-/// `Send + Sync`; implement the provider trait rather than this one.
+/// `mocks::FixedTokens`): octotoken's `DynInstallationTokenProvider`,
+/// implemented for every provider. Implement the provider trait rather than
+/// this one.
 ///
-/// The futures are `Send` on every target (wrapped in `SendWrapper` on wasm32).
-pub trait TokenSource: Send + Sync {
-    /// `InstallationTokenProvider::token`.
-    fn token<'a>(
-        &'a self,
-        installation: InstallationId,
-        scope: &'a TokenScope,
-    ) -> BoxFut<'a, Result<InstallationToken, TokenError>>;
-
-    /// `InstallationTokenProvider::replace`.
-    fn replace<'a>(
-        &'a self,
-        rejected: &'a InstallationToken,
-    ) -> BoxFut<'a, Result<InstallationToken, TokenError>>;
-}
-
-impl<P: InstallationTokenProvider + Send + Sync> TokenSource for P {
-    fn token<'a>(
-        &'a self,
-        installation: InstallationId,
-        scope: &'a TokenScope,
-    ) -> BoxFut<'a, Result<InstallationToken, TokenError>> {
-        send_box(InstallationTokenProvider::token(self, installation, scope))
-    }
-
-    fn replace<'a>(
-        &'a self,
-        rejected: &'a InstallationToken,
-    ) -> BoxFut<'a, Result<InstallationToken, TokenError>> {
-        send_box(InstallationTokenProvider::replace(self, rejected))
-    }
-}
+/// The futures are `Send` on every target (wrapped in `SendWrapper` on wasm32
+/// by octotoken's `send-wrapper` feature).
+pub use octotoken::DynInstallationTokenProvider as TokenSource;
 
 /// Box a future as `Send`: natively it is; on wasm32 through `SendWrapper`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -245,22 +219,16 @@ fn provider(installed: InstalledApp) -> (InstalledApp, Arc<dyn TokenSource>) {
 /// credential is reused too.
 #[cfg(target_arch = "wasm32")]
 fn provider(mut installed: InstalledApp) -> (InstalledApp, Arc<dyn TokenSource>) {
-    use std::cell::RefCell;
-    thread_local! {
-        // A Worker isolate has one thread: this is isolate scope.
-        static PROVIDERS: RefCell<Vec<(AppSlot, AppId, octotoken::AppTokenProvider)>> =
-            const { RefCell::new(Vec::new()) };
-    }
-    let key = (installed.slot, installed.app.id());
-    let provider = PROVIDERS.with(|providers| {
-        let mut providers = providers.borrow_mut();
-        if let Some((_, _, provider)) = providers.iter().find(|(s, a, _)| (*s, *a) == key) {
-            return provider.clone();
-        }
-        let provider = octotoken::AppTokenProvider::new(installed.app.clone());
-        providers.push((key.0, key.1, provider.clone()));
-        provider
-    });
+    use octotoken::ProviderRegistry;
+    // A Worker isolate has one thread: this is isolate scope. A registry per
+    // slot keys the providers by slot and App ID.
+    static REPO: ProviderRegistry = ProviderRegistry::new();
+    static ORG: ProviderRegistry = ProviderRegistry::new();
+    let registry = match installed.slot {
+        AppSlot::Repo => &REPO,
+        AppSlot::Org => &ORG,
+    };
+    let provider = registry.provider(&installed.app);
     installed.app = provider.app().clone();
     (installed, Arc::new(provider))
 }
