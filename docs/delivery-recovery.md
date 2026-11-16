@@ -208,7 +208,7 @@ remaining invitation, and read-only unknown replay with missing projections/fenc
 delivery, applied PUT/result loss, read-only recovery and convergence on Worker/D1.
 
 `bash scripts/test-restate.sh retained_delivery` exercises real Restate 1.8.1,
-native SQLx, and the GitHub HTTP stub: stable plans, 201/204/422, ambiguous 502,
+native SQLx, and the GitHub emulator (octoemu, compat world and fault rules): stable plans, 201/204/422, ambiguous 502,
 HTTP-result and SQL-acknowledgement loss, Sent/declined replay, changed payload,
 partial fan-out and send-checkpoint interruption, blocked scope restoration,
 numeric identity/rename validation, throttled delivery resuming on its own
