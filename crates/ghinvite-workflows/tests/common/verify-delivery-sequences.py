@@ -112,7 +112,11 @@ def check_case(report, kind):
             assert budget['content_used_hour'] >= sum(r in {'created','no_content','timeout'} for r in consumed)
             assert budget['limit_counts']['spammed'] == consumed.count('spammed')
             assert budget['limit_counts']['rate_limited'] == consumed.count('primary_limit') + consumed.count('secondary_limit')
-        if previous is not None and step['action'] == 'absent' and previous['snapshot']['create']['outcome']['kind'] == 'outcome_unknown':
+        # A workflow read that listed the invitation during this step is
+        # positive presence and may resolve it; absence alone never may.
+        if (previous is not None and step['action'] == 'absent'
+                and previous['snapshot']['create']['outcome']['kind'] == 'outcome_unknown'
+                and previous['counters'].get('presence_listings') == sample['counters'].get('presence_listings')):
             assert owner['create']['outcome']['kind'] == 'outcome_unknown', 'absence resolved unknown create'
         previous = sample
     final = steps[-1]['sample']

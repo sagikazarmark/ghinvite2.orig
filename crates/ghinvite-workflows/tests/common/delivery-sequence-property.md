@@ -18,7 +18,11 @@ Each seed generates26 owner operations: create/replay/status calls, bounded
 real-deadline waits and complete presence/absence/acceptance/expiry observations.
 The suffix deliberately submits conflicting settlement evidence and replays the
 original create command. Positive presence may resolve an uncertain create;
-absence must not. Selected201 cases additionally lose three actual run
+absence must not. A scheduled recheck wake runs its own read-only recovery
+against the synthetic invitation list, which still shows the invitation a
+previous present/expired step put there. The repository oracle therefore fails
+an absent step that resolves an unknown create only when no invitation listing
+during that step showed the invitation (`presence_listings`). Selected201 cases additionally lose three actual run
 acknowledgements. Team5 is included in organization commands and independently
 checked for immutable create/settlement and physical PUT counters.
 

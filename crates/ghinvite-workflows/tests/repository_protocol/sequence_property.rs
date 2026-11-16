@@ -100,7 +100,7 @@ async fn status(runtime: &Runtime, command: &CreateCommand) -> DeliverySnapshot 
 }
 async fn sample(runtime: &Runtime, command: &CreateCommand) -> Sample {
     let snapshot = status(runtime, command).await;
-    let (consumed, calls) = {
+    let (consumed, calls, presence_listings) = {
         let s = runtime.github.scenario.lock().unwrap();
         (
             s.sequence_consumed.clone(),
@@ -108,6 +108,7 @@ async fn sample(runtime: &Runtime, command: &CreateCommand) -> Sample {
                 .iter()
                 .map(|t| json!({"method":t.method,"path":t.path,"body":t.body,"fence":t.fence}))
                 .collect::<Vec<_>>(),
+            s.presence_listings,
         )
     };
     let mutations = runtime
@@ -128,7 +129,7 @@ async fn sample(runtime: &Runtime, command: &CreateCommand) -> Sample {
         mutations: BTreeMap::from([("root".into(), mutations)]),
         consumed,
         audit_settlements: generated::settlement_facts(runtime.storage.as_ref()).await,
-        counters: json!({"fence":runtime.fence(command).await,"calls":calls,"lost_run_acknowledgements":runtime.faults.http_result_losses.load(Ordering::SeqCst),"projection":runtime.storage.get_delivery(&command.delivery_key()).await.unwrap()}),
+        counters: json!({"fence":runtime.fence(command).await,"calls":calls,"presence_listings":presence_listings,"lost_run_acknowledgements":runtime.faults.http_result_losses.load(Ordering::SeqCst),"projection":runtime.storage.get_delivery(&command.delivery_key()).await.unwrap()}),
     }
 }
 async fn observe(runtime: &Runtime, command: &CreateCommand, action: Action) {
@@ -244,10 +245,14 @@ async fn ac_dlv_3_generated_repository_response_sequences_preserve_one_create_an
             }
             let sample = sample(&runtime, &command).await;
             evidence.after(index, action, &sample, vec![]);
+            // A pending recheck wake runs its own read-only recovery, so an
+            // unknown create may resolve during this step from a listing that
+            // still showed the invitation. Only absence must never resolve it.
             if action == Action::Absent
-                && previous
-                    .as_ref()
-                    .is_some_and(|s| s.snapshot["create"]["outcome"]["kind"] == "outcome_unknown")
+                && previous.as_ref().is_some_and(|s| {
+                    s.snapshot["create"]["outcome"]["kind"] == "outcome_unknown"
+                        && s.counters["presence_listings"] == sample.counters["presence_listings"]
+                })
                 && sample.snapshot["create"]["outcome"]["kind"] != "outcome_unknown"
             {
                 evidence.fail("absence resolved unknown create");

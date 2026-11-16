@@ -65,6 +65,9 @@ struct Scenario {
     created_at: Option<chrono::DateTime<Utc>>,
     invitation_clock_override: Option<Value>,
     accept_after_metadata: bool,
+    // Invitation listings that showed the pending invitation. Generated cases
+    // use it to tell a workflow read that observed presence from absence.
+    presence_listings: usize,
     trace: Vec<Trace>,
 }
 impl Default for Scenario {
@@ -86,6 +89,7 @@ impl Default for Scenario {
             created_at: None,
             invitation_clock_override: None,
             accept_after_metadata: false,
+            presence_listings: 0,
             trace: vec![],
         }
     }
@@ -169,6 +173,7 @@ async fn github(State(state): State<Arc<Github>>, request: axum::extract::Reques
             },
             ("GET", "/repos/acme/api/invitations") => {
                 let response=state.pending.map(|p| { let mut i=invitation(p); if let Some(at)=state.created_at { i["created_at"]=json!(at); } json!([i]) }).unwrap_or(json!([]));
+                if state.pending.is_some() { state.presence_listings += 1; }
                 if state.pending.is_some() && state.accept_after_metadata { state.pending=None; state.roles=vec!["write"]; }
                 Json(response).into_response()
             },
