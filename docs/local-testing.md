@@ -176,6 +176,12 @@ From the repository root, run the same targets as CI:
 ```bash
 RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows \
   --features integration --test authoritative_admission -- --test-threads=2
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows \
+  --features integration --test repository_protocol -- --test-threads=2
+RESTATE_SERVER_BIN=/path/to/restate-server cargo test --locked -p ghinvite-workflows \
+  --features integration --test installation_authority --test invite_budget \
+  --test journal_steps --test link_capability --test request_control \
+  --test settlement_evidence --test sweep_schedule
 bash scripts/test-restate.sh request_owner   # also the default target
 bash scripts/test-restate.sh canonical_link
 bash scripts/test-restate.sh retained_delivery

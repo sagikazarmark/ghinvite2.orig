@@ -451,7 +451,7 @@ jobs:
   integration:
     name: Restate approval and delivery gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
@@ -478,6 +478,14 @@ jobs:
         env:
           CI: 'true'
         run: RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test mixed_dispatch --test organization_delivery --test organization_reconcile --test request_completion --test email_delivery -- --test-threads=1
+      - name: Verify the repository write fence, 401 remint and permission recheck protocol
+        env:
+          CI: 'true'
+        run: RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test repository_protocol -- --test-threads=2
+      - name: Verify installation authority, budget, journals, capabilities, request control, settlement evidence and sweeps
+        env:
+          CI: 'true'
+        run: RESTATE_SERVER_BIN="$RUNNER_TEMP/restate-server" cargo test --locked -p ghinvite-workflows --features integration --test installation_authority --test invite_budget --test journal_steps --test link_capability --test request_control --test settlement_evidence --test sweep_schedule
       - name: Verify request initialization and deadline verdict recovery
         run: bash scripts/test-restate.sh request_owner
       - name: Authenticated invitation journey, settlement and retained recovery
