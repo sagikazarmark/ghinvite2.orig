@@ -206,6 +206,8 @@ GHINVITE_RESTATE_AUTH=local-unauthenticated \
 cargo run -p ghinvite-web-server -- --local-dev
 ```
 
+To develop against the [`octoemu`](libs/octoauth/crates/octoemu/README.md) GitHub emulator instead of GitHub, start it with a seed of your Apps and users (`cargo run --manifest-path libs/octoauth/Cargo.toml -p octoemu -- --port 0 --seed seed.json` prints its loopback `api_base` and `web_base`; avatars are at `{web_base}/avatars`) and add `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE` with those values to both commands (the workflows server uses only `GITHUB_API_BASE`). Only `--local-dev` and `--local-unsigned` accept them; production startup refuses them ([deploy](docs/deploy.md#p1-app-split-configuration)).
+
 App available at `http://127.0.0.1:8787`. Both services point at the same `dev.sqlite` file for domain data. Native sessions use a separate in-memory SQLite database, encrypted with the configured session key, and disappear on restart. Sign-in requires a real sign-in GitHub App with `http://127.0.0.1:8787/oauth/callback` as the callback URL. Other env vars have local defaults.
 
 ### Option B — Wrangler dev (production-equivalent)

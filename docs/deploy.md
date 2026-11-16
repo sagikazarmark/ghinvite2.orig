@@ -357,6 +357,8 @@ cargo run -p ghinvite-web-server -- --local-dev
 ```
 
 This mode still requires `P1_KEYRING` and the explicit repository-app registry.
+It also accepts `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE`
+(see [GitHub base URLs](#p1-app-split-configuration)); production startup refuses them.
 Leave `GHINVITE_RESTATE_API_KEY` absent in this development mode; a supplied key
 conflicts with unsigned mode. Native startup without `--local-dev` uses the same
 canonical production parser as the Worker. Native hosting still uses its documented
@@ -694,6 +696,21 @@ sign-in credentials plus installed-app signing keys and rotated webhook lists.
 `parse_mint_apps` requests only `P1_HOST` and the installed apps' IDs, client IDs
 and signing keys. The small `ghinvite-config` crate is shared by native and
 Worker composition roots and has no web, storage or Restate dependency.
+
+**GitHub base URLs (local development and tests only).** `GITHUB_API_BASE`
+(REST API, default `https://api.github.com`), `GITHUB_WEB_BASE` (OAuth pages,
+default `https://github.com`) and `GITHUB_AVATAR_BASE` (avatar CDN, default
+`https://avatars.githubusercontent.com`) point every GitHub client at a
+stand-in such as the `octoemu` emulator: the installed apps' tokens and REST
+calls, sign-in, and avatar reads. Each one unset keeps GitHub's. They are
+accepted only outside production: by `ghinvite-web-server --local-dev`, by
+`ghinvite-workflows-server --local-unsigned`, and by the Workers' `runtime-tests`
+harness builds. Production roots (native startup without those flags, and every
+deployed Worker build) fail startup with `GITHUB_…_BASE is not accepted in
+production` if any is set, so never put them in `wrangler/*.toml` or a production
+secret store. A base must be `https`, or `http` on a loopback host (`localhost`,
+`127.0.0.0/8`, `::1`), without credentials, query or fragment; a trailing slash is
+optional. Errors name the variable, never its value.
 
 Bulk issuance is a separate opt-in: `GH_BULK_ENABLED=true` enables the Console
 capability and standard BulkInviteBatch owner; absent or exact `false` disables

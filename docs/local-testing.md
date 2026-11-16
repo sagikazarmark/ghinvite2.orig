@@ -331,6 +331,16 @@ The Rust workflow suites no longer use it (see above); the Worker drivers
 (`tests/worker/build-stub.mjs`) and the native D1 bridge still do, until
 GE-09 deletes it.
 
+Their replacement is the `octoemu` emulator reached through the GitHub
+base-URL variables (`GITHUB_API_BASE`, `GITHUB_WEB_BASE`, `GITHUB_AVATAR_BASE`;
+[deploy](deploy.md#p1-app-split-configuration)), which non-production roots
+accept: `ghinvite-web-server --local-dev`, `ghinvite-workflows-server
+--local-unsigned`, and the Workers' `runtime-tests` builds (as Miniflare
+bindings). `crates/ghinvite-web/tests/emulator_config.rs` runs web's local
+configuration end to end against an embedded emulator that way. The Worker
+drivers still intercept the real hostnames with Miniflare's `outboundService`
+until GE-09b moves them.
+
 ```bash
 cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
 ```

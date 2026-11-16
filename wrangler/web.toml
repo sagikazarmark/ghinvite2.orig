@@ -56,6 +56,8 @@ id = "REPLACE_WITH_WRANGLER_AUTHZ_KV_CREATE_OUTPUT"
 [vars]
 # Explicit registry stage; org delivery/target release gates remain separate.
 P1_APP_STAGE = "repo"
+# Never set GITHUB_API_BASE/GITHUB_WEB_BASE/GITHUB_AVATAR_BASE here: deployed
+# builds refuse them (runtime-tests harness builds only; docs/deploy.md).
 # Matched web/workflow capability. Keep off until AccessGrant acceptance gates pass.
 GH_ACCESS_REMOVAL_ENABLED = "false"
 P1_HOST                    = "ghinvite.workers.dev"
