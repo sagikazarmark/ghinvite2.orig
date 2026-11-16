@@ -8,7 +8,7 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: OAuth and user tokens (GE-05)
+## Status: organizations (GE-06)
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
@@ -23,7 +23,12 @@ the deliveries API and the App's hook configuration, and `installation` /
 web flow (the authorize page with auto-consent, the token endpoint with
 PKCE, codes and refresh tokens), GitHub App user access tokens and classic
 PATs, `/user`, `/user/emails`, the `/applications/{client_id}` token routes
-and the invitee's `/user/repository_invitations` routes (GE-05).
+and the invitee's `/user/repository_invitations` routes (GE-05);
+organizations, memberships, organization invitations (by user or email,
+with teams; expiry, the failed list, the daily budget and seats), teams
+and team memberships with their repository grants, the user's
+`/user/memberships/orgs` routes, and `organization` / `membership` events
+(GE-06).
 
 ### Implemented routes
 
@@ -59,6 +64,24 @@ and the invitee's `/user/repository_invitations` routes (GE-05).
 | `GET /user/repository_invitations` | user token | Paged; the user's invitations |
 | `PATCH /user/repository_invitations/{invitation_id}` | user token | Accept: 204, `member.added`; 404 if not theirs or expired |
 | `DELETE /user/repository_invitations/{invitation_id}` | user token | Decline: 204 |
+| `GET /orgs/{org}` | installation token | `plan` only with `organization_plan: read` (documented); `two_factor_requirement_enabled`, `default_repository_permission` and the private repository counts only with `organization_administration: read` (assumed) |
+| `GET /orgs/{org}/members` | installation token, `members: read` | Paged active members; `role=all\|admin\|member` |
+| `GET /orgs/{org}/memberships/{username}` | installation token, `members: read` | `{url, state, role, organization_url, organization, user}`; an open invitation is `pending`; else 404 |
+| `PUT /orgs/{org}/memberships/{username}` | installation token, `members: write` | `{role}` `admin\|member`: 200; a member's role changes; a non-member is invited (`pending`, `organization.member_invited`) |
+| `DELETE /orgs/{org}/memberships/{username}` | installation token, `members: write` | 204: removes a member (and their team memberships; `organization.member_removed`) or cancels an invitee's invitation |
+| `GET /orgs/{org}/invitations` | installation token, `members: read` | Paged open invitations; `login` null for an email invitee; `role=` |
+| `POST /orgs/{org}/invitations` | installation token, `members: write` | `{invitee_id \| email, role, team_ids}`: 201, `organization.member_invited`; 422 for an existing member, an open invitation, an invalid role or team, past the budget, without a seat, or while `spammed` |
+| `DELETE /orgs/{org}/invitations/{invitation_id}` | installation token, `members: write` | 204; 404 unknown, failed or expired |
+| `GET /orgs/{org}/invitations/{invitation_id}/teams` | installation token, `members: read` | Paged |
+| `GET /orgs/{org}/failed_invitations` | installation token, `members: read` | Paged; seeded failures and expired invitations (`failed_reason: "Invitation expired"`, assumed) |
+| `GET /orgs/{org}/teams` | installation token, `members: read` | Paged, with `parent` |
+| `GET /orgs/{org}/teams/{team_slug}` | installation token, `members: read` | `members_count`, `repos_count`, `organization` |
+| `GET /orgs/{org}/teams/{team_slug}/memberships/{username}` | installation token, `members: read` | `{url, role, state}`; 404 when not in the team |
+| `PUT /orgs/{org}/teams/{team_slug}/memberships/{username}` | installation token, `members: write` | `{role}` `member\|maintainer`: 200; active for a member (`membership.added`), pending otherwise (a non-member is invited, assumed) |
+| `DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}` | installation token, `members: write` | 204 (`membership.removed`) |
+| `GET /user/memberships/orgs` | user token | Paged; `state=active\|pending` |
+| `GET /user/memberships/orgs/{org}` | user token, `members: read` | 200 or 404 |
+| `PATCH /user/memberships/orgs/{org}` | user token, `members: write` | `{"state": "active"}`: accepts; 200 (GitHub's asynchronous 202 is not modelled) |
 | `POST /applications/{client_id}/token` | `Basic client_id:client_secret` | Check `{access_token}`: 200 with the authorization, 404 invalid, 422 without `access_token` |
 | `PATCH /applications/{client_id}/token` | `Basic …` | Reset: 200 with a new token; the old one stops working |
 | `DELETE /applications/{client_id}/token` | `Basic …` | Revoke: 204 (and its refresh token) |
@@ -76,8 +99,7 @@ content-type: application/json; charset=utf-8
 {"message":"octoemu: not implemented","route":"GET /repos/acme/widgets","documentation_url":"…"}
 ```
 
-It is never a 404, which a client could take for GitHub's answer. Routes
-arrive with GE-06 (organizations, `/user/memberships/orgs/{org}`); anything
+It is never a 404, which a client could take for GitHub's answer. Anything
 outside ghinvite's surface stays 501.
 
 ### Repository model
@@ -90,8 +112,9 @@ outside ghinvite's surface stays 501.
   `triage`, `write`, `maintain`, `admin` or the custom name); invitations
   report `permissions` the same way.
 - **Effective access** is the highest of: a direct collaboration, owning the
-  repository, owning its organization (admin), and the organization's base
-  permission for active members. Team grants arrive with GE-06.
+  repository, owning its organization (admin), the organization's base
+  permission for active members, and a team's role on the repository for
+  the team's active members and the active members of its child teams.
 - **Invitations** expire 7 days after `created_at` on the virtual clock and
   then show `expired: true` (they stay listed until deleted or replaced).
   A repository gets at most 50 invitations per sliding 24 hours through
@@ -101,6 +124,35 @@ outside ghinvite's surface stays 501.
 - **The invitee's side** (accept, decline, leave) are domain operations
   (`src/collaboration.rs`), reached through the user-token routes
   (`/user/repository_invitations…`) and the admin API's `act` routes alike.
+
+### Organization model
+
+- **Memberships** are `active` or `pending`. A seed may hold pending ones;
+  an open invitation (sent by `POST …/invitations`, `PUT
+  …/memberships/{username}` or a team PUT for a non-member) is the
+  invitee's pending membership, and its `team_ids` their pending team
+  memberships, until it is accepted, declined, cancelled or expires.
+- **Accepting** (`PATCH /user/memberships/orgs/{org}`, or the admin
+  `act … accept`) turns the invitation (by login, or an email invitation
+  matching one of the user's verified addresses, assumed) or the pending
+  membership into an active membership with the invited role, and its
+  teams into active team memberships: `organization.member_added`, then
+  `membership.added` per team.
+- **Invitations** expire 7 days after `created_at` on the virtual clock:
+  they leave the pending list and show in `failed_invitations` with
+  `failed_at` at the expiry (assumed). Cancelled and declined invitations
+  disappear (assumed).
+- **Budget** (documented): 50 invitations per organization per sliding 24
+  hours, 500 once the organization is older than a month (`created_at`) or
+  on a paid plan (any plan but `free`); past it, 422 `Over invitation rate
+  limit` (assumed).
+- **Seats**: on a paid plan with `seats > 0`, an invitation that would make
+  a member needs `filled_seats < seats`; `filled_seats` is the plan's
+  pinned value, else memberships plus open member invitations (assumed).
+- **`reinstate`** gives a user removed by this instance their old role.
+- **Events** go to the organization's non-suspended installations that
+  subscribe to `organization` / `membership`, with `organization` and
+  `sender`; the App's bot sends what an installation token does.
 
 ### OAuth web flow and user tokens
 
@@ -163,6 +215,11 @@ outbox: `{"id", "at", "event", "action", "targets": [{"app_id",
 "installation_id"}], "payload"}`. Read it at `GET /__octoemu/events` or
 `Emulator::events()`. Today:
 
+- `organization` `member_invited` (`invitation`, `user`), `member_added`
+  and `member_removed` (`membership {url, state, role, organization_url,
+  user}`); `membership` `added` and `removed` (`scope: "team"`, `member`,
+  `team`). Targets: the organization's non-suspended installations
+  subscribed to the event; `organization` and `sender` in every payload.
 - `member` `added` (an invitation accepted, or an organization member
   added directly), `edited` (a role change, with `changes`) and `removed`
   (`DELETE …/collaborators/{username}` or leaving). Targets: the
@@ -333,7 +390,8 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
   "orgs": [{"id": 2, "login": "acme", "plan": {"name": "team", "seats": 10},
             "created_at": "2020-01-01T00:00:00Z", "two_factor_requirement_enabled": false,
             "default_repository_permission": "read"}],
-  "teams": [{"id": 3, "org": "acme", "slug": "core", "privacy": "closed"}],
+  "teams": [{"id": 3, "org": "acme", "slug": "core", "privacy": "closed",
+             "parent": null, "repositories": [{"repo": "acme/widgets", "role": "push"}]}],
   "repos": [{"id": 4, "owner": "acme", "name": "widgets", "private": true,
              "visibility": "private"}],
   "apps": [{"id": 5, "slug": "invite-bot", "client_id": "Iv23.example", "client_secret": "…",
@@ -354,7 +412,12 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
                               "inviter": "octocat", "role": "auditor",
                               "created_at": "2029-12-30T00:00:00Z"}],
   "memberships": [{"org": "acme", "user": "octocat", "role": "admin", "state": "active"}],
-  "team_memberships": [{"team": "acme/core", "user": "octocat", "role": "maintainer"}]
+  "team_memberships": [{"team": "acme/core", "user": "octocat", "role": "maintainer"}],
+  "org_invitations": [{"id": 10, "org": "acme", "invitee": "hubot", "role": "direct_member",
+                       "inviter": "octocat", "team_ids": [3], "team_roles": {"3": "maintainer"},
+                       "created_at": "2029-12-30T00:00:00Z"},
+                      {"id": 11, "org": "acme", "email": "new@example.com",
+                       "failed_at": "2029-12-31T00:00:00Z", "failed_reason": "Invitation expired"}]
 }
 ```
 
@@ -367,7 +430,11 @@ App's permissions or events; that App public keys parse as RSA; that
 installation requests name an App, an account and a requesting user; that team
 memberships rest on an organization membership (an active one for an active
 team membership); that a custom role exists in the repository's organization
-and is not one of GitHub's names; that an invitation names a user who is
+and is not one of GitHub's names; that a team's parent is a team of the
+same organization without cycles and its repositories are the
+organization's; that an organization invitation names exactly one of a
+user (without a membership or another open invitation) and an email
+address, teams of that organization and one inviter; that an invitation names a user who is
 neither a collaborator nor invited already, and one inviter (a user or an
 App); that only an organization's repository is `internal`; and that a
 user's `emails` are addresses, unique, with exactly one primary (the only
@@ -409,6 +476,10 @@ applies whole or not at all; it may not set `start_time`.
 | `POST /act/{login}/repository_invitations/{id}/accept` | The invitee accepts: collaborator with the invited role, `member.added` (204; 404 if not theirs or expired) |
 | `POST /act/{login}/repository_invitations/{id}/decline` | The invitee declines (204, no event) |
 | `POST /act/{login}/repos/{owner}/{repo}/leave` | A collaborator leaves (204, `member.removed`) |
+| `POST /act/{login}/orgs/{org}/accept` | The user accepts their invitation or pending membership, as `PATCH /user/memberships/orgs/{org}` (204; 404 without one) |
+| `POST /act/{login}/orgs/{org}/decline` | The user declines their invitation (204, no event) |
+| `POST /act/{login}/orgs/{org}/leave` | A member leaves (204, `organization.member_removed`) |
+| `POST /orgs/{org}/spammed` | `{"spammed": bool}`: the organization's invitation writes (create, cancel) answer GitHub's `spammed` 422 (assumed shape) while on (204; 404 unknown) |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
 ticks with real time, and jumps on advance. Every response, admin included,
@@ -493,7 +564,14 @@ so most of these are labels only, not refused); for OAuth and user tokens
 `redirect-uri-loopback-port`, `user-token-cap`, `user-token-hourly-limit`,
 `user-token-invitations` (a `ghu_` token on the invitee routes),
 `pat-scopes`, `client-credential-errors`, `applications-errors` and
-`noreply-email`; the routes `GET /repositories/{repository_id}/invitations`,
+`noreply-email`; for organizations `org-admin-fields` (withheld),
+`org-error-messages` (withheld), `org-invitation-limit-response`,
+`org-no-seat`, `org-spammed`, `expired-org-invitations-failed`,
+`org-invitation-cancel`, `org-invitation-decline`, `org-invitation-roles`,
+`org-reput-pending`, `team-put-non-member`,
+`invited-team-membership-pending`, `org-accept-team-events` (not emitted),
+`remove-org-non-member`, `remove-team-non-member`, `org-out-of-scope`,
+`email-invitation-accept` and `user-token-org-membership-list`; the routes `GET /repositories/{repository_id}/invitations`,
 `GET /user/{account_id}`, `GET /avatars/u/{id}` and
 `POST /login/oauth/authorize` (the consent form).
 
@@ -537,6 +615,19 @@ sign-in against an embedded emulator (including `access_denied` and the
 `Incomplete` rule for more than 100 addresses); in the ghinvite workspace,
 `crates/ghinvite-web/tests/emulator_signin.rs` drives ghinvite-web's real
 `/login` → authorize → `/oauth/callback` through it.
+
+`tests/orgs.rs` covers the organization surface: `GET /orgs/{org}` by
+permission, invitations by user and by email with teams, their teams and
+pagination, the 422s, acceptance through `PATCH /user/memberships/orgs`
+(memberships and team memberships activate, team grants apply, the events
+are delivered under manual dispatch), email acceptance, expiry into the
+failed list, the 50/500 budget on the clock, seats, membership and team
+PUT/DELETE, the `act` routes, permission and scope refusals, `spammed` and
+refuse-assumed mode. In the ghinvite workspace,
+`crates/ghinvite-github/tests/emulator_orgs.rs` rebuilds the GitHub side
+of the JS org drivers over ghinvite-github's real organization client, and
+`crates/ghinvite-web/tests/emulator_webhooks.rs` feeds the organization
+events to ghinvite-web's org webhook intake.
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

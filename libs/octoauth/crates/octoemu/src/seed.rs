@@ -74,6 +74,12 @@ pub struct Seed {
     /// Organizations' custom repository roles.
     #[serde(default)]
     pub repository_roles: Vec<RepositoryRole>,
+    /// Organization invitations: pending, failed (`failed_at`) or expired.
+    /// Changed in place by the emulator: created by `POST
+    /// /orgs/{org}/invitations` and its kin, removed when accepted, declined
+    /// or cancelled.
+    #[serde(default)]
+    pub org_invitations: Vec<OrgInvitation>,
     /// Pending (or expired) repository invitations. Changed in place by the
     /// emulator: created by `PUT …/collaborators/{username}`, removed when
     /// accepted, declined or deleted.
@@ -441,6 +447,29 @@ pub struct Team {
     /// Visibility.
     #[serde(default)]
     pub privacy: TeamPrivacy,
+    /// The parent team's slug (same organization), if nested. A child team's
+    /// members inherit the parent's repository access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The team's repositories and its role on each; active members (of
+    /// this team or a child team) inherit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<TeamRepository>,
+}
+
+/// A team's role on one of its organization's repositories.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamRepository {
+    /// The repository as `owner/name`, owned by the team's organization.
+    pub repo: String,
+    /// The role members inherit.
+    #[serde(default = "pull")]
+    pub role: Role,
+}
+
+fn pull() -> Role {
+    Role::Pull
 }
 
 impl Team {
@@ -452,7 +481,31 @@ impl Team {
             slug: slug.into(),
             name: None,
             privacy: TeamPrivacy::default(),
+            parent: None,
+            repositories: Vec::new(),
         }
+    }
+
+    /// Nests the team under `parent` (a slug in the same organization).
+    #[must_use]
+    pub fn parent(mut self, slug: impl Into<String>) -> Self {
+        self.parent = Some(slug.into());
+        self
+    }
+
+    /// Grants the team `role` on `repo` (`owner/name`).
+    #[must_use]
+    pub fn repository(mut self, repo: impl Into<String>, role: Role) -> Self {
+        self.repositories.push(TeamRepository {
+            repo: repo.into(),
+            role,
+        });
+        self
+    }
+
+    /// The display name: `name`, else the slug.
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.slug)
     }
 
     /// Sets the display name.
@@ -1111,6 +1164,142 @@ pub enum TeamRole {
     Maintainer,
 }
 
+/// An invitation to join an organization, addressed to a user or an email
+/// address.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrgInvitation {
+    /// The invitation ID, unique across organization invitations.
+    pub id: u64,
+    /// The organization's login.
+    pub org: String,
+    /// The invited user's login; exactly one of `invitee` and `email`. A
+    /// user is invited at most once per organization (while the invitation
+    /// is open) and never while a member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitee: Option<String>,
+    /// The invited email address; exactly one of `invitee` and `email`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The offered role.
+    #[serde(default)]
+    pub role: InvitationRole,
+    /// The inviting user's login, if a user invited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inviter: Option<String>,
+    /// The inviting App's ID, if an App invited (its bot account is
+    /// reported as the inviter). Not with `inviter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inviter_app_id: Option<u64>,
+    /// Teams (IDs, in the organization) the invitee joins on accepting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_ids: Vec<u64>,
+    /// The role in each of `team_ids` when not `member` (by team ID).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub team_roles: BTreeMap<u64, TeamRole>,
+    /// When it was sent; the clock's start when absent. It expires seven
+    /// days later on the virtual clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// When it failed, if it did (`GET /orgs/{org}/failed_invitations`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<DateTime<Utc>>,
+    /// Why it failed; only with `failed_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_reason: Option<String>,
+}
+
+impl OrgInvitation {
+    /// `login` invited to `org` as a direct member.
+    pub fn new(id: u64, org: impl Into<String>, login: impl Into<String>) -> Self {
+        Self {
+            id,
+            org: org.into(),
+            invitee: Some(login.into()),
+            email: None,
+            role: InvitationRole::DirectMember,
+            inviter: None,
+            inviter_app_id: None,
+            team_ids: Vec::new(),
+            team_roles: BTreeMap::new(),
+            created_at: None,
+            failed_at: None,
+            failed_reason: None,
+        }
+    }
+
+    /// `email` invited to `org` as a direct member.
+    pub fn by_email(id: u64, org: impl Into<String>, email: impl Into<String>) -> Self {
+        let mut invitation = Self::new(id, org, "");
+        invitation.invitee = None;
+        invitation.email = Some(email.into());
+        invitation
+    }
+
+    /// Sets the offered role.
+    #[must_use]
+    pub fn role(mut self, role: InvitationRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Names the inviting user.
+    #[must_use]
+    pub fn inviter(mut self, login: impl Into<String>) -> Self {
+        self.inviter = Some(login.into());
+        self
+    }
+
+    /// Adds a team the invitee joins on accepting.
+    #[must_use]
+    pub fn team(mut self, id: u64) -> Self {
+        self.team_ids.push(id);
+        self
+    }
+
+    /// Sets when it was sent.
+    #[must_use]
+    pub fn created_at(mut self, at: DateTime<Utc>) -> Self {
+        self.created_at = Some(at);
+        self
+    }
+
+    /// Marks it failed at `at` for `reason`.
+    #[must_use]
+    pub fn failed(mut self, at: DateTime<Utc>, reason: impl Into<String>) -> Self {
+        self.failed_at = Some(at);
+        self.failed_reason = Some(reason.into());
+        self
+    }
+}
+
+/// The role an organization invitation offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationRole {
+    /// A member.
+    #[default]
+    DirectMember,
+    /// An owner.
+    Admin,
+    /// A billing manager (not a member).
+    BillingManager,
+    /// A hiring manager (not a member).
+    HiringManager,
+}
+
+impl InvitationRole {
+    /// GitHub's spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectMember => "direct_member",
+            Self::Admin => "admin",
+            Self::BillingManager => "billing_manager",
+            Self::HiringManager => "hiring_manager",
+        }
+    }
+}
+
 /// An organization's custom repository role: a name over one of GitHub's
 /// base roles. Collaborators and invitations on the organization's
 /// repositories may name it as their role.
@@ -1275,6 +1464,8 @@ impl Seed {
         repository_role(RepositoryRole) => repository_roles;
         /// Adds a repository invitation.
         repository_invitation(RepositoryInvitation) => repository_invitations;
+        /// Adds an organization invitation.
+        org_invitation(OrgInvitation) => org_invitations;
     }
 
     /// Starts the virtual clock at `at`.
@@ -1332,6 +1523,7 @@ impl Seed {
         all.repository_roles.extend(more.repository_roles);
         all.repository_invitations
             .extend(more.repository_invitations);
+        all.org_invitations.extend(more.org_invitations);
         if let Err(error) = all.validate() {
             problems.extend(error.problems);
         }
@@ -1446,6 +1638,8 @@ impl Check {
         self.memberships(seed);
         self.team_memberships(seed);
         self.repository_invitations(seed);
+        self.team_details(seed);
+        self.org_invitations(seed);
     }
 
     fn name(&mut self, path: String, what: &str, value: &str) {
@@ -2069,6 +2263,182 @@ impl Check {
             }
         }
     }
+}
+
+impl Check {
+    /// Team parents and repositories (after repositories and roles).
+    fn team_details(&mut self, seed: &Seed) {
+        for (i, team) in seed.teams.iter().enumerate() {
+            let at = format!("teams[{i}]");
+            if let Some(parent) = &team.parent {
+                let key = format!("{}/{}", team.org, parent).to_lowercase();
+                if parent.eq_ignore_ascii_case(&team.slug) {
+                    self.problem(
+                        format!("{at}.parent"),
+                        "a team cannot be its own parent".into(),
+                    );
+                } else if !self.teams.contains(&key) {
+                    self.problem(
+                        format!("{at}.parent"),
+                        format!("no team {parent:?} in {:?}", team.org),
+                    );
+                } else if team_cycle(seed, team) {
+                    self.problem(format!("{at}.parent"), "team parents form a cycle".into());
+                }
+            }
+            let mut listed = HashSet::new();
+            for (r, grant) in team.repositories.iter().enumerate() {
+                let path = format!("{at}.repositories[{r}]");
+                let repo = grant.repo.to_lowercase();
+                match self.repos.get(&repo) {
+                    None => self.problem(
+                        format!("{path}.repo"),
+                        format!("no repository {:?}", grant.repo),
+                    ),
+                    Some(owner) if *owner != team.org.to_lowercase() => self.problem(
+                        format!("{path}.repo"),
+                        format!(
+                            "{:?} is not owned by the team's organization {:?}",
+                            grant.repo, team.org
+                        ),
+                    ),
+                    Some(_) if !listed.insert(repo.clone()) => {
+                        self.problem(
+                            format!("{path}.repo"),
+                            format!("{:?} is listed twice", grant.repo),
+                        );
+                    }
+                    Some(_) => {}
+                }
+                self.role(format!("{path}.role"), &repo, &grant.role);
+            }
+        }
+    }
+
+    fn org_invitations(&mut self, seed: &Seed) {
+        let mut ids = HashSet::new();
+        let mut open = HashSet::new();
+        for (i, invitation) in seed.org_invitations.iter().enumerate() {
+            let at = format!("org_invitations[{i}]");
+            self.id(
+                format!("{at}.id"),
+                invitation.id,
+                &mut ids,
+                "organization invitation",
+            );
+            let org_ok = self.account(format!("{at}.org"), &invitation.org, Some(AccountKind::Org));
+            let org = invitation.org.to_lowercase();
+            match (&invitation.invitee, &invitation.email) {
+                (Some(login), None) => {
+                    if self.account(format!("{at}.invitee"), login, Some(AccountKind::User))
+                        && org_ok
+                    {
+                        let user = login.to_lowercase();
+                        if self.memberships.contains_key(&(org.clone(), user.clone())) {
+                            self.problem(
+                                format!("{at}.invitee"),
+                                format!(
+                                    "{login:?} already has a membership of {:?}",
+                                    invitation.org
+                                ),
+                            );
+                        } else if invitation.failed_at.is_none()
+                            && !open.insert((org.clone(), user))
+                        {
+                            self.problem(
+                                format!("{at}.invitee"),
+                                format!(
+                                    "{login:?} already has an open invitation to {:?}",
+                                    invitation.org
+                                ),
+                            );
+                        }
+                    }
+                }
+                (None, Some(email)) => {
+                    if email.is_empty()
+                        || !email.contains('@')
+                        || email.chars().any(char::is_whitespace)
+                    {
+                        self.problem(
+                            format!("{at}.email"),
+                            format!("{email:?} is not an email address"),
+                        );
+                    }
+                }
+                _ => self.problem(
+                    format!("{at}.invitee"),
+                    "an invitation names exactly one of invitee and email".into(),
+                ),
+            }
+            if let Some(inviter) = &invitation.inviter {
+                self.account(format!("{at}.inviter"), inviter, Some(AccountKind::User));
+            }
+            if let Some(app) = invitation.inviter_app_id {
+                if invitation.inviter.is_some() {
+                    self.problem(
+                        format!("{at}.inviter_app_id"),
+                        "an invitation has one inviter: a user or an App".into(),
+                    );
+                }
+                if !self.apps.contains_key(&app) {
+                    self.problem(
+                        format!("{at}.inviter_app_id"),
+                        format!("no App with ID {app}"),
+                    );
+                }
+            }
+            let mut teams = HashSet::new();
+            for (t, id) in invitation.team_ids.iter().enumerate() {
+                let found = seed
+                    .teams
+                    .iter()
+                    .any(|team| team.id == *id && team.org.eq_ignore_ascii_case(&invitation.org));
+                if !found {
+                    self.problem(
+                        format!("{at}.team_ids[{t}]"),
+                        format!("no team with ID {id} in {:?}", invitation.org),
+                    );
+                } else if !teams.insert(*id) {
+                    self.problem(
+                        format!("{at}.team_ids[{t}]"),
+                        format!("team {id} is listed twice"),
+                    );
+                }
+            }
+            for id in invitation.team_roles.keys() {
+                if !invitation.team_ids.contains(id) {
+                    self.problem(
+                        format!("{at}.team_roles"),
+                        format!("team {id} is not one of team_ids"),
+                    );
+                }
+            }
+            if invitation.failed_reason.is_some() && invitation.failed_at.is_none() {
+                self.problem(
+                    format!("{at}.failed_reason"),
+                    "only a failed invitation (with failed_at) has a reason".into(),
+                );
+            }
+        }
+    }
+}
+
+/// Whether following `team`'s parents ever returns to it.
+fn team_cycle(seed: &Seed, team: &Team) -> bool {
+    let mut current = team.parent.clone();
+    for _ in 0..=seed.teams.len() {
+        let Some(slug) = current else { return false };
+        if slug.eq_ignore_ascii_case(&team.slug) {
+            return true;
+        }
+        current = seed
+            .teams
+            .iter()
+            .find(|t| t.org.eq_ignore_ascii_case(&team.org) && t.slug.eq_ignore_ascii_case(&slug))
+            .and_then(|t| t.parent.clone());
+    }
+    true
 }
 
 fn is_rsa_public_key(pem: &str) -> bool {

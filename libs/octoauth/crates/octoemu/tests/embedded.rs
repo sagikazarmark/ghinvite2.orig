@@ -76,8 +76,8 @@ async fn unbuilt_routes_answer_501_never_404() {
         (Method::GET, "/repos/acme/widgets/branches"),
         (Method::DELETE, "/app/installations/5"),
         (Method::DELETE, "/app/hook/deliveries/1"),
-        (Method::PUT, "/orgs/acme/memberships/octocat"),
-        (Method::PATCH, "/user/memberships/orgs/acme"),
+        (Method::PUT, "/orgs/acme/outside_collaborators/octocat"),
+        (Method::PATCH, "/orgs/acme"),
         (Method::POST, "/installation/token"),
         (Method::GET, "/totally/made/up"),
         (Method::POST, "/login/device/code"),
@@ -111,7 +111,7 @@ async fn unbuilt_routes_answer_501_never_404() {
     }
     // HEAD gets the status without a body.
     let head = client
-        .head(format!("{base}/orgs/acme"))
+        .head(format!("{base}/orgs/acme/hooks"))
         .send()
         .await
         .unwrap();

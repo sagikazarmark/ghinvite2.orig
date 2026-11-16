@@ -685,3 +685,245 @@ doc = "https://docs.github.com/en/rest/users/users#get-a-user"
 [behaviours.noreply-email]
 label = "assumed"
 reason = "A user seeded with noreply_email also lists {id}+{login}@users.noreply.github.com in GET /user/emails, verified, not primary, without a visibility. Refused in refuse-assumed mode when listed."
+
+# --- Organizations, teams and memberships (GE-06) -----------------------------
+
+[routes."GET /orgs/{org}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/orgs#get-an-organization"
+# Any installation token (no permission is listed for it). plan {name, space,
+# private_repos, filled_seats, seats} per org-plan-visibility; the owner-only
+# settings per org-admin-fields.
+
+[routes."GET /orgs/{org}/members"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#list-organization-members"
+# members: read. Active members only, by ID; role=all|admin|member; paged.
+# filter=2fa_disabled is not modelled.
+
+[routes."GET /orgs/{org}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#get-organization-membership-for-a-user"
+# members: read. {url, state, role, organization_url, organization, user}; an
+# open invitation is a pending membership with the invited role; else 404.
+
+[routes."PUT /orgs/{org}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#set-organization-membership-for-a-user"
+# members: write. role admin|member (default member), else 422. 200 with the
+# membership; a non-member is invited and pending (org-membership-pending).
+
+[routes."DELETE /orgs/{org}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#remove-organization-membership-for-a-user"
+# members: write. 204. A member is removed (organization.member_removed), an
+# invitee's invitation cancelled; anyone else per remove-org-non-member.
+
+[routes."GET /orgs/{org}/invitations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#list-pending-organization-invitations"
+# members: read. Open invitations, oldest first, paged; role= filter. login is
+# null for an email invitee; team_count, role, inviter, created_at,
+# failed_at/failed_reason null.
+
+[routes."POST /orgs/{org}/invitations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#create-an-organization-invitation"
+# members: write. {invitee_id | email, role (admin, direct_member (default),
+# billing_manager, reinstate), team_ids}: 201 with the invitation,
+# organization.member_invited. 422s per org-error-messages, org-no-seat,
+# org-invitation-limit-response, org-spammed.
+
+[routes."DELETE /orgs/{org}/invitations/{invitation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#cancel-an-organization-invitation"
+# members: write. 204; 404 for an unknown, failed or expired invitation.
+
+[routes."GET /orgs/{org}/invitations/{invitation_id}/teams"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#list-organization-invitation-teams"
+# members: read. Paged; 404 for an unknown invitation.
+
+[routes."GET /orgs/{org}/failed_invitations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#list-failed-organization-invitations"
+# members: read. Invitations with failed_at (seeded); expired ones per
+# expired-org-invitations-failed. Paged.
+
+[routes."GET /orgs/{org}/teams"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/teams/teams#list-teams"
+# members: read. Every team (secret ones too), by ID, paged.
+
+[routes."GET /orgs/{org}/teams/{team_slug}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/teams/teams#get-a-team-by-name"
+# members: read. team-full with members_count, repos_count, organization.
+
+[routes."GET /orgs/{org}/teams/{team_slug}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/teams/members#get-team-membership-for-a-user"
+# members: read. {url, role, state}; an organization owner who is not in the
+# team is a 404. Pending through an invitation per invited-team-membership-pending.
+
+[routes."PUT /orgs/{org}/teams/{team_slug}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/teams/members#add-or-update-team-membership-for-a-user"
+# members: write. role member|maintainer (default member), else 422. 200
+# {url, role, state}: active for an active member (membership.added), pending
+# for a pending one; a non-member per team-put-non-member. The 403 for an
+# IdP-synchronized team is not modelled.
+
+[routes."DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/teams/members#remove-team-membership-for-a-user"
+# members: write. 204 (membership.removed for an active membership).
+
+[routes."GET /user/memberships/orgs"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#list-organization-memberships-for-the-authenticated-user"
+# User token. Active and pending memberships (open invitations by login),
+# by organization ID; state=active|pending; paged. ghu_ callers per
+# user-token-org-membership-list.
+
+[routes."GET /user/memberships/orgs/{org}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#get-an-organization-membership-for-the-authenticated-user"
+# User token, members: read (a ghu_ token's App). 200 or 404.
+
+[routes."PATCH /user/memberships/orgs/{org}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#update-an-organization-membership-for-the-authenticated-user"
+# User token, members: write (a ghu_ token's App). {"state": "active"} (else
+# 422) accepts: 200 with the active membership; organization.member_added.
+# GitHub may answer 202 when it processes the change asynchronously: not
+# modelled (always 200). 404 without a pending membership or invitation.
+
+[behaviours.org-membership-pending]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#set-organization-membership-for-a-user"
+# PUT membership for a non-member invites them: pending until they accept
+# with PATCH /user/memberships/orgs/{org}. The invitation is visible in GET
+# /orgs/{org}/invitations and spends the budget (the docs state the same
+# limits on this route).
+
+[behaviours.org-invitation-expiry]
+label = "documented"
+doc = "https://docs.github.com/en/organizations/managing-membership-in-your-organization/inviting-users-to-join-your-organization"
+# An organization invitation expires 7 days after created_at on the virtual
+# clock: it leaves the pending list and its pending (team) memberships end.
+
+[behaviours.org-invitation-limit]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/members#create-an-organization-invitation"
+# At most 50 invitations per organization per 24 hours (sliding, virtual
+# clock), or 500 once the organization is older than a month (created_at)
+# or on a paid plan (any plan but free). Counts invitations from POST
+# invitations, PUT membership and team PUT for non-members.
+
+[behaviours.org-plan-visibility]
+label = "documented"
+doc = "https://docs.github.com/en/rest/orgs/orgs#get-an-organization"
+# "To see information about an organization's GitHub plan, GitHub Apps need
+# the Organization plan permission": plan only for a token with
+# organization_plan: read of an installation on the organization.
+
+[behaviours.org-member-events]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#organization"
+# organization.member_invited {invitation (organization-invitation), user
+# (null for an email invitee)}, member_added and member_removed {membership
+# {url, state, role, organization_url, user}}, each with organization and
+# sender (the App's bot, or the user who accepted or left). Targets: the
+# organization's non-suspended installations subscribed to organization.
+# member_removed carries the removed membership's role with state active
+# (unmeasured detail).
+
+[behaviours.team-membership-events]
+label = "documented"
+doc = "https://docs.github.com/en/webhooks/webhook-events-and-payloads#membership"
+# membership.added|removed {scope: "team", member, team, organization,
+# sender} when an active team membership starts or ends (a pending one
+# emits nothing). Targets: installations on the organization subscribed to
+# membership. Removing an organization member drops their team memberships
+# without membership.removed (unmeasured).
+
+[behaviours.team-repository-access]
+label = "documented"
+doc = "https://docs.github.com/en/organizations/organizing-members-into-teams/about-teams"
+# A team's role on a repository is a grant for its active members and the
+# active members of its child teams (nested teams inherit the parent's
+# access): GET …/permission, affiliation=all and PUT collaborator's 204
+# reflect it.
+
+[behaviours.org-admin-fields]
+label = "assumed"
+reason = "GET /orgs/{org} shows two_factor_requirement_enabled, default_repository_permission, members_can_create_repositories and the private repository counts only to a token with organization_administration: read on the organization (the docs say owners see full details; which fields an installation token sees is unmeasured). Withheld in refuse-assumed mode."
+
+[behaviours.org-error-messages]
+label = "assumed"
+reason = "422 texts for organization writes (an existing member, an open invitation, an unknown invitee, invalid role/team_ids/state, neither or both of invitee_id and email, reinstate without a former membership) are guesses with resource OrganizationInvitation (or Membership, TeamMember). The 422 status is documented; the text is withheld in refuse-assumed mode."
+
+[behaviours.org-invitation-limit-response]
+label = "assumed"
+reason = "Past the budget, POST invitations (and PUT membership, team PUT for a non-member) answer 422 Validation Failed with errors[{resource: OrganizationInvitation, field: base, code: custom, message: 'Over invitation rate limit'}]. The limit is documented; the response is unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.org-no-seat]
+label = "assumed"
+reason = "On a paid plan with seats > 0, an invitation that would make a member (direct_member, admin) when filled_seats >= seats answers 422 with a custom error ('You must purchase at least one more seat…'). filled_seats is the plan's pinned value, else memberships plus open member invitations. Refused in refuse-assumed mode."
+
+[behaviours.org-spammed]
+label = "assumed"
+reason = "While POST /__octoemu/orgs/{org}/spammed is on, POST and DELETE invitations answer 422 {message: 'Validation Failed', errors: [{resource: OrganizationInvitation, code: spammed}]} (the docs list 'spammed' with the 422; the shape and trigger are unmeasured). Refused in refuse-assumed mode."
+
+[behaviours.expired-org-invitations-failed]
+label = "assumed"
+reason = "An expired organization invitation moves to GET /orgs/{org}/failed_invitations with failed_at = created_at + 7 days and failed_reason 'Invitation expired'. Unmeasured (SP-08/SP-18). Refused in refuse-assumed mode when the failed list would show one."
+
+[behaviours.org-invitation-cancel]
+label = "assumed"
+reason = "A cancelled invitation (DELETE invitation, or DELETE membership of an invitee) disappears: it is not listed as failed. Unmeasured. Refused in refuse-assumed mode on DELETE invitation."
+
+[behaviours.org-invitation-decline]
+label = "assumed"
+reason = "An invitee declining (admin act route) removes the invitation without an event and without a failed entry. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.org-invitation-roles]
+label = "assumed"
+reason = "role reinstate resolves to the role of the invitee's last removal recorded by this instance (admin → admin, member → direct_member), else 422; accepting a billing_manager or hiring_manager invitation uses it up without a membership. Refused in refuse-assumed mode when used."
+
+[behaviours.org-reput-pending]
+label = "assumed"
+reason = "PUT membership for an invitee (or pending member) changes the pending role and returns it as pending, without a new invitation or budget. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.team-put-non-member]
+label = "assumed"
+reason = "Team PUT for someone who is not an organization member creates a visible direct_member organization invitation carrying the team (spending the budget, organization.member_invited), or adds the team to their open invitation; DELETE drops it again. The docs say only that an invitation is sent and the membership is pending. Refused in refuse-assumed mode."
+
+[behaviours.invited-team-membership-pending]
+label = "assumed"
+reason = "GET team membership for an invitee whose open invitation names the team answers 200 {state: pending} with the invited team role. Unmeasured (the JS org fakes answer 404). Refused in refuse-assumed mode when it applies."
+
+[behaviours.org-accept-team-events]
+label = "assumed"
+reason = "Accepting an invitation with teams (or a pending membership with pending team memberships) emits membership.added for each team after organization.member_added, sent by the user. Unmeasured. Not emitted in refuse-assumed mode."
+
+[behaviours.remove-org-non-member]
+label = "assumed"
+reason = "DELETE membership of a user with neither a membership nor an open invitation is a 404. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.remove-team-non-member]
+label = "assumed"
+reason = "DELETE team membership of a user who is not in the team (nor invited to it) is a 404. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.org-out-of-scope]
+label = "assumed"
+reason = "An installation token of another account's installation on an organization's members, invitation and team routes is 403 Resource not accessible by integration with X-Accepted-GitHub-Permissions. Unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.email-invitation-accept]
+label = "assumed"
+reason = "An email invitation keeps login null; a user with a matching verified address accepts it with PATCH /user/memberships/orgs/{org} (or the admin act route) and gets its role and teams. Whether GitHub resolves the address to an existing account, and how the invitee accepts, is unmeasured. Refused in refuse-assumed mode when used."
+
+[behaviours.user-token-org-membership-list]
+label = "assumed"
+reason = "A GitHub App's user access token may call GET /user/memberships/orgs without any App permission (the route is not in GitHub's permission table; PATs are documented). Refused in refuse-assumed mode for ghu_ callers."

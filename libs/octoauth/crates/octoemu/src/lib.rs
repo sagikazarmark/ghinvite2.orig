@@ -2,7 +2,7 @@
 //! uses (REST, App and installation auth, the OAuth web flow, webhooks), for
 //! tests. Native only.
 //!
-//! **OAuth and user tokens (GE-05).** The server, seed, virtual clock, admin API,
+//! **Organizations (GE-06).** The server, seed, virtual clock, admin API,
 //! call log and fidelity manifest (GE-01); App JWTs, stateless installation
 //! tokens with scoping, revocation and suspension, per-route credential and
 //! permission checks, and the `/app…` and `/installation…` routes (GE-02);
@@ -13,7 +13,11 @@
 //! ([`webhooks`]) (GE-04); the OAuth web flow (the authorize page and the
 //! token endpoint, PKCE, refresh), user access tokens and classic PATs,
 //! `/user`, `/user/emails`, `/applications/{client_id}/token|grant` and the
-//! invitee's `/user/repository_invitations` routes (GE-05). Every
+//! invitee's `/user/repository_invitations` routes (GE-05); organizations,
+//! memberships, organization invitations (expiry, the failed list, the
+//! budget, seats), teams and team memberships with repository grants, the
+//! user's `/user/memberships/orgs` routes and `organization` / `membership`
+//! events (GE-06). Every
 //! other API and web route answers
 //! `501 {"message": "octoemu: not implemented", "route": …}`, never 404. The
 //! plan is `docs/specs/github-emulator.md` in the ghinvite repository.
@@ -35,7 +39,8 @@
 //! `/__octoemu/` (`health`, `state`, `seed`, `clock`, `clock/advance`,
 //! `calls`, `fidelity`, `tokens/installation`, `tokens/user`, `oauth…`,
 //! `installations…`,
-//! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`). Every
+//! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`,
+//! `orgs/{org}/spammed`). Every
 //! response carries `Date` from the virtual clock. The binary
 //! (`octoemu --port 0`) prints one JSON line with the base URLs once it
 //! listens.
@@ -67,6 +72,8 @@ mod hooks;
 mod invitee;
 mod jwt;
 mod oauth;
+mod organization;
+mod orgs;
 mod paginate;
 mod repos;
 mod response;

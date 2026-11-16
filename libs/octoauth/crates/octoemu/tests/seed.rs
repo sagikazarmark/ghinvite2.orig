@@ -3,8 +3,8 @@
 
 use octoemu::seed::{
     Access, App, BaseRole, Collaborator, Installation, InstallationRequest, Membership, Org,
-    OrgRole, Plan, Repo, RepositoryInvitation, RepositoryRole, Role, Seed, Team, TeamMembership,
-    TeamRole, User, Visibility, Webhook,
+    OrgInvitation, OrgRole, Plan, Repo, RepositoryInvitation, RepositoryRole, Role, Seed, Team,
+    TeamMembership, TeamRole, User, Visibility, Webhook,
 };
 
 const PUBLIC_KEY: &str = include_str!("fixtures/rsa2048.pub.pem");
@@ -300,6 +300,50 @@ fn reports_membership_problems() {
             "memberships[1].user: \"octocat\" already has a membership of \"acme\"",
             "team_memberships[0].state: an active team membership needs an active organization membership; \"octocat\"'s is pending",
             "team_memberships[1].user: \"hubot\" has no membership of the team's organization",
+        ]
+    );
+}
+
+#[test]
+fn reports_team_and_organization_invitation_problems() {
+    let start = "2030-01-01T00:00:00Z".parse().unwrap();
+    let seed = Seed::new()
+        .user(User::new(1, "octocat"))
+        .user(User::new(2, "hubot"))
+        .org(Org::new(3, "acme"))
+        .org(Org::new(4, "other"))
+        .repo(Repo::new(5, "other", "x"))
+        .repo(Repo::new(6, "acme", "w"))
+        .team(Team::new(10, "acme", "a").parent("b"))
+        .team(Team::new(11, "acme", "b").parent("a"))
+        .team(Team::new(12, "acme", "c").parent("missing"))
+        .team(
+            Team::new(13, "acme", "d")
+                .repository("other/x", Role::Push)
+                .repository("acme/w", Role::Custom("ghost".into())),
+        )
+        .team(Team::new(14, "other", "e"))
+        .membership(Membership::new("acme", "octocat", OrgRole::Member))
+        .org_invitation(OrgInvitation::new(20, "acme", "octocat"))
+        .org_invitation(OrgInvitation::new(21, "acme", "hubot").team(14))
+        .org_invitation(OrgInvitation::new(22, "acme", "hubot"))
+        .org_invitation(OrgInvitation::new(23, "acme", "hubot").failed(start, "Invitation expired"))
+        .org_invitation(OrgInvitation::by_email(24, "acme", "not-an-address"))
+        .org_invitation(OrgInvitation::by_email(20, "hubot", "a@example.test"));
+    assert_eq!(
+        problems(&seed),
+        [
+            "teams[0].parent: team parents form a cycle",
+            "teams[1].parent: team parents form a cycle",
+            "teams[2].parent: no team \"missing\" in \"acme\"",
+            "teams[3].repositories[0].repo: \"other/x\" is not owned by the team's organization \"acme\"",
+            "teams[3].repositories[1].role: \"ghost\" is neither a GitHub role nor a custom repository role of \"acme\"",
+            "org_invitations[0].invitee: \"octocat\" already has a membership of \"acme\"",
+            "org_invitations[1].team_ids[0]: no team with ID 14 in \"acme\"",
+            "org_invitations[2].invitee: \"hubot\" already has an open invitation to \"acme\"",
+            "org_invitations[4].email: \"not-an-address\" is not an email address",
+            "org_invitations[5].id: organization invitation ID 20 is used twice",
+            "org_invitations[5].org: \"hubot\" is a user, not an organization",
         ]
     );
 }

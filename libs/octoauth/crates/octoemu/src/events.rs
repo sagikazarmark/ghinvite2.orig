@@ -8,7 +8,10 @@
 //! organization member added directly), `edited` (a collaborator's role
 //! changed) and `removed` (GE-03); `installation` with `created`, `deleted`,
 //! `suspend`, `unsuspend` and `new_permissions_accepted`, and
-//! `installation_repositories` with `added` and `removed` (GE-04).
+//! `installation_repositories` with `added` and `removed` (GE-04);
+//! `organization` with `member_invited`, `member_added` and
+//! `member_removed`, and `membership` with `added` and `removed` (team
+//! scope) (GE-06, `crate::organization`).
 //!
 //! **Emitting an event** (for later tasks): build the payload without
 //! `installation` (deliveries add `{"id", "node_id"}` unless the payload
@@ -133,6 +136,40 @@ pub(crate) fn repository_targets(world: &Seed, repo: &Repo, event: &str) -> Vec<
     targets
 }
 
+/// Whether `installation` subscribes to `event` (its own events, else its
+/// App's).
+fn subscribes(world: &Seed, installation: &Installation, event: &str) -> bool {
+    let app_events = world
+        .apps
+        .iter()
+        .find(|app| app.id == installation.app_id)
+        .map(|app| &app.events);
+    installation
+        .events
+        .as_ref()
+        .or(app_events)
+        .is_some_and(|events| events.iter().any(|e| e == event))
+}
+
+/// The installations an organization-scoped `event` (`organization`,
+/// `membership`) goes to: every non-suspended installation on `org` that
+/// subscribes to it.
+pub(crate) fn organization_targets(world: &Seed, org: &str, event: &str) -> Vec<Target> {
+    let mut targets: Vec<Target> = world
+        .installations
+        .iter()
+        .filter(|installation| installation.suspended_at.is_none())
+        .filter(|installation| installation.account.eq_ignore_ascii_case(org))
+        .filter(|installation| subscribes(world, installation, event))
+        .map(|installation| Target {
+            app_id: installation.app_id,
+            installation_id: installation.id,
+        })
+        .collect();
+    targets.sort_by_key(|t| t.installation_id);
+    targets
+}
+
 /// Who an installation change is attributed to when nobody is named: the
 /// account itself for a user account; for an organization, its first
 /// active owner, else the organization (behaviour
@@ -168,7 +205,8 @@ fn view<'a>(state: &'a State, origin: &'a str) -> View<'a> {
     }
 }
 
-fn sender(view: &View<'_>, actor: &Actor) -> Value {
+/// The `sender` of an event `actor` caused.
+pub(crate) fn sender(view: &View<'_>, actor: &Actor) -> Value {
     match actor {
         Actor::App { app_id } => view.app_bot(*app_id),
         Actor::User(login) => view.account(login).unwrap_or_default(),

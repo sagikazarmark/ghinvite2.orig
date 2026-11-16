@@ -43,6 +43,18 @@ pub(crate) struct State {
     /// The highest repository invitation ID handed out, so a deleted
     /// invitation's ID is never reused.
     pub(crate) last_invitation_id: u64,
+    /// Organization invitations sent (POST invitations, PUT memberships of
+    /// non-members, team PUTs for non-members): (lowercased organization,
+    /// when), for the 50-or-500-per-24-hours budget.
+    pub(crate) org_invitations_sent: Vec<(String, DateTime<Utc>)>,
+    /// The highest organization invitation ID handed out.
+    pub(crate) last_org_invitation_id: u64,
+    /// Removed organization members and their role, for `reinstate`:
+    /// (lowercased organization, lowercased login, role).
+    pub(crate) former_members: Vec<(String, String, crate::seed::OrgRole)>,
+    /// Organizations whose invitation writes answer `spammed` (lowercased;
+    /// `POST /__octoemu/orgs/{org}/spammed`).
+    pub(crate) spammed_orgs: std::collections::BTreeSet<String>,
     /// OAuth codes, user access tokens, refresh tokens and PATs.
     pub(crate) user_tokens: UserTokens,
     /// How the authorize page answers (`crate::oauth`).
@@ -102,6 +114,10 @@ impl Shared {
                 deliveries: Deliveries::default(),
                 invitations_sent: Vec::new(),
                 last_invitation_id: 0,
+                org_invitations_sent: Vec::new(),
+                last_org_invitation_id: 0,
+                former_members: Vec::new(),
+                spammed_orgs: std::collections::BTreeSet::new(),
                 user_tokens: UserTokens::default(),
                 oauth: OAuthControls::default(),
             }),

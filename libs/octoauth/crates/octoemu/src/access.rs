@@ -5,10 +5,11 @@
 //! an organization's custom role over a base (`seed::RepositoryRole`),
 //! ranked as its base. A user's effective role is the highest of their
 //! [`grants`]: a direct collaboration, the repository's ownership, the
-//! owning organization's ownership or base permission, and (GE-06) teams.
+//! owning organization's ownership or base permission, and its teams
+//! (an active team membership, inherited by child teams).
 
 use crate::seed::{
-    BasePermission, MembershipState, OrgRole, Repo, RepositoryRole, Role, Seed, User,
+    BasePermission, MembershipState, OrgRole, Repo, RepositoryRole, Role, Seed, Team, User,
 };
 use serde_json::{Value, json};
 
@@ -23,6 +24,9 @@ pub(crate) enum Source {
     OrgOwner,
     /// A member of that organization, through its base permission.
     OrgBase,
+    /// An active member of a team (or of one of its child teams) with a
+    /// role on the repository; the team's ID.
+    Team(u64),
 }
 
 /// One source of access and the role it confers.
@@ -61,6 +65,48 @@ pub(crate) fn org_member(world: &Seed, org: &str, login: &str) -> bool {
             && m.user.eq_ignore_ascii_case(login)
             && m.state == MembershipState::Active
     })
+}
+
+/// The team `slug` of organization `org`.
+pub(crate) fn team<'a>(world: &'a Seed, org: &str, slug: &str) -> Option<&'a Team> {
+    world
+        .teams
+        .iter()
+        .find(|t| t.org.eq_ignore_ascii_case(org) && t.slug.eq_ignore_ascii_case(slug))
+}
+
+/// `team` named as seed entries name it: `org/slug`.
+pub(crate) fn team_key(team: &Team) -> String {
+    format!("{}/{}", team.org, team.slug)
+}
+
+/// The teams `login` is an active member of, plus their ancestors (a child
+/// team's members inherit the parent's access; documented).
+pub(crate) fn active_teams<'a>(world: &'a Seed, org: &str, login: &str) -> Vec<&'a Team> {
+    let mut teams: Vec<&Team> = Vec::new();
+    for membership in world
+        .team_memberships
+        .iter()
+        .filter(|m| m.user.eq_ignore_ascii_case(login) && m.state == MembershipState::Active)
+    {
+        let Some((team_org, slug)) = membership.team.split_once('/') else {
+            continue;
+        };
+        if !team_org.eq_ignore_ascii_case(org) {
+            continue;
+        }
+        let mut current = team(world, org, slug);
+        // Bounded: seed validation refuses parent cycles.
+        for _ in 0..=world.teams.len() {
+            let Some(found) = current else { break };
+            if teams.iter().any(|t| t.id == found.id) {
+                break;
+            }
+            teams.push(found);
+            current = found.parent.as_deref().and_then(|p| team(world, org, p));
+        }
+    }
+    teams
 }
 
 /// The custom role `name` of the organization owning `repo`.
@@ -166,10 +212,10 @@ pub(crate) fn parse_invitation_permission(value: &str) -> Option<Role> {
     }
 }
 
-/// Every source of `login`'s access to `repo`, direct first.
-///
-/// Team grants (a team's role on the repository, inherited by its active
-/// members) arrive with the organization surface (GE-06) and slot in here.
+/// Every source of `login`'s access to `repo`, direct first: a direct
+/// collaboration, ownership, the organization's ownership and base
+/// permission (active members), then team grants (active team members,
+/// and members of child teams).
 pub(crate) fn grants(world: &Seed, repo: &Repo, login: &str) -> Vec<Grant> {
     let mut grants = Vec::new();
     let full_name = repo.full_name();
@@ -216,6 +262,18 @@ pub(crate) fn grants(world: &Seed, repo: &Repo, login: &str) -> Vec<Grant> {
                 source: Source::OrgBase,
                 role,
             });
+        }
+        for team in active_teams(world, &org.login, login) {
+            if let Some(grant) = team
+                .repositories
+                .iter()
+                .find(|r| r.repo.eq_ignore_ascii_case(&full_name))
+            {
+                grants.push(Grant {
+                    source: Source::Team(team.id),
+                    role: grant.role.clone(),
+                });
+            }
         }
     }
     grants

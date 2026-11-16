@@ -11,6 +11,29 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- Organizations (GE-06): `GET /orgs/{org}` (`plan` with
+  `organization_plan`), `GET /orgs/{org}/members`, `GET`/`PUT`/`DELETE
+  /orgs/{org}/memberships/{username}` (a non-member is invited and
+  `pending`), `GET`/`POST /orgs/{org}/invitations` (by `invitee_id` or
+  `email`, `role`, `team_ids`), `DELETE
+  /orgs/{org}/invitations/{invitation_id}`,
+  `GET /orgs/{org}/invitations/{invitation_id}/teams`,
+  `GET /orgs/{org}/failed_invitations`, `GET /orgs/{org}/teams`,
+  `GET /orgs/{org}/teams/{team_slug}`, `GET`/`PUT`/`DELETE
+  /orgs/{org}/teams/{team_slug}/memberships/{username}`, and the user's
+  `GET /user/memberships/orgs[/{org}]` and `PATCH
+  /user/memberships/orgs/{org}` (accept). Invitations expire after 7 days
+  on the clock (then listed as failed, assumed); the 50-or-500 per 24 hours
+  budget; the paid-plan seat check; `organization.member_invited`,
+  `member_added`, `member_removed` and `membership.added`/`removed` events.
+- Team repository grants (with nested teams) feed effective repository
+  access: the permission route, `affiliation=all` and PUT collaborator's
+  204.
+- Seed: `org_invitations` (`seed::OrgInvitation`, `seed::InvitationRole`),
+  a team's `parent` and `repositories` (`seed::TeamRepository`).
+- Admin API: `POST /act/{login}/orgs/{org}/accept|decline|leave` and
+  `POST /orgs/{org}/spammed`.
+
 - OAuth web flow and user tokens (GE-05): the authorize page
   (`GET /login/oauth/authorize`: registered callbacks, S256 PKCE, `login=`
   with auto-consent, an HTML page of the seeded users with a consent form at

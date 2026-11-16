@@ -104,7 +104,7 @@ fn unprocessable(shared: &Shared, field: &str, code: &str, message: &str, docs: 
 }
 
 /// A JSON object body; empty means `{}`. Malformed JSON is GitHub's 400.
-fn object(body: &[u8], docs: &str) -> Result<Value, Response> {
+pub(crate) fn object(body: &[u8], docs: &str) -> Result<Value, Response> {
     if body.iter().all(u8::is_ascii_whitespace) {
         return Ok(json!({}));
     }
@@ -120,7 +120,7 @@ fn object(body: &[u8], docs: &str) -> Result<Value, Response> {
 
 /// A string field of `body`: `Ok(None)` when absent or null, `Err` when
 /// present with another type.
-fn string_field<'a>(body: &'a Value, field: &str) -> Result<Option<&'a str>, ()> {
+pub(crate) fn string_field<'a>(body: &'a Value, field: &str) -> Result<Option<&'a str>, ()> {
     match body.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => Ok(Some(value)),

@@ -74,7 +74,7 @@ async fn prints_one_json_line_with_its_bases() {
         .await
         .unwrap();
     assert_eq!(health.status(), 200);
-    let unbuilt = reqwest::get(format!("{root}/orgs/acme/invitations"))
+    let unbuilt = reqwest::get(format!("{root}/orgs/acme/hooks"))
         .await
         .unwrap();
     assert_eq!(unbuilt.status(), 501);

@@ -5,10 +5,11 @@
 //! verification and permission checks (`crate::auth`).
 
 use crate::auth::Auth;
+use crate::orgs::{MEMBERS_READ, MEMBERS_WRITE};
 use crate::repos::{ADMINISTRATION_READ, ADMINISTRATION_WRITE};
 use crate::state::SharedState;
 use crate::users::EMAIL_ADDRESSES_READ;
-use crate::{applications, apps, hooks, invitee, oauth, repos, users};
+use crate::{applications, apps, hooks, invitee, oauth, orgs, repos, users};
 use axum::Router;
 use axum::handler::Handler;
 use axum::http::Method;
@@ -30,8 +31,10 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "collaborator-put-outcomes",
     "custom-role-invitation-permissions",
     "date-header",
+    "email-invitation-accept",
     "error-body",
     "expired-invitations-listed",
+    "expired-org-invitations-failed",
     "installation-event-sender",
     "installation-events",
     "installation-events-while-suspended",
@@ -42,6 +45,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "invitation-alias-links",
     "invitation-expiry",
     "invitation-limit",
+    "invited-team-membership-pending",
     "json-content-type",
     "jwt-error-messages",
     "jwt-exp-after-iat",
@@ -55,6 +59,22 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "oauth-error-status",
     "oauth-token-errors",
     "oauth-token-response",
+    "org-accept-team-events",
+    "org-admin-fields",
+    "org-error-messages",
+    "org-invitation-cancel",
+    "org-invitation-decline",
+    "org-invitation-expiry",
+    "org-invitation-limit",
+    "org-invitation-limit-response",
+    "org-invitation-roles",
+    "org-member-events",
+    "org-membership-pending",
+    "org-no-seat",
+    "org-out-of-scope",
+    "org-plan-visibility",
+    "org-reput-pending",
+    "org-spammed",
     "out-of-scope-repository",
     "pagination",
     "pat-scopes",
@@ -68,6 +88,8 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "redirect-uri-match",
     "refresh-token-rotation",
     "remove-non-collaborator",
+    "remove-org-non-member",
+    "remove-team-non-member",
     "repo-error-messages",
     "reput-expired-invitation",
     "reput-pending-invitation",
@@ -77,6 +99,9 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "suspended-installation",
     "suspended-installation-tokens",
     "suspended-installation-webhooks",
+    "team-membership-events",
+    "team-put-non-member",
+    "team-repository-access",
     "token-error-messages",
     "token-implicit-metadata",
     "token-repositories-union",
@@ -89,6 +114,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "user-token-expiry",
     "user-token-hourly-limit",
     "user-token-invitations",
+    "user-token-org-membership-list",
     "user-token-permissions",
     "user-token-revocation",
     "validation-errors",
@@ -363,6 +389,119 @@ pub(crate) fn github() -> Api {
             "/user/repository_invitations/{invitation_id}",
             Auth::User(None),
             invitee::decline,
+        )
+        // Organizations: docs.github.com/rest/orgs/orgs and
+        // docs.github.com/rest/orgs/members.
+        .route(
+            Method::GET,
+            "/orgs/{org}",
+            Auth::Installation(None),
+            orgs::get_org,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/members",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::list_members,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::get_membership,
+        )
+        .route(
+            Method::PUT,
+            "/orgs/{org}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::put_membership,
+        )
+        .route(
+            Method::DELETE,
+            "/orgs/{org}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::remove_membership,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/invitations",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::list_invitations,
+        )
+        .route(
+            Method::POST,
+            "/orgs/{org}/invitations",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::create_invitation,
+        )
+        .route(
+            Method::DELETE,
+            "/orgs/{org}/invitations/{invitation_id}",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::cancel_invitation,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/invitations/{invitation_id}/teams",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::invitation_teams,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/failed_invitations",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::list_failed_invitations,
+        )
+        // Teams: docs.github.com/rest/teams/teams and
+        // docs.github.com/rest/teams/members.
+        .route(
+            Method::GET,
+            "/orgs/{org}/teams",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::list_teams,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/teams/{team_slug}",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::get_team,
+        )
+        .route(
+            Method::GET,
+            "/orgs/{org}/teams/{team_slug}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_READ)),
+            orgs::get_team_membership,
+        )
+        .route(
+            Method::PUT,
+            "/orgs/{org}/teams/{team_slug}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::put_team_membership,
+        )
+        .route(
+            Method::DELETE,
+            "/orgs/{org}/teams/{team_slug}/memberships/{username}",
+            Auth::Installation(Some(MEMBERS_WRITE)),
+            orgs::remove_team_membership,
+        )
+        // The user's organization memberships: docs.github.com/rest/orgs/members.
+        .route(
+            Method::GET,
+            "/user/memberships/orgs",
+            Auth::User(None),
+            orgs::list_user_memberships,
+        )
+        .route(
+            Method::GET,
+            "/user/memberships/orgs/{org}",
+            Auth::User(Some(MEMBERS_READ)),
+            orgs::get_user_membership,
+        )
+        .route(
+            Method::PATCH,
+            "/user/memberships/orgs/{org}",
+            Auth::User(Some(MEMBERS_WRITE)),
+            orgs::accept_membership,
         )
         // An App's OAuth tokens: docs.github.com/rest/apps/oauth-applications.
         .route(

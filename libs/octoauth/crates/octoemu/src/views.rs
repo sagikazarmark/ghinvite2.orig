@@ -1,7 +1,10 @@
 //! JSON representations of world objects, in GitHub's shapes (the fields
 //! ghinvite and octoauth read, plus the common ones around them).
 
-use crate::seed::{App, Installation, InstallationRequest, Repo, RepositoryInvitation, Role, Seed};
+use crate::seed::{
+    App, Installation, InstallationRequest, MembershipState, Org, OrgInvitation, OrgRole, Repo,
+    RepositoryInvitation, Role, Seed, Team, TeamRole,
+};
 use crate::state::Shared;
 use axum::http::{HeaderMap, header::HOST};
 use base64::Engine as _;
@@ -63,7 +66,275 @@ pub(crate) fn expired(
     now >= invitation.created_at.unwrap_or(start) + INVITATION_LIFETIME
 }
 
+/// Whether organization invitation `invitation` has expired at `now`
+/// (documented: seven days).
+pub(crate) fn org_invitation_expired(
+    invitation: &OrgInvitation,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    now >= invitation.created_at.unwrap_or(start) + INVITATION_LIFETIME
+}
+
+/// Whether organization invitation `invitation` is still open: neither
+/// failed nor expired.
+pub(crate) fn org_invitation_open(
+    invitation: &OrgInvitation,
+    start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> bool {
+    invitation.failed_at.is_none() && !org_invitation_expired(invitation, start, now)
+}
+
+/// The text `failed_reason` carries for an expired invitation (behaviour
+/// `expired-org-invitations-failed`).
+pub(crate) const EXPIRED_REASON: &str = "Invitation expired";
+
+/// An organization role as membership objects name it.
+pub(crate) fn org_role_name(role: OrgRole) -> &'static str {
+    match role {
+        OrgRole::Admin => "admin",
+        OrgRole::Member => "member",
+    }
+}
+
+/// A membership state's spelling.
+pub(crate) fn state_name(state: MembershipState) -> &'static str {
+    match state {
+        MembershipState::Active => "active",
+        MembershipState::Pending => "pending",
+    }
+}
+
+/// A team role's spelling.
+pub(crate) fn team_role_name(role: TeamRole) -> &'static str {
+    match role {
+        TeamRole::Member => "member",
+        TeamRole::Maintainer => "maintainer",
+    }
+}
+
 impl View<'_> {
+    /// An organization as `GET /orgs/{org}` reports it (an
+    /// `organization-full` subset). `plan` only with `plan` (the caller
+    /// holds `organization_plan`), the owner-only settings only with
+    /// `admin_fields`.
+    pub(crate) fn full_org(&self, org: &Org, plan: bool, admin_fields: bool) -> Value {
+        let mut body = self.organization(&org.login).unwrap_or_default();
+        let origin = self.origin;
+        let login = &org.login;
+        let created = timestamp(org.created_at.unwrap_or(self.start));
+        let public_repos = self
+            .world
+            .repos
+            .iter()
+            .filter(|r| r.owner.eq_ignore_ascii_case(login) && !r.is_private())
+            .count();
+        for (field, value) in [
+            ("name", org.name.clone().map_or(Value::Null, Value::from)),
+            ("company", Value::Null),
+            ("blog", "".into()),
+            ("location", Value::Null),
+            ("email", Value::Null),
+            ("twitter_username", Value::Null),
+            ("is_verified", false.into()),
+            ("has_organization_projects", true.into()),
+            ("has_repository_projects", true.into()),
+            ("public_repos", public_repos.into()),
+            ("public_gists", 0.into()),
+            ("followers", 0.into()),
+            ("following", 0.into()),
+            ("html_url", format!("{origin}/{login}").into()),
+            ("created_at", created.clone().into()),
+            ("updated_at", created.into()),
+            ("archived_at", Value::Null),
+            ("type", "Organization".into()),
+        ] {
+            body[field] = value;
+        }
+        if plan {
+            body["plan"] = json!({
+                "name": org.plan.name,
+                "space": 976_562_499,
+                "private_repos": 999_999,
+                "filled_seats": crate::organization::filled_seats(self.world, org, self.start, self.now),
+                "seats": org.plan.seats,
+            });
+        }
+        if admin_fields {
+            let private = self
+                .world
+                .repos
+                .iter()
+                .filter(|r| r.owner.eq_ignore_ascii_case(login) && r.is_private())
+                .count();
+            body["two_factor_requirement_enabled"] = org.two_factor_requirement_enabled.into();
+            body["default_repository_permission"] =
+                serde_json::to_value(org.default_repository_permission).unwrap_or_default();
+            body["members_can_create_repositories"] = true.into();
+            body["total_private_repos"] = private.into();
+            body["owned_private_repos"] = private.into();
+        }
+        body
+    }
+
+    /// An organization membership (`org-membership`).
+    pub(crate) fn membership(
+        &self,
+        org: &str,
+        login: &str,
+        role: &str,
+        state: MembershipState,
+    ) -> Value {
+        let origin = self.origin;
+        let org_login = self
+            .world
+            .orgs
+            .iter()
+            .find(|o| o.login.eq_ignore_ascii_case(org))
+            .map_or(org, |o| o.login.as_str());
+        let user = self.account(login).unwrap_or_default();
+        let user_login = user["login"].as_str().unwrap_or(login).to_owned();
+        json!({
+            "url": format!("{origin}/orgs/{org_login}/memberships/{user_login}"),
+            "state": state_name(state),
+            "role": role,
+            "organization_url": format!("{origin}/orgs/{org_login}"),
+            "organization": self.organization(org_login),
+            "user": user,
+        })
+    }
+
+    /// A team (`team`, as lists show it).
+    pub(crate) fn team(&self, team: &Team) -> Value {
+        let origin = self.origin;
+        let org = &team.org;
+        let slug = &team.slug;
+        let parent = team
+            .parent
+            .as_deref()
+            .and_then(|p| crate::access::team(self.world, org, p))
+            .map(|parent| self.team_simple(parent));
+        let mut body = self.team_simple(team);
+        body["parent"] = parent.unwrap_or(Value::Null);
+        body["members_url"] = format!("{origin}/orgs/{org}/teams/{slug}/members{{/member}}").into();
+        body
+    }
+
+    /// A team as `parent` shows it (`team-simple`).
+    fn team_simple(&self, team: &Team) -> Value {
+        let origin = self.origin;
+        let org = &team.org;
+        let slug = &team.slug;
+        json!({
+            "id": team.id,
+            "node_id": STANDARD.encode(format!("04:Team{}", team.id)),
+            "url": format!("{origin}/organizations/{}/team/{}", self.organization(org).map_or(Value::Null, |o| o["id"].clone()), team.id),
+            "html_url": format!("{origin}/orgs/{org}/teams/{slug}"),
+            "name": team.display_name(),
+            "slug": slug,
+            "description": null,
+            "privacy": serde_json::to_value(team.privacy).unwrap_or_default(),
+            "notification_setting": "notifications_enabled",
+            "permission": "pull",
+            "members_url": format!("{origin}/orgs/{org}/teams/{slug}/members{{/member}}"),
+            "repositories_url": format!("{origin}/orgs/{org}/teams/{slug}/repos"),
+        })
+    }
+
+    /// A team as `GET /orgs/{org}/teams/{team_slug}` reports it
+    /// (`team-full`).
+    pub(crate) fn full_team(&self, team: &Team) -> Value {
+        let mut body = self.team(team);
+        let key = crate::access::team_key(team);
+        let members = self
+            .world
+            .team_memberships
+            .iter()
+            .filter(|m| m.team.eq_ignore_ascii_case(&key) && m.state == MembershipState::Active)
+            .count();
+        let created = timestamp(self.start);
+        body["members_count"] = members.into();
+        body["repos_count"] = team.repositories.len().into();
+        body["created_at"] = created.clone().into();
+        body["updated_at"] = created.into();
+        body["organization"] = self
+            .world
+            .orgs
+            .iter()
+            .find(|o| o.login.eq_ignore_ascii_case(&team.org))
+            .map_or(Value::Null, |org| self.full_org(org, false, false));
+        body
+    }
+
+    /// A team membership (`team-membership`).
+    pub(crate) fn team_membership(
+        &self,
+        team: &Team,
+        login: &str,
+        role: TeamRole,
+        state: MembershipState,
+    ) -> Value {
+        let origin = self.origin;
+        let login = self
+            .account(login)
+            .and_then(|a| a["login"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| login.to_owned());
+        let org_id = self
+            .organization(&team.org)
+            .map_or(Value::Null, |o| o["id"].clone());
+        json!({
+            "url": format!("{origin}/organizations/{org_id}/team/{}/memberships/{login}", team.id),
+            "role": team_role_name(role),
+            "state": state_name(state),
+        })
+    }
+
+    /// An organization invitation (`organization-invitation`). An expired
+    /// one shows its expiry as `failed_at` with [`EXPIRED_REASON`].
+    pub(crate) fn org_invitation(&self, invitation: &OrgInvitation) -> Value {
+        let origin = self.origin;
+        let inviter = match (&invitation.inviter, invitation.inviter_app_id) {
+            (Some(login), _) => self.account(login).unwrap_or_default(),
+            (None, Some(app_id)) => self.app_bot(app_id),
+            (None, None) => Value::Null,
+        };
+        let created = invitation.created_at.unwrap_or(self.start);
+        let (failed_at, failed_reason) = match (&invitation.failed_at, &invitation.failed_reason) {
+            (Some(at), reason) => (
+                Value::from(timestamp(*at)),
+                reason.clone().map_or(Value::Null, Value::from),
+            ),
+            (None, _) if org_invitation_expired(invitation, self.start, self.now) => (
+                timestamp(created + INVITATION_LIFETIME).into(),
+                EXPIRED_REASON.into(),
+            ),
+            (None, _) => (Value::Null, Value::Null),
+        };
+        let login = invitation.invitee.as_deref().map(|login| {
+            self.account(login)
+                .and_then(|a| a["login"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| login.to_owned())
+        });
+        let org_id = self
+            .organization(&invitation.org)
+            .map_or(Value::Null, |o| o["id"].clone());
+        json!({
+            "id": invitation.id,
+            "node_id": STANDARD.encode(format!("011:OrganizationInvitation{}", invitation.id)),
+            "login": login,
+            "email": invitation.email,
+            "role": invitation.role.as_str(),
+            "created_at": timestamp(created),
+            "failed_at": failed_at,
+            "failed_reason": failed_reason,
+            "inviter": inviter,
+            "team_count": invitation.team_ids.len(),
+            "invitation_teams_url": format!("{origin}/organizations/{org_id}/invitations/{}/teams", invitation.id),
+            "invitation_source": "member",
+        })
+    }
+
     /// A user or organization as a `simple-user`; `None` for an unknown
     /// login.
     pub(crate) fn account(&self, login: &str) -> Option<Value> {

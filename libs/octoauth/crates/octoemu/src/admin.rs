@@ -63,6 +63,54 @@ pub(crate) fn router() -> Router<SharedState> {
             "/__octoemu/act/{login}/repos/{owner}/{repo}/leave",
             post(leave_repository),
         )
+        .route(
+            "/__octoemu/act/{login}/orgs/{org}/{action}",
+            post(act_on_org),
+        )
+        .route("/__octoemu/orgs/{org}/spammed", post(set_spammed))
+}
+
+/// `POST /__octoemu/act/{login}/orgs/{org}/accept|decline|leave`: the
+/// user's side of an organization membership, as `PATCH
+/// /user/memberships/orgs/{org}` does with their user token (accept), plus
+/// declining an invitation and leaving.
+async fn act_on_org(
+    State(shared): State<SharedState>,
+    Path((login, org, action)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let origin = crate::views::origin(&shared, &headers);
+    crate::orgs::act(&shared, &origin, &login, &org, &action)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Spammed {
+    spammed: bool,
+}
+
+/// `POST /__octoemu/orgs/{org}/spammed` `{"spammed": bool}`: the
+/// organization's invitation writes (create, cancel) answer GitHub's
+/// `spammed` 422 (assumed shape) while on. 204; 404 for an unknown
+/// organization.
+async fn set_spammed(
+    State(shared): State<SharedState>,
+    Path(org): Path<String>,
+    bytes: Bytes,
+) -> Response {
+    let Spammed { spammed } = match body(&bytes) {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    if crate::orgs::set_spammed(&shared, &org, spammed) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        error(
+            StatusCode::NOT_FOUND,
+            "octoemu: no such organization",
+            OCTOEMU_DOCS,
+        )
+    }
 }
 
 /// A JSON body, or the 400 (in GitHub's error shape) to answer instead.

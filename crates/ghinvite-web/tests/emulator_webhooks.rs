@@ -10,6 +10,8 @@
 //!   with either are accepted, one signed with a retired secret is a 401.
 //! - Dedupe: a redelivery (same body, same GUID) reaches Restate with the
 //!   same payload-SHA-256 `delivery_id` as the original.
+//! - Organizations (GE-06): `POST /webhooks/org` accepts the emulator's
+//!   documented `organization` and `membership` payloads.
 //!
 //! Keys: octoemu's test key pair (public test material).
 #![cfg(not(target_arch = "wasm32"))]
@@ -274,4 +276,87 @@ async fn the_web_intake_verifies_rotates_and_dedupes_emulator_deliveries() {
     let recorded = calls(&restate);
     assert_eq!(recorded.len(), 6);
     assert_eq!(recorded[5].method, "recheck_permissions");
+}
+
+/// The org App's ID in `common::apps` (`GH_ORG_APP_ID`).
+const ORG_APP: u64 = 456;
+
+/// ghinvite-web's organization intake (`POST /webhooks/org`) parses the
+/// emulator's documented `organization` and `membership` payloads (GE-06):
+/// `member_invited` is ignored, `member_added`, `membership.added` and
+/// `member_removed` are accepted (202), never refused as malformed (400).
+#[tokio::test]
+async fn the_web_intake_parses_emulator_organization_events() {
+    let (base, _restate) = web().await;
+    let url = format!("{base}/webhooks/org");
+    let seed = Seed::new()
+        .user(User::new(42, "installer"))
+        .user(User::new(8, "alice"))
+        .org(Org::new(9001, "acme"))
+        .membership(Membership::new("acme", "installer", OrgRole::Admin))
+        .team(octoemu::seed::Team::new(50, "acme", "devs"))
+        .app(
+            App::new(ORG_APP, "ghinvite-org", "Iv.fixture-org", "fixture-secret")
+                .public_key(PUBLIC_KEY)
+                .webhook(Webhook::new(&url, "org-current"))
+                .permission("members", Access::Write)
+                .permission("metadata", Access::Read)
+                .event("organization")
+                .event("membership"),
+        )
+        .installation(octoemu::seed::Installation::new(78, ORG_APP, "acme"));
+    let emulator = Emulator::start(seed).await.unwrap();
+    let token = {
+        let response = reqwest::Client::new()
+            .post(format!("{}/tokens/installation", emulator.admin_base()))
+            .header("content-type", "application/json")
+            .body(json!({"installation_id": 78}).to_string())
+            .send()
+            .await
+            .unwrap();
+        response.json::<Value>().await.unwrap()["token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let api = |method: reqwest::Method, path: &str, body: Value| {
+        reqwest::Client::new()
+            .request(method, format!("{}{path}", emulator.api_base()))
+            .bearer_auth(&token)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+    };
+    let invited = api(
+        reqwest::Method::POST,
+        "/orgs/acme/invitations",
+        json!({"invitee_id": 8, "team_ids": [50]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(invited.status(), reqwest::StatusCode::CREATED);
+    let accepted = admin(&emulator, "/act/alice/orgs/acme/accept", json!({})).await;
+    assert_eq!(accepted, reqwest::StatusCode::NO_CONTENT);
+    let removed = api(
+        reqwest::Method::DELETE,
+        "/orgs/acme/memberships/alice",
+        json!({}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(removed.status(), reqwest::StatusCode::NO_CONTENT);
+    let deliveries = settle(&emulator).await;
+    let summary: Vec<(&str, Option<&str>, u16)> = deliveries
+        .iter()
+        .map(|d| (d.event.as_str(), d.action.as_deref(), d.status_code))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("organization", Some("member_invited"), 202),
+            ("organization", Some("member_added"), 202),
+            ("membership", Some("added"), 202),
+            ("organization", Some("member_removed"), 202),
+        ]
+    );
 }
