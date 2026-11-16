@@ -312,6 +312,60 @@ async fn a_rejected_token_is_never_served_again() {
 }
 
 #[tokio::test]
+async fn invalidate_creates_nothing_and_the_next_token_is_new() {
+    let f = Fixture::new().await;
+    let first = f.token().await.unwrap();
+    f.provider.invalidate(&first);
+    assert_eq!(f.created(), 1, "invalidating creates nothing");
+    let second = f.token().await.unwrap();
+    assert_ne!(second.id(), first.id());
+    assert_eq!(f.created(), 2);
+
+    // A newer token is kept: another holder of `first` invalidating late
+    // does not cost a creation.
+    f.provider.invalidate(&first);
+    assert_eq!(f.token().await.unwrap().id(), second.id());
+    assert_eq!(f.created(), 2);
+}
+
+#[tokio::test]
+async fn invalidate_installation_forgets_every_scope_of_that_installation_only() {
+    let f = Fixture::new().await;
+    let write: TokenScope = Permissions::new([(OrganizationPermission::Members, Access::Write)])
+        .unwrap()
+        .into();
+    let read = f.token().await.unwrap();
+    let written = f
+        .provider
+        .token(InstallationId::new(42), &write)
+        .await
+        .unwrap();
+    let other = f
+        .provider
+        .token(InstallationId::new(43), &scope())
+        .await
+        .unwrap();
+    assert_eq!(f.created(), 3);
+
+    f.provider.invalidate_installation(InstallationId::new(42));
+    assert_eq!(f.created(), 3, "invalidating creates nothing");
+    assert_ne!(f.token().await.unwrap().id(), read.id());
+    let rewritten = f
+        .provider
+        .token(InstallationId::new(42), &write)
+        .await
+        .unwrap();
+    assert_ne!(rewritten.id(), written.id());
+    let kept = f
+        .provider
+        .token(InstallationId::new(43), &scope())
+        .await
+        .unwrap();
+    assert_eq!(kept.id(), other.id(), "other installations keep theirs");
+    assert_eq!(f.created(), 5);
+}
+
+#[tokio::test]
 async fn foreign_tokens_are_refused() {
     let f = Fixture::new().await;
     let foreign = InstallationToken::from_parts(TokenParts {
@@ -328,6 +382,12 @@ async fn foreign_tokens_are_refused() {
         TokenError::ForeignToken
     );
     assert_eq!(f.created(), 0);
+
+    // Invalidating one never touches this app's cache.
+    let own = f.token().await.unwrap();
+    f.provider.invalidate(&foreign);
+    assert_eq!(f.token().await.unwrap().id(), own.id());
+    assert_eq!(f.created(), 1);
 }
 
 #[tokio::test]
@@ -546,6 +606,12 @@ async fn dyn_providers_use_the_providers_cache() {
     assert_ne!(second.id(), first.id());
     assert_eq!(f.token().await.unwrap().id(), second.id());
     assert_eq!(f.created(), 2);
+
+    crate::DynInstallationTokenProvider::invalidate(&*tokens, &second);
+    assert_ne!(f.token().await.unwrap().id(), second.id());
+    crate::DynInstallationTokenProvider::invalidate_installation(&*tokens, InstallationId::new(42));
+    f.token().await.unwrap();
+    assert_eq!(f.created(), 4);
 }
 
 #[tokio::test]

@@ -259,6 +259,12 @@ impl octotoken::InstallationTokenProvider for FreshTokens {
         let provider = self.current();
         provider.replace(rejected).await
     }
+    fn invalidate(&self, rejected: &octotoken::InstallationToken) {
+        self.current().invalidate(rejected);
+    }
+    fn invalidate_installation(&self, installation: octotoken::InstallationId) {
+        self.current().invalidate_installation(installation);
+    }
 }
 
 struct Runtime {

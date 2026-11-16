@@ -67,6 +67,12 @@ pub trait DynInstallationTokenProvider: DynSendSync {
 
     /// [`InstallationTokenProvider::replace`].
     fn replace<'a>(&'a self, rejected: &'a InstallationToken) -> TokenFuture<'a>;
+
+    /// [`InstallationTokenProvider::invalidate`].
+    fn invalidate(&self, rejected: &InstallationToken);
+
+    /// [`InstallationTokenProvider::invalidate_installation`].
+    fn invalidate_installation(&self, installation: InstallationId);
 }
 
 impl<P: InstallationTokenProvider + DynSendSync> DynInstallationTokenProvider for P {
@@ -76,6 +82,14 @@ impl<P: InstallationTokenProvider + DynSendSync> DynInstallationTokenProvider fo
 
     fn replace<'a>(&'a self, rejected: &'a InstallationToken) -> TokenFuture<'a> {
         boxed(InstallationTokenProvider::replace(self, rejected))
+    }
+
+    fn invalidate(&self, rejected: &InstallationToken) {
+        InstallationTokenProvider::invalidate(self, rejected);
+    }
+
+    fn invalidate_installation(&self, installation: InstallationId) {
+        InstallationTokenProvider::invalidate_installation(self, installation);
     }
 }
 
@@ -90,6 +104,14 @@ impl InstallationTokenProvider for dyn DynInstallationTokenProvider + '_ {
 
     async fn replace(&self, rejected: &InstallationToken) -> Result<InstallationToken, TokenError> {
         DynInstallationTokenProvider::replace(self, rejected).await
+    }
+
+    fn invalidate(&self, rejected: &InstallationToken) {
+        DynInstallationTokenProvider::invalidate(self, rejected);
+    }
+
+    fn invalidate_installation(&self, installation: InstallationId) {
+        DynInstallationTokenProvider::invalidate_installation(self, installation);
     }
 }
 

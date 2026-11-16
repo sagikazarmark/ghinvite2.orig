@@ -23,3 +23,9 @@ Not yet published; developed inside the ghinvite repository.
   that build their context per request.
 - `tracing` feature: events for token creation, replacement and failure
   (also enables octoauth's). Their fields never hold a token.
+- `InstallationTokenProvider::invalidate` (stop serving a rejected token,
+  creating nothing, for requests that must not be repeated right away, such
+  as fenced writes) and `invalidate_installation` (forget every scope's
+  token of an installation, e.g. after its permissions changed); also on
+  `DynInstallationTokenProvider`. Both are required: a provider implements
+  them too (a provider that caches nothing does nothing).

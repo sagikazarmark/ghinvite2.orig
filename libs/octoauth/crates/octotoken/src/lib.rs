@@ -17,6 +17,10 @@
 //!   again would return the same rejected token.) Never replace after a 403
 //!   (missing permissions, SSO, IP allow list, rate limits): a new token
 //!   cannot fix those.
+//! - A request that must not be repeated right away (a write behind a
+//!   fence) [`invalidate`](InstallationTokenProvider::invalidate)s the
+//!   rejected token instead, which creates nothing; its next attempt, if
+//!   any, gets a new token from `token`.
 //! - Classify error responses with [`ApiError::classify`], which keeps no
 //!   response text, before logging or journaling them.
 //! - Never journal, store, log or return a token from a durable step (ADR
@@ -109,4 +113,18 @@ pub trait InstallationTokenProvider: MaybeSendSync {
         &self,
         rejected: &InstallationToken,
     ) -> impl Future<Output = Result<InstallationToken, TokenError>> + MaybeSend;
+
+    /// Stop returning `rejected`: the next [`token`](Self::token) for its
+    /// installation and scope creates a new one, unless a newer one is
+    /// already cached. Creates nothing. For a request that must not be
+    /// repeated right away, such as a write behind a fence: after GitHub
+    /// answers 401, invalidate, settle the fence, then get the next
+    /// attempt's token (if any) from `token`. [`replace`](Self::replace)
+    /// would create a token even when no attempt follows.
+    fn invalidate(&self, rejected: &InstallationToken);
+
+    /// Stop returning any token of `installation`, in every scope, e.g. after
+    /// its permissions changed: the next [`token`](Self::token) per scope
+    /// creates a new one. Creates nothing.
+    fn invalidate_installation(&self, installation: InstallationId);
 }

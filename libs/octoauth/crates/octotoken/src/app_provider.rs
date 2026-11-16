@@ -241,6 +241,30 @@ impl InstallationTokenProvider for AppTokenProvider {
         self.create(&slot, installation, scope, Some(rejected))
             .await
     }
+
+    fn invalidate(&self, rejected: &InstallationToken) {
+        let key = (rejected.installation_id(), rejected.scope().clone());
+        // No slot is created: a foreign or uncached token has nothing to drop.
+        let Some(slot) = lock(&self.shared.slots).get(&key).cloned() else {
+            return;
+        };
+        let mut cached = lock(&slot.cached);
+        if rejected.app_id() == self.shared.app.id()
+            && cached
+                .as_ref()
+                .is_some_and(|cached| cached.token.id() == rejected.id())
+        {
+            *cached = None;
+        }
+    }
+
+    fn invalidate_installation(&self, installation: InstallationId) {
+        for ((id, _), slot) in lock(&self.shared.slots).iter() {
+            if *id == installation {
+                *lock(&slot.cached) = None;
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for AppTokenProvider {

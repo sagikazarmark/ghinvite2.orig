@@ -53,7 +53,10 @@ Hardening before a second consumer (HANDOFF §3.5, tier (a)), done:
   gone).
 - [x] Optional `tracing` events on `App` and `AppTokenProvider`.
 - [x] Licenses, per-crate changelogs, committed `error-codes.txt`.
+- [x] `InstallationTokenProvider::invalidate` and `invalidate_installation`:
+  drop a rejected token, or every token of an installation, without creating
+  one (ghinvite's fenced writes and permission recheck, P1 spec §9.4/§10.2).
 
 Known gaps (tier (b), deferred; tracked in the ghinvite issue tracker): no
-`invalidate_installation`, no acting-grant exchange or `rotcred` `Refresher`
-adapter, no `check_token`/`delete_grant`, no user-installation listing.
+acting-grant exchange or `rotcred` `Refresher` adapter, no
+`check_token`/`delete_grant`, no user-installation listing.

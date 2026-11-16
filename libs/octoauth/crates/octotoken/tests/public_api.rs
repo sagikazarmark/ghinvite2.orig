@@ -24,6 +24,10 @@ impl InstallationTokenProvider for Fixed {
     async fn replace(&self, _: &InstallationToken) -> Result<InstallationToken, TokenError> {
         Err(TokenError::ForeignToken)
     }
+
+    fn invalidate(&self, _: &InstallationToken) {}
+
+    fn invalidate_installation(&self, _: InstallationId) {}
 }
 
 fn scope() -> TokenScope {

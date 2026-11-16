@@ -239,6 +239,8 @@ pub fn app(app_id: u64, base_url: &str) -> octoauth::App {
 ///   ([`FixedTokens::bearer`]). Secrets do not encode the scope.
 /// - `token` returns the current generation (creating 1); `replace` of the
 ///   current token moves to the next one, as `AppTokenProvider` does.
+///   `invalidate` of the current token, and `invalidate_installation`,
+///   make the next `token` call move to the next generation.
 /// - [`fail_next_token`](Self::fail_next_token) and
 ///   [`fail_next_replace`](Self::fail_next_replace) script errors for the
 ///   next calls of that operation, in order.
@@ -254,6 +256,8 @@ struct FixedState {
     generations: std::collections::HashMap<(octoauth::InstallationId, octoauth::TokenScope), u64>,
     token_failures: std::collections::VecDeque<octotoken::TokenError>,
     replace_failures: std::collections::VecDeque<octotoken::TokenError>,
+    /// Keys whose next `token` call moves to the next generation.
+    invalidated: std::collections::HashSet<(octoauth::InstallationId, octoauth::TokenScope)>,
     token_calls: usize,
     replace_calls: usize,
 }
@@ -356,14 +360,36 @@ impl octotoken::InstallationTokenProvider for FixedTokens {
             if let Some(error) = state.token_failures.pop_front() {
                 return Err(error);
             }
-            let generation = state
-                .generations
-                .entry((installation, scope.clone()))
-                .or_insert(0);
-            *generation = (*generation).max(1);
+            let key = (installation, scope.clone());
+            let next = u64::from(state.invalidated.remove(&key));
+            let generation = state.generations.entry(key).or_insert(0);
+            *generation = (*generation + next).max(1);
             *generation
         };
         Ok(self.mint(installation, scope, generation))
+    }
+
+    fn invalidate(&self, rejected: &octoauth::InstallationToken) {
+        let key = (rejected.installation_id(), rejected.scope().clone());
+        let mut state = self.state.lock();
+        let current = state.generations.get(&key).copied().unwrap_or(0);
+        if rejected.app_id() == self.app_id
+            && current > 0
+            && self.mint(key.0, &key.1, current).id() == rejected.id()
+        {
+            state.invalidated.insert(key);
+        }
+    }
+
+    fn invalidate_installation(&self, installation: octoauth::InstallationId) {
+        let mut state = self.state.lock();
+        let keys: Vec<_> = state
+            .generations
+            .keys()
+            .filter(|(id, _)| *id == installation)
+            .cloned()
+            .collect();
+        state.invalidated.extend(keys);
     }
 
     async fn replace(
@@ -381,11 +407,12 @@ impl octotoken::InstallationTokenProvider for FixedTokens {
             if rejected.app_id() != self.app_id {
                 return Err(octotoken::TokenError::ForeignToken);
             }
-            let generation = state
-                .generations
-                .entry((installation, scope.clone()))
-                .or_insert(0);
-            if *generation == 0 || self.mint(installation, scope, *generation).id() == rejected.id()
+            let key = (installation, scope.clone());
+            let invalidated = state.invalidated.remove(&key);
+            let generation = state.generations.entry(key).or_insert(0);
+            if *generation == 0
+                || invalidated
+                || self.mint(installation, scope, *generation).id() == rejected.id()
             {
                 *generation += 1;
             }
