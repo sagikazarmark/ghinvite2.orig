@@ -4,25 +4,16 @@ use std::sync::Arc;
 
 pub struct InstallationContext {
     state: ghinvite_workflows::AppState,
-    server: tokio::task::JoinHandle<()>,
-}
-impl Drop for InstallationContext {
-    fn drop(&mut self) {
-        self.server.abort();
-    }
+    /// GitHub: the emulator's compat world (installation 1 on acme).
+    _github: octoemu::Emulator,
 }
 impl InstallationContext {
     pub async fn start(
         storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
         client: reqwest::Client,
     ) -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let server = tokio::spawn(async move {
-            axum::serve(listener, ghinvite_github::stub::router())
-                .await
-                .unwrap();
-        });
+        let github = ghinvite_e2e::github_emulator().await;
+        let base = github.api_base().to_owned();
         let github_transport = ghinvite_e2e::github_transport(client);
         let state = ghinvite_workflows::AppState::new(storage).with_github_apps(Arc::new(
             ghinvite_workflows::RepositoryGithub::new(
@@ -32,7 +23,10 @@ impl InstallationContext {
             )
             .unwrap(),
         ));
-        Self { state, server }
+        Self {
+            state,
+            _github: github,
+        }
     }
     pub fn bind(&self, builder: restate_sdk::endpoint::Builder) -> restate_sdk::endpoint::Builder {
         ghinvite_workflows::delivery::bind(builder, self.state.clone())

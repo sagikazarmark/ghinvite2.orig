@@ -8,7 +8,9 @@ use std::{sync::Arc, time::Duration};
 
 #[tokio::test]
 async fn approved_delivery_progresses_without_projected_parents() {
-    let harness = ghinvite_e2e::Harness::start().await;
+    let harness =
+        ghinvite_e2e::Harness::start_with_emulator(ghinvite_e2e::github_emulator_for(9).await)
+            .await;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(5))
@@ -28,57 +30,12 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .unwrap();
     sqlx::query("CREATE TRIGGER hold_installation BEFORE INSERT ON installations BEGIN SELECT RAISE(ABORT, 'projection withheld'); END")
         .execute(&sql).await.unwrap();
-    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", stub.local_addr().unwrap());
-    let lose_fence_after_put = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let observation_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let fail_observations = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let wrong_repository_owner = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let router = {
-        let sql = sql.clone();
-        let wrong_owner = wrong_repository_owner.clone();
-        let lose_fence = lose_fence_after_put.clone();
-        let reads = observation_reads.clone();
-        let fail = fail_observations.clone();
-        ghinvite_github::stub::router().layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
-                let sql = sql.clone();
-                let wrong_owner = wrong_owner.clone();
-                let lose_fence = lose_fence.clone();
-                let reads = reads.clone();
-                let fail = fail.clone();
-                async move {
-                    if request.uri().path()=="/repos/acme/web" && wrong_owner.load(std::sync::atomic::Ordering::SeqCst) {
-                        return axum::response::Response::builder().status(200).header("content-type","application/json").body(axum::body::Body::from(json!({"id":11,"full_name":"acme/web","owner":{"id":200,"login":"acme"}}).to_string())).unwrap();
-                    }
-                    let put = request.method() == axum::http::Method::PUT;
-                    if request.method() == axum::http::Method::GET
-                        && request.uri().path() == "/repos/acme/api/invitations"
-                    {
-                        reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        if fail.load(std::sync::atomic::Ordering::SeqCst) {
-                            return axum::response::Response::builder()
-                                .status(429)
-                                .header("retry-after", "1")
-                                .body(axum::body::Body::from("{}"))
-                                .unwrap();
-                        }
-                    }
-                    let response = next.run(request).await;
-                    if put && lose_fence.swap(false, std::sync::atomic::Ordering::SeqCst) {
-                        sqlx::query(
-                            "ALTER TABLE delivery_attempts RENAME TO delivery_attempts_offline",
-                        )
-                        .execute(&sql)
-                        .await
-                        .unwrap();
-                    }
-                    response
-                }
-            },
-        ))
-    };
-    let stub_server = tokio::spawn(async move { axum::serve(stub, router).await.unwrap() });
+    // GitHub: the emulator's compat world with the repository App installed
+    // as 9. Fault rules stand in for the stub's middleware: a lost fence
+    // after a write, failing invitation reads and a wrong repository owner.
+    let emulator = harness.emulator();
+    let base = harness.github_url.clone();
+    let github_admin = emulator.admin_base().to_owned();
     let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
         ghinvite_workflows::RepositoryGithub::new(
             ghinvite_e2e::github_transport(client.clone()),
@@ -156,7 +113,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     post(
         &client,
-        &format!("{base}/installation-repositories"),
+        &format!("{base}/__octoemu/compat/installation-repositories"),
         json!([10]),
     )
     .await;
@@ -236,9 +193,10 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let receipt: Value = response.json().await.unwrap();
     assert_eq!(receipt["outcome"]["kind"], "created");
     assert_eq!(receipt["command"], command);
+    // The invitee declines (the stub took an unauthenticated DELETE).
     client
-        .delete(format!(
-            "{base}/repos/acme/api/invitations/{}",
+        .post(format!(
+            "{github_admin}/act/alice/repository_invitations/{}/decline",
             receipt["outcome"]["upstream_id"]
         ))
         .send()
@@ -248,7 +206,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .unwrap();
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"alice","addressed_id":8,"role_name":"write"}),
     )
     .await;
@@ -315,7 +273,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .is_none()
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -374,9 +332,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
         json!({"app":"repo","installation_id":9,"uninstalled_at":chrono::Utc::now()}),
     )
     .await;
+    // On GitHub the App is uninstalled and installed again as 19.
+    assert!(emulator.uninstall(9));
+    emulator
+        .install(octoemu::seed::Installation::new(19, 123, "acme"))
+        .unwrap();
     post(
         &client,
-        &format!("{base}/installation-repositories"),
+        &format!("{base}/__octoemu/compat/installation-repositories"),
         json!([10, 11]),
     )
     .await;
@@ -404,20 +367,29 @@ async fn approved_delivery_progresses_without_projected_parents() {
     // The installation-token repository read must bind the numeric owner.
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"alice","addressed_id":8}),
     )
     .await;
-    wrong_repository_owner.store(true, std::sync::atomic::Ordering::SeqCst);
+    let wrong_owner = emulator
+        .add_fault(octoemu::faults::Fault::on(
+            "GET",
+            "/repos/acme/web",
+            octoemu::faults::FaultAction::respond_json(
+                200,
+                json!({"id":11,"full_name":"acme/web","owner":{"id":200,"login":"acme"}}),
+            ),
+        ))
+        .unwrap();
     assert_eq!(
         post(&client, &blocked_url, blocked_command.clone()).await["outcome"]["kind"],
         "blocked"
     );
     assert_eq!(puts(&client, &base).await, 1);
-    wrong_repository_owner.store(false, std::sync::atomic::Ordering::SeqCst);
+    emulator.remove_fault(wrong_owner);
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"renamed","addressed_id":99}),
     )
     .await;
@@ -428,7 +400,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     assert_eq!(puts(&client, &base).await, 1);
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"renamed","addressed_id":8}),
     )
     .await;
@@ -469,7 +441,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         resumed
     );
     let ledger: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -530,10 +502,14 @@ async fn approved_delivery_progresses_without_projected_parents() {
     assert_eq!(puts(&client, &base).await, 2);
 
     // Authoritative manual approval progresses while SQL still says Pending.
-    client.delete(format!("{base}/reset")).send().await.unwrap();
+    client
+        .delete(format!("{base}/__octoemu/compat/reset"))
+        .send()
+        .await
+        .unwrap();
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"renamed","addressed_id":8}),
     )
     .await;
@@ -643,7 +619,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     post(
         &client,
-        &format!("{base}/outcomes"),
+        &format!("{base}/__octoemu/compat/outcomes"),
         json!({"owner":"acme","repo":"api","user":"renamed","outcome":"created_then_declined"}),
     )
     .await;
@@ -712,39 +688,64 @@ async fn approved_delivery_progresses_without_projected_parents() {
     // The receipt must retain uncertainty even though no earlier receipt exists.
     post(
         &client,
-        &format!("{base}/identity"),
+        &format!("{base}/__octoemu/compat/identity"),
         json!({"login":"recovered-user","addressed_id":8}),
     )
     .await;
-    lose_fence_after_put.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The fence goes offline while the next write is in flight.
+    let hold = emulator
+        .add_fault(
+            octoemu::faults::Fault::on("PUT", "/repos/**", octoemu::faults::FaultAction::Hold)
+                .once(),
+        )
+        .unwrap();
+    let lose_fence = {
+        let sql = sql.clone();
+        async move {
+            assert!(
+                emulator
+                    .wait_for_held(hold, 1, Duration::from_secs(30))
+                    .await
+            );
+            sqlx::query("ALTER TABLE delivery_attempts RENAME TO delivery_attempts_offline")
+                .execute(&sql)
+                .await
+                .unwrap();
+            emulator.release_fault(hold);
+        }
+    };
     faults
         .lose_http_result
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let recovery_link = ghinvite_core::InvitationLinkId::new();
-    post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/create"), json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":recovery_link,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Lost create acknowledgement","approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
-    let recovery_admission = post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/admit"), json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":recovery_link,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()})).await;
-    assert_eq!(recovery_admission["result"]["kind"], "accepted");
-    let recovery_plan = post(&client, &format!("{ingress}/InvitationRequest/{}/approved_plan", recovery_admission["result"]["request_id"].as_str().unwrap()), json!({"link_id":recovery_link,"request_id":recovery_admission["result"]["request_id"],"requester_id":8})).await;
-    let uncertain_command = recovery_plan["commands"][0].clone();
-    assert!(uncertain_command.get("invitation_id").is_none());
-    let owner = format!(
-        "{ingress}/RepositoryDelivery/{}:10:{}",
-        uncertain_command["request_id"].as_str().unwrap(),
-        uncertain_command["delivery_generation"]
-    );
-    // Admission already sent create. Read its retained first result without
-    // issuing a second create, which legitimately performs positive recovery.
-    let uncertain = tokio::time::timeout(Duration::from_secs(15), async {
-        loop {
-            let snapshot = post(&client, &format!("{owner}/status"), Value::Null).await;
-            if !snapshot.is_null() {
-                break snapshot["create"].clone();
+    let flow = async {
+        let recovery_link = ghinvite_core::InvitationLinkId::new();
+        post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/create"), json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":recovery_link,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Lost create acknowledgement","approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
+        let recovery_admission = post(&client, &format!("{ingress}/InvitationLink/{recovery_link}/admit"), json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":recovery_link,"requester_id":8,"operation_id":ghinvite_core::RequestId::new()})).await;
+        assert_eq!(recovery_admission["result"]["kind"], "accepted");
+        let recovery_plan = post(&client, &format!("{ingress}/InvitationRequest/{}/approved_plan", recovery_admission["result"]["request_id"].as_str().unwrap()), json!({"link_id":recovery_link,"request_id":recovery_admission["result"]["request_id"],"requester_id":8})).await;
+        let uncertain_command = recovery_plan["commands"][0].clone();
+        assert!(uncertain_command.get("invitation_id").is_none());
+        let owner = format!(
+            "{ingress}/RepositoryDelivery/{}:10:{}",
+            uncertain_command["request_id"].as_str().unwrap(),
+            uncertain_command["delivery_generation"]
+        );
+        // Admission already sent create. Read its retained first result without
+        // issuing a second create, which legitimately performs positive recovery.
+        let uncertain = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let snapshot = post(&client, &format!("{owner}/status"), Value::Null).await;
+                if !snapshot.is_null() {
+                    break snapshot["create"].clone();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("lost-result invocation retains uncertainty");
+        })
+        .await
+        .expect("lost-result invocation retains uncertainty");
+        (uncertain_command, owner, uncertain)
+    };
+    let ((), (uncertain_command, owner, uncertain)) = tokio::join!(lose_fence, flow);
     assert_eq!(uncertain["outcome"]["kind"], "outcome_unknown");
     assert_eq!(
         faults
@@ -768,18 +769,25 @@ async fn approved_delivery_progresses_without_projected_parents() {
 
     // A real delayed observation retry wakes after another event has settled.
     let sent = post(&client, &format!("{owner}/status"), Value::Null).await;
-    fail_observations.store(true, std::sync::atomic::Ordering::SeqCst);
-    let before = observation_reads.load(std::sync::atomic::Ordering::SeqCst);
+    emulator
+        .add_fault(octoemu::faults::Fault::on(
+            "GET",
+            "/repos/acme/api/invitations",
+            octoemu::faults::FaultAction::Respond(
+                octoemu::faults::Reply::new(429)
+                    .header("retry-after", "1")
+                    .json(json!({})),
+            ),
+        ))
+        .unwrap();
+    let before = observation_reads(emulator);
     post(
         &client,
         &format!("{ingress}/DeliveryObservation/observe"),
         sent.clone(),
     )
     .await;
-    assert_eq!(
-        observation_reads.load(std::sync::atomic::Ordering::SeqCst),
-        before + 1
-    );
+    assert_eq!(observation_reads(emulator), before + 1);
     refuse_cancel(&client, &format!("{owner}/cancel"), json!({"invitation_id":json!(ghinvite_core::GithubInvitationId::new()),"installation_id":19,"by_user":7,"at":chrono::Utc::now()})).await;
     post(
         &client,
@@ -801,16 +809,13 @@ async fn approved_delivery_progresses_without_projected_parents() {
         absence(&sent, "write"),
     )
     .await;
-    assert_eq!(
-        observation_reads.load(std::sync::atomic::Ordering::SeqCst),
-        before + 1
-    );
+    assert_eq!(observation_reads(emulator), before + 1);
     assert_eq!(
         post(&client, &format!("{owner}/status"), Value::Null).await["settlement"]["state"],
         "declined"
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -826,7 +831,15 @@ async fn approved_delivery_progresses_without_projected_parents() {
     );
     harness.finish().await;
     server.abort();
-    stub_server.abort();
+}
+
+/// Invitation list reads of `acme/api` (the delivery observation's read).
+fn observation_reads(emulator: &octoemu::Emulator) -> usize {
+    emulator
+        .calls()
+        .iter()
+        .filter(|call| call.method == "GET" && call.path.starts_with("/repos/acme/api/invitations"))
+        .count()
 }
 
 async fn post(client: &reqwest::Client, url: &str, input: Value) -> Value {
@@ -854,7 +867,7 @@ async fn post(client: &reqwest::Client, url: &str, input: Value) -> Value {
 
 async fn puts(client: &reqwest::Client, base: &str) -> usize {
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()

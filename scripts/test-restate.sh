@@ -31,9 +31,6 @@ bounded 15s docker compose version
 
 # Compile before starting infrastructure; respect rust-toolchain.toml and Cargo.lock.
 rustc --version
-if [[ "$target" == retained_delivery ]]; then
-  bounded 600s cargo test --locked -p ghinvite-github --features test-stub --lib stub::tests
-fi
 bounded 600s cargo test --locked -p ghinvite-workflows --features integration --test "$target" --no-run
 
 project="ghinvite-smoke-$(date +%s)-$$-$RANDOM"

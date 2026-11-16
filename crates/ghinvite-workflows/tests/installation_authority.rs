@@ -1,6 +1,5 @@
 //! Real Restate proof: setup identity, signed installer ordering and delegation.
 #![cfg(feature = "integration")]
-use axum::response::IntoResponse as _;
 use ghinvite_e2e::{Call, Harness};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -52,39 +51,17 @@ async fn decide(h: &Harness, input: &Value) -> Value {
     )
     .await
 }
-/// How the GitHub fixture answers the app-authenticated read of
-/// installation 1 (PD-8): as the stub does, 404, or one 502 and then 404.
-const INSTALLED: u8 = 0;
-const GONE: u8 = 1;
-const GONE_AFTER_ONE_FAILURE: u8 = 2;
-fn deletable_installation(answer: Arc<std::sync::atomic::AtomicU8>) -> axum::Router {
-    use std::sync::atomic::Ordering::SeqCst;
-    ghinvite_github::stub::router().layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let answer = answer.clone();
-            async move {
-                if request.method() == axum::http::Method::GET
-                    && request.uri().path() == "/app/installations/1"
-                {
-                    match answer.load(SeqCst) {
-                        GONE => return axum::http::StatusCode::NOT_FOUND.into_response(),
-                        GONE_AFTER_ONE_FAILURE => {
-                            answer.store(GONE, SeqCst);
-                            return axum::http::StatusCode::BAD_GATEWAY.into_response();
-                        }
-                        _ => {}
-                    }
-                }
-                next.run(request).await
-            }
-        },
-    ))
+/// The emulator's compat world with only the repository App installed (as
+/// 1), so it can be installed again as 2.
+async fn repository_only() -> octoemu::Emulator {
+    let mut seed = octoemu::compat::seed();
+    seed.installations
+        .retain(|installation| installation.app_id == octoemu::compat::REPO_APP_ID);
+    ghinvite_e2e::github_emulator_with(seed).await
 }
 #[tokio::test]
 async fn setup_cannot_claim_installing_owner_and_signed_owner_changes_are_ordered() {
-    let installation_one = Arc::new(std::sync::atomic::AtomicU8::new(INSTALLED));
-    let h =
-        Harness::start_with_github_router(deletable_installation(installation_one.clone())).await;
+    let h = Harness::start_with_emulator(repository_only().await).await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -426,7 +403,19 @@ async fn setup_cannot_claim_installing_owner_and_signed_owner_changes_are_ordere
     );
     // GitHub's 404 confirms the next deletion; a transient failure first is
     // retried rather than answered.
-    installation_one.store(GONE_AFTER_ONE_FAILURE, std::sync::atomic::Ordering::SeqCst);
+    // GitHub uninstalled it: one 502 first, then GitHub's 404.
+    assert!(h.emulator().uninstall(1));
+    let failure = h
+        .emulator()
+        .add_fault(
+            octoemu::faults::Fault::on(
+                "GET",
+                "/app/installations/1",
+                octoemu::faults::FaultAction::respond(502),
+            )
+            .once(),
+        )
+        .unwrap();
     let mut deleted = event("e", 9, "2026-01-01T03:00:00Z");
     deleted["action"] = json!("deleted");
     call(
@@ -448,8 +437,8 @@ async fn setup_cannot_claim_installing_owner_and_signed_owner_changes_are_ordere
     )
     .await;
     assert_eq!(
-        installation_one.load(std::sync::atomic::Ordering::SeqCst),
-        GONE,
+        h.emulator().fault(failure).unwrap().fired,
+        1,
         "the transient failure was served and retried"
     );
     let final_state = call(&h, "AccountInstallation", "repo:100", "status", None, 200).await;
@@ -460,6 +449,9 @@ async fn setup_cannot_claim_installing_owner_and_signed_owner_changes_are_ordere
     let mut reinstalled = setup.clone();
     reinstalled["operation_id"] = json!(ghinvite_core::RequestId::new());
     reinstalled["verified"]["account"]["installation_id"] = json!(2);
+    h.emulator()
+        .install(octoemu::seed::Installation::new(2, 123, "acme"))
+        .unwrap();
     call(
         &h,
         "Installation",

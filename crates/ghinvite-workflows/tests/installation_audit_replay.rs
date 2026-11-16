@@ -222,40 +222,14 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         .unwrap();
 
     // GitHub confirms installation 9 belongs to account 100 and shares one repo.
-    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", stub.local_addr().unwrap());
-    let stub_server = tokio::spawn(async move {
-        axum::serve(
-            stub,
-            axum::Router::new().fallback(|request: axum::extract::Request| async move {
-                let path = request.uri().path();
-                let (status, body) = if path.ends_with("/access_tokens") {
-                    (
-                        201,
-                        json!({"token":"fixture","expires_at":"2099-01-01T00:00:00Z"}),
-                    )
-                } else if path == "/installation/repositories" {
-                    (
-                        200,
-                        json!({"total_count":1,"repositories":[{"id":10,"full_name":"acme/api","private":true}]}),
-                    )
-                } else if path == "/app/installations/9" {
-                    (
-                        200,
-                        json!({"id":9,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}),
-                    )
-                } else {
-                    (404, json!({}))
-                };
-                (
-                    axum::http::StatusCode::from_u16(status).unwrap(),
-                    axum::Json(body),
-                )
-            }),
-        )
-        .await
-        .unwrap();
-    });
+    let mut github = octoemu::compat::seed_with_installation(9);
+    for installation in &mut github.installations {
+        if installation.id == 9 {
+            *installation = installation.clone().selected(["acme/api"]);
+        }
+    }
+    let emulator = ghinvite_e2e::github_emulator_with(github).await;
+    let base = emulator.api_base().to_owned();
 
     let acknowledgements = Arc::new(LostAuditAcknowledgement {
         inner: storage.clone(),
@@ -327,7 +301,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         "a retry must replay the retained audit identity, not mint a second one"
     );
 
-    stub_server.abort();
+    drop(emulator);
     harness.finish().await;
 }
 

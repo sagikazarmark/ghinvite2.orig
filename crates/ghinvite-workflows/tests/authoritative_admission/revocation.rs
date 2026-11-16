@@ -214,7 +214,7 @@ async fn explicit_m1_composition_revoke_reaches_created_delivery_and_fenced_dele
     assert_eq!(progress["unavailable"], 0);
     let trace: Value = rt
         .client
-        .get(format!("{}/calls", rt.harness.github_url))
+        .get(format!("{}/__octoemu/compat/calls", rt.harness.github_url))
         .send()
         .await
         .unwrap()

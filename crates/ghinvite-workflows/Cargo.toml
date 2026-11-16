@@ -59,3 +59,8 @@ sqlx.workspace = true
 tokio.workspace = true
 tower.workspace = true
 tower-sessions = { workspace = true, features = ["memory-store"] }
+
+# The GitHub emulator's fault rules in the integration suites (GE-07);
+# native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+octoemu.workspace = true

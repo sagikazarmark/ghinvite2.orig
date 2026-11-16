@@ -153,7 +153,9 @@ async fn observation_ingress_with_webhook_guard(
 
 #[tokio::test]
 async fn retained_create_survives_sent_replay_and_conflicts() {
-    let harness = ghinvite_e2e::Harness::start().await;
+    let harness =
+        ghinvite_e2e::Harness::start_with_emulator(ghinvite_e2e::github_emulator_for(9).await)
+            .await;
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(20))
@@ -177,60 +179,21 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .await
             .unwrap();
     }
-    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", stub.local_addr().unwrap());
-    let credentials_unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let repository_reassigned = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let throttle_observation = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let throttle = throttle_observation.clone();
-    let github_tokens = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let unavailable = credentials_unavailable.clone();
-    let reassigned = repository_reassigned.clone();
-    let tokens = github_tokens.clone();
-    let router = ghinvite_github::stub::router().layer(axum::middleware::from_fn(
-        move |request: axum::extract::Request, next: axum::middleware::Next| {
-            let unavailable = unavailable.clone();
-            let reassigned = reassigned.clone();
-            let tokens = tokens.clone();
-            let throttle = throttle.clone();
-            async move {
-                if request.uri().path() == "/repos/acme/api/invitations"
-                    && throttle.swap(false, std::sync::atomic::Ordering::SeqCst)
-                {
-                    return axum::response::Response::builder()
-                        .status(429)
-                        .header("retry-after", "1")
-                        .body(axum::body::Body::from("{}"))
-                        .unwrap();
-                }
-                if let Some(token) = request
-                    .headers()
-                    .get("authorization")
-                    .and_then(|h| h.to_str().ok())
-                    && token.starts_with("Bearer test-token-for-")
-                {
-                    tokens.lock().unwrap().push(token.to_owned());
-                    if unavailable.load(std::sync::atomic::Ordering::SeqCst) {
-                        return axum::response::Response::builder()
-                            .status(401)
-                            .body(axum::body::Body::empty())
-                            .unwrap();
-                    }
-                }
-                if request.uri().path() == "/repos/acme/api"
-                    && reassigned.load(std::sync::atomic::Ordering::SeqCst)
-                {
-                    return axum::response::IntoResponse::into_response(axum::Json(
-                        json!({"id":999,"full_name":"acme/api","private":true}),
-                    ));
-                }
-                next.run(request).await
-            }
-        },
-    ));
-    let stub_task = tokio::spawn(async move {
-        axum::serve(stub, router).await.unwrap();
-    });
+    // GitHub: the emulator's compat world, the repository App installed as
+    // 9. Fault rules stand in for the stub's middleware: unavailable
+    // credentials, a reassigned repository and a throttled observation.
+    let emulator = harness.emulator();
+    let base = harness.github_url.clone();
+    let github_admin = emulator.admin_base().to_owned();
+    use octoemu::faults::{Fault, FaultAction, Reply};
+    let credentials_unavailable = || {
+        emulator
+            .add_fault(
+                Fault::new("/**", FaultAction::respond(401))
+                    .credential(octoemu::calls::CredentialKind::InstallationToken),
+            )
+            .unwrap()
+    };
     let apps = Arc::new(
         ghinvite_workflows::RepositoryGithub::new(
             ghinvite_e2e::github_transport(client.clone()),
@@ -431,7 +394,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         409
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -454,9 +417,13 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         ("created_response_lost", "outcome_unknown"),
         ("created_then_declined", "outcome_unknown"),
     ] {
-        client.delete(format!("{base}/reset")).send().await.unwrap();
         client
-            .post(format!("{base}/outcomes"))
+            .delete(format!("{base}/__octoemu/compat/reset"))
+            .send()
+            .await
+            .unwrap();
+        client
+            .post(format!("{base}/__octoemu/compat/outcomes"))
             .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":stub_outcome}))
             .send()
             .await
@@ -528,7 +495,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             assert_eq!(replay["outcome"], result["outcome"]);
         }
         let calls: Value = client
-            .get(format!("{base}/calls"))
+            .get(format!("{base}/__octoemu/compat/calls"))
             .send()
             .await
             .unwrap()
@@ -619,7 +586,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         ghinvite_core::InvitationState::Declined
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -637,7 +604,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     );
     // Partial fan-out: a durable first send stalls before its link checkpoint;
     // link commands remain available and explicit recovery uses the same plan.
-    client.delete(format!("{base}/reset")).send().await.unwrap();
+    client
+        .delete(format!("{base}/__octoemu/compat/reset"))
+        .send()
+        .await
+        .unwrap();
     workflow_faults
         .pause_after_send
         .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -728,7 +699,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert_eq!(checkpoint["submitted"], json!([]));
     client
-        .post(format!("{base}/installation-repositories"))
+        .post(format!("{base}/__octoemu/compat/installation-repositories"))
         .json(&json!([10]))
         .send()
         .await
@@ -788,7 +759,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         );
     }
     client
-        .post(format!("{base}/installation-repositories"))
+        .post(format!("{base}/__octoemu/compat/installation-repositories"))
         .json(&json!([10, 11]))
         .send()
         .await
@@ -807,7 +778,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .is_success()
     );
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"renamed","addressed_id":99}))
         .send()
         .await
@@ -827,7 +798,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     .unwrap();
     assert_eq!(mismatch["outcome"]["kind"], "blocked");
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"renamed","addressed_id":8}))
         .send()
         .await
@@ -848,7 +819,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         assert_eq!(result["outcome"]["kind"], "created");
     }
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -901,10 +872,14 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         progress,
         json!([{"repo_id":10,"stage":"submitted"},{"repo_id":11,"stage":"submitted"}])
     );
-    client.delete(format!("{base}/reset")).send().await.unwrap();
+    client
+        .delete(format!("{base}/__octoemu/compat/reset"))
+        .send()
+        .await
+        .unwrap();
     // Explicit 403 proves rejection, so restoration may safely try again.
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"user-84","addressed_id":84}))
         .send()
         .await
@@ -913,7 +888,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .pause_before_dispatch
         .store(true, std::sync::atomic::Ordering::SeqCst);
     client
-        .post(format!("{base}/outcomes"))
+        .post(format!("{base}/__octoemu/compat/outcomes"))
         .json(&json!({"owner":"acme","repo":"api","user":"user-84","outcome":"access_lost_once"}))
         .send()
         .await
@@ -998,7 +973,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // The stub exposes one addressed identity at a time. This sweep observes
     // older Alice invitations; the blocked user-84 create is ineligible.
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"alice","addressed_id":8}))
         .send()
         .await
@@ -1017,7 +992,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         }
     );
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"user-84","addressed_id":84}))
         .send()
         .await
@@ -1083,21 +1058,33 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert!(pending["settlement"].is_null());
+    // The invitee declines (the stub took an unauthenticated DELETE).
     client
-        .delete(format!(
-            "{base}/repos/acme/api/invitations/{}",
+        .post(format!(
+            "{github_admin}/act/user-84/repository_invitations/{}/decline",
             upstream(&sent).unwrap()
         ))
         .send()
         .await
+        .unwrap()
+        .error_for_status()
         .unwrap();
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"user-84","addressed_id":84,"role_name":"write"}))
         .send()
         .await
         .unwrap();
-    throttle_observation.store(true, std::sync::atomic::Ordering::SeqCst);
+    emulator
+        .add_fault(
+            Fault::on(
+                "GET",
+                "/repos/acme/api/invitations",
+                FaultAction::Respond(Reply::new(429).header("retry-after", "1").json(json!({}))),
+            )
+            .once(),
+        )
+        .unwrap();
     let retry = client
         .post(format!("{proxy_url}/DeliveryObservation/observe/send"))
         .json(&pending)
@@ -1266,7 +1253,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         ghinvite_core::InvitationState::Accepted
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -1283,8 +1270,12 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         2
     );
     for role in ["triage", "maintain"] {
-        client.delete(format!("{base}/reset")).send().await.unwrap();
-        client.post(format!("{base}/outcomes")).json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_then_declined"})).send().await.unwrap();
+        client
+            .delete(format!("{base}/__octoemu/compat/reset"))
+            .send()
+            .await
+            .unwrap();
+        client.post(format!("{base}/__octoemu/compat/outcomes")).json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_then_declined"})).send().await.unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
         call("InvitationLink",link.to_string(),"create",json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":link,"account_id":100,"installation_id":9,"admin":{"account_id":100,"user_id":7},
             "description":"Role reconciliation","approval_required":false,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":if role == "push" { "write" } else if role == "pull" { "read" } else { role }}]}})).send().await.unwrap();
@@ -1327,7 +1318,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             .unwrap();
         assert_eq!(unknown["outcome"]["kind"], "outcome_unknown");
         client
-            .post(format!("{base}/identity"))
+            .post(format!("{base}/__octoemu/compat/identity"))
             .json(&json!({"login":"alice","role_name":role}))
             .send()
             .await
@@ -1344,7 +1335,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
             "role evidence without invitation presence cannot resolve uncertain creation"
         );
         let calls: Value = client
-            .get(format!("{base}/calls"))
+            .get(format!("{base}/__octoemu/compat/calls"))
             .send()
             .await
             .unwrap()
@@ -1362,7 +1353,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         );
     }
     // #65: approval and scope belong to A even when delivery resumes through B.
-    client.delete(format!("{base}/reset")).send().await.unwrap();
+    client
+        .delete(format!("{base}/__octoemu/compat/reset"))
+        .send()
+        .await
+        .unwrap();
     let historical_link = ghinvite_core::InvitationLinkId::new();
     let created = call("InvitationLink", historical_link.to_string(), "create", json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),
         "link_id":historical_link,"account_id":100,"installation_id":9,
@@ -1421,6 +1416,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .await
         .unwrap();
     assert_eq!(blocked["outcome"]["kind"], "blocked");
+    // On GitHub the App is uninstalled and installed again as 19.
+    assert!(emulator.uninstall(9));
+    emulator
+        .install(octoemu::seed::Installation::new(19, 123, "acme"))
+        .unwrap();
     assert!(call("Installation", "19".into(), "onboard", ghinvite_e2e::setup_command(json!({"app":"repo","installation_id":19,"actor_user_id":7,"account_id":100,
         "account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()})))
         .send().await.unwrap().status().is_success());
@@ -1449,16 +1449,19 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         .unwrap();
     let original_audit = assert_create_audit(&*storage, &delivered).await.unwrap();
     // GitHub acceptance without a webhook: remove pending evidence, expose access.
+    // The invitee declines (the stub took an unauthenticated DELETE).
     client
-        .delete(format!(
-            "{base}/repos/acme/api/invitations/{}",
+        .post(format!(
+            "{github_admin}/act/alice/repository_invitations/{}/decline",
             delivered["outcome"]["upstream_id"].as_u64().unwrap()
         ))
         .send()
         .await
+        .unwrap()
+        .error_for_status()
         .unwrap();
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"alice","addressed_id":8,"role_name":"write"}))
         .send()
         .await
@@ -1466,7 +1469,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     // A stale/corrupt local installation mapping must not grant another account
     // authority to observe this request, even if its repo/login evidence matches.
     client
-        .post(format!("{base}/installation-identity"))
+        .post(format!("{base}/__octoemu/compat/installation-identity"))
         .json(&json!({"id":200,"login":"acme","type":"Organization"}))
         .send()
         .await
@@ -1477,34 +1480,52 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "another account cannot supply observation authority"
     );
     client
-        .post(format!("{base}/installation-identity"))
+        .post(format!("{base}/__octoemu/compat/installation-identity"))
         .json(&json!({"id":100,"login":"acme","type":"Organization"}))
         .send()
         .await
         .unwrap();
-    credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
-    github_tokens.lock().unwrap().clear();
+    let unavailable = credentials_unavailable();
+    let window = emulator.calls().last().map_or(0, |call| call.seq);
     run_sweep(&client, &ingress, &admin, &*storage).await;
     assert!(
         is_pending_delivery(&storage.get_delivery(id).await.unwrap().unwrap()),
         "unavailable credentials must preserve recoverability"
     );
-    let tokens = github_tokens.lock().unwrap().clone();
+    // Every refused call carried installation 19's token.
+    let tokens: Vec<_> = emulator
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            call.seq > window && call.fault.as_ref().is_some_and(|f| f.rule == unavailable)
+        })
+        .map(|call| call.identity)
+        .collect();
     assert!(!tokens.is_empty());
     assert!(
-        tokens
-            .iter()
-            .all(|token| token == "Bearer test-token-for-19"),
+        tokens.iter().all(|identity| matches!(
+            identity,
+            Some(octoemu::calls::Identity::Installation {
+                installation_id: 19,
+                ..
+            })
+        )),
         "{tokens:?}"
     );
-    credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
-    repository_reassigned.store(true, std::sync::atomic::Ordering::SeqCst);
+    emulator.remove_fault(unavailable);
+    let reassigned = emulator
+        .add_fault(Fault::on(
+            "GET",
+            "/repos/acme/api",
+            FaultAction::respond_json(200, json!({"id":999,"full_name":"acme/api","private":true})),
+        ))
+        .unwrap();
     run_sweep(&client, &ingress, &admin, &*storage).await;
     assert!(
         is_pending_delivery(&storage.get_delivery(id).await.unwrap().unwrap()),
         "a reused repository name cannot supply evidence"
     );
-    repository_reassigned.store(false, std::sync::atomic::Ordering::SeqCst);
+    emulator.remove_fault(reassigned);
     run_sweep(&client, &ingress, &admin, &*storage).await;
     let settled = storage.get_delivery(id).await.unwrap().unwrap();
     assert_eq!(
@@ -1584,7 +1605,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     faults
         .projection_unavailable
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    client.delete(format!("{base}/reset")).send().await.unwrap();
+    client
+        .delete(format!("{base}/__octoemu/compat/reset"))
+        .send()
+        .await
+        .unwrap();
     let throttled_link = ghinvite_core::InvitationLinkId::new();
     call("InvitationLink", throttled_link.to_string(), "create", json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),
         "link_id":throttled_link,"account_id":100,"installation_id":19,
@@ -1607,7 +1632,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     let delivery_id = delivery_key(&command);
     let id = delivery_id.as_str();
     client
-        .post(format!("{base}/outcomes"))
+        .post(format!("{base}/__octoemu/compat/outcomes"))
         .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"throttled_once"}))
         .send()
         .await
@@ -1640,7 +1665,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
     assert!(sending.is_none(), "receipt projection remains unavailable");
     // Explicit recovery is an exclusive command too. It returns while SQL is
     // stalled and keeps the original pending timer instead of adding an hour.
-    credentials_unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    let unavailable = credentials_unavailable();
     let redriven: Value = call("RepositoryDelivery", id.into(), "create", command.clone())
         .send()
         .await
@@ -1683,7 +1708,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         retained["create"], redriven,
         "stale wakes cannot consume the scheduled generation"
     );
-    credentials_unavailable.store(false, std::sync::atomic::Ordering::SeqCst);
+    emulator.remove_fault(unavailable);
     // The stub asked for one second; the recheck that wait scheduled delivers
     // without any further command from us.
     let mut recovered = Value::Null;
@@ -1770,7 +1795,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "only the original timer advances the redriven delivery"
     );
     let calls: Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -1795,7 +1820,11 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         "after-projection-send",
         "after-recheck-send",
     ] {
-        client.delete(format!("{base}/reset")).send().await.unwrap();
+        client
+            .delete(format!("{base}/__octoemu/compat/reset"))
+            .send()
+            .await
+            .unwrap();
         let link = ghinvite_core::InvitationLinkId::new();
         call("InvitationLink", link.to_string(), "create", json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),
             "link_id":link,"account_id":100,"installation_id":19,
@@ -1838,7 +1867,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         let id = delivery_id.as_str();
         if stage == "after-recheck-send" {
             client
-                .post(format!("{base}/outcomes"))
+                .post(format!("{base}/__octoemu/compat/outcomes"))
                 .json(
                     &json!({"owner":"acme","repo":"api","user":"alice","outcome":"throttled_once"}),
                 )
@@ -1866,31 +1895,28 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         let competing = if stage == "after-receipt" {
             // Acceptance hints now require fresh role evidence. Simulate the
             // actual upstream transition while the owner remains interrupted.
-            let pending: Value = client
-                .get(format!("{base}/repos/acme/api/invitations"))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            let upstream_id = pending
+            let world = emulator.state()["world"].clone();
+            let upstream_id = world["repository_invitations"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|invitation| invitation["invitee"]["id"] == 8)
+                .find(|invitation| {
+                    invitation["repo"] == "acme/api" && invitation["invitee"] == "alice"
+                })
                 .unwrap()["id"]
                 .as_u64()
                 .unwrap();
             client
-                .delete(format!("{base}/repos/acme/api/invitations/{upstream_id}"))
+                .post(format!(
+                    "{github_admin}/act/alice/repository_invitations/{upstream_id}/decline"
+                ))
                 .send()
                 .await
                 .unwrap()
                 .error_for_status()
                 .unwrap();
             client
-                .post(format!("{base}/identity"))
+                .post(format!("{base}/__octoemu/compat/identity"))
                 .json(&json!({"login":"alice","addressed_id":8,"role_name":"write"}))
                 .send()
                 .await
@@ -2000,7 +2026,7 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         }
         assert_create_audit(&*storage, &recovered).await.unwrap();
         let calls: Value = client
-            .get(format!("{base}/calls"))
+            .get(format!("{base}/__octoemu/compat/calls"))
             .send()
             .await
             .unwrap()
@@ -2020,7 +2046,6 @@ async fn retained_create_survives_sent_replay_and_conflicts() {
         assert_eq!(writes.iter().filter(|c| c["status"] == 201).count(), 1);
     }
     server.abort();
-    stub_task.abort();
     harness.finish().await;
 }
 

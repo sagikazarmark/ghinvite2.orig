@@ -809,7 +809,7 @@ async fn abuse_window_refuses_without_a_use_holds_approval_and_resumes_or_aborts
     async fn writes(r: &Runtime) -> usize {
         let trace: Value = r
             .client
-            .get(format!("{}/calls", r.harness.github_url))
+            .get(format!("{}/__octoemu/compat/calls", r.harness.github_url))
             .send()
             .await
             .unwrap()

@@ -1,4 +1,4 @@
-//! Authenticated native web → real Restate owners → GitHub HTTP stub, with
+//! Authenticated native web → real Restate owners → the GitHub emulator, with
 //! projection deliberately unavailable until after creation and admission replay.
 #![cfg(feature = "integration")]
 
@@ -189,13 +189,61 @@ async fn select_secret(app: &axum::Router, cookie: &str, secret: &str) {
 async fn authenticated_journey_settles_and_recovers_across_projection_and_response_loss() {
     let requester_login = Arc::new(AtomicBool::new(false));
     let login_identity = requester_login.clone();
-    let stub = ghinvite_github::stub::router()
-        .route("/login/oauth/access_token", axum::routing::post(|| async { axum::Json(json!({"access_token":"fixture", "token_type":"bearer", "scope":""})) }))
-        .route(&format!("/applications/{}/token", web_apps::SIGNIN_CLIENT_ID), axum::routing::delete(|| async { axum::http::StatusCode::NO_CONTENT }))
-        .route("/user", axum::routing::get(move || { let requester = login_identity.load(Ordering::SeqCst); async move { axum::Json(if requester { json!({"id":8,"login":"alice"}) } else { json!({"id":7,"login":"creator"}) }) } }))
-        .route("/user/memberships/orgs/acme", axum::routing::get(|| async { axum::Json(json!({"role":"admin","state":"active","organization":{"id":100}})) }))
-        .route("/user/installations/1/repositories", axum::routing::get(|| async { axum::Json(json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]})) }));
-    let harness = ghinvite_e2e::Harness::start_with_github_router(stub).await;
+    // GitHub: the emulator's compat world. The sign-in side stays canned
+    // (fault rules standing in for the stub's extra routes) until the
+    // browser sign-in moves to the emulated OAuth flow (GE-09).
+    let harness = ghinvite_e2e::Harness::start().await;
+    {
+        use octoemu::faults::{Fault, FaultAction};
+        let emulator = harness.emulator();
+        let canned = [
+            Fault::on(
+                "POST",
+                "/login/oauth/access_token",
+                FaultAction::respond_json(
+                    200,
+                    json!({"access_token":"fixture", "token_type":"bearer", "scope":""}),
+                ),
+            ),
+            Fault::on(
+                "DELETE",
+                format!("/applications/{}/token", web_apps::SIGNIN_CLIENT_ID),
+                FaultAction::respond(204),
+            ),
+            Fault::on(
+                "GET",
+                "/user",
+                FaultAction::custom(move |_| {
+                    octoemu::faults::Reply::new(200).json(
+                        if login_identity.load(Ordering::SeqCst) {
+                            json!({"id":8,"login":"alice"})
+                        } else {
+                            json!({"id":7,"login":"creator"})
+                        },
+                    )
+                }),
+            ),
+            Fault::on(
+                "GET",
+                "/user/memberships/orgs/acme",
+                FaultAction::respond_json(
+                    200,
+                    json!({"role":"admin","state":"active","organization":{"id":100}}),
+                ),
+            ),
+            Fault::on(
+                "GET",
+                "/user/installations/1/repositories",
+                FaultAction::respond_json(
+                    200,
+                    json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]}),
+                ),
+            ),
+        ];
+        for fault in canned {
+            emulator.add_fault(fault.label("sign-in fixture")).unwrap();
+        }
+    }
     let ingress = harness.restate.ingress_url().to_owned();
     let admin = harness.restate.admin_url().to_owned();
     let client = harness.client.clone();
@@ -363,7 +411,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     let proxy_task = tokio::spawn(async move {
         axum::serve(listener, proxy).await.unwrap();
     });
-    // Installation reads create tokens at and call the stub.
+    // Installation reads create tokens at and call the emulator.
     let github_transport = ghinvite_e2e::github_transport(client.clone());
     let web_github = ghinvite_web::WebGithub {
         apps: ghinvite_github::GithubApps::new(
@@ -379,7 +427,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()),
         ghinvite_web::WebConfig {
             webhooks: Some(web_apps::webhooks("journey-secret")),
-            // Sign-in calls the stub, too.
+            // Sign-in calls the emulator, too (canned rules above).
             signin_apps: Some(web_apps::signin_app(&base)),
             ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
         },
@@ -654,7 +702,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let calls: serde_json::Value = client
-                .get(format!("{base}/calls"))
+                .get(format!("{base}/__octoemu/compat/calls"))
                 .send()
                 .await
                 .unwrap()
@@ -728,15 +776,19 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     let upstream = delivered["create"]["outcome"]["upstream_id"]
         .as_u64()
         .unwrap();
+    // The invitee declines (the stub took an unauthenticated DELETE).
     client
-        .delete(format!("{base}/repos/acme/api/invitations/{upstream}"))
+        .post(format!(
+            "{}/act/alice/repository_invitations/{upstream}/decline",
+            harness.emulator().admin_base()
+        ))
         .send()
         .await
         .unwrap()
         .error_for_status()
         .unwrap();
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"alice","addressed_id":8,"role_name":"read"}))
         .send()
         .await
@@ -953,7 +1005,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         before
     );
     let calls: serde_json::Value = client
-        .get(format!("{base}/calls"))
+        .get(format!("{base}/__octoemu/compat/calls"))
         .send()
         .await
         .unwrap()
@@ -970,7 +1022,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         1
     );
     client
-        .post(format!("{base}/identity"))
+        .post(format!("{base}/__octoemu/compat/identity"))
         .json(&json!({"login":"alice","addressed_id":8}))
         .send()
         .await
@@ -983,7 +1035,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         // Independent delivery scenarios need independent upstream invitations;
         // the typed protocol correctly tracks a previous scenario's pending invite.
         client
-            .delete(format!("{base}/reset"))
+            .delete(format!("{base}/__octoemu/compat/reset"))
             .send()
             .await
             .unwrap()
@@ -1093,7 +1145,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             let fresh = page["request"]["request_id"].as_str().unwrap();
             assert_ne!(fresh, request_id);
             request_id = fresh.to_owned();
-            client.post(format!("{base}/outcomes")).json(&json!({"owner":"acme","repo":"web","user":"alice","outcome":"access_lost_once"})).send().await.unwrap().error_for_status().unwrap();
+            client.post(format!("{base}/__octoemu/compat/outcomes")).json(&json!({"owner":"acme","repo":"web","user":"alice","outcome":"access_lost_once"})).send().await.unwrap().error_for_status().unwrap();
             let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
             let body = format!(
                 "csrf_token={csrf}&link_id={link_id}&operation_id={}",
@@ -1181,7 +1233,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .expect("explicit recovery resumes refused repository");
         }
         let calls: serde_json::Value = client
-            .get(format!("{base}/calls"))
+            .get(format!("{base}/__octoemu/compat/calls"))
             .send()
             .await
             .unwrap()

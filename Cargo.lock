@@ -2334,6 +2334,7 @@ dependencies = [
  "base64 0.22.1",
  "ghinvite-config",
  "ghinvite-github",
+ "octoemu",
  "reqwest 0.12.28",
  "restate-e2e-harness",
  "restate-sdk",
@@ -2575,6 +2576,7 @@ dependencies = [
  "hmac 0.12.1",
  "kekring",
  "octoauth",
+ "octoemu",
  "octoscrub",
  "octotoken",
  "rand 0.8.6",
@@ -3857,6 +3859,8 @@ dependencies = [
  "chrono",
  "getrandom 0.2.17",
  "hmac 0.12.1",
+ "hyper",
+ "hyper-util",
  "octoscrub",
  "reqwest 0.12.28",
  "rsa",
@@ -3864,9 +3868,11 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.10.9",
+ "socket2",
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "tower",
 ]
 
 [[package]]

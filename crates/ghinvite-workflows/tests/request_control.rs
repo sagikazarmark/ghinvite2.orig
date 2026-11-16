@@ -359,11 +359,32 @@ async fn pending_cascade_cancels_once_projects_typed_reason_and_preserves_approv
     };
     let now =
         chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis()).unwrap();
-    let router=axum::Router::new().route("/app/installations/{id}",axum::routing::get(move || async move {
-        axum::Json(json!({"id":1,"app_id":123,"account":{"id":100,"login":"owner","type":"User"},
-            "created_at":now,"updated_at":now,"suspended_at":null,"permissions":{"administration":"write","metadata":"read"},"repository_selection":"selected"}))
-    }));
-    let harness = ghinvite_e2e::Harness::start_with_github_router(router).await;
+    // GitHub: the repository App installed on the user `owner` (100) for
+    // `owner/api` (10).
+    let github = {
+        use octoemu::seed::{Access, App, Installation, Repo, Seed, User};
+        Seed::new()
+            .user(User::new(100, "owner"))
+            .repo(Repo::new(10, "owner", "api").private())
+            .app(
+                App::new(
+                    octoemu::compat::REPO_APP_ID,
+                    "ghinvite-repo-fixture",
+                    octoemu::compat::REPO_CLIENT_ID,
+                    "fixture-client-secret",
+                )
+                .public_key(octoemu::compat::PUBLIC_KEY)
+                .permission("administration", Access::Write)
+                .permission("metadata", Access::Read),
+            )
+            .installation(
+                Installation::new(1, octoemu::compat::REPO_APP_ID, "owner").selected(["owner/api"]),
+            )
+    };
+    let harness = ghinvite_e2e::Harness::start_with_emulator(
+        ghinvite_e2e::github_emulator_with(github).await,
+    )
+    .await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await

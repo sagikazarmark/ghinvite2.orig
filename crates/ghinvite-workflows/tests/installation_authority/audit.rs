@@ -24,8 +24,19 @@ impl Runtime {
     async fn start_with_hook(hook: bool) -> Self {
         let suspension = Arc::new(Mutex::new(Value::Null));
         let observed = suspension.clone();
-        let router=axum::Router::new().route("/app/installations/1",axum::routing::get(move || {let observed=observed.clone();async move {axum::Json(json!({"id":1,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":observed.lock().unwrap().clone()}))}})).fallback_service(ghinvite_github::stub::router());
-        let h = Harness::start_with_github_router(router).await;
+        // The installation as GitHub reports it, suspended at exactly the
+        // time a step sets (a canned rule over the emulator's compat world).
+        let emulator = ghinvite_e2e::github_emulator().await;
+        emulator
+            .add_fault(octoemu::faults::Fault::on(
+                "GET",
+                "/app/installations/1",
+                octoemu::faults::FaultAction::custom(move |_| {
+                    octoemu::faults::Reply::new(200).json(json!({"id":1,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":observed.lock().unwrap().clone()}))
+                }),
+            ))
+            .unwrap();
+        let h = Harness::start_with_emulator(emulator).await;
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
                 .await

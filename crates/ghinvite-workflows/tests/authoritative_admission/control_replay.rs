@@ -193,7 +193,7 @@ async fn failed_initialization_replays_original_handoff_after_auto_hold_and_resu
     assert_eq!(r.uses(link).await, 1);
     let calls: Value = r
         .client
-        .get(format!("{}/calls", r.harness.github_url))
+        .get(format!("{}/__octoemu/compat/calls", r.harness.github_url))
         .send()
         .await
         .unwrap()

@@ -385,7 +385,10 @@ impl Runtime {
     async fn refuse_once(&self) {
         self.harness
             .client
-            .post(format!("{}/outcomes", self.harness.github_url))
+            .post(format!(
+                "{}/__octoemu/compat/outcomes",
+                self.harness.github_url
+            ))
             .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"access_lost_once"}))
             .send()
             .await
@@ -404,7 +407,10 @@ impl Runtime {
     async fn command(&self) -> ghinvite_core::delivery::CreateCommand {
         self.harness
             .client
-            .delete(format!("{}/reset", self.harness.github_url))
+            .delete(format!(
+                "{}/__octoemu/compat/reset",
+                self.harness.github_url
+            ))
             .send()
             .await
             .unwrap()
@@ -633,7 +639,10 @@ async fn production_handler_journals_walk_fixed_step_table() {
     let command = r.command().await;
     r.harness
         .client
-        .post(format!("{}/identity", r.harness.github_url))
+        .post(format!(
+            "{}/__octoemu/compat/identity",
+            r.harness.github_url
+        ))
         .json(&json!({"addressed_id":999}))
         .send()
         .await
@@ -690,7 +699,7 @@ async fn production_handler_journals_walk_fixed_step_table() {
                 "blocked"
             );
         }
-        r.harness.client.post(format!("{}/outcomes",r.harness.github_url))
+        r.harness.client.post(format!("{}/__octoemu/compat/outcomes",r.harness.github_url))
             .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_response_lost"}))
             .send().await.unwrap().error_for_status().unwrap();
         assert_eq!(
@@ -739,7 +748,7 @@ async fn production_handler_journals_walk_fixed_step_table() {
                     r.hold_release(false).await;
                 }
             }
-            r.harness.client.post(format!("{}/outcomes", r.harness.github_url))
+            r.harness.client.post(format!("{}/__octoemu/compat/outcomes", r.harness.github_url))
                 .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_response_lost"}))
                 .send().await.unwrap().error_for_status().unwrap();
             if handler == "create" {
@@ -862,7 +871,10 @@ async fn production_handler_journals_walk_fixed_step_table() {
     .await;
     r.harness
         .client
-        .post(format!("{}/identity", r.harness.github_url))
+        .post(format!(
+            "{}/__octoemu/compat/identity",
+            r.harness.github_url
+        ))
         .json(&json!({"addressed_id":999}))
         .send()
         .await
@@ -875,7 +887,10 @@ async fn production_handler_journals_walk_fixed_step_table() {
     );
     r.harness
         .client
-        .post(format!("{}/identity", r.harness.github_url))
+        .post(format!(
+            "{}/__octoemu/compat/identity",
+            r.harness.github_url
+        ))
         .json(&json!({"addressed_id":8}))
         .send()
         .await
