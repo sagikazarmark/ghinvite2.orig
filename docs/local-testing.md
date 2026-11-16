@@ -199,7 +199,7 @@ Prerequisites:
   inside another container are not supported by this host/bridge topology.
 - The container must be able to reach an ephemeral TCP port on the host. Host
   firewalls must allow traffic from the Docker bridge to that test listener.
-  No GitHub App credentials, separately started GitHub stub, Wrangler, or dev stack is needed.
+  No GitHub App credentials, separately started GitHub stand-in, Wrangler, or dev stack is needed.
 
 `compose.yaml` pins Restate **1.8.1** by image digest; the dev stack and smoke
 service share that pin. CI uses Ubuntu 24.04 and the same Rust version and runner
@@ -277,8 +277,7 @@ command. CI runs it natively: about 190 s on 4 cores at `--test-threads=2`, 10/1
 image (see `.github/workflows/ci.yml`). The script's other targets are single-test
 files, one endpoint per runtime, so sharing is safe for them.
 
-The script runs the GitHub stub HTTP contract tests (for `retained_delivery`),
-compiles the selected integration-test file, creates a uniquely named
+The script compiles the selected integration-test file, creates a uniquely named
 Compose project, and publishes admin/ingress on randomly allocated **loopback**
 ports. The Rust test serves the current workflow endpoint on `0.0.0.0:0`.
 Restate reaches it using `host.docker.internal`, explicitly mapped by Compose
@@ -287,12 +286,27 @@ subnet or fixed IP is assumed. The readiness probe uses cleartext HTTP/2 and the
 SDK discovery media type. Successful deployment registration verifies the
 container-to-host discovery path before any invocation is sent.
 
-`retained_delivery` starts its own GitHub HTTP stub on `127.0.0.1:0`, using the same router
-as the standalone example. The production `InstallationClient` and
-`ReqwestTransport` exchange a synthetic App JWT for a fake installation token
-and send real HTTP requests to that stub. Both servers are Tokio tasks owned by
-the test runtime, so success, assertion failure, or process termination closes
-their sockets. No credentials are injected into this gate.
+**GitHub is the emulator.** `ghinvite_e2e::Harness::start` (and
+`start_owned`, `github_emulator*`) serves an embedded
+[octoemu](../libs/octoauth/crates/octoemu/README.md) on `127.0.0.1:0` with its
+temporary stub-compatibility world (`octoemu::compat::seed`: `acme` 100,
+`acme/api` 10, `acme/web` 11, `creator` 7, `alice` 8, App 123 installed as 1,
+App 456 as 2). The production `InstallationClient` and `ReqwestTransport` sign
+real App JWTs with `test-fixtures/github-app-rsa.pem`, which the emulator
+verifies, and use the stateless `ghs_…` installation tokens it mints. The old
+stub's control routes live under `/__octoemu/compat/` (`identity`, `outcomes`,
+`installation-identity`, `installation-repositories`, `invitation-expired`,
+`calls`, `reset`; `ghinvite_e2e::compat_url`), and the suites inject failures
+with [fault rules](../libs/octoauth/crates/octoemu/README.md#fault-rules)
+(`harness.emulator().add_fault(…)`) instead of axum middleware around the
+stub. The shim is temporary: GE-09 rewrites the suites against the native
+admin API and deletes it. Suites with their own scenario fakes
+(`start_with_github_router`: the organization suites, `email_delivery`,
+`repository_protocol`, `settlement_evidence`, `sweep_schedule`,
+`installation_availability`) keep them until GE-09. The emulator and the
+servers are Tokio tasks owned by the test runtime, so success, assertion
+failure, or process termination closes their sockets. No credentials are
+injected into this gate.
 
 Each target documents its scenarios: [authoritative admission](admission-v1.md#native-acceptance)
 and [request lifecycle](request-lifecycle-v1.md), [retained delivery](delivery-recovery.md#verification),
@@ -300,12 +314,16 @@ and [request lifecycle](request-lifecycle-v1.md), [retained delivery](delivery-r
 [durable projection](admission-v1.md#projection-tests). Focused HTTP
 authorization/session tests remain in `console_flow`, `route_smoke`, and `oauth_flow`.
 
-**Boundaries:** local stub responses are not evidence of live GitHub webhook
+**Boundaries:** local emulator and stub responses are not evidence of live GitHub webhook
 availability or delivery. Native SQLx runtime tests are **not D1 adapter
 conformance**. Full browser OAuth is outside this gate. No test claims
 exactly-once delivery across a GitHub-success/database-failure gap.
 
 #### Standalone GitHub stub
+
+The Rust workflow suites no longer use it (see above); the Worker drivers
+(`tests/worker/build-stub.mjs`) and the native D1 bridge still do, until
+GE-09 deletes it.
 
 ```bash
 cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
