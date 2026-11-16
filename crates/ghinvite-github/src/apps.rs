@@ -8,9 +8,9 @@
 //! | Operation | Replaces | Behaviour |
 //! |---|---|---|
 //! | [`read`](GithubApp::read) | `with_token` | token; on [`ApiError::Unauthorized`] `replace` it and run the closure once more (`octotoken::with_token`) |
-//! | [`write_once`](GithubApp::write_once) | `call` | token, one call, never replayed; on a 401 the token is `replace`d before the error is returned |
+//! | [`write_once`](GithubApp::write_once) | `call` | token, one call, never replayed; on a 401 the token is `invalidate`d (nothing created) before the error is returned |
 //! | [`ensure`](GithubApp::ensure) | `ensure` | `token()` |
-//! | [`refresh`](GithubApp::refresh) | `invalidate_installation` + `ensure_fresh` | `replace(token())` |
+//! | [`refresh`](GithubApp::refresh) | `invalidate_installation` + `ensure_fresh` | `invalidate_installation`, then `token()`: one creation |
 //! | [`installation`](GithubApp::installation), [`get_installation`](GithubApp::get_installation) | app-JWT `get_installation` | `octoauth::Installation::get` |
 //! | [`app_rest`](GithubApp::app_rest) | `list_installation_requests`'s credential | a [`Rest`] with `octoauth::App::credential` |
 //!
@@ -316,9 +316,10 @@ impl GithubApp {
 
     /// Run `call` once with a token for `installation` and `scope`; never
     /// replayed, for writes whose repetition needs the caller's fencing. On
-    /// `CallError::Api(ApiError::Unauthorized)` the token is replaced before
-    /// the error is returned (a replacement failure is not reported), so the
-    /// caller's own single retry gets a newer token.
+    /// `CallError::Api(ApiError::Unauthorized)` the token is invalidated
+    /// before the error is returned, creating nothing: the caller releases
+    /// its fence, and its own single retry gets a new token from
+    /// [`ensure`](Self::ensure) (P1 spec §9.4). A last 401 costs no token.
     pub async fn write_once<T, E, F, Fut>(
         &self,
         installation: impl Into<InstallationId>,
@@ -336,7 +337,7 @@ impl GithubApp {
             .map_err(TokenCallError::Token)?;
         let result = call(self.handle(token.clone())).await;
         if matches!(result, Err(CallError::Api(ApiError::Unauthorized))) {
-            let _ = self.tokens.replace(&token).await;
+            self.tokens.invalidate(&token);
         }
         result.map_err(TokenCallError::Call)
     }
@@ -354,16 +355,18 @@ impl GithubApp {
             .map(drop)
     }
 
-    /// Replace the token for `installation` and `scope` with a newer one,
-    /// e.g. after the installation's permissions changed. Creates a token
-    /// when none is cached, then its replacement. Other scopes keep theirs.
+    /// Drop every cached token of `installation`, then create one for
+    /// `scope`, e.g. after the installation's permissions changed
+    /// (gh-toolkit's `invalidate_installation` + `ensure_fresh`). Creates
+    /// exactly one token; the other scopes get theirs when next used.
     pub async fn refresh(
         &self,
         installation: impl Into<InstallationId>,
         scope: &TokenScope,
     ) -> Result<(), TokenError> {
-        let token = self.tokens.token(installation.into(), scope).await?;
-        self.tokens.replace(&token).await.map(drop)
+        let installation = installation.into();
+        self.tokens.invalidate_installation(installation);
+        self.tokens.token(installation, scope).await.map(drop)
     }
 
     /// The `octoauth::Installation` for app-authenticated operations. Its

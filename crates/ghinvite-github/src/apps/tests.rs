@@ -128,12 +128,12 @@ async fn read_does_not_retry_other_failures() {
 }
 
 #[tokio::test]
-async fn write_once_never_replays_and_replaces_the_rejected_token() {
+async fn write_once_never_replays_and_invalidates_the_rejected_token() {
     let tokens = FixedTokens::new(123);
     let mock = MockTransport::scripted(vec![
         Expectation::status(Method::Delete, COLLABORATOR, 401)
             .require_header("authorization", tokens.bearer(9, 1)),
-        // The caller's own retry gets the replacement.
+        // The caller's own retry gets a new token.
         Expectation::status(Method::Delete, COLLABORATOR, 204)
             .require_header("authorization", tokens.bearer(9, 2)),
     ]);
@@ -142,13 +142,15 @@ async fn write_once_never_replays_and_replaces_the_rejected_token() {
     let error = remove(&app, &runs).await.unwrap_err();
     assert!(error.is_unauthorized());
     assert_eq!(runs.load(SeqCst), 1);
-    assert_eq!((tokens.token_calls(), tokens.replace_calls()), (1, 1));
+    // Nothing is created until the caller (after settling its fence) asks.
+    assert_eq!((tokens.token_calls(), tokens.replace_calls()), (1, 0));
+    assert_eq!(tokens.generation(9, &REPO_INVITE), 1);
     assert_eq!(mock.remaining(), 1);
     app.ensure(9, &REPO_INVITE).await.unwrap();
     assert_eq!(tokens.generation(9, &REPO_INVITE), 2);
     remove(&app, &runs).await.unwrap();
     assert_eq!(runs.load(SeqCst), 2);
-    assert_eq!(tokens.replace_calls(), 1);
+    assert_eq!(tokens.replace_calls(), 0);
     mock.assert_exhausted();
 }
 
@@ -171,17 +173,26 @@ async fn write_once_returns_other_failures_without_replacing() {
 }
 
 #[tokio::test]
-async fn write_once_reports_the_401_even_if_replacing_fails() {
+async fn after_a_write_401_the_next_ensure_reports_a_failed_creation() {
     let tokens = FixedTokens::new(123);
     let mock = MockTransport::scripted(vec![
         Expectation::status(Method::Delete, COLLABORATOR, 401)
             .require_header("authorization", tokens.bearer(9, 1)),
     ]);
     let app = repo_app(&mock, &tokens);
-    tokens.fail_next_replace(transient());
     let error = remove(&app, &AtomicUsize::new(0)).await.unwrap_err();
     assert!(error.is_unauthorized());
-    assert_eq!(tokens.replace_calls(), 1);
+    tokens.fail_next_token(transient());
+    assert!(
+        app.ensure(9, &REPO_INVITE)
+            .await
+            .unwrap_err()
+            .is_transient()
+    );
+    // The rejected token is still not served.
+    app.ensure(9, &REPO_INVITE).await.unwrap();
+    assert_eq!(tokens.generation(9, &REPO_INVITE), 2);
+    assert_eq!(tokens.replace_calls(), 0);
     mock.assert_exhausted();
 }
 
@@ -195,14 +206,21 @@ async fn ensure_and_refresh_send_no_api_request() {
     assert_eq!(tokens.generation(9, &REPO_READ), 1);
     assert_eq!((tokens.token_calls(), tokens.replace_calls()), (2, 0));
 
+    app.ensure(10, &REPO_READ).await.unwrap();
+
     app.refresh(9, &REPO_READ).await.unwrap();
     assert_eq!(tokens.generation(9, &REPO_READ), 2);
-    assert_eq!((tokens.token_calls(), tokens.replace_calls()), (3, 1));
-    // Without a cached token: create one, then its replacement.
+    assert_eq!((tokens.token_calls(), tokens.replace_calls()), (4, 0));
+    // Without a cached token: exactly one is created.
     app.refresh(9, &REPO_INVITE).await.unwrap();
-    assert_eq!(tokens.generation(9, &REPO_INVITE), 2);
-    // Other installations and scopes are untouched.
-    assert_eq!(tokens.generation(10, &REPO_READ), 0);
+    assert_eq!(tokens.generation(9, &REPO_INVITE), 1);
+    // The installation's other scopes are invalidated, not created...
+    assert_eq!(tokens.generation(9, &REPO_READ), 2);
+    app.ensure(9, &REPO_READ).await.unwrap();
+    assert_eq!(tokens.generation(9, &REPO_READ), 3);
+    // ...and other installations keep theirs.
+    app.ensure(10, &REPO_READ).await.unwrap();
+    assert_eq!(tokens.generation(10, &REPO_READ), 1);
     assert_eq!(tokens.generation(9, &ORG_READ), 0);
 }
 

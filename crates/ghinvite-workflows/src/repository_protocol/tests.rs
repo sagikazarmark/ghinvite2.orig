@@ -241,7 +241,8 @@ async fn rejected_401_releases_then_reclaims_once() {
     for final_status in [201, 401] {
         let storage = SqlxStorage::in_memory().await.unwrap();
         let command = command();
-        // The 401 replaced the token: the retry writes with the next one.
+        // The 401 invalidated the token: the retry, after the release,
+        // writes with a new one.
         let (app, tokens, mock) = github(vec![
             permission("read").require_header("authorization", bearer(1)),
             put(401).require_header("authorization", bearer(1)),
@@ -269,10 +270,10 @@ async fn rejected_401_releases_then_reclaims_once() {
             Some(3)
         );
         used_only(&tokens, &profiles::REPO_INVITE);
-        assert_eq!(
-            tokens.replace_calls(),
-            if final_status == 201 { 1 } else { 2 }
-        );
+        // Two tokens either way: a last 401 invalidates without creating a
+        // third (P1 spec §9.4: `call` invalidates, `ensure` re-mints).
+        assert_eq!(tokens.generation(9, &profiles::REPO_INVITE), 2);
+        assert_eq!(tokens.replace_calls(), 0);
         mock.assert_exhausted();
     }
 }

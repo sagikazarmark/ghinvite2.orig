@@ -1270,25 +1270,21 @@ impl AccountInstallation {
     }
 }
 
-/// Replace the cached token of every scope `app`'s installation `id` is used
-/// with (`GithubApp::refresh` is per scope; gh-toolkit invalidated them all),
-/// the write scope first. Whether a refresh failed transiently, the only
-/// failure worth retrying.
+/// Drop every cached token of `app`'s installation `id` and create one for
+/// the write scope (gh-toolkit's `invalidate_installation` + `ensure_fresh`;
+/// P1 spec §10.2): one creation, the read scope's comes when next used.
+/// Whether it failed transiently, the only failure worth retrying.
 async fn refresh_tokens(github: &ghinvite_github::GithubApp, app: App, id: u64) -> bool {
-    use ghinvite_github::profiles::{ORG_INVITE, ORG_READ, REPO_INVITE, REPO_READ};
-    let scopes = match app {
-        App::Repo => [&REPO_INVITE, &REPO_READ],
-        App::Org => [&ORG_INVITE, &ORG_READ],
+    use ghinvite_github::profiles::{ORG_INVITE, REPO_INVITE};
+    let scope = match app {
+        App::Repo => &REPO_INVITE,
+        App::Org => &ORG_INVITE,
     };
-    let mut unavailable = false;
-    for scope in scopes {
-        let result = github.refresh(id, scope).await;
-        unavailable |= matches!(
-            result.as_ref().map_err(ghinvite_github::apps::github_error),
-            Err(Some(octotoken::octoauth::Error::Transient { .. }))
-        );
-    }
-    unavailable
+    let result = github.refresh(id, scope).await;
+    matches!(
+        result.as_ref().map_err(ghinvite_github::apps::github_error),
+        Err(Some(octotoken::octoauth::Error::Transient { .. }))
+    )
 }
 
 #[cfg(test)]
@@ -1477,7 +1473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_refresh_replaces_every_scope_and_retries_only_transient_failures() {
+    async fn credential_refresh_creates_one_write_token_and_retries_only_transient_failures() {
         use ghinvite_github::{
             AppSlot, GithubApps,
             mocks::{FixedTokens, MockTransport},
@@ -1493,35 +1489,46 @@ mod tests {
         );
         let github = |slot| apps.app(slot).unwrap();
 
+        // Cached tokens of every scope, as deliveries leave them.
+        for (slot, installation, scopes) in [
+            (AppSlot::Repo, 1, [&REPO_INVITE, &REPO_READ]),
+            (AppSlot::Org, 2, [&ORG_INVITE, &ORG_READ]),
+        ] {
+            for scope in scopes {
+                github(slot).ensure(installation, scope).await.unwrap();
+            }
+        }
         assert!(!refresh_tokens(&github(AppSlot::Repo), App::Repo, 1).await);
         assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
-        for (tokens, installation, scope) in [
-            (&repo, 1, &REPO_INVITE),
-            (&repo, 1, &REPO_READ),
-            (&org, 2, &ORG_INVITE),
-            (&org, 2, &ORG_READ),
-        ] {
-            assert_eq!(tokens.generation(installation, scope), 2);
-        }
+        // One creation per refresh: the write scope's (gh-toolkit's
+        // `invalidate_installation` + `ensure_fresh`).
+        assert_eq!(repo.generation(1, &REPO_INVITE), 2);
+        assert_eq!(org.generation(2, &ORG_INVITE), 2);
+        assert_eq!(repo.generation(1, &REPO_READ), 1);
+        assert_eq!(org.generation(2, &ORG_READ), 1);
+        assert_eq!((repo.replace_calls(), org.replace_calls()), (0, 0));
+        // The read scopes were invalidated: their next use creates a token.
+        github(AppSlot::Org).ensure(2, &ORG_READ).await.unwrap();
+        assert_eq!(org.generation(2, &ORG_READ), 2);
         assert_eq!(repo.generation(2, &ORG_READ), 0);
 
-        // A refused scope is retained as is; the other scope is still refreshed.
+        // A still-refused write scope is retained as is, never retried.
         org.fail_next_token(TokenError::GitHub(GitHub::PermissionsNotGranted));
         assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
         assert_eq!(org.generation(2, &ORG_INVITE), 2);
-        assert_eq!(org.generation(2, &ORG_READ), 3);
         // Neither are rate limits retried here (gh-toolkit's `Transient` only).
         org.fail_next_token(TokenError::GitHub(GitHub::RateLimited {
             scope: ghinvite_github::error::RateLimitScope::Secondary,
             retry_after: None,
         }));
         assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
-        // A transient failure of either scope fails the step, after both ran.
-        org.fail_next_replace(TokenError::GitHub(GitHub::Transient {
+        // A transient failure fails the step.
+        org.fail_next_token(TokenError::GitHub(GitHub::Transient {
             kind: octotoken::octoauth::TransientKind::NoResponse,
         }));
         assert!(refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
-        assert_eq!(org.generation(2, &ORG_READ), 5);
+        assert!(!refresh_tokens(&github(AppSlot::Org), App::Org, 2).await);
+        assert_eq!(org.generation(2, &ORG_INVITE), 3);
         mock.assert_exhausted();
     }
 
