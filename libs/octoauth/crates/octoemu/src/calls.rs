@@ -27,13 +27,67 @@ pub struct Call {
     /// The shape of the `Authorization` header; never its value.
     pub credential: CredentialKind,
     /// Who the route verified the caller to be; `None` without a credential,
-    /// when the credential was rejected, and on the 501 fallback.
+    /// when the credential was rejected, and on the 501 fallback. When a
+    /// fault rule answers instead of the route, who the credential belongs
+    /// to, if it is valid.
     #[serde(default)]
     pub identity: Option<Identity>,
-    /// The response status.
+    /// The response status; 0 when the connection was closed without one
+    /// (a fault rule).
     pub status: u16,
     /// The `X-GitHub-Request-Id` the response carried.
     pub request_id: String,
+    /// The non-secret fields of a JSON request body that say what was asked
+    /// for ([`RECORDED_FIELDS`]: `permission`, `permissions`, `role`, …),
+    /// when the body had any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_fields: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The fault rule that fired on the request, if one did
+    /// ([`crate::faults`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<CallFault>,
+}
+
+/// A fault rule's mark on a [`Call`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallFault {
+    /// The rule's ID.
+    pub rule: u64,
+    /// Its action's kind (`respond`, `delay`, `hold`, `apply_then_lose`,
+    /// `close`, `reset`, `custom`).
+    pub action: String,
+    /// The status the real handler answered, when it ran (`delay`, `hold`,
+    /// `apply_then_lose`); for `apply_then_lose` the client never saw it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handler_status: Option<u16>,
+}
+
+/// Top-level JSON request body fields recorded in [`Call::body_fields`]:
+/// roles, permissions and IDs, never free text, addresses or secrets.
+pub const RECORDED_FIELDS: &[&str] = &[
+    "permission",
+    "permissions",
+    "role",
+    "state",
+    "invitee_id",
+    "team_ids",
+    "repository_ids",
+    "repositories",
+];
+
+/// [`RECORDED_FIELDS`] of a JSON object body.
+pub(crate) fn body_fields(body: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if body.is_empty() {
+        return None;
+    }
+    let serde_json::Value::Object(object) = serde_json::from_slice(body).ok()? else {
+        return None;
+    };
+    let fields: serde_json::Map<_, _> = object
+        .into_iter()
+        .filter(|(name, _)| RECORDED_FIELDS.contains(&name.as_str()))
+        .collect();
+    (!fields.is_empty()).then_some(fields)
 }
 
 /// The part of the emulator a path belongs to.
@@ -293,6 +347,19 @@ mod tests {
     }
 
     #[test]
+    fn records_only_listed_body_fields() {
+        assert_eq!(body_fields(b""), None);
+        assert_eq!(body_fields(b"not json"), None);
+        assert_eq!(body_fields(b"[1]"), None);
+        assert_eq!(body_fields(br#"{"email":"a@example.com"}"#), None);
+        let fields = body_fields(br#"{"permission":"push","secret":"s","team_ids":[1]}"#).unwrap();
+        assert_eq!(
+            serde_json::Value::Object(fields),
+            serde_json::json!({"permission": "push", "team_ids": [1]})
+        );
+    }
+
+    #[test]
     fn classifies_surfaces() {
         assert_eq!(Surface::of("/__octoemu/calls"), Surface::Admin);
         assert_eq!(Surface::of("/__octoemu"), Surface::Admin);
@@ -317,6 +384,8 @@ mod tests {
             identity: None,
             status: 501,
             request_id: String::new(),
+            body_fields: None,
+            fault: None,
         };
         for seq in 0..CAPACITY as u64 + 3 {
             log.record(call(seq));

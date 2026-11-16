@@ -8,7 +8,7 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: organizations (GE-06)
+## Status: fault rules (GE-07)
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
@@ -28,7 +28,7 @@ organizations, memberships, organization invitations (by user or email,
 with teams; expiry, the failed list, the daily budget and seats), teams
 and team memberships with their repository grants, the user's
 `/user/memberships/orgs` routes, and `organization` / `membership` events
-(GE-06).
+(GE-06); fault rules and the temporary stub-compatibility shim (GE-07).
 
 ### Implemented routes
 
@@ -348,8 +348,10 @@ let calls = emulator.calls();
 `suspend_installation`, `unsuspend_installation`, `uninstall`, `install`,
 `events`, `deliveries`, `dispatch_deliveries`, `set_dispatch`,
 `set_webhook`, `wait_for_deliveries`, `mint_user_token`,
-`mint_personal_access_token`, `deny_authorization`, `allow_authorization`
-and `set_auto_consent`.
+`mint_personal_access_token`, `deny_authorization`, `allow_authorization`,
+`set_auto_consent` and, for [fault rules](#fault-rules), `add_fault`,
+`faults`, `fault`, `remove_fault`, `clear_faults`, `release_fault` and
+`wait_for_held`.
 
 **Binary**, for the Worker drivers, browser tests and other processes:
 
@@ -358,7 +360,9 @@ $ octoemu --port 0 [--bind 127.0.0.1] [--seed seed.json] [--idle-timeout SECS] [
 {"api_base":"http://127.0.0.1:41234","web_base":"http://127.0.0.1:41234","admin_base":"http://127.0.0.1:41234/__octoemu","port":41234,"pid":4242}
 ```
 
-Exactly one JSON line on stdout, once listening; nothing else goes to stdout.
+`--seed compat` starts the [stub-compatibility](#compatibility-shim-temporary)
+world instead of a file. Exactly one JSON line on stdout, once listening;
+nothing else goes to stdout.
 `--idle-timeout` exits (status 0) after that many seconds without a request.
 SIGTERM or Ctrl-C stops it. A bad argument or seed exits with status 2.
 `octoemu --fidelity` prints the fidelity table.
@@ -480,6 +484,14 @@ applies whole or not at all; it may not set `start_time`.
 | `POST /act/{login}/orgs/{org}/decline` | The user declines their invitation (204, no event) |
 | `POST /act/{login}/orgs/{org}/leave` | A member leaves (204, `organization.member_removed`) |
 | `POST /orgs/{org}/spammed` | `{"spammed": bool}`: the organization's invitation writes (create, cancel) answer GitHub's `spammed` 422 (assumed shape) while on (204; 404 unknown) |
+| `GET /faults` | `{"faults": […]}`: every [fault rule](#fault-rules) with `id`, its fields, `matched`, `fired`, `held` and `released` |
+| `POST /faults` | Adds a rule: 201 with it as listed; 422 for a bad pattern, method, status or header |
+| `DELETE /faults` | Removes every rule (204), letting held requests go on |
+| `GET /faults/{id}` | One rule (404 if unknown) |
+| `DELETE /faults/{id}` | Removes it (204; 404), letting its held requests go on |
+| `POST /faults/{id}/release` | A hold rule lets its held requests go on and holds no more (204; 404) |
+| `POST /faults/{id}/wait` | `{"held"?: n (1), "timeout_ms"?}`: 200 `{"held": n}` once the hold rule holds at least `n` requests, 504 at the timeout (default 30 s) |
+| `/compat/…` | The temporary [stub-compatibility shim](#compatibility-shim-temporary) |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
 ticks with real time, and jumps on advance. Every response, admin included,
@@ -499,16 +511,117 @@ token's SHA-256 in hex, as octoauth's `TokenId` prints it),
 `{"kind": "user_token", "app_id", "user_id", "login", "token_id"}`,
 `{"kind": "personal_access_token", "user_id", "login", "token_id"}` or
 `{"kind": "client", "app_id"}`, `null` without or with a rejected
-credential. Query values
+credential (when a fault rule answers instead of the route: the
+credential's owner, if it is valid). Query values
 named like secrets (`code`, `state`, `client_secret`, `*token*`, …) become
-`<redacted>`, and octoscrub runs over the rest. Bodies are never recorded.
-The newest 10 000 records are kept.
+`<redacted>`, and octoscrub runs over the rest. Bodies are never recorded,
+except `body_fields`: the top-level JSON request body fields that say what
+was asked for (`permission`, `permissions`, `role`, `state`, `invitee_id`,
+`team_ids`, `repository_ids`, `repositories`), never free text, addresses or
+secrets. A call a fault rule fired on carries `fault: {"rule", "action",
+"handler_status"?}` (`handler_status`: what the real handler answered,
+when it ran) and `status` 0 when the connection was closed without a
+response. The newest 10 000 records are kept.
 
 **Response basics.** API responses carry `x-ratelimit-*` (stub values; no
 per-credential budget yet) and every response an `X-GitHub-Request-Id`. Lists
 are paged GitHub's way: `per_page` (default 30, silently capped at 100),
 `page`, and a `Link` header with `prev`, `next`, `last` and `first`. Errors use GitHub's
 `{"message", "documentation_url"}`; 422s add `errors[{resource, field, code}]`.
+
+## Fault rules
+
+Injected failures on the API, web and avatar surfaces (never the admin
+API), for testing a client's failure handling. **A fault-injected response
+is not GitHub behaviour**: it has no fidelity label, refuse-assumed mode
+does not touch it, and nothing in it is a claim about GitHub. Every call a
+rule fires on is marked in the call log.
+
+```json
+{"method": "PUT", "path": "/repos/{owner}/{repo}/collaborators/{username}",
+ "credential": "installation_token", "body_contains": "\"admin\"",
+ "nth": 2, "times": 1, "label": "lost write",
+ "action": {"kind": "apply_then_lose", "status": 502}}
+```
+
+- **Matching.** `method` (any when absent or `*`); `path`, matched against
+  the request path without the query: literal segments, axum-style
+  `{param}` (one segment) and `{*rest}` (the rest), `*` (one segment, or a
+  run of characters within one) and `**` (any number of segments);
+  `credential` (the call log's credential kinds); `body_contains` (a
+  substring of the raw body).
+- **Counting.** A rule counts every request it matches and fires from the
+  `nth` (default 1) for `times` requests (default: every one after). A
+  rule that matches without firing lets later rules look; the first rule
+  that fires decides. Rules apply in the order they were added.
+- **Actions** (`kind`):
+  - `respond`: `status`, `headers`, a JSON `body` or a `text` body; the
+    handler does not run, so nothing changes (a 503 on a read, a 401 once,
+    a secondary-rate-limit 403 with `Retry-After`);
+  - `delay`: `ms`, `clock: "real"` (the response comes that much later) or
+    `"virtual"` (the virtual clock jumps first; expiry sees the time
+    pass), then the handler runs;
+  - `hold`: the request waits until the rule is released, removed or the
+    emulator stops, then the handler runs; `POST /faults/{id}/wait`
+    (`Emulator::wait_for_held`) returns once requests are held, so a test
+    can act while a write is in flight;
+  - `apply_then_lose`: the handler runs (its changes happen), then its
+    response is lost: `status` (e.g. 502, with a short text body) is sent
+    instead, or, without `status`, the connection closes unanswered (the
+    stub's `loseDeleteResponse`);
+  - `close`: the connection closes without a response; the handler does
+    not run;
+  - `reset`: the connection is reset (TCP RST); the handler does not run;
+  - `custom` (embedded only, `FaultAction::custom`): a Rust closure gets the
+    method, path, pattern parameters and credential kind and returns the
+    response.
+- **Rust.** `Emulator::add_fault(Fault::on("PUT", "/repos/**",
+  FaultAction::Hold).once())` returns the rule's ID; `octoemu::faults` has
+  the builder (`Fault`, `FaultAction`, `Reply`, `DelayClock`).
+- **Connections.** octoemu runs its own HTTP/1.1 accept loop (hyper) so a
+  rule can drop the connection a request came on.
+- The organization `spammed` switch (`POST /orgs/{org}/spammed`) stays an
+  `assumed` GitHub behaviour, not a fault rule.
+
+## Compatibility shim (temporary)
+
+**Deleted in GE-09.** It lets ghinvite's Rust workflow tests, written
+against `ghinvite_github::stub`, run against the emulator before they are
+rewritten for the native admin API. `octoemu::compat::seed()` (the binary's
+`--seed compat`) is the stub's default world: the organization `acme` (100,
+created 2020) with the private `acme/api` (10) and `acme/web` (11);
+`creator` (7) owns `acme` (so is admin everywhere); `alice` (8); the
+repository App 123 (`Iv-p1-runtime-fixture`, `administration: write`,
+`metadata: read`) installed on all of `acme` as installation 1, and the
+organization App 456 (`Iv-p1-runtime-fixture-org`, `members: write`,
+`metadata: read`) as 2, both created 2026-01-01, without webhooks, verifying
+JWTs against `compat::PUBLIC_KEY` (the public half of
+`tests/fixtures/rsa2048.pem`, which is ghinvite's
+`test-fixtures/github-app-rsa.pem`). `compat::seed_with_installation(id)`
+installs the repository App as `id` (the stub answered for any ID).
+
+The stub's control routes, under `/__octoemu/compat/`, act on emulator
+state and on fault rules labelled `compat:…`:
+
+| Route | Does |
+|---|---|
+| `POST /identity` `{"login"?, "addressed_id"?, "role_name"?}` | Custom rules make `GET /user/{id}` answer `login` (default `alice`) for every ID and `GET /users/{username}` answer `addressed_id` (default 8) for every username, as the stub did, so a login that now resolves to another account can be staged. In the world, user `addressed_id` carries `login` (created if needed; a previous holder of the login is renamed `{login}-former-{id}`); with `role_name` (`read`, `triage`, `write`, `maintain`, `admin`, a custom role, `none`) they become a direct collaborator with that role on every repository and their pending invitations are accepted (gone from the list); without it they lose direct access |
+| `POST /outcomes` `{"owner", "repo", "user", "outcome"}` | `already_collaborator` makes the user a direct `pull` collaborator (so PUTs answer 204); the rest are rules on that PUT: `terminal_failure` (422 every time), `transient_once` (502 once), `created_response_lost` (`apply_then_lose` 502 every time), `created_then_declined` (502 every time, nothing left behind), `access_lost_once` (403 once), `throttled_once` (403 with `Retry-After: 1` and the secondary-rate-limit message, once) |
+| `POST /installation-identity` `<account>` | `GET /app/installations/{id}` reports this `account` (a custom rule; the rest is the real installation); the real account removes the rule |
+| `POST /installation-repositories` `[ids]` | Every installation of App 123 selects exactly these repositories (an unknown ID becomes `acme/repo-{id}`) |
+| `POST /invitation-expired` `{"owner", "repo", "id", "expired"}` | Dates the invitation back past its 7 days (or to now) |
+| `GET /calls` | The stub's ledger, `{"count", "requests": [{"method", "path", "permission", "status"}]}`: token minting, collaborator PUT/GET/DELETE, invitation lists and deletions, without the query; a lost write shows the status its handler chose |
+| `DELETE /reset` | 200; removes the `compat:` rules, empties the call log, gives users their starting logins and returns collaborators, invitations, memberships and App 123's repository selection to the start; installations, tokens, the clock and invitation IDs (never reused) stay |
+
+Where the emulator differs from the stub (and the workflow tests now see
+GitHub's documented behaviour): JWTs and installation tokens are verified
+(`ghs_…`, not `test-token-for-{id}`); unknown users, repositories and
+installations are 404; a PUT for a user with a pending invitation returns
+that invitation again (assumed) instead of a new one; an accepted
+invitation leaves the pending list; `/repos/{owner}/{repo}` is the real
+repository; `permission` follows the role (`read` is `read`, not
+`write`); an installation narrowed to some repositories reports
+`repository_selection: "selected"`.
 
 ## Fidelity
 
@@ -628,6 +741,16 @@ refuse-assumed mode. In the ghinvite workspace,
 of the JS org drivers over ghinvite-github's real organization client, and
 `crates/ghinvite-web/tests/emulator_webhooks.rs` feeds the organization
 events to ghinvite-web's org webhook intake.
+
+`tests/faults.rs` covers fault rules over HTTP: matching by method,
+pattern, credential and body, `nth`/`times`, every action (a dropped
+connection is an error at the client, a lost response still changes
+state, a virtual delay expires a token), holds and their release, the
+admin API and the call log's marks. `tests/compat.rs` covers the
+stub-compatibility shim: the `compat` seed reached with octoauth and
+ghinvite's fixture key, and every `/__octoemu/compat/` route. In the
+ghinvite workspace, `ghinvite_e2e::Harness::start` serves the compat world
+to the Restate workflow suites (`crates/ghinvite-workflows/tests`).
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

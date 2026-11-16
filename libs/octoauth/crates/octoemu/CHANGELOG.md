@@ -11,6 +11,29 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- Fault rules (GE-07): `POST`/`GET`/`DELETE /__octoemu/faults`, `GET`/`DELETE
+  /__octoemu/faults/{id}`, `POST /__octoemu/faults/{id}/release` and
+  `…/wait`, and `Emulator::add_fault`, `faults`, `fault`, `remove_fault`,
+  `clear_faults`, `release_fault` and `wait_for_held` (`octoemu::faults`).
+  Rules match method, path pattern (axum-style `{param}`/`{*rest}`, `*`,
+  `**`), credential kind and a body substring, count `nth`/`times`, and
+  respond, delay (real or virtual time), hold until released, apply then
+  lose the response (a status or a closed connection), close or reset the
+  connection, or answer from a Rust closure. They apply to the API, web and
+  avatar surfaces, never the admin API. Fault-injected responses are not
+  GitHub behaviour and carry no fidelity label.
+- Call log: `fault` (`rule`, `action`, `handler_status`) on calls a rule
+  fired on, `status` 0 for a dropped connection, the credential's owner as
+  `identity` when a rule answered instead of the route, and `body_fields`
+  (the non-secret request body fields `permission`, `permissions`, `role`,
+  `state`, `invitee_id`, `team_ids`, `repository_ids`, `repositories`).
+- The stub-compatibility shim (temporary, deleted in GE-09):
+  `octoemu::compat::seed()` / `seed_with_installation(id)` (the binary's
+  `--seed compat`), the stub's default world, and its control routes under
+  `/__octoemu/compat/` (`identity`, `outcomes`, `installation-identity`,
+  `installation-repositories`, `invitation-expired`, `calls`, `reset`) on
+  emulator state and `compat:` fault rules.
+
 - Organizations (GE-06): `GET /orgs/{org}` (`plan` with
   `organization_plan`), `GET /orgs/{org}/members`, `GET`/`PUT`/`DELETE
   /orgs/{org}/memberships/{username}` (a non-member is invited and
@@ -135,5 +158,8 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Changed
 
+- The server runs its own HTTP/1.1 accept loop (hyper) instead of
+  `axum::serve`, so a fault rule can drop a connection; shutdown still
+  waits for in-flight requests and releases held ones (GE-07).
 - `email` in `GET /users/{username}` is now the user's public primary
   address (it was always null).

@@ -68,6 +68,131 @@ pub(crate) fn router() -> Router<SharedState> {
             post(act_on_org),
         )
         .route("/__octoemu/orgs/{org}/spammed", post(set_spammed))
+        .route(
+            "/__octoemu/faults",
+            get(list_faults).post(add_fault).delete(clear_faults),
+        )
+        .route(
+            "/__octoemu/faults/{id}",
+            get(get_fault).delete(remove_fault),
+        )
+        .route("/__octoemu/faults/{id}/release", post(release_fault))
+        .route("/__octoemu/faults/{id}/wait", post(wait_for_held))
+        .merge(crate::compat::router())
+}
+
+fn no_such_fault() -> Response {
+    error(
+        StatusCode::NOT_FOUND,
+        "octoemu: no such fault rule",
+        OCTOEMU_DOCS,
+    )
+}
+
+/// `POST /__octoemu/faults`: adds a rule (`crate::faults::Fault`); 201
+/// with it as listed, 422 for a bad pattern, status or header.
+async fn add_fault(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let fault: crate::faults::Fault = match body(&bytes) {
+        Ok(fault) => fault,
+        Err(response) => return *response,
+    };
+    let mut state = shared.state();
+    match state.faults.add(fault) {
+        Ok(id) => json(StatusCode::CREATED, &state.faults.get(id)),
+        Err(refused) => error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &refused.to_string(),
+            OCTOEMU_DOCS,
+        ),
+    }
+}
+
+async fn list_faults(State(shared): State<SharedState>) -> Response {
+    json(
+        StatusCode::OK,
+        &json!({"faults": shared.state().faults.list()}),
+    )
+}
+
+async fn clear_faults(State(shared): State<SharedState>) -> Response {
+    shared.state().faults.clear();
+    StatusCode::NO_CONTENT.into_response()
+}
+
+async fn get_fault(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    match shared.state().faults.get(id) {
+        Some(status) => json(StatusCode::OK, &status),
+        None => no_such_fault(),
+    }
+}
+
+async fn remove_fault(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    if shared.state().faults.remove(id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        no_such_fault()
+    }
+}
+
+async fn release_fault(State(shared): State<SharedState>, Path(id): Path<u64>) -> Response {
+    if shared.state().faults.release(id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        no_such_fault()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitHeld {
+    #[serde(default = "one")]
+    held: usize,
+    #[serde(default = "thirty_seconds")]
+    timeout_ms: u64,
+}
+
+fn one() -> usize {
+    1
+}
+
+fn thirty_seconds() -> u64 {
+    30_000
+}
+
+/// `POST /__octoemu/faults/{id}/wait` `{"held"?: n (1), "timeout_ms"?}`:
+/// 200 `{"held": n}` once the hold rule holds at least `n` requests, 504 at
+/// the timeout.
+async fn wait_for_held(
+    State(shared): State<SharedState>,
+    Path(id): Path<u64>,
+    bytes: Bytes,
+) -> Response {
+    let WaitHeld { held, timeout_ms } = if bytes.is_empty() {
+        WaitHeld {
+            held: 1,
+            timeout_ms: thirty_seconds(),
+        }
+    } else {
+        match body(&bytes) {
+            Ok(wait) => wait,
+            Err(response) => return *response,
+        }
+    };
+    let Some(gate) = shared.state().faults.gate(id) else {
+        return no_such_fault();
+    };
+    if gate
+        .held(held, std::time::Duration::from_millis(timeout_ms))
+        .await
+    {
+        json(StatusCode::OK, &json!({"held": held}))
+    } else {
+        error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "octoemu: timed out waiting for held requests",
+            OCTOEMU_DOCS,
+        )
+    }
 }
 
 /// `POST /__octoemu/act/{login}/orgs/{org}/accept|decline|leave`: the

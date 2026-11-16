@@ -19,6 +19,9 @@ base64.workspace = true
 chrono = { workspace = true, features = ["clock", "serde"] }
 getrandom_02.workspace = true
 hmac.workspace = true
+# The accept loop (fault rules close and reset connections).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 octoscrub.workspace = true
 # Webhook delivery to the App's URL.
 reqwest.workspace = true
@@ -27,9 +30,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
+socket2 = "0.6"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal", "sync", "time"] }
 toml.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 # The real clients, run against an embedded emulator (tests/app_auth.rs).

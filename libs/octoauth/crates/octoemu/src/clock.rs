@@ -43,6 +43,13 @@ impl Clock {
         self.advanced += TimeDelta::seconds(i64::try_from(seconds).unwrap_or(i64::MAX));
     }
 
+    /// Moves the clock forward by `millis` milliseconds (a fault rule's
+    /// virtual delay), at most [`MAX_ADVANCE_SECONDS`].
+    pub(crate) fn advance_millis(&mut self, millis: u64) {
+        let millis = millis.min(MAX_ADVANCE_SECONDS.saturating_mul(1000));
+        self.advanced += TimeDelta::milliseconds(i64::try_from(millis).unwrap_or(i64::MAX));
+    }
+
     /// The total of every advance, in seconds.
     pub(crate) fn advanced_seconds(&self) -> i64 {
         self.advanced.num_seconds()

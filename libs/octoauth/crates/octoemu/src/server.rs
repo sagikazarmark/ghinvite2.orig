@@ -1,18 +1,24 @@
 //! The router: GitHub routes, the admin API, the 501 fallback, and the
-//! middleware every response passes through (`Date`, request ID, rate-limit
-//! headers, call log, idle tracking).
+//! middleware every request passes through (fault rules, `Date`, request
+//! ID, rate-limit headers, call log, idle tracking).
 
 use crate::api::Api;
 use crate::auth;
-use crate::calls::{Call, CredentialKind, Identity, Surface, redacted_path};
+use crate::calls::{self, Call, CallFault, CredentialKind, Identity, Surface, redacted_path};
 use crate::clock::http_date;
+use crate::connection::Connection;
+use crate::faults::{DelayClock, FaultAction, Fired, Probe, Reply};
 use crate::response::{self, OCTOEMU_DOCS, REQUEST_ID, RateLimit};
 use crate::state::SharedState;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, Uri, header::DATE};
+use axum::http::header::{CONTENT_TYPE, DATE};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{Next, from_fn_with_state};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// The matched GitHub route (`METHOD /pattern`), attached to the response
 /// for the call log.
@@ -86,7 +92,24 @@ pub(crate) async fn route_context(
     response
 }
 
-/// Wraps every request.
+/// The largest request body octoemu reads (GitHub's own limits are far
+/// lower for the routes it implements).
+const BODY_LIMIT: usize = 16 * 1024 * 1024;
+
+/// What became of a request.
+enum Outcome {
+    /// Answered.
+    Response(Response),
+    /// The connection is to be dropped without an answer.
+    Dropped {
+        reset: bool,
+        route: Option<MatchedRoute>,
+        identity: Option<Identity>,
+    },
+}
+
+/// Wraps every request: fault rules (GitHub surfaces only), then the
+/// response headers and the call log.
 async fn observe(State(shared): State<SharedState>, request: Request, next: Next) -> Response {
     let _active = shared.activity.enter();
     let sequence = shared.next_sequence();
@@ -95,10 +118,64 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
     let surface = Surface::of(request.uri().path());
     let credential = CredentialKind::of(request.headers());
     let path = redacted_path(request.uri());
+    let connection = request.extensions().get::<Arc<Connection>>().cloned();
 
-    let mut response = next.run(request).await;
+    let mut body_fields = None;
+    let mut mark = None;
+    let outcome = if surface == Surface::Admin {
+        Outcome::Response(next.run(request).await)
+    } else {
+        let (parts, body) = request.into_parts();
+        match axum::body::to_bytes(body, BODY_LIMIT).await {
+            Err(_) => Outcome::Response(response::error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "octoemu: request body too large",
+                OCTOEMU_DOCS,
+            )),
+            Ok(bytes) => {
+                body_fields = calls::body_fields(&bytes);
+                let fired = shared.state().faults.decide(&Probe {
+                    method: parts.method.as_str(),
+                    path: parts.uri.path(),
+                    credential,
+                    body: &bytes,
+                });
+                let request = Request::from_parts(parts, Body::from(bytes));
+                match fired {
+                    None => Outcome::Response(next.run(request).await),
+                    Some(fired) => {
+                        let mut fault = CallFault {
+                            rule: fired.id,
+                            action: fired.action.kind().to_owned(),
+                            handler_status: None,
+                        };
+                        let outcome = inject(&shared, fired, request, next, &mut fault).await;
+                        mark = Some(fault);
+                        outcome
+                    }
+                }
+            }
+        }
+    };
 
     let now = shared.now();
+    let (mut response, dropped) = match outcome {
+        Outcome::Response(response) => (response, None),
+        Outcome::Dropped {
+            reset,
+            route,
+            identity,
+        } => {
+            let mut response = Response::new(Body::empty());
+            if let Some(route) = route {
+                response.extensions_mut().insert(route);
+            }
+            if let Some(identity) = identity {
+                response.extensions_mut().insert(identity);
+            }
+            (response, Some(reset))
+        }
+    };
     let headers = response.headers_mut();
     if let Ok(date) = HeaderValue::from_str(&http_date(now)) {
         headers.insert(DATE, date);
@@ -129,9 +206,133 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
             route,
             credential,
             identity,
-            status: response.status().as_u16(),
+            status: if dropped.is_some() {
+                0
+            } else {
+                response.status().as_u16()
+            },
             request_id,
+            body_fields,
+            fault: mark,
         });
+    }
+    if let Some(reset) = dropped {
+        match connection {
+            Some(connection) => {
+                connection.kill(reset);
+                // The connection task drops this request with the socket.
+                std::future::pending::<()>().await;
+            }
+            None => {
+                return response::error(
+                    StatusCode::BAD_GATEWAY,
+                    "octoemu: this connection cannot be dropped (fault rule)",
+                    OCTOEMU_DOCS,
+                );
+            }
+        }
+    }
+    response
+}
+
+/// Runs a fired rule's action around (or instead of) the handler.
+async fn inject(
+    shared: &SharedState,
+    fired: Fired,
+    request: Request,
+    next: Next,
+    mark: &mut CallFault,
+) -> Outcome {
+    // Who the credential belongs to, for the call log, when the handler
+    // (and so the route's own check) does not run.
+    let caller = || {
+        auth::authenticate(shared, request.headers())
+            .ok()
+            .and_then(|caller| caller.identity())
+    };
+    let answered = |mut response: Response, identity: Option<Identity>| {
+        if let Some(identity) = identity {
+            response.extensions_mut().insert(identity);
+        }
+        Outcome::Response(response)
+    };
+    match fired.action {
+        FaultAction::Respond(reply) => answered(reply_response(&reply), caller()),
+        FaultAction::Custom(responder) => {
+            answered(reply_response(&responder.reply(&fired.request)), caller())
+        }
+        FaultAction::Close => Outcome::Dropped {
+            reset: false,
+            route: None,
+            identity: caller(),
+        },
+        FaultAction::Reset => Outcome::Dropped {
+            reset: true,
+            route: None,
+            identity: caller(),
+        },
+        FaultAction::Delay { ms, clock } => {
+            match clock {
+                DelayClock::Real => tokio::time::sleep(Duration::from_millis(ms)).await,
+                DelayClock::Virtual => shared.state().clock.advance_millis(ms),
+            }
+            let response = next.run(request).await;
+            mark.handler_status = Some(response.status().as_u16());
+            Outcome::Response(response)
+        }
+        FaultAction::Hold => {
+            fired.gate.pass().await;
+            let response = next.run(request).await;
+            mark.handler_status = Some(response.status().as_u16());
+            Outcome::Response(response)
+        }
+        FaultAction::ApplyThenLose { status } => {
+            let handled = next.run(request).await;
+            mark.handler_status = Some(handled.status().as_u16());
+            let route = handled.extensions().get::<MatchedRoute>().cloned();
+            let identity = handled.extensions().get::<Identity>().cloned();
+            drop(handled);
+            match status.and_then(|status| StatusCode::from_u16(status).ok()) {
+                None => Outcome::Dropped {
+                    reset: false,
+                    route,
+                    identity,
+                },
+                Some(status) => {
+                    let mut response = (
+                        status,
+                        [(CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        format!("octoemu: response lost (fault rule {})", fired.id),
+                    )
+                        .into_response();
+                    if let Some(route) = route {
+                        response.extensions_mut().insert(route);
+                    }
+                    if let Some(identity) = identity {
+                        response.extensions_mut().insert(identity);
+                    }
+                    Outcome::Response(response)
+                }
+            }
+        }
+    }
+}
+
+/// A canned [`Reply`] as a response.
+fn reply_response(reply: &Reply) -> Response {
+    let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let mut response = match (&reply.body, &reply.text) {
+        (_, Some(text)) => (status, text.clone()).into_response(),
+        (Some(body), None) => response::json(status, body),
+        (None, None) => status.into_response(),
+    };
+    for (name, value) in &reply.headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
     }
     response
 }

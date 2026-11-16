@@ -2,7 +2,7 @@
 //! uses (REST, App and installation auth, the OAuth web flow, webhooks), for
 //! tests. Native only.
 //!
-//! **Organizations (GE-06).** The server, seed, virtual clock, admin API,
+//! **Fault rules (GE-07).** The server, seed, virtual clock, admin API,
 //! call log and fidelity manifest (GE-01); App JWTs, stateless installation
 //! tokens with scoping, revocation and suspension, per-route credential and
 //! permission checks, and the `/app…` and `/installation…` routes (GE-02);
@@ -17,7 +17,8 @@
 //! memberships, organization invitations (expiry, the failed list, the
 //! budget, seats), teams and team memberships with repository grants, the
 //! user's `/user/memberships/orgs` routes and `organization` / `membership`
-//! events (GE-06). Every
+//! events (GE-06); fault rules ([`faults`]) and the temporary
+//! stub-compatibility shim ([`compat`], deleted in GE-09) (GE-07). Every
 //! other API and web route answers
 //! `501 {"message": "octoemu: not implemented", "route": …}`, never 404. The
 //! plan is `docs/specs/github-emulator.md` in the ghinvite repository.
@@ -40,7 +41,7 @@
 //! `calls`, `fidelity`, `tokens/installation`, `tokens/user`, `oauth…`,
 //! `installations…`,
 //! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`,
-//! `orgs/{org}/spammed`). Every
+//! `orgs/{org}/spammed`, `faults…`, `compat/…`). Every
 //! response carries `Date` from the virtual clock. The binary
 //! (`octoemu --port 0`) prints one JSON line with the base URLs once it
 //! listens.
@@ -64,8 +65,11 @@ mod auth;
 pub mod calls;
 mod clock;
 mod collaboration;
+pub mod compat;
+mod connection;
 mod emulator;
 pub mod events;
+pub mod faults;
 pub mod fidelity;
 mod form;
 mod hooks;

@@ -3,6 +3,7 @@
 use crate::api::{self, Api};
 use crate::auth::Auth;
 use crate::calls::Call;
+use crate::faults::{Fault, FaultError, FaultStatus};
 use crate::fidelity::{Manifest, ManifestError, Mismatch};
 use crate::seed::{Seed, SeedError};
 use crate::state::{Shared, SharedState};
@@ -120,17 +121,23 @@ impl Builder {
         }
         let app = crate::server::router(shared.clone(), api);
 
-        let (stop, mut stop_requested) = watch::channel(false);
+        let (stop, stop_requested) = watch::channel(false);
         let (stopped_tx, stopped) = watch::channel(false);
-        let task = tokio::spawn(async move {
-            let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = stop_requested.wait_for(|stop| *stop).await;
-                })
-                .await;
-            let _ = stopped_tx.send(true);
-            result
-        });
+        let task = {
+            let shared = shared.clone();
+            let mut released = stop_requested.clone();
+            tokio::spawn(async move {
+                // Held requests would keep the graceful shutdown waiting.
+                let release = tokio::spawn(async move {
+                    let _ = released.wait_for(|stop| *stop).await;
+                    shared.state().faults.clear();
+                });
+                let result = crate::connection::serve(listener, app, stop_requested).await;
+                release.abort();
+                let _ = stopped_tx.send(true);
+                result
+            })
+        };
         tokio::spawn(crate::webhooks::dispatcher(
             shared.clone(),
             stop.subscribe(),
@@ -385,6 +392,49 @@ impl Emulator {
     /// on).
     pub fn set_auto_consent(&self, on: bool) {
         self.shared.state().oauth.auto_consent = on;
+    }
+
+    /// Adds a fault rule ([`crate::faults`]); returns its ID. Fault-injected
+    /// responses are not GitHub behaviour.
+    pub fn add_fault(&self, fault: Fault) -> Result<u64, FaultError> {
+        self.shared.state().faults.add(fault)
+    }
+
+    /// Every fault rule, with its counters.
+    pub fn faults(&self) -> Vec<FaultStatus> {
+        self.shared.state().faults.list()
+    }
+
+    /// Fault rule `id`, with its counters.
+    pub fn fault(&self, id: u64) -> Option<FaultStatus> {
+        self.shared.state().faults.get(id)
+    }
+
+    /// Removes fault rule `id`, letting the requests it holds go on;
+    /// `false` if there is no such rule.
+    pub fn remove_fault(&self, id: u64) -> bool {
+        self.shared.state().faults.remove(id)
+    }
+
+    /// Removes every fault rule.
+    pub fn clear_faults(&self) {
+        self.shared.state().faults.clear();
+    }
+
+    /// Releases what hold rule `id` holds, and holds nothing more; `false`
+    /// if there is no such rule.
+    pub fn release_fault(&self, id: u64) -> bool {
+        self.shared.state().faults.release(id)
+    }
+
+    /// Waits until hold rule `id` holds at least `n` requests, at most
+    /// `timeout`; `false` on the timeout or for an unknown rule.
+    pub async fn wait_for_held(&self, id: u64, n: usize, timeout: Duration) -> bool {
+        let gate = self.shared.state().faults.gate(id);
+        match gate {
+            Some(gate) => gate.held(n, timeout).await,
+            None => false,
+        }
     }
 
     /// Empties the call log.
