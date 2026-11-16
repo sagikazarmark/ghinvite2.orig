@@ -1,5 +1,7 @@
 //! Public GitHub avatar bytes. The URL is derived exclusively from a numeric
-//! identity; no credential, caller-supplied host, or redirect is accepted.
+//! identity and the deployment's avatar base (GitHub's CDN unless a
+//! non-production deployment configures another); no credential,
+//! caller-supplied host, or redirect is accepted.
 use crate::{HttpTransportDyn, Method, Request, ids::UserId};
 use std::time::Duration;
 
@@ -42,24 +44,37 @@ pub struct Avatar {
     pub bytes: Vec<u8>,
 }
 
+/// GitHub's avatar CDN.
+pub const DEFAULT_AVATAR_BASE: &str = "https://avatars.githubusercontent.com";
+
 /// Canonical public CDN address for a verified numeric GitHub identity.
 /// Never preserves an upstream or caller-supplied URL.
 pub fn canonical_url(user: UserId) -> Option<String> {
-    (user.get() != 0).then(|| {
-        format!(
-            "https://avatars.githubusercontent.com/u/{}?s=80&v=4",
-            user.get()
-        )
-    })
+    canonical_url_at(DEFAULT_AVATAR_BASE, user)
+}
+
+/// [`canonical_url`] at another avatar base (e.g. an emulator's), with or
+/// without a trailing slash: `{base}/u/{id}?s=80&v=4`.
+pub fn canonical_url_at(base: &str, user: UserId) -> Option<String> {
+    (user.get() != 0).then(|| format!("{}/u/{}?s=80&v=4", base.trim_end_matches('/'), user.get()))
 }
 
 /// One public, credential-free CDN GET, with a five-second end-to-end deadline.
 /// Transport implementations enforce their streaming response cap and prohibit
 /// redirects; this helper accepts at most 256 KiB of recognized raster content.
 pub async fn get(transport: &dyn HttpTransportDyn, user: UserId) -> Result<Avatar, AvatarError> {
+    get_at(transport, DEFAULT_AVATAR_BASE, user).await
+}
+
+/// [`get`] from another avatar base ([`canonical_url_at`]).
+pub async fn get_at(
+    transport: &dyn HttpTransportDyn,
+    base: &str,
+    user: UserId,
+) -> Result<Avatar, AvatarError> {
     let request = Request::new(
         Method::Get,
-        canonical_url(user).ok_or(AvatarError::Identity)?,
+        canonical_url_at(base, user).ok_or(AvatarError::Identity)?,
     )
     .header("accept", "image/png,image/jpeg,image/webp")
     .timeout(Duration::from_secs(5));
@@ -174,5 +189,16 @@ mod tests {
             Err(AvatarError::Identity)
         );
         assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn another_base_keeps_the_path_with_or_without_a_trailing_slash() {
+        for base in ["http://127.0.0.1:9/avatars", "http://127.0.0.1:9/avatars/"] {
+            assert_eq!(
+                canonical_url_at(base, UserId::new(42)).as_deref(),
+                Some("http://127.0.0.1:9/avatars/u/42?s=80&v=4")
+            );
+        }
+        assert_eq!(canonical_url_at("http://127.0.0.1:9", UserId::new(0)), None);
     }
 }

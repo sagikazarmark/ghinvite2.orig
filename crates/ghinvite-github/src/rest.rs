@@ -36,9 +36,9 @@ impl std::fmt::Debug for RestEnv {
 }
 
 impl RestEnv {
-    /// An environment for `api_base` (e.g. [`DEFAULT_API_BASE`], a local stub
-    /// or a GHES API). The base must be `http(s)` without credentials, query
-    /// or fragment; the user agent must be 1–256 printable ASCII characters.
+    /// An environment for `api_base` (e.g. [`DEFAULT_API_BASE`], a local
+    /// emulator or a GHES API). The base follows [`parse_base_url`]; the user
+    /// agent must be 1–256 printable ASCII characters.
     /// Either failure is `Decode { what: "api_base" | "user_agent" }`.
     pub fn new(
         transport: Arc<dyn HttpTransportDyn>,
@@ -127,16 +127,34 @@ fn parse_user_agent(user_agent: String) -> Result<String, ApiError> {
 }
 
 fn parse_api_base(base: &str) -> Result<url::Url, ApiError> {
-    let parsed = url::Url::parse(base).map_err(|_| ApiError::Decode { what: "api_base" })?;
-    if !matches!(parsed.scheme(), "https" | "http")
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
+    parse_base_url(base).ok_or(ApiError::Decode { what: "api_base" })
+}
+
+/// A GitHub base URL (REST API, web or avatar origin): `https`, or `http` on
+/// a loopback host (`localhost`, `127.0.0.0/8`, `::1`), with a host and no
+/// credentials, query or fragment. The same rule as octoauth's
+/// `AppBuilder::base_url` and octologin's base URLs, so every GitHub client
+/// accepts the same bases.
+pub fn parse_base_url(value: &str) -> Option<url::Url> {
+    let url = url::Url::parse(value).ok()?;
+    let host = url.host_str()?;
+    let loopback = host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let scheme_ok = url.scheme() == "https" || (url.scheme() == "http" && loopback);
+    if !scheme_ok
+        || url.cannot_be_a_base()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
     {
-        return Err(ApiError::Decode { what: "api_base" });
+        return None;
     }
-    Ok(parsed)
+    Some(url)
 }
 
 /// HTTP status and typed response body; no raw headers or bytes escape.
@@ -367,6 +385,8 @@ mod tests {
             "https://user:pass@api.github.test",
             "https://api.github.test/?q=1",
             "https://api.github.test/#f",
+            "http://api.github.test",
+            "http://10.0.0.1:3001",
             "not a url",
         ] {
             assert_eq!(
@@ -386,6 +406,9 @@ mod tests {
         assert_eq!(env.user_agent(), "ghinvite");
         let env = env.with_api_base("http://127.0.0.1:3001").unwrap();
         assert_eq!(env.api_base(), "http://127.0.0.1:3001/");
+        for loopback in ["http://localhost:1", "http://[::1]:2/api/v3/"] {
+            assert!(parse_base_url(loopback).is_some(), "{loopback}");
+        }
     }
 
     #[tokio::test]
