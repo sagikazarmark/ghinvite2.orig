@@ -11,6 +11,31 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- OAuth web flow and user tokens (GE-05): the authorize page
+  (`GET /login/oauth/authorize`: registered callbacks, S256 PKCE, `login=`
+  with auto-consent, an HTML page of the seeded users with a consent form at
+  `POST /login/oauth/authorize`, `redirect_uri_mismatch`, `access_denied`,
+  `application_suspended`) and the token endpoint
+  (`POST /login/oauth/access_token`: form or JSON, single-use 10-minute
+  codes, `ghu_` tokens with 8-hour expiry and single-use `ghr_` refresh
+  tokens, GitHub's error codes); the 10-token cap and an hourly limit
+  (`settings.user_tokens_per_hour`).
+- Routes `GET /user`, `GET /user/emails`, `GET /user/repository_invitations`,
+  `PATCH`/`DELETE /user/repository_invitations/{invitation_id}` (the
+  invitee's side, `member.added`), `POST`/`PATCH`/`DELETE
+  /applications/{client_id}/token` and `DELETE
+  /applications/{client_id}/grant`; `GET /repos/{owner}/{repo}` also takes
+  user tokens.
+- Seed: a user's `emails` (`seed::Email`, `seed::EmailVisibility`) and
+  `noreply_email`; an App's `user_permissions`, `expire_user_tokens` and
+  `suspended`; `settings.user_tokens_per_hour`.
+- Admin API: `POST /tokens/user` (a `ghu_` token or a classic `ghp_` PAT
+  without the browser), `GET`/`POST /oauth`, `POST`/`DELETE /oauth/deny`;
+  `GET /state` lists user and refresh tokens, redacted. Handle methods
+  `mint_user_token`, `mint_personal_access_token`, `deny_authorization`,
+  `allow_authorization` and `set_auto_consent`.
+- `calls::Identity` gains `UserToken`, `PersonalAccessToken` and `Client`.
+
 - Webhooks (GE-04): every outbox event is delivered to each target App's
   active webhook (`X-GitHub-*` headers, `X-Hub-Signature-256` and the
   legacy `X-Hub-Signature`, signed with the first secret; 10 s timeout, no
@@ -84,3 +109,8 @@ Not yet published; developed inside the ghinvite repository.
 - `fidelity.toml` with `verified`/`documented`/`assumed` labels, a route
   registry checked against it, and refuse-assumed mode.
 - 501 `octoemu: not implemented` for every API and web route not built.
+
+### Changed
+
+- `email` in `GET /users/{username}` is now the user's public primary
+  address (it was always null).

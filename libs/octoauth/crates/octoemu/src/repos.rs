@@ -14,7 +14,9 @@
 
 use crate::access;
 use crate::apps::view;
-use crate::auth::{self, InstallationCaller, Permission, forbidden, in_scope, visible_repo};
+use crate::auth::{
+    self, AnyCaller, Caller, InstallationCaller, Permission, forbidden, in_scope, visible_repo,
+};
 use crate::collaboration::{self, Actor, Ctx, Failure, PutOutcome};
 use crate::paginate::Pagination;
 use crate::response::{self, FieldError, json, json_with_link};
@@ -138,7 +140,7 @@ fn numeric(raw: &str) -> Option<u64> {
 }
 
 /// Renders invitations, refusing the assumed parts they would show.
-fn invitations_json(
+pub(crate) fn invitations_json(
     shared: &Shared,
     view: &View<'_>,
     invitations: &[&RepositoryInvitation],
@@ -161,15 +163,24 @@ fn invitations_json(
 // --- repositories --------------------------------------------------------------
 
 /// `GET /repos/{owner}/{repo}`.
+///
+/// With an installation token or a user token: a user token reaches a
+/// private repository the user can access and, for a GitHub App's token, an
+/// installation of the App covers.
 pub(crate) async fn get_repo(
     State(shared): State<SharedState>,
-    InstallationCaller(token): InstallationCaller,
+    AnyCaller(caller): AnyCaller,
     Path((owner, name)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
     let origin = views::origin(&shared, &headers);
     let state = shared.state();
-    match visible_repo(&state.world, &token, &owner, &name) {
+    let found = match &caller {
+        Caller::Installation(token) => visible_repo(&state.world, token, &owner, &name),
+        Caller::User(token) => auth::visible_repo_for_user(&state.world, token, &owner, &name),
+        _ => Err(auth::not_found()),
+    };
+    match found {
         Ok(repo) => json(StatusCode::OK, &view(&state, &origin).full_repo(repo)),
         Err(hidden) => hidden,
     }

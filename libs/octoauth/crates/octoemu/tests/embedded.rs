@@ -77,11 +77,11 @@ async fn unbuilt_routes_answer_501_never_404() {
         (Method::DELETE, "/app/installations/5"),
         (Method::DELETE, "/app/hook/deliveries/1"),
         (Method::PUT, "/orgs/acme/memberships/octocat"),
-        (Method::PATCH, "/user/repository_invitations/1"),
+        (Method::PATCH, "/user/memberships/orgs/acme"),
         (Method::POST, "/installation/token"),
         (Method::GET, "/totally/made/up"),
-        (Method::GET, "/login/oauth/authorize"),
-        (Method::POST, "/login/oauth/access_token"),
+        (Method::POST, "/login/device/code"),
+        (Method::GET, "/login/oauth/unknown"),
         (Method::GET, "/avatars/x/1"),
     ];
     for (method, path) in cases {

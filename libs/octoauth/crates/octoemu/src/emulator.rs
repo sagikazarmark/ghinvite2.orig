@@ -335,6 +335,58 @@ impl Emulator {
         self.shared.state().events.events().to_vec()
     }
 
+    /// Mints a GitHub App user access token (`ghu_…`) of App `app_id` for
+    /// seeded user `login`, as `POST /__octoemu/tokens/user` does; `None`
+    /// when either is unknown.
+    pub fn mint_user_token(&self, login: &str, app_id: u64) -> Option<String> {
+        crate::user_tokens::mint_for(
+            &mut self.shared.state(),
+            login,
+            crate::user_tokens::MintRequest::UserToken { app_id },
+        )
+        .ok()
+        .map(|minted| minted.token)
+    }
+
+    /// Mints a classic personal access token (`ghp_…`) with `scopes` for
+    /// seeded user `login`; `None` for an unknown user.
+    pub fn mint_personal_access_token(&self, login: &str, scopes: &[&str]) -> Option<String> {
+        crate::user_tokens::mint_for(
+            &mut self.shared.state(),
+            login,
+            crate::user_tokens::MintRequest::PersonalAccessToken {
+                scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            },
+        )
+        .ok()
+        .map(|minted| minted.token)
+    }
+
+    /// Makes `login` (or, with `None`, everyone) decline authorizations:
+    /// the authorize page redirects with `error=access_denied`.
+    pub fn deny_authorization(&self, login: Option<&str>) {
+        let mut state = self.shared.state();
+        match login {
+            Some(login) => {
+                state.oauth.denied.insert(login.to_lowercase());
+            }
+            None => state.oauth.deny_all = true,
+        }
+    }
+
+    /// Undoes every [`deny_authorization`](Self::deny_authorization).
+    pub fn allow_authorization(&self) {
+        let mut state = self.shared.state();
+        state.oauth.deny_all = false;
+        state.oauth.denied.clear();
+    }
+
+    /// Whether `login=<user>` authorizes without showing the page (default
+    /// on).
+    pub fn set_auto_consent(&self, on: bool) {
+        self.shared.state().oauth.auto_consent = on;
+    }
+
     /// Empties the call log.
     pub fn clear_calls(&self) {
         self.shared.state().calls.clear();

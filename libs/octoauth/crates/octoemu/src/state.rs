@@ -6,9 +6,11 @@ use crate::calls::{Call, CallLog};
 use crate::clock::Clock;
 use crate::events::Outbox;
 use crate::fidelity::{Fidelity, Manifest};
+use crate::oauth::OAuthControls;
 use crate::response::{OCTOEMU_DOCS, json};
 use crate::seed::{Seed, SeedError};
 use crate::tokens::Tokens;
+use crate::user_tokens::UserTokens;
 use crate::webhooks::Deliveries;
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -41,6 +43,10 @@ pub(crate) struct State {
     /// The highest repository invitation ID handed out, so a deleted
     /// invitation's ID is never reused.
     pub(crate) last_invitation_id: u64,
+    /// OAuth codes, user access tokens, refresh tokens and PATs.
+    pub(crate) user_tokens: UserTokens,
+    /// How the authorize page answers (`crate::oauth`).
+    pub(crate) oauth: OAuthControls,
 }
 
 /// The `message` sent instead of an `assumed` one in refuse-assumed mode:
@@ -96,6 +102,8 @@ impl Shared {
                 deliveries: Deliveries::default(),
                 invitations_sent: Vec::new(),
                 last_invitation_id: 0,
+                user_tokens: UserTokens::default(),
+                oauth: OAuthControls::default(),
             }),
             manifest,
             registered,
@@ -191,6 +199,9 @@ impl Shared {
             "world": world,
             // Redacted IDs and scopes only, never the tokens.
             "tokens": state.tokens.records(),
+            "user_tokens": state.user_tokens.records(),
+            "refresh_tokens": state.user_tokens.refresh_records(),
+            "oauth": state.oauth.view(&state.world),
             "calls": state.calls.calls().len(),
             "events": state.events.events().len(),
             "deliveries": state.deliveries.attempts().count(),

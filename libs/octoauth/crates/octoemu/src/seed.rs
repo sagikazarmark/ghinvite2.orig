@@ -93,6 +93,11 @@ pub struct Settings {
     /// crate docs). A merged seed can turn it on, never off.
     #[serde(default)]
     pub refuse_assumed: bool,
+    /// New user access tokens a user may get per App per hour (on the
+    /// virtual clock) before authorizing needs the browser again; 10 when
+    /// absent. A merged seed may change it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_tokens_per_hour: Option<u32>,
 }
 
 /// A user account.
@@ -106,7 +111,8 @@ pub struct User {
     /// Display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Primary email address.
+    /// Primary email address: shorthand for one primary, verified, public
+    /// address when `emails` is empty; otherwise it must be the primary one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// Account creation time; the clock's start when absent.
@@ -115,6 +121,73 @@ pub struct User {
     /// `User` (the default) or `Bot`, reported as `type`.
     #[serde(rename = "type", default)]
     pub kind: UserKind,
+    /// The account's email addresses, as `GET /user/emails` lists them:
+    /// exactly one primary when any. Without them, `email` stands for one
+    /// primary, verified, public address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emails: Vec<Email>,
+    /// Also list GitHub's noreply address,
+    /// `{id}+{login}@users.noreply.github.com` (verified, not primary).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub noreply_email: bool,
+}
+
+/// One of a user's email addresses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Email {
+    /// The address.
+    pub email: String,
+    /// Whether it is the primary address (exactly one is).
+    #[serde(default)]
+    pub primary: bool,
+    /// Whether it is verified (default true).
+    #[serde(default = "yes")]
+    pub verified: bool,
+    /// `public` or `private`; only the primary address has one.
+    #[serde(default)]
+    pub visibility: Option<EmailVisibility>,
+}
+
+/// Who may see a primary email address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmailVisibility {
+    /// Shown on the profile: `GET /user`'s `email`.
+    Public,
+    /// Hidden from the profile.
+    Private,
+}
+
+impl Email {
+    /// A verified, non-primary address without a visibility.
+    pub fn new(email: impl Into<String>) -> Self {
+        Self {
+            email: email.into(),
+            primary: false,
+            verified: true,
+            visibility: None,
+        }
+    }
+
+    /// Makes it the primary address, with `visibility`.
+    #[must_use]
+    pub fn primary(mut self, visibility: EmailVisibility) -> Self {
+        self.primary = true;
+        self.visibility = Some(visibility);
+        self
+    }
+
+    /// Marks it unverified.
+    #[must_use]
+    pub fn unverified(mut self) -> Self {
+        self.verified = false;
+        self
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A user account's `type`.
@@ -147,7 +220,49 @@ impl User {
             email: None,
             created_at: None,
             kind: UserKind::User,
+            emails: Vec::new(),
+            noreply_email: false,
         }
+    }
+
+    /// Adds an email address.
+    #[must_use]
+    pub fn email_address(mut self, email: Email) -> Self {
+        self.emails.push(email);
+        self
+    }
+
+    /// Also lists GitHub's noreply address.
+    #[must_use]
+    pub fn noreply_email(mut self) -> Self {
+        self.noreply_email = true;
+        self
+    }
+
+    /// Every address `GET /user/emails` lists: `emails`, or `email` as a
+    /// primary, verified, public address; then the noreply address.
+    pub fn email_addresses(&self) -> Vec<Email> {
+        let mut all = self.emails.clone();
+        if all.is_empty()
+            && let Some(email) = &self.email
+        {
+            all.push(Email::new(email.clone()).primary(EmailVisibility::Public));
+        }
+        if self.noreply_email {
+            all.push(Email::new(format!(
+                "{}+{}@users.noreply.github.com",
+                self.id, self.login
+            )));
+        }
+        all
+    }
+
+    /// The primary address when it is public: `GET /user`'s `email`.
+    pub fn public_email(&self) -> Option<String> {
+        self.email_addresses()
+            .into_iter()
+            .find(|e| e.primary && e.visibility == Some(EmailVisibility::Public))
+            .map(|e| e.email)
     }
 
     /// Makes the account a bot (`type: "Bot"`).
@@ -164,7 +279,8 @@ impl User {
         self
     }
 
-    /// Sets the primary email address.
+    /// Sets the primary email address (verified and public unless `emails`
+    /// say otherwise).
     #[must_use]
     pub fn email(mut self, email: impl Into<String>) -> Self {
         self.email = Some(email.into());
@@ -496,6 +612,19 @@ pub struct App {
     /// Webhook events the App subscribes to.
     #[serde(default)]
     pub events: Vec<String>,
+    /// Account permissions the App requests of users who sign in
+    /// (`email_addresses`, …): what its user access tokens hold besides
+    /// `permissions`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user_permissions: BTreeMap<String, Access>,
+    /// Whether user access tokens expire (8 hours, with a refresh token);
+    /// GitHub's default, true.
+    #[serde(default = "yes")]
+    pub expire_user_tokens: bool,
+    /// A suspended App: its authorization requests fail with
+    /// `application_suspended`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suspended: bool,
 }
 
 impl App {
@@ -518,7 +647,32 @@ impl App {
             callback_urls: Vec::new(),
             permissions: BTreeMap::new(),
             events: Vec::new(),
+            user_permissions: BTreeMap::new(),
+            expire_user_tokens: true,
+            suspended: false,
         }
+    }
+
+    /// Requests an account permission of signing-in users.
+    #[must_use]
+    pub fn user_permission(mut self, name: impl Into<String>, access: Access) -> Self {
+        self.user_permissions.insert(name.into(), access);
+        self
+    }
+
+    /// User access tokens that never expire (and come without a refresh
+    /// token).
+    #[must_use]
+    pub fn non_expiring_user_tokens(mut self) -> Self {
+        self.expire_user_tokens = false;
+        self
+    }
+
+    /// Suspends the App.
+    #[must_use]
+    pub fn suspended(mut self) -> Self {
+        self.suspended = true;
+        self
     }
 
     /// Sets the display name.
@@ -1162,6 +1316,9 @@ impl Seed {
         }
         let mut all = self.clone();
         all.settings.refuse_assumed |= more.settings.refuse_assumed;
+        if more.settings.user_tokens_per_hour.is_some() {
+            all.settings.user_tokens_per_hour = more.settings.user_tokens_per_hour;
+        }
         all.users.extend(more.users);
         all.orgs.extend(more.orgs);
         all.teams.extend(more.teams);
@@ -1278,6 +1435,7 @@ impl Check {
 
     fn run(&mut self, seed: &Seed) {
         self.accounts(seed);
+        self.emails(seed);
         self.teams(seed);
         self.repos(seed);
         self.repository_roles(seed);
@@ -1354,6 +1512,51 @@ impl Check {
         for (i, org) in seed.orgs.iter().enumerate() {
             if org.plan.name.is_empty() {
                 self.problem(format!("orgs[{i}].plan.name"), "is empty".into());
+            }
+        }
+    }
+
+    fn emails(&mut self, seed: &Seed) {
+        for (i, user) in seed.users.iter().enumerate() {
+            let at = format!("users[{i}]");
+            let mut seen = HashSet::new();
+            for (e, email) in user.emails.iter().enumerate() {
+                let address = &email.email;
+                if address.is_empty()
+                    || !address.contains('@')
+                    || address.chars().any(char::is_whitespace)
+                {
+                    self.problem(
+                        format!("{at}.emails[{e}].email"),
+                        format!("{address:?} is not an email address"),
+                    );
+                } else if !seen.insert(address.to_lowercase()) {
+                    self.problem(
+                        format!("{at}.emails[{e}].email"),
+                        format!("{address:?} is listed twice"),
+                    );
+                }
+                if !email.primary && email.visibility.is_some() {
+                    self.problem(
+                        format!("{at}.emails[{e}].visibility"),
+                        "only the primary address has a visibility".into(),
+                    );
+                }
+            }
+            let primaries: Vec<&Email> = user.emails.iter().filter(|e| e.primary).collect();
+            if !user.emails.is_empty() && primaries.len() != 1 {
+                self.problem(
+                    format!("{at}.emails"),
+                    format!("exactly one address is primary, not {}", primaries.len()),
+                );
+            }
+            if let (Some(email), [primary]) = (&user.email, primaries.as_slice())
+                && !email.eq_ignore_ascii_case(&primary.email)
+            {
+                self.problem(
+                    format!("{at}.email"),
+                    format!("{email:?} is not the primary address in emails"),
+                );
             }
         }
     }
@@ -1535,12 +1738,17 @@ impl Check {
                     );
                 }
             }
-            for name in app.permissions.keys() {
-                if !is_identifier(name) {
-                    self.problem(
-                        format!("{at}.permissions"),
-                        format!("permission name {name:?} is not snake_case"),
-                    );
+            for (field, permissions) in [
+                ("permissions", &app.permissions),
+                ("user_permissions", &app.user_permissions),
+            ] {
+                for name in permissions.keys() {
+                    if !is_identifier(name) {
+                        self.problem(
+                            format!("{at}.{field}"),
+                            format!("permission name {name:?} is not snake_case"),
+                        );
+                    }
                 }
             }
             let mut events = HashSet::new();

@@ -2,7 +2,7 @@
 //! uses (REST, App and installation auth, the OAuth web flow, webhooks), for
 //! tests. Native only.
 //!
-//! **Webhooks (GE-04).** The server, seed, virtual clock, admin API,
+//! **OAuth and user tokens (GE-05).** The server, seed, virtual clock, admin API,
 //! call log and fidelity manifest (GE-01); App JWTs, stateless installation
 //! tokens with scoping, revocation and suspension, per-route credential and
 //! permission checks, and the `/app…` and `/installation…` routes (GE-02);
@@ -10,7 +10,10 @@
 //! and the daily limit on the clock), users, avatars, the invitee's side
 //! through the admin API and the webhook outbox ([`events`]) (GE-03);
 //! webhook delivery, the deliveries API and installation events
-//! ([`webhooks`]) (GE-04). Every
+//! ([`webhooks`]) (GE-04); the OAuth web flow (the authorize page and the
+//! token endpoint, PKCE, refresh), user access tokens and classic PATs,
+//! `/user`, `/user/emails`, `/applications/{client_id}/token|grant` and the
+//! invitee's `/user/repository_invitations` routes (GE-05). Every
 //! other API and web route answers
 //! `501 {"message": "octoemu: not implemented", "route": …}`, never 404. The
 //! plan is `docs/specs/github-emulator.md` in the ghinvite repository.
@@ -30,7 +33,8 @@
 //! One port, routed by path: the API at `/`, github.com's pages at
 //! `/login/oauth/*`, avatars at `/avatars/*`, and the admin API at
 //! `/__octoemu/` (`health`, `state`, `seed`, `clock`, `clock/advance`,
-//! `calls`, `fidelity`, `tokens/installation`, `installations…`,
+//! `calls`, `fidelity`, `tokens/installation`, `tokens/user`, `oauth…`,
+//! `installations…`,
 //! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`). Every
 //! response carries `Date` from the virtual clock. The binary
 //! (`octoemu --port 0`) prints one JSON line with the base URLs once it
@@ -49,6 +53,7 @@
 mod access;
 mod admin;
 mod api;
+mod applications;
 mod apps;
 mod auth;
 pub mod calls;
@@ -57,8 +62,11 @@ mod collaboration;
 mod emulator;
 pub mod events;
 pub mod fidelity;
+mod form;
 mod hooks;
+mod invitee;
 mod jwt;
+mod oauth;
 mod paginate;
 mod repos;
 mod response;
@@ -66,6 +74,7 @@ pub mod seed;
 mod server;
 mod state;
 mod tokens;
+mod user_tokens;
 mod users;
 mod views;
 pub mod webhooks;

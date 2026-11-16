@@ -119,8 +119,9 @@ reason = "exp more than 600 s after iat is rejected even when it is within 10 mi
 [behaviours.bad-credentials]
 label = "documented"
 doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
-# An unknown, malformed or expired token is 401 {"message": "Bad credentials"}.
-# User tokens (ghu_) are unknown until GE-05.
+# An unknown, malformed or expired token is 401 {"message": "Bad credentials"}:
+# installation tokens, user access tokens (ghu_), classic PATs (ghp_); any
+# other prefix (gho_, github_pat_, a ghr_ refresh token) matches nothing.
 
 [behaviours.requires-authentication]
 label = "documented"
@@ -200,8 +201,9 @@ doc = "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-th
 [routes."GET /repos/{owner}/{repo}"]
 label = "documented"
 doc = "https://docs.github.com/en/rest/repos/repos#get-a-repository"
-# metadata: read. A private or internal repository outside the token's
-# repositories is a 404 (private-resource-404).
+# metadata: read. An installation token or a user token (GE-05,
+# user-token-permissions). A private or internal repository outside the
+# token's reach is a 404 (private-resource-404).
 
 [routes."GET /repos/{owner}/{repo}/collaborators"]
 label = "documented"
@@ -487,3 +489,199 @@ reason = "the list runs newest first and the cursor is v1_<delivery id>; a bad c
 [behaviours.webhook-config-details]
 label = "assumed"
 reason = "GET /app/hook/config for an App without a webhook is a 404, and PATCH errors are 422 Validation Failed on the field."
+
+# --- OAuth web flow and user tokens (GE-05) ------------------------------------
+
+[routes."GET /login/oauth/authorize"]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-web-application-flow-to-generate-a-user-access-token"
+# client_id, redirect_uri (omitted: the first callback), state,
+# code_challenge + code_challenge_method=S256, login, allow_signup (ignored),
+# prompt=select_account. The page itself (a list of the seeded users with
+# consent forms, auto-consent for login=) is octoemu's.
+
+[routes."POST /login/oauth/authorize"]
+label = "assumed"
+reason = "octoemu's consent form: the page's buttons post the request's parameters plus login (authorize) or cancel (access_denied) back to the same path. GitHub's own consent form is not an API."
+
+[routes."POST /login/oauth/access_token"]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-web-application-flow-to-generate-a-user-access-token"
+# A form or JSON body (or query parameters): client_id, client_secret, code,
+# redirect_uri, code_verifier; or grant_type=refresh_token with
+# refresh_token (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens).
+
+[routes."GET /user"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/users/users#get-the-authenticated-user"
+# A user token (ghu_ or ghp_), no permission. The public-user fields; email
+# per user-public-email.
+
+[routes."GET /user/emails"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/users/emails#list-email-addresses-for-the-authenticated-user"
+# email_addresses: read (a user permission of the App); a PAT needs user or
+# user:email (pat-scopes). Paged: per_page default 30, at most 100.
+
+[routes."GET /user/repository_invitations"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#list-repository-invitations-for-the-authenticated-user"
+
+[routes."PATCH /user/repository_invitations/{invitation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#accept-a-repository-invitation"
+# 204; member.added. 404 for an invitation that is not the user's; an
+# expired one per accept-expired-invitation. 304/403/409 are not modelled.
+
+[routes."DELETE /user/repository_invitations/{invitation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/collaborators/invitations#decline-a-repository-invitation"
+# 204, no event.
+
+[routes."POST /applications/{client_id}/token"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/oauth-applications#check-a-token"
+# Basic client_id:client_secret, JSON {access_token}: 200 with the
+# authorization (token, token_last_eight, hashed_token, app, user,
+# expires_at, ...); 404 invalid token; 422 without access_token.
+
+[routes."PATCH /applications/{client_id}/token"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/oauth-applications#reset-a-token"
+# The old token stops working; 200 with the new one (same shape as check).
+
+[routes."DELETE /applications/{client_id}/token"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/oauth-applications#delete-an-app-token"
+# 204; the token and its refresh token stop working.
+
+[routes."DELETE /applications/{client_id}/grant"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/oauth-applications#delete-an-app-authorization"
+# 204; every token the App holds for that user stops working.
+
+[behaviours.redirect-uri-match]
+label = "documented"
+doc = "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#redirect-urls"
+# redirect_uri must be one of the App's callback URLs (exactly); omitted, the
+# first one is used.
+
+[behaviours.redirect-uri-loopback-port]
+label = "assumed"
+reason = "A loopback redirect_uri (127.0.0.1, ::1, localhost) matches a callback that differs only in port. Documented for OAuth apps; unmeasured for GitHub Apps. A match resting on it is refused in refuse-assumed mode."
+
+[behaviours.oauth-authorize-errors]
+label = "documented"
+doc = "https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-authorization-request-errors"
+# redirect_uri_mismatch (to the first registered callback), access_denied
+# (POST /__octoemu/oauth/deny, a per-user denial, or the page's Cancel) and
+# application_suspended (a seeded `suspended` App) redirect to the callback
+# with error, error_description, error_uri (the page's texts) and state.
+
+[behaviours.authorize-page-errors]
+label = "assumed"
+reason = "An unknown client_id (404), an App without callback URLs (400) and malformed PKCE parameters (both or neither, S256 only, 43 base64url characters; 400) are shown as an HTML error page rather than redirected; GitHub's exact answers are unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.pkce]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-web-application-flow-to-generate-a-user-access-token"
+# code_challenge: 43 characters, code_challenge_method S256 (plain is not
+# supported); the exchange's code_verifier must hash to the challenge.
+
+[behaviours.pkce-exchange-errors]
+label = "assumed"
+reason = "A wrong or missing code_verifier for a code issued with a challenge, or a verifier for a code issued without one, is bad_verification_code. GitHub's error code for these is unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.oauth-code]
+label = "documented"
+doc = "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#2-users-are-redirected-back-to-your-site-by-github"
+# Codes expire after 10 minutes (virtual clock), work once, and are bound to
+# their App and redirect URI. Any exchange naming a valid code of the App uses
+# it up, even one that then fails (assumed detail).
+
+[behaviours.oauth-token-response]
+label = "documented"
+doc = "https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#response"
+# Form-encoded by default; JSON with Accept: application/json (XML is not
+# offered). access_token, expires_in 28800, refresh_token,
+# refresh_token_expires_in 15897600, scope "", token_type bearer; without
+# expiring tokens no expiry or refresh fields.
+
+[behaviours.oauth-token-errors]
+label = "documented"
+doc = "https://docs.github.com/en/apps/oauth-apps/maintaining-oauth-apps/troubleshooting-oauth-app-access-token-request-errors"
+# incorrect_client_credentials, redirect_uri_mismatch, bad_verification_code,
+# unverified_user_email (the user's primary address is unverified) with the
+# page's error_description and error_uri.
+
+[behaviours.oauth-error-status]
+label = "assumed"
+reason = "Token-endpoint errors are answered with HTTP 200 and the error in the body (community-reported; plan §4 [M] scenario 5). Refused in refuse-assumed mode."
+
+[behaviours.bad-refresh-token-text]
+label = "assumed"
+reason = "bad_refresh_token's error_description 'The refresh token passed is incorrect or expired.' and its error_uri are not documented. Withheld in refuse-assumed mode."
+
+[behaviours.unsupported-grant-type]
+label = "assumed"
+reason = "A grant_type other than authorization_code or refresh_token is unsupported_grant_type ('The grant type is not supported.'). Refused in refuse-assumed mode."
+
+[behaviours.refresh-token-rotation]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens"
+# A refresh token works once; using it kills it and the old access token and
+# returns a new pair. Six months' lifetime.
+
+[behaviours.user-token-expiry]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens"
+# ghu_ tokens expire after 8 hours on the virtual clock when the App's
+# expire_user_tokens is on (the default); otherwise never.
+
+[behaviours.user-token-revocation]
+label = "documented"
+doc = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/token-expiration-and-revocation"
+# A revoked user token (DELETE /applications/{client_id}/token or /grant, a
+# refresh, a reset) is 401 Bad credentials on its next use.
+
+[behaviours.user-token-permissions]
+label = "documented"
+doc = "https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-with-a-github-app-on-behalf-of-a-user"
+# A ghu_ token holds the App's user (account) permissions and its repository
+# permissions; on resource routes it reaches only what the user can access and
+# an installation of the App covers. Without the route's permission: 403
+# Resource not accessible by integration with X-Accepted-GitHub-Permissions.
+
+[behaviours.user-token-cap]
+label = "assumed"
+reason = "At most 10 live user access tokens per user and App: minting the 11th revokes the oldest (and its refresh token). Documented for OAuth apps (per user/application/scope); unmeasured for GitHub App ghu_ tokens (plan §4 [M] scenario 6). Refused in refuse-assumed mode when it would apply."
+
+[behaviours.user-token-hourly-limit]
+label = "assumed"
+reason = "After user_tokens_per_hour (default 10; seed settings or POST /__octoemu/oauth) new tokens for a user and App within an hour, login= no longer auto-consents: the page asks to authorize again and the form's choice issues the code. Documented for OAuth apps as a re-authorization prompt; unmeasured for GitHub Apps. Refused in refuse-assumed mode when it applies."
+
+[behaviours.user-token-invitations]
+label = "assumed"
+reason = "A GitHub App's user access token may list, accept and decline the user's repository invitations without any App permission. Unmeasured (classic PATs are documented, with repo:invite). Refused in refuse-assumed mode for ghu_ callers."
+
+[behaviours.pat-scopes]
+label = "assumed"
+reason = "Classic PAT scopes are checked only for GET /user/emails (user or user:email); a PAT without one gets 403 'Resource not accessible by personal access token' with X-Accepted-OAuth-Scopes and X-OAuth-Scopes. Every other route admits any PAT. Refused in refuse-assumed mode when it applies."
+
+[behaviours.client-credential-errors]
+label = "assumed"
+reason = "Basic credentials that are not a seeded App's client_id:client_secret are 401 Bad credentials on every route; GitHub may answer the /applications routes with 404. Refused in refuse-assumed mode."
+
+[behaviours.applications-errors]
+label = "assumed"
+reason = "On the /applications routes, a token that is not a live user access token of this App, or a {client_id} other than the credentials', is 404 Not Found (documented for check only); a body without access_token is 422 Validation Failed with a missing_field error (details withheld in refuse-assumed mode). Refused in refuse-assumed mode."
+
+[behaviours.user-public-email]
+label = "documented"
+doc = "https://docs.github.com/en/rest/users/users#get-a-user"
+# email in GET /user and GET /users/{username} is the publicly visible
+# address: the primary one when its visibility is public, else null.
+
+[behaviours.noreply-email]
+label = "assumed"
+reason = "A user seeded with noreply_email also lists {id}+{login}@users.noreply.github.com in GET /user/emails, verified, not primary, without a visibility. Refused in refuse-assumed mode when listed."

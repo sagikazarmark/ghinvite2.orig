@@ -8,7 +8,7 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: webhooks (GE-04)
+## Status: OAuth and user tokens (GE-05)
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
@@ -19,7 +19,11 @@ with expiry and the daily limit, the invitee's side (through the admin
 API until GE-05), users, avatars and the webhook event outbox (GE-03);
 webhook delivery with GitHub's headers and signatures, recorded attempts,
 the deliveries API and the App's hook configuration, and `installation` /
-`installation_repositories` events from admin actions (GE-04).
+`installation_repositories` events from admin actions (GE-04); the OAuth
+web flow (the authorize page with auto-consent, the token endpoint with
+PKCE, codes and refresh tokens), GitHub App user access tokens and classic
+PATs, `/user`, `/user/emails`, the `/applications/{client_id}` token routes
+and the invitee's `/user/repository_invitations` routes (GE-05).
 
 ### Implemented routes
 
@@ -38,7 +42,7 @@ the deliveries API and the App's hook configuration, and `installation` /
 | `POST /app/hook/deliveries/{delivery_id}/attempts` | App JWT | 202 `{}`; the same body and GUID again, `redelivery: true` |
 | `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
 | `DELETE /installation/token` | installation token | 204; the token stops working |
-| `GET /repos/{owner}/{repo}` | installation token, `metadata: read` | Private and internal repositories outside the token are 404 |
+| `GET /repos/{owner}/{repo}` | installation or user token, `metadata: read` | Private and internal repositories outside the token's reach are 404 |
 | `GET /repos/{owner}/{repo}/collaborators` | installation token, `metadata: read` | Paged; `affiliation=direct\|outside\|all` (default all); each with `permissions` and `role_name` |
 | `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h |
 | `DELETE /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | 204 |
@@ -50,6 +54,18 @@ the deliveries API and the App's hook configuration, and `installation` /
 | `GET /users/{username}` | none needed | Users and organizations |
 | `GET /user/{account_id}` | none needed | The same by numeric ID |
 | `GET /avatars/u/{id}` | none needed | A small PNG for any seeded account or App bot |
+| `GET /user` | user token | The signed-in user (`id`, `login`, `avatar_url`, `created_at`, `type`, `name`, `email`, …); `email` is the public primary address, else null |
+| `GET /user/emails` | user token, `email_addresses: read` (a PAT: `user` or `user:email`) | Paged `[{email, primary, verified, visibility}]` |
+| `GET /user/repository_invitations` | user token | Paged; the user's invitations |
+| `PATCH /user/repository_invitations/{invitation_id}` | user token | Accept: 204, `member.added`; 404 if not theirs or expired |
+| `DELETE /user/repository_invitations/{invitation_id}` | user token | Decline: 204 |
+| `POST /applications/{client_id}/token` | `Basic client_id:client_secret` | Check `{access_token}`: 200 with the authorization, 404 invalid, 422 without `access_token` |
+| `PATCH /applications/{client_id}/token` | `Basic …` | Reset: 200 with a new token; the old one stops working |
+| `DELETE /applications/{client_id}/token` | `Basic …` | Revoke: 204 (and its refresh token) |
+| `DELETE /applications/{client_id}/grant` | `Basic …` | Revoke every token the App holds for that user: 204 |
+| `GET /login/oauth/authorize` | none (web) | The authorize page; see below |
+| `POST /login/oauth/authorize` | none (web) | The page's consent form |
+| `POST /login/oauth/access_token` | none (web) | Codes and refresh tokens for user access tokens; see below |
 
 Every other API and web route answers:
 
@@ -61,8 +77,7 @@ content-type: application/json; charset=utf-8
 ```
 
 It is never a 404, which a client could take for GitHub's answer. Routes
-arrive with GE-05 (OAuth web flow, `/user`, the invitee's
-`/user/repository_invitations/{id}`) and GE-06 (organizations); anything
+arrive with GE-06 (organizations, `/user/memberships/orgs/{org}`); anything
 outside ghinvite's surface stays 501.
 
 ### Repository model
@@ -84,8 +99,62 @@ outside ghinvite's surface stays 501.
 - **What the App does** is attributed to its bot account
   (`{slug}[bot]`, `type: "Bot"`, ID 1 000 000 000 + App ID).
 - **The invitee's side** (accept, decline, leave) are domain operations
-  (`src/collaboration.rs`), reached today through the admin API's `act`
-  routes; GE-05's user-token routes call the same functions.
+  (`src/collaboration.rs`), reached through the user-token routes
+  (`/user/repository_invitations…`) and the admin API's `act` routes alike.
+
+### OAuth web flow and user tokens
+
+The web pages live on the same port as the API (`web_base` = `api_base`):
+point a client's GitHub web origin at `web_base` and its API base at
+`api_base`.
+
+- **Authorize** (`GET /login/oauth/authorize`): `client_id`, `redirect_uri`
+  (one of the App's `callback_urls` exactly, or a loopback URL differing
+  only in port; omitted, the first), `state`, `code_challenge` with
+  `code_challenge_method=S256` (both or neither; 43 base64url characters),
+  `login`, `allow_signup` (ignored), `prompt=select_account`.
+  - With `login=<seeded user>` and auto-consent on (the default), it
+    answers `302` to `redirect_uri?code=…&state=…` at once: no browser.
+  - Otherwise it renders an HTML page listing the seeded users (bots
+    excluded), one form each posting the choice back to
+    `POST /login/oauth/authorize`, plus Cancel (`access_denied`).
+    `prompt=select_account` always shows the page.
+  - Errors as GitHub's troubleshooting page documents, redirected with
+    `error`, `error_description`, `error_uri` and `state`:
+    `redirect_uri_mismatch` (to the first registered callback),
+    `access_denied` (`POST /__octoemu/oauth/deny`, optionally for one
+    `login`, or Cancel) and `application_suspended` (an App seeded
+    `suspended`). An unknown `client_id` (404) and malformed PKCE parameters
+    (400) are an HTML error page (assumed).
+- **Codes** are 20 characters, last 10 minutes on the virtual clock, work
+  once and are bound to their App and redirect URI.
+- **Token endpoint** (`POST /login/oauth/access_token`): a form or JSON body
+  (or query parameters). `Accept: application/json` answers JSON,
+  otherwise form-encoded (documented). A code (`client_id`,
+  `client_secret`, `code`, `redirect_uri`, `code_verifier` required exactly
+  when the authorization sent a challenge) or `grant_type=refresh_token`
+  with `refresh_token`. Success: `access_token` (`ghu_` + 36), and with
+  expiring tokens (the App's `expire_user_tokens`, default true)
+  `expires_in` 28800, `refresh_token` (`ghr_` + 76),
+  `refresh_token_expires_in` 15897600; then `scope` `""` and `token_type`
+  `bearer`. A refresh token works once and kills the access token it came
+  with. Errors (`incorrect_client_credentials`, `redirect_uri_mismatch`,
+  `bad_verification_code`, `bad_refresh_token`, `unverified_user_email` for
+  an unverified primary address, `unsupported_grant_type`) carry GitHub's
+  documented `error_description` and `error_uri`, with HTTP 200 (assumed;
+  refused in refuse-assumed mode).
+- **User tokens** are looked up on every call: unknown, expired, revoked:
+  401 `Bad credentials`. A `ghu_` token holds its App's `user_permissions`
+  and `permissions`; on resource routes it reaches only what the user can
+  access and an installation of the App covers. Without the route's
+  permission: 403 `Resource not accessible by integration` with
+  `X-Accepted-GitHub-Permissions`. Classic PATs (`ghp_`, admin-minted only)
+  have scopes, checked only on `/user/emails` (assumed).
+- **Caps (assumed).** At most 10 live tokens per user and App: the 11th
+  revokes the oldest. After `user_tokens_per_hour` (default 10; seed
+  `settings` or `POST /__octoemu/oauth`) new tokens for a user and App in
+  an hour, `login=` stops auto-consenting and the page asks to authorize
+  again; its form still issues a code.
 
 ### Event outbox
 
@@ -171,11 +240,15 @@ is checked before the handler runs, in this order:
      every call. Unknown, forged, expired (1 h, on the virtual clock),
      revoked or uninstalled: 401 `Bad credentials`. Suspended: 403 `This
      installation has been suspended`, until unsuspended.
-   - Anything else (user tokens until GE-05, PATs, Basic): 401 `Bad
-     credentials`.
+   - **User token** (`Bearer ghu_…`/`ghp_…`, or `token …`): looked up on
+     every call; unknown, expired or revoked: 401 `Bad credentials`.
+   - **Client credentials** (`Basic base64(client_id:client_secret)`): a
+     seeded App's pair, else 401 `Bad credentials` (assumed).
+   - Anything else (`gho_`, `github_pat_`, a `ghr_` refresh token): 401
+     `Bad credentials`.
 2. **The right kind.** No credential on a route that needs one: 401
    `Requires authentication`. The wrong kind: 401.
-3. **The route's permission**, for installation tokens: without it, 403
+3. **The route's permission**, for installation and user tokens: without it, 403
    `Resource not accessible by integration` with
    `X-Accepted-GitHub-Permissions: <permission>=<level>`.
 
@@ -217,7 +290,9 @@ let calls = emulator.calls();
 `now`, `seed` (merge more), `state`, `clear_calls`, `stopped`,
 `suspend_installation`, `unsuspend_installation`, `uninstall`, `install`,
 `events`, `deliveries`, `dispatch_deliveries`, `set_dispatch`,
-`set_webhook` and `wait_for_deliveries`.
+`set_webhook`, `wait_for_deliveries`, `mint_user_token`,
+`mint_personal_access_token`, `deny_authorization`, `allow_authorization`
+and `set_auto_consent`.
 
 **Binary**, for the Worker drivers, browser tests and other processes:
 
@@ -247,8 +322,13 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
 
 ```json
 {
-  "settings": {"start_time": "2030-01-01T00:00:00Z", "refuse_assumed": false},
-  "users": [{"id": 1, "login": "octocat", "name": "The Octocat", "email": "octocat@example.com"},
+  "settings": {"start_time": "2030-01-01T00:00:00Z", "refuse_assumed": false,
+               "user_tokens_per_hour": 10},
+  "users": [{"id": 1, "login": "octocat", "name": "The Octocat",
+             "emails": [{"email": "octocat@example.com", "primary": true, "verified": true,
+                         "visibility": "public"},
+                        {"email": "work@example.com", "verified": false}],
+             "noreply_email": true},
             {"id": 3, "login": "hubot", "type": "Bot"}],
   "orgs": [{"id": 2, "login": "acme", "plan": {"name": "team", "seats": 10},
             "created_at": "2020-01-01T00:00:00Z", "two_factor_requirement_enabled": false,
@@ -260,7 +340,9 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
             "public_keys": ["-----BEGIN PUBLIC KEY-----\n…"],
             "webhook": {"url": "http://127.0.0.1:8787/webhooks", "secrets": ["…"]},
             "callback_urls": ["http://127.0.0.1:8787/callback"],
-            "permissions": {"members": "write", "metadata": "read"}, "events": ["member"]}],
+            "permissions": {"members": "write", "metadata": "read"}, "events": ["member"],
+            "user_permissions": {"email_addresses": "read"}, "expire_user_tokens": true,
+            "suspended": false}],
   "installations": [{"id": 6, "app_id": 5, "account": "acme",
                      "repository_selection": "selected", "repositories": ["acme/widgets"],
                      "permissions": {"members": "write", "metadata": "read"},
@@ -287,7 +369,10 @@ memberships rest on an organization membership (an active one for an active
 team membership); that a custom role exists in the repository's organization
 and is not one of GitHub's names; that an invitation names a user who is
 neither a collaborator nor invited already, and one inviter (a user or an
-App); and that only an organization's repository is `internal`. A merged seed is validated with the existing world and
+App); that only an organization's repository is `internal`; and that a
+user's `emails` are addresses, unique, with exactly one primary (the only
+one with a `visibility`) which `email`, if also set, must name. A user's
+`email` alone stands for one primary, verified, public address. A merged seed is validated with the existing world and
 applies whole or not at all; it may not set `start_time`.
 
 ## Admin API (`/__octoemu/`)
@@ -295,7 +380,7 @@ applies whole or not at all; it may not set `start_time`.
 | Route | Does |
 |---|---|
 | `GET /health` | `{"status": "ok", "version": …}` |
-| `GET /state` | The world (as changed by suspensions and uninstalls), the virtual time, the call count, and minted tokens as redacted IDs with their scope and expiry (never the token); App client secrets and webhook secrets redacted |
+| `GET /state` | The world (as changed by suspensions and uninstalls), the virtual time, the call count, minted installation tokens, user tokens and PATs (`user_tokens`), refresh tokens (`refresh_tokens`) as redacted IDs with their scope, user, expiry and revocation (never the token), and the `oauth` settings; App client secrets and webhook secrets redacted |
 | `POST /seed` | Merges a seed; 422 `{"message": "octoemu: seed rejected", "errors": [{path, message}]}` |
 | `GET /clock` | `{"now", "advanced_seconds"}` |
 | `POST /clock/advance` | `{"seconds": N}` moves the clock forward (never back) |
@@ -303,6 +388,11 @@ applies whole or not at all; it may not set `start_time`.
 | `DELETE /calls` | Empties the call log (204) |
 | `GET /fidelity` | The manifest as JSON |
 | `POST /tokens/installation` | `{"installation_id", "permissions"?, "repositories"?, "repository_ids"?}`: mints an installation token without a JWT, answered (narrowed, refused) exactly as `POST /app/installations/{id}/access_tokens` |
+| `POST /tokens/user` | `{"login", "app_id"}` mints a `ghu_` user access token of that App (with a `ghr_` refresh token when its tokens expire; counted like a new grant), `{"login", "kind": "pat", "scopes"}` a classic `ghp_` PAT: 201 `{token, token_id, expires_at, refresh_token}`; 422 for an unknown user or App |
+| `GET /oauth` | The authorize page's settings: `{auto_consent, deny_all, denied_users, user_tokens_per_hour}` |
+| `POST /oauth` | Changes any of those |
+| `POST /oauth/deny` | `{"login"}`: that user declines every authorization (`access_denied`); empty body: everyone |
+| `DELETE /oauth/deny` | Nobody declines any more |
 | `POST /installations` | `{"installation": <seed installation>, "sender"?: login}` installs an App: 201 and `installation.created`; 422 with the seed problems |
 | `POST /installations/{id}/suspend` | Suspends an installation (204; 404 if unknown), `installation.suspend`; optional body `{"sender"}` |
 | `POST /installations/{id}/unsuspend` | Lifts a suspension, `installation.unsuspend` |
@@ -332,10 +422,13 @@ not recorded): `seq`, `at` (virtual), `method`, `path`, `surface`, `route`
 header's shape (`none`, `jwt`, `installation_token`, `user_token`,
 `oauth_token`, `personal_access_token`, `basic`, `unknown`), never its value.
 `identity` is who the route verified the caller to be:
-`{"kind": "app", "app_id"}` or `{"kind": "installation", "app_id",
+`{"kind": "app", "app_id"}`, `{"kind": "installation", "app_id",
 "installation_id", "token_id"}` (`token_id` is the first 16 bytes of the
-token's SHA-256 in hex, as octoauth's `TokenId` prints it), `null` without
-or with a rejected credential. Query values
+token's SHA-256 in hex, as octoauth's `TokenId` prints it),
+`{"kind": "user_token", "app_id", "user_id", "login", "token_id"}`,
+`{"kind": "personal_access_token", "user_id", "login", "token_id"}` or
+`{"kind": "client", "app_id"}`, `null` without or with a rejected
+credential. Query values
 named like secrets (`code`, `state`, `client_secret`, `*token*`, …) become
 `<redacted>`, and octoscrub runs over the rest. Bodies are never recorded.
 The newest 10 000 records are kept.
@@ -393,8 +486,16 @@ whose text is a guess keeps its status with the message
 with a cursor), `webhook-config-details`, `installation-event-sender`,
 `installation-events-while-suspended`, `installation-repositories-events`
 and `suspended-installation-webhooks` (delivery runs in the background,
-so most of these are labels only, not refused); the routes `GET /repositories/{repository_id}/invitations`,
-`GET /user/{account_id}` and `GET /avatars/u/{id}`.
+so most of these are labels only, not refused); for OAuth and user tokens
+`oauth-error-status` (HTTP 200 on token errors; refused),
+`bad-refresh-token-text` (withheld), `unsupported-grant-type`,
+`pkce-exchange-errors`, `authorize-page-errors`,
+`redirect-uri-loopback-port`, `user-token-cap`, `user-token-hourly-limit`,
+`user-token-invitations` (a `ghu_` token on the invitee routes),
+`pat-scopes`, `client-credential-errors`, `applications-errors` and
+`noreply-email`; the routes `GET /repositories/{repository_id}/invitations`,
+`GET /user/{account_id}`, `GET /avatars/u/{id}` and
+`POST /login/oauth/authorize` (the consent form).
 
 ## Tests
 
@@ -422,6 +523,20 @@ events of every admin action, the suspension rule and `member` events. In
 the ghinvite workspace, `crates/ghinvite-web/tests/emulator_webhooks.rs`
 feeds ghinvite-web's real webhook intake from the emulator (signature,
 rotation, dedupe).
+
+`tests/oauth.rs` covers the OAuth web flow and user tokens: the full flow
+with PKCE (authorize, exchange, `/user`, `/user/emails`, revoke, then 401),
+the token endpoint's error matrix (reuse, expiry, redirect, verifier,
+secret, unverified email), form and JSON answers, refresh rotation, a
+non-expiring App, the authorize errors, the HTML page and its form, the
+token caps, the `/applications` routes, admin-minted tokens and PATs, user
+tokens on `GET /repos/…`, invitations accepted and declined through the
+user routes (with `member.added` delivered under manual dispatch) and
+refuse-assumed mode. `crates/octologin/tests/emulator.rs` runs octologin's
+sign-in against an embedded emulator (including `access_denied` and the
+`Incomplete` rule for more than 100 addresses); in the ghinvite workspace,
+`crates/ghinvite-web/tests/emulator_signin.rs` drives ghinvite-web's real
+`/login` → authorize → `/oauth/callback` through it.
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

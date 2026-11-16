@@ -1,15 +1,18 @@
 //! Users (GE-03): `GET /users/{username}`, `GET /user/{account_id}` and the
-//! avatar images at `/avatars/u/{id}`.
+//! avatar images at `/avatars/u/{id}`; the signed-in user (GE-05): `GET
+//! /user` and `GET /user/emails`.
 
 use crate::apps::view;
-use crate::auth;
-use crate::response::json;
+use crate::auth::{self, Permission, UserCaller};
+use crate::paginate::Pagination;
+use crate::response::{json, json_with_link};
 use crate::state::SharedState;
 use crate::views::{self, BOT_ID_OFFSET};
 use axum::extract::{Path, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
+use serde_json::{Value, json};
 
 /// Every avatar: a 4×4 PNG in GitHub's dark grey (`#24292e`).
 pub(crate) const AVATAR_PNG: &[u8] = &[
@@ -87,4 +90,61 @@ pub(crate) async fn avatar(State(shared): State<SharedState>, Path(raw): Path<St
         AVATAR_PNG,
     )
         .into_response()
+}
+
+/// `email_addresses: read`, which `GET /user/emails` needs (documented).
+pub(crate) const EMAIL_ADDRESSES_READ: Permission =
+    Permission::new("email_addresses", crate::seed::Access::Read);
+
+/// `GET /user`: the signed-in user, as `GET /users/{username}` reports
+/// them (`email` is the public primary address, else null).
+pub(crate) async fn get_authenticated(
+    State(shared): State<SharedState>,
+    UserCaller(token): UserCaller,
+    headers: HeaderMap,
+) -> Response {
+    let origin = views::origin(&shared, &headers);
+    let state = shared.state();
+    match view(&state, &origin).full_account(&token.login) {
+        Some(body) => json(StatusCode::OK, &body),
+        None => auth::not_found(),
+    }
+}
+
+/// `GET /user/emails`, paged: `{email, primary, verified, visibility}`.
+pub(crate) async fn emails(
+    State(shared): State<SharedState>,
+    UserCaller(token): UserCaller,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let origin = views::origin(&shared, &headers);
+    let addresses = {
+        let state = shared.state();
+        match crate::access::user(&state.world, &token.login) {
+            Some(user) => user.email_addresses(),
+            None => return auth::not_found(),
+        }
+    };
+    if addresses
+        .iter()
+        .any(|e| e.email.ends_with("@users.noreply.github.com"))
+        && let Some(refusal) = shared.refuse("noreply-email")
+    {
+        return refusal;
+    }
+    let paged = Pagination::of(&uri).apply(addresses);
+    let body: Vec<Value> = paged
+        .items
+        .iter()
+        .map(|e| {
+            json!({
+                "email": e.email,
+                "primary": e.primary,
+                "verified": e.verified,
+                "visibility": e.visibility,
+            })
+        })
+        .collect();
+    json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
 }

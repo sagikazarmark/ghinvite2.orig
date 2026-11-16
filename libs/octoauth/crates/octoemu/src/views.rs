@@ -187,7 +187,11 @@ impl View<'_> {
             ("company", Value::Null),
             ("blog", "".into()),
             ("location", Value::Null),
-            ("email", Value::Null),
+            (
+                "email",
+                user.and_then(crate::seed::User::public_email)
+                    .map_or(Value::Null, Value::from),
+            ),
             ("hireable", Value::Null),
             ("bio", Value::Null),
             ("twitter_username", Value::Null),

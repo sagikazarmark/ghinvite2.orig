@@ -89,6 +89,31 @@ pub enum Identity {
         /// as octoauth's `TokenId` displays it.
         token_id: String,
     },
+    /// A user, by a GitHub App's user access token (`ghu_…`).
+    UserToken {
+        /// The App the token belongs to.
+        app_id: u64,
+        /// The user's account ID.
+        user_id: u64,
+        /// The user's login.
+        login: String,
+        /// The token's redacted ID (as for installation tokens).
+        token_id: String,
+    },
+    /// A user, by a classic personal access token (`ghp_…`).
+    PersonalAccessToken {
+        /// The user's account ID.
+        user_id: u64,
+        /// The user's login.
+        login: String,
+        /// The token's redacted ID.
+        token_id: String,
+    },
+    /// An App, by its client ID and secret (`Basic`).
+    Client {
+        /// The App ID.
+        app_id: u64,
+    },
 }
 
 /// What an `Authorization` header looks like, judged by shape alone. It is

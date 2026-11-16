@@ -7,7 +7,8 @@
 use crate::auth::Auth;
 use crate::repos::{ADMINISTRATION_READ, ADMINISTRATION_WRITE};
 use crate::state::SharedState;
-use crate::{apps, hooks, repos, users};
+use crate::users::EMAIL_ADDRESSES_READ;
+use crate::{applications, apps, hooks, invitee, oauth, repos, users};
 use axum::Router;
 use axum::handler::Handler;
 use axum::http::Method;
@@ -20,7 +21,11 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "accept-expired-invitation",
     "app-bot-account",
     "app-jwt",
+    "applications-errors",
+    "authorize-page-errors",
     "bad-credentials",
+    "bad-refresh-token-text",
+    "client-credential-errors",
     "collaborator-affiliation",
     "collaborator-put-outcomes",
     "custom-role-invitation-permissions",
@@ -44,12 +49,24 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "member-added-directly",
     "member-edited-changes",
     "member-events",
+    "noreply-email",
+    "oauth-authorize-errors",
+    "oauth-code",
+    "oauth-error-status",
+    "oauth-token-errors",
+    "oauth-token-response",
     "out-of-scope-repository",
     "pagination",
+    "pat-scopes",
     "permission-enforcement",
     "permission-without-access",
+    "pkce",
+    "pkce-exchange-errors",
     "private-resource-404",
     "rate-limit-headers",
+    "redirect-uri-loopback-port",
+    "redirect-uri-match",
+    "refresh-token-rotation",
     "remove-non-collaborator",
     "repo-error-messages",
     "reput-expired-invitation",
@@ -65,7 +82,15 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "token-repositories-union",
     "token-revocation-immediate",
     "unknown-user-404",
+    "unsupported-grant-type",
+    "user-public-email",
     "user-repo-permission-ignored",
+    "user-token-cap",
+    "user-token-expiry",
+    "user-token-hourly-limit",
+    "user-token-invitations",
+    "user-token-permissions",
+    "user-token-revocation",
     "validation-errors",
     "webhook-config-details",
     "webhook-deliveries-cursor",
@@ -240,7 +265,7 @@ pub(crate) fn github() -> Api {
         .route(
             Method::GET,
             "/repos/{owner}/{repo}",
-            Auth::Installation(Some(METADATA)),
+            Auth::Token(Some(METADATA)),
             repos::get_repo,
         )
         // Collaborators: docs.github.com/rest/collaborators/collaborators.
@@ -305,6 +330,83 @@ pub(crate) fn github() -> Api {
             "/user/{account_id}",
             Auth::Public,
             users::get_user_by_id,
+        )
+        // The signed-in user: docs.github.com/rest/users/users and
+        // docs.github.com/rest/users/emails.
+        .route(
+            Method::GET,
+            "/user",
+            Auth::User(None),
+            users::get_authenticated,
+        )
+        .route(
+            Method::GET,
+            "/user/emails",
+            Auth::User(Some(EMAIL_ADDRESSES_READ)),
+            users::emails,
+        )
+        // The invitee: docs.github.com/rest/collaborators/invitations.
+        .route(
+            Method::GET,
+            "/user/repository_invitations",
+            Auth::User(None),
+            invitee::list,
+        )
+        .route(
+            Method::PATCH,
+            "/user/repository_invitations/{invitation_id}",
+            Auth::User(None),
+            invitee::accept,
+        )
+        .route(
+            Method::DELETE,
+            "/user/repository_invitations/{invitation_id}",
+            Auth::User(None),
+            invitee::decline,
+        )
+        // An App's OAuth tokens: docs.github.com/rest/apps/oauth-applications.
+        .route(
+            Method::POST,
+            "/applications/{client_id}/token",
+            Auth::Client,
+            applications::check_token,
+        )
+        .route(
+            Method::PATCH,
+            "/applications/{client_id}/token",
+            Auth::Client,
+            applications::reset_token,
+        )
+        .route(
+            Method::DELETE,
+            "/applications/{client_id}/token",
+            Auth::Client,
+            applications::delete_token,
+        )
+        .route(
+            Method::DELETE,
+            "/applications/{client_id}/grant",
+            Auth::Client,
+            applications::delete_grant,
+        )
+        // github.com's OAuth web flow (web_base).
+        .route(
+            Method::GET,
+            "/login/oauth/authorize",
+            Auth::Public,
+            oauth::authorize,
+        )
+        .route(
+            Method::POST,
+            "/login/oauth/authorize",
+            Auth::Public,
+            oauth::consent,
+        )
+        .route(
+            Method::POST,
+            "/login/oauth/access_token",
+            Auth::Public,
+            oauth::access_token,
         )
         // Avatars (avatars.githubusercontent.com).
         .route(Method::GET, "/avatars/u/{id}", Auth::Public, users::avatar)

@@ -31,6 +31,9 @@ pub(crate) fn router() -> Router<SharedState> {
             "/__octoemu/tokens/installation",
             post(mint_installation_token),
         )
+        .route("/__octoemu/tokens/user", post(mint_user_token))
+        .route("/__octoemu/oauth", get(oauth).post(set_oauth))
+        .route("/__octoemu/oauth/deny", post(deny).delete(allow))
         .route("/__octoemu/installations", post(install))
         .route("/__octoemu/installations/{id}", delete(uninstall))
         .route("/__octoemu/installations/{id}/suspend", post(suspend))
@@ -184,6 +187,156 @@ async fn mint_installation_token(
     };
     let origin = crate::views::origin(&shared, &headers);
     crate::apps::issue(&shared, None, mint.installation_id, &request, &origin)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MintUser {
+    login: String,
+    #[serde(default)]
+    app_id: Option<u64>,
+    /// `user_token` (default) or `pat`.
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
+}
+
+fn unprocessable(message: &str) -> Response {
+    error(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        &format!("octoemu: {message}"),
+        OCTOEMU_DOCS,
+    )
+}
+
+/// `POST /__octoemu/tokens/user`: `{"login", "app_id"}` mints a `ghu_`
+/// user access token of that App (with a `ghr_` refresh token when the
+/// App's tokens expire); `{"login", "kind": "pat", "scopes"}` a classic
+/// `ghp_` personal access token. 201 `{token, token_id, expires_at,
+/// refresh_token?}`.
+async fn mint_user_token(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    use crate::user_tokens::MintRequest;
+    let mint: MintUser = match body(&bytes) {
+        Ok(mint) => mint,
+        Err(response) => return *response,
+    };
+    let request = match (mint.kind.as_deref(), mint.app_id, mint.scopes) {
+        (None | Some("user_token"), Some(app_id), None) => MintRequest::UserToken { app_id },
+        (Some("pat"), None, scopes) => MintRequest::PersonalAccessToken {
+            scopes: scopes.unwrap_or_default(),
+        },
+        _ => {
+            return unprocessable(
+                "send {\"login\", \"app_id\"} or {\"login\", \"kind\": \"pat\", \"scopes\"}",
+            );
+        }
+    };
+    let minted = crate::user_tokens::mint_for(&mut shared.state(), &mint.login, request);
+    match minted {
+        Ok(minted) => json(
+            StatusCode::CREATED,
+            &json!({
+                "token": minted.token,
+                "token_id": minted.record.id,
+                "expires_at": minted.record.expires_at,
+                "refresh_token": minted.refresh_token,
+            }),
+        ),
+        Err(message) => unprocessable(&message),
+    }
+}
+
+fn oauth_body(shared: &SharedState) -> Response {
+    let state = shared.state();
+    json(StatusCode::OK, &state.oauth.view(&state.world))
+}
+
+/// `GET /__octoemu/oauth`: the authorize page's settings.
+async fn oauth(State(shared): State<SharedState>) -> Response {
+    oauth_body(&shared)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OAuthSettings {
+    #[serde(default)]
+    auto_consent: Option<bool>,
+    #[serde(default)]
+    deny_all: Option<bool>,
+    #[serde(default)]
+    denied_users: Option<Vec<String>>,
+    #[serde(default)]
+    user_tokens_per_hour: Option<u32>,
+}
+
+/// `POST /__octoemu/oauth`: `{"auto_consent"?, "deny_all"?,
+/// "denied_users"?, "user_tokens_per_hour"?}` changes what is given.
+async fn set_oauth(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let settings: OAuthSettings = match body(&bytes) {
+        Ok(settings) => settings,
+        Err(response) => return *response,
+    };
+    {
+        let mut state = shared.state();
+        if let Some(on) = settings.auto_consent {
+            state.oauth.auto_consent = on;
+        }
+        if let Some(on) = settings.deny_all {
+            state.oauth.deny_all = on;
+        }
+        if let Some(users) = settings.denied_users {
+            state.oauth.denied = users.iter().map(|u| u.to_lowercase()).collect();
+        }
+        if let Some(limit) = settings.user_tokens_per_hour {
+            state.world.settings.user_tokens_per_hour = Some(limit);
+        }
+    }
+    oauth_body(&shared)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Deny {
+    #[serde(default)]
+    login: Option<String>,
+}
+
+/// `POST /__octoemu/oauth/deny`: `{"login"}` makes that user decline every
+/// authorization (`error=access_denied`); an empty body makes everyone.
+async fn deny(State(shared): State<SharedState>, bytes: Bytes) -> Response {
+    let Deny { login } = match optional_body(&bytes) {
+        Ok(deny) => deny,
+        Err(response) => return *response,
+    };
+    {
+        let mut state = shared.state();
+        match login {
+            None => state.oauth.deny_all = true,
+            Some(login) => {
+                if !state
+                    .world
+                    .users
+                    .iter()
+                    .any(|u| u.login.eq_ignore_ascii_case(&login))
+                {
+                    return unprocessable(&format!("no user {login:?}"));
+                }
+                state.oauth.denied.insert(login.to_lowercase());
+            }
+        }
+    }
+    oauth_body(&shared)
+}
+
+/// `DELETE /__octoemu/oauth/deny`: nobody declines any more.
+async fn allow(State(shared): State<SharedState>) -> Response {
+    {
+        let mut state = shared.state();
+        state.oauth.deny_all = false;
+        state.oauth.denied.clear();
+    }
+    oauth_body(&shared)
 }
 
 fn no_installation() -> Response {

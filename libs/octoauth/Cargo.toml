@@ -11,6 +11,8 @@ publish = false
 
 [workspace.dependencies]
 octoauth = { version = "0.1.0", path = "crates/octoauth" }
+# Native-only test dependency (octologin's tests/emulator.rs).
+octoemu = { version = "0.1.0", path = "crates/octoemu" }
 octoscrub = { version = "0.1.0", path = "crates/octoscrub" }
 octotoken = { version = "0.1.0", path = "crates/octotoken" }
 

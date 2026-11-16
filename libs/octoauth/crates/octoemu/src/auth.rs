@@ -4,13 +4,16 @@
 //!
 //! - The credential is verified first, on every route: a bad, expired or
 //!   revoked credential is a 401 even where none is needed.
-//! - Then its kind: an App JWT, an installation token, or none.
-//! - Then, for installation tokens, the route's permission: without it, a 403
-//!   `Resource not accessible by integration` with
+//! - Then its kind: an App JWT, an installation token, a user token (a
+//!   GitHub App's `ghu_…` or a classic PAT `ghp_…`), an App's client
+//!   credentials (`Basic`), or none.
+//! - Then, for installation and user tokens, the route's permission: without
+//!   it, a 403 `Resource not accessible by integration` with
 //!   `X-Accepted-GitHub-Permissions` (documented).
 //!
-//! Handlers read the verified caller with the [`AppCaller`] and
-//! [`InstallationCaller`] extractors.
+//! Handlers read the verified caller with the [`AppCaller`],
+//! [`InstallationCaller`], [`UserCaller`], [`ClientCaller`] and
+//! [`AnyCaller`] extractors.
 #![allow(
     clippy::result_large_err,
     reason = "a rejection is the response to send, built once per request"
@@ -22,10 +25,12 @@ use crate::response::{self, REST_DOCS};
 use crate::seed::{Access, Installation, Repo, Seed};
 use crate::state::Shared;
 use crate::tokens::{Rejected, TokenRecord};
+use crate::user_tokens::{Grant, UserTokenRecord};
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::AUTHORIZATION};
 use axum::response::Response;
+use std::collections::BTreeMap;
 
 /// What a route accepts. Part of every route's registration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +41,15 @@ pub(crate) enum Auth {
     App,
     /// An installation token, holding `permission` when one is named.
     Installation(Option<Permission>),
+    /// A user token: a GitHub App's user access token whose App holds
+    /// `permission` (as a user or a repository permission), or a classic
+    /// personal access token with a scope that grants it.
+    User(Option<Permission>),
+    /// An installation token or a user token, each checked as above.
+    Token(Option<Permission>),
+    /// An App's client credentials (`Authorization: Basic
+    /// base64(client_id:client_secret)`).
+    Client,
 }
 
 /// A permission at a level, by GitHub's names (`metadata`, `members`, …).
@@ -65,6 +79,10 @@ pub(crate) enum Caller {
     App { app_id: u64 },
     /// An installation token, as minted.
     Installation(TokenRecord),
+    /// A user access token or personal access token, as minted.
+    User(UserTokenRecord),
+    /// An App, by its client ID and secret.
+    Client { app_id: u64 },
 }
 
 impl Caller {
@@ -78,6 +96,20 @@ impl Caller {
                 installation_id: token.installation_id,
                 token_id: token.id.clone(),
             }),
+            Self::User(token) => Some(match token.grant {
+                Grant::UserToken { app_id } => Identity::UserToken {
+                    app_id,
+                    user_id: token.user_id,
+                    login: token.login.clone(),
+                    token_id: token.id.clone(),
+                },
+                Grant::PersonalAccessToken { .. } => Identity::PersonalAccessToken {
+                    user_id: token.user_id,
+                    login: token.login.clone(),
+                    token_id: token.id.clone(),
+                },
+            }),
+            Self::Client { app_id } => Some(Identity::Client { app_id: *app_id }),
         }
     }
 }
@@ -90,6 +122,21 @@ pub(crate) struct AppCaller(pub(crate) u64);
 /// [`Auth::Installation`] routes.
 #[derive(Clone, Debug)]
 pub(crate) struct InstallationCaller(pub(crate) TokenRecord);
+
+/// The token of a verified user token, for handlers of [`Auth::User`]
+/// routes.
+#[derive(Clone, Debug)]
+pub(crate) struct UserCaller(pub(crate) UserTokenRecord);
+
+/// The App behind verified client credentials, for handlers of
+/// [`Auth::Client`] routes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ClientCaller(pub(crate) u64);
+
+/// Whoever the route admitted, for handlers of [`Auth::Token`] and
+/// [`Auth::Public`] routes.
+#[derive(Clone, Debug)]
+pub(crate) struct AnyCaller(pub(crate) Caller);
 
 /// A handler extracted a caller kind its route does not admit: a
 /// registration bug.
@@ -120,6 +167,42 @@ impl<S: Send + Sync> FromRequestParts<S> for InstallationCaller {
             Some(Caller::Installation(token)) => Ok(Self(token.clone())),
             _ => Err(misdeclared()),
         }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for UserCaller {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Response> {
+        match parts.extensions.get::<Caller>() {
+            Some(Caller::User(token)) => Ok(Self(token.clone())),
+            _ => Err(misdeclared()),
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientCaller {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Response> {
+        match parts.extensions.get::<Caller>() {
+            Some(Caller::Client { app_id }) => Ok(Self(*app_id)),
+            _ => Err(misdeclared()),
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for AnyCaller {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Response> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<Caller>()
+                .cloned()
+                .unwrap_or(Caller::Anonymous),
+        ))
     }
 }
 
@@ -192,9 +275,50 @@ pub(crate) fn authenticate(shared: &Shared, headers: &HeaderMap) -> Result<Calle
         "bearer" | "token" if credential.starts_with("ghs_") => {
             installation_token(shared, &credential)
         }
-        // User tokens arrive with GE-05; anything else matches no
-        // credential.
+        "bearer" | "token" if credential.starts_with("ghu_") || credential.starts_with("ghp_") => {
+            user_token(shared, &credential)
+        }
+        "basic" => client_credentials(shared, &credential),
+        // Anything else (OAuth App tokens, fine-grained PATs, refresh
+        // tokens) matches no credential.
         _ => Err(unauthorized(BAD_CREDENTIALS)),
+    }
+}
+
+/// A `ghu_` or `ghp_` token: looked up on every call; unknown, expired or
+/// revoked is 401 `Bad credentials` (documented).
+fn user_token(shared: &Shared, credential: &str) -> Result<Caller, Response> {
+    let state = shared.state();
+    match state.user_tokens.verify(credential, state.clock.now()) {
+        Ok(token) => Ok(Caller::User(token.clone())),
+        Err(_) => Err(unauthorized(BAD_CREDENTIALS)),
+    }
+}
+
+/// `Basic base64(client_id:client_secret)`: an App's client credentials.
+/// Anything that is not a seeded App's pair is a 401 (behaviour
+/// `client-credential-errors`).
+fn client_credentials(shared: &Shared, credential: &str) -> Result<Caller, Response> {
+    use base64::Engine as _;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(credential)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok());
+    let app = decoded.as_deref().and_then(|pair| {
+        let (client_id, secret) = pair.split_once(':')?;
+        let state = shared.state();
+        state
+            .world
+            .apps
+            .iter()
+            .find(|app| app.client_id == client_id && app.client_secret == secret)
+            .map(|app| app.id)
+    });
+    match app {
+        Some(app_id) => Ok(Caller::Client { app_id }),
+        None => Err(shared
+            .refuse("client-credential-errors")
+            .unwrap_or_else(|| unauthorized(BAD_CREDENTIALS))),
     }
 }
 
@@ -273,9 +397,93 @@ pub(crate) fn admit(shared: &Shared, auth: Auth, caller: &Caller) -> Result<(), 
             }
             _ => Ok(()),
         },
+        (Auth::Token(need), Caller::Installation(token)) => match need {
+            Some(permission) if !token.has(permission.name, permission.access) => {
+                Err(forbidden(permission))
+            }
+            _ => Ok(()),
+        },
+        (Auth::User(need) | Auth::Token(need), Caller::User(token)) => match need {
+            Some(permission) => user_permission(shared, permission, token),
+            None => Ok(()),
+        },
+        (Auth::Client, Caller::Client { .. }) => Ok(()),
         (_, Caller::Anonymous) => Err(unauthorized(REQUIRES_AUTHENTICATION)),
         (Auth::App, _) => wrong_kind(JwtError::Undecodable.message()),
-        (Auth::Installation(_), _) => wrong_kind(BAD_CREDENTIALS),
+        (Auth::Installation(_) | Auth::User(_) | Auth::Token(_) | Auth::Client, _) => {
+            wrong_kind(BAD_CREDENTIALS)
+        }
+    }
+}
+
+/// The permissions a GitHub App's user access token holds: the App's
+/// account (user) permissions and its repository and organization
+/// permissions (narrowed further by the user's own access on resource
+/// routes).
+pub(crate) fn user_token_permissions(world: &Seed, app_id: u64) -> BTreeMap<String, Access> {
+    let Some(app) = world.apps.iter().find(|app| app.id == app_id) else {
+        return BTreeMap::new();
+    };
+    let mut held = app.permissions.clone();
+    for (name, access) in &app.user_permissions {
+        let entry = held.entry(name.clone()).or_insert(*access);
+        *entry = (*entry).max(*access);
+    }
+    held
+}
+
+/// The classic PAT scopes that grant `permission` (behaviour `pat-scopes`):
+/// only email addresses are checked; every other route admits any PAT.
+fn scopes_for(permission: &str) -> &'static [&'static str] {
+    match permission {
+        "email_addresses" => &["user", "user:email"],
+        _ => &[],
+    }
+}
+
+/// Checks a user token against the route's permission.
+fn user_permission(
+    shared: &Shared,
+    permission: Permission,
+    token: &UserTokenRecord,
+) -> Result<(), Response> {
+    match &token.grant {
+        Grant::UserToken { app_id } => {
+            let held = user_token_permissions(&shared.state().world, *app_id);
+            if held
+                .get(permission.name)
+                .is_some_and(|access| *access >= permission.access)
+            {
+                Ok(())
+            } else {
+                Err(forbidden(permission))
+            }
+        }
+        Grant::PersonalAccessToken { scopes } => {
+            let accepted = scopes_for(permission.name);
+            if accepted.is_empty() || scopes.iter().any(|s| accepted.contains(&s.as_str())) {
+                return Ok(());
+            }
+            if let Some(refusal) = shared.refuse("pat-scopes") {
+                return Err(refusal);
+            }
+            let mut response = response::error(
+                StatusCode::FORBIDDEN,
+                "Resource not accessible by personal access token",
+                REST_DOCS,
+            );
+            if let Ok(value) = HeaderValue::from_str(&accepted.join(", ")) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("x-accepted-oauth-scopes"), value);
+            }
+            if let Ok(value) = HeaderValue::from_str(&scopes.join(", ")) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("x-oauth-scopes"), value);
+            }
+            Err(response)
+        }
     }
 }
 
@@ -311,6 +519,42 @@ pub(crate) fn visible_repo<'a>(
         .iter()
         .find(|r| r.owner.eq_ignore_ascii_case(owner) && r.name.eq_ignore_ascii_case(name));
     let reachable = |repo: &Repo| !repo.is_private() || in_scope(world, token, repo);
+    match repo {
+        Some(repo) if reachable(repo) => Ok(repo),
+        _ => Err(not_found()),
+    }
+}
+
+/// [`visible_repo`] for a user token (documented: a user access token
+/// reaches what both the user and the App can access). A private repository
+/// is reachable when the user has access to it and, for a GitHub App's
+/// token, a non-suspended installation of the App covers it.
+pub(crate) fn visible_repo_for_user<'a>(
+    world: &'a Seed,
+    token: &UserTokenRecord,
+    owner: &str,
+    name: &str,
+) -> Result<&'a Repo, Response> {
+    let repo = world
+        .repos
+        .iter()
+        .find(|r| r.owner.eq_ignore_ascii_case(owner) && r.name.eq_ignore_ascii_case(name));
+    let app_covers = |repo: &Repo| match token.app_id() {
+        None => true,
+        Some(app_id) => world
+            .installations
+            .iter()
+            .filter(|i| i.app_id == app_id && i.suspended_at.is_none())
+            .any(|i| {
+                crate::apps::installation_repos(world, i)
+                    .iter()
+                    .any(|r| r.id == repo.id)
+            }),
+    };
+    let reachable = |repo: &Repo| {
+        !repo.is_private()
+            || (!crate::access::grants(world, repo, &token.login).is_empty() && app_covers(repo))
+    };
     match repo {
         Some(repo) if reachable(repo) => Ok(repo),
         _ => Err(not_found()),
