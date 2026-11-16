@@ -1,12 +1,10 @@
 //! Explicit matched web/workflow administrator-reissue activation.
-use crate::apps::AppDeploymentError;
+use crate::apps::{AppDeploymentError, bad};
 pub fn enabled(value: Option<&str>) -> Result<bool, AppDeploymentError> {
     match value {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),
-        Some(_) => Err(AppDeploymentError {
-            field: "GH_REISSUE_ENABLED",
-        }),
+        Some(_) => Err(bad("GH_REISSUE_ENABLED")),
     }
 }
 #[cfg(test)]

@@ -131,6 +131,7 @@ async fn observation_ingress_with_webhook_guard(
         storage,
         ghinvite_web::WebGithub::new(
             Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+            &Default::default(),
             vec![],
         )
         .unwrap(),

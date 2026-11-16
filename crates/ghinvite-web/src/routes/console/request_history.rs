@@ -425,8 +425,9 @@ pub(super) async fn avatar(
         {
             return None;
         }
-        ghinvite_github::avatar::get(
+        ghinvite_github::avatar::get_at(
             state.github_transport.as_ref(),
+            state.config.github.avatar(),
             ghinvite_github::ids::UserId::new(request.requester_id),
         )
         .await

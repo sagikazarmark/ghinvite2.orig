@@ -1,24 +1,20 @@
 //! Explicit M2 composition and a vault-only deployment keyring. Session keys
 //! remain web-owned; workflow roots never need the web session keyring.
-use crate::apps::AppDeploymentError;
+use crate::apps::{AppDeploymentError, bad};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 pub fn enabled(value: Option<&str>) -> Result<bool, AppDeploymentError> {
     match value {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),
-        Some(_) => Err(AppDeploymentError {
-            field: "GH_BULK_ENABLED",
-        }),
+        Some(_) => Err(bad("GH_BULK_ENABLED")),
     }
 }
 pub fn email_keyring(
     required: bool,
     value: Option<String>,
 ) -> Result<Option<Arc<kekring::Keyring>>, AppDeploymentError> {
-    let error = || AppDeploymentError {
-        field: "P1_EMAIL_KEYRING",
-    };
+    let error = || bad("P1_EMAIL_KEYRING");
     let Some(value) = value else {
         return if required { Err(error()) } else { Ok(None) };
     };

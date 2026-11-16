@@ -1,7 +1,8 @@
 //! AC-APP-1 and the inactive P1 app deployment configuration contract.
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ghinvite_web::config::apps::{
-    AppStage, InstalledApp, InstalledSlot, parse_installed_web, parse_mint_apps, parse_web_apps,
+    AppStage, Deployment, InstalledApp, InstalledSlot, parse_installed_web, parse_mint_apps,
+    parse_web_apps,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -102,7 +103,10 @@ fn ac_app_1_manifests_have_exact_permissions_events_and_routes() {
 #[test]
 fn web_apps_are_purpose_separated_without_signin_numeric_id() {
     let input = values();
-    let cfg = parse_web_apps(AppStage::RepoAndOrg, |key| input.get(key).cloned()).unwrap();
+    let cfg = parse_web_apps(AppStage::RepoAndOrg, Deployment::Production, |key| {
+        input.get(key).cloned()
+    })
+    .unwrap();
     // The sign-in app is OAuth only: no App ID, key or webhook.
     assert_eq!(summary(&cfg.installed), both());
     assert_eq!(
@@ -119,7 +123,15 @@ fn web_apps_are_purpose_separated_without_signin_numeric_id() {
         cfg.signin.redirect_uri.as_str(),
         "https://p1.example.com/oauth/callback"
     );
-    assert!(cfg.signin.web_base_url.is_none() && cfg.signin.api_base_url.is_none());
+    // Production signs in at GitHub itself.
+    assert_eq!(
+        cfg.signin.web_base_url.as_deref(),
+        Some("https://github.com/")
+    );
+    assert_eq!(
+        cfg.signin.api_base_url.as_deref(),
+        Some("https://api.github.com/")
+    );
     ghinvite_web::signin::SignInService::new(&cfg.signin).unwrap();
     let diagnostics = format!("{cfg:?}");
     for marker in [
@@ -137,7 +149,7 @@ fn web_apps_are_purpose_separated_without_signin_numeric_id() {
 fn mint_apps_never_request_web_only_credentials() {
     let input = values();
     let mut requested = BTreeSet::new();
-    let cfg = parse_mint_apps(AppStage::RepoAndOrg, |key| {
+    let cfg = parse_mint_apps(AppStage::RepoAndOrg, Deployment::Production, |key| {
         assert!(!key.contains("SIGNIN") && !key.contains("WEBHOOK") && key != "P1_KEYRING");
         requested.insert(key);
         input.get(key).cloned()
@@ -152,7 +164,10 @@ fn mint_apps_never_request_web_only_credentials() {
             "GH_REPO_PRIVATE_KEYS",
             "GH_ORG_APP_ID",
             "GH_ORG_CLIENT_ID",
-            "GH_ORG_PRIVATE_KEYS"
+            "GH_ORG_PRIVATE_KEYS",
+            "GITHUB_API_BASE",
+            "GITHUB_WEB_BASE",
+            "GITHUB_AVATAR_BASE",
         ])
     );
     assert_eq!(summary(&cfg.installed), both());
@@ -163,7 +178,7 @@ fn mint_apps_never_request_web_only_credentials() {
 fn org_stage_requires_all_fields_and_repo_stage_does_not_read_them() {
     let mut input = values();
     input.retain(|key, _| !key.starts_with("GH_ORG"));
-    let cfg = parse_web_apps(AppStage::Repo, |key| {
+    let cfg = parse_web_apps(AppStage::Repo, Deployment::Production, |key| {
         assert!(!key.starts_with("GH_ORG"));
         input.get(key).cloned()
     })
@@ -171,18 +186,22 @@ fn org_stage_requires_all_fields_and_repo_stage_does_not_read_them() {
     assert_eq!(summary(&cfg.installed), both()[..1]);
     assert!(cfg.webhooks.get(InstalledSlot::Org).is_none());
     assert_eq!(
-        parse_web_apps(AppStage::RepoAndOrg, |key| input.get(key).cloned())
-            .unwrap_err()
-            .field,
+        parse_web_apps(AppStage::RepoAndOrg, Deployment::Production, |key| input
+            .get(key)
+            .cloned())
+        .unwrap_err()
+        .field,
         "GH_ORG_APP_ID"
     );
     for missing in values().keys() {
         let mut input = values();
         input.remove(missing);
         assert_eq!(
-            parse_web_apps(AppStage::RepoAndOrg, |key| input.get(key).cloned())
-                .unwrap_err()
-                .field,
+            parse_web_apps(AppStage::RepoAndOrg, Deployment::Production, |key| input
+                .get(key)
+                .cloned())
+            .unwrap_err()
+            .field,
             *missing
         );
     }
@@ -217,8 +236,10 @@ fn malformed_configuration_reports_only_fixed_variable_names() {
     for (field, value) in cases {
         let mut input = values();
         input.insert(field, value.into());
-        let error =
-            parse_web_apps(AppStage::RepoAndOrg, |key| input.get(key).cloned()).unwrap_err();
+        let error = parse_web_apps(AppStage::RepoAndOrg, Deployment::Production, |key| {
+            input.get(key).cloned()
+        })
+        .unwrap_err();
         assert_eq!(error.field, field);
         assert_eq!(
             error.to_string(),
@@ -236,9 +257,11 @@ fn malformed_configuration_reports_only_fixed_variable_names() {
         ),
     );
     assert_eq!(
-        parse_web_apps(AppStage::Repo, |key| input.get(key).cloned())
-            .unwrap_err()
-            .field,
+        parse_web_apps(AppStage::Repo, Deployment::Production, |key| input
+            .get(key)
+            .cloned())
+        .unwrap_err()
+        .field,
         "GH_REPO_PRIVATE_KEYS"
     );
 }
@@ -261,9 +284,11 @@ fn duplicate_app_and_client_identities_fail_atomically() {
         let mut input = values();
         input.insert(field, value.into());
         assert_eq!(
-            parse_web_apps(AppStage::RepoAndOrg, |key| input.get(key).cloned())
-                .unwrap_err()
-                .field,
+            parse_web_apps(AppStage::RepoAndOrg, Deployment::Production, |key| input
+                .get(key)
+                .cloned())
+            .unwrap_err()
+            .field,
             expected
         );
     }
@@ -272,9 +297,9 @@ fn duplicate_app_and_client_identities_fail_atomically() {
 #[test]
 fn installed_web_apps_require_only_installed_app_credentials() {
     let input = values();
-    let apps = parse_installed_web(AppStage::Repo, |key| {
+    let apps = parse_installed_web(AppStage::Repo, Deployment::Production, |key| {
         assert!(
-            key.starts_with("GH_REPO_"),
+            key.starts_with("GH_REPO_") || key.starts_with("GITHUB_"),
             "unexpected credential read: {key}"
         );
         input.get(key).cloned()
@@ -293,7 +318,7 @@ fn installed_web_apps_require_only_installed_app_credentials() {
         "GH_REPO_PRIVATE_KEYS",
         "GH_REPO_WEBHOOK_SECRETS",
     ] {
-        let err = parse_installed_web(AppStage::Repo, |key| {
+        let err = parse_installed_web(AppStage::Repo, Deployment::Production, |key| {
             if key == missing {
                 None
             } else {
@@ -353,6 +378,55 @@ fn production_web_requires_canonical_authenticated_config_and_the_signin_app() {
         assert!(error.to_string().contains(field), "{field}: {error}");
         assert!(!format!("{error:?} {error}").contains("SECRET_MARKER"));
     }
+}
+
+#[test]
+fn github_base_overrides_are_refused_in_production_and_plumbed_outside_it() {
+    for field in ["GITHUB_API_BASE", "GITHUB_WEB_BASE", "GITHUB_AVATAR_BASE"] {
+        let mut input = production_values();
+        input.insert(field, "http://127.0.0.1:3001".into());
+        let error = ghinvite_web::WebConfig::for_production(|key| input.get(key).cloned())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "{field} is not accepted in production: GitHub base-URL overrides are for local development and tests only"
+            )
+        );
+        // Outside production a non-loopback http base is still refused.
+        input.insert(field, "http://ghe.example.com".into());
+        let error = ghinvite_web::WebConfig::for_deployment(Deployment::Development, |key| {
+            input.get(key).cloned()
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!("invalid or missing deployment configuration: {field}")
+        );
+    }
+    let mut input = production_values();
+    input.insert("GITHUB_API_BASE", "http://127.0.0.1:3001".into());
+    input.insert("GITHUB_WEB_BASE", "http://localhost:3001".into());
+    input.insert("GITHUB_AVATAR_BASE", "http://[::1]:3001/avatars/".into());
+    let config = ghinvite_web::WebConfig::for_deployment(Deployment::Development, |key| {
+        input.get(key).cloned()
+    })
+    .unwrap();
+    assert_eq!(config.github.api(), "http://127.0.0.1:3001/");
+    assert_eq!(config.github.web(), "http://localhost:3001/");
+    assert_eq!(config.github.avatar(), "http://[::1]:3001/avatars/");
+    let signin = config.signin_apps.as_ref().unwrap();
+    assert_eq!(
+        signin.api_base_url.as_deref(),
+        Some("http://127.0.0.1:3001/")
+    );
+    assert_eq!(
+        signin.web_base_url.as_deref(),
+        Some("http://localhost:3001/")
+    );
+    assert!(format!("{:?}", config.github_apps[0].app).contains("http://127.0.0.1:3001/"));
+    ghinvite_web::signin::SignInService::new(signin).unwrap();
 }
 
 #[test]

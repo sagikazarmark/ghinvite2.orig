@@ -143,6 +143,8 @@ const USER_AGENT: &str = "p1/signin";
 
 pub struct SignInService {
     sign_in: SignIn,
+    /// GitHub's avatar CDN, or the app's `avatar_base_url`.
+    avatar_base: String,
     clock: Arc<dyn Clock>,
 }
 impl SignInService {
@@ -161,8 +163,15 @@ impl SignInService {
         if let Some(url) = &app.api_base_url {
             builder = builder.api_base_url(url.as_str());
         }
+        let avatar_base = match &app.avatar_base_url {
+            Some(url) => ghinvite_github::rest::parse_base_url(url)
+                .ok_or(SignInError::Configuration)?
+                .to_string(),
+            None => ghinvite_github::avatar::DEFAULT_AVATAR_BASE.to_owned(),
+        };
         Ok(Self {
             sign_in: builder.build().map_err(|_| SignInError::Configuration)?,
+            avatar_base,
             clock: Arc::new(SystemClock),
         })
     }
@@ -280,9 +289,10 @@ impl SignInService {
                 };
             Ok(CompletedSignIn {
                 avatar_url: user.avatar_url.filter(|url| !url.is_empty()).and_then(|_| {
-                    ghinvite_github::avatar::canonical_url(ghinvite_github::ids::UserId::new(
-                        user.id.get(),
-                    ))
+                    ghinvite_github::avatar::canonical_url_at(
+                        &self.avatar_base,
+                        ghinvite_github::ids::UserId::new(user.id.get()),
+                    )
                 }),
                 github_created_at: user
                     .created_at

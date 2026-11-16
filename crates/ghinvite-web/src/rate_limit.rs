@@ -427,6 +427,7 @@ mod tests {
             ),
             crate::WebGithub::new(
                 Arc::new(ghinvite_github::mocks::MockTransport::scripted(vec![])),
+                &Default::default(),
                 vec![],
             )
             .unwrap(),

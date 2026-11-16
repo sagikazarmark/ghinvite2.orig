@@ -7,12 +7,13 @@
 //! Missing/invalid app configuration fails before storage or network startup.
 //! Optional local configuration: GHINVITE_LISTEN_ADDR (127.0.0.1:9080),
 //! GHINVITE_DATABASE_PATH (in-memory). RESTATE_IDENTITY_KEYS is required unless
-//! --local-unsigned is explicitly selected for local development.
+//! --local-unsigned is explicitly selected for local development, which also
+//! accepts GITHUB_API_BASE (e.g. an octoemu emulator) in place of GitHub.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ghinvite_config::apps::{AppStage, organization_delivery_enabled, parse_mint_apps};
+use ghinvite_config::apps::{AppStage, Deployment, organization_delivery_enabled, parse_mint_apps};
 use ghinvite_workflows::{
     AppState, RepositoryGithub, build_endpoint_with_identity, endpoint_identity::EndpointIdentity,
 };
@@ -49,12 +50,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let email_ring =
         ghinvite_config::bulk::email_keyring(bulk_enabled && organization_enabled, email_setting)?;
-    let apps = parse_mint_apps(stage, |field| std::env::var(field).ok())?;
     let local_unsigned = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
         [] => false,
         [flag] if flag == "--local-unsigned" => true,
         _ => return Err("expected no arguments or --local-unsigned".into()),
     };
+    // Only local development may point GitHub's bases elsewhere.
+    let deployment = if local_unsigned {
+        Deployment::Development
+    } else {
+        Deployment::Production
+    };
+    for field in ghinvite_config::github::OVERRIDES {
+        if let Err(std::env::VarError::NotUnicode(_)) = std::env::var(field) {
+            return Err(format!("{field} invalid").into());
+        }
+    }
+    let apps = parse_mint_apps(stage, deployment, |field| std::env::var(field).ok())?;
     let addr: SocketAddr = std::env::var("GHINVITE_LISTEN_ADDR")
         .unwrap_or_else(|_| "127.0.0.1:9080".into())
         .parse()?;
@@ -70,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let github_transport = Arc::new(ghinvite_github::transport::ReqwestTransport::new()?);
     let github_apps = Arc::new(RepositoryGithub::new(
         github_transport,
-        "https://api.github.com",
+        apps.github.api(),
         apps.installed,
     )?);
 

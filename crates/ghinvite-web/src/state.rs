@@ -60,18 +60,16 @@ pub struct WebGithub {
 
 impl WebGithub {
     /// `transport` and the `installed` apps (e.g. `WebConfig::github_apps`),
-    /// calling GitHub's REST API (`api.github.com`). Natively build this once
-    /// and keep it: the apps' token caches live in it. On Workers build it
-    /// per request: the token caches are isolate-scope (PD-4).
+    /// calling `github`'s REST API base (`WebConfig::github`; GitHub's
+    /// `api.github.com` in production). Natively build this once and keep
+    /// it: the apps' token caches live in it. On Workers build it per
+    /// request: the token caches are isolate-scope (PD-4).
     pub fn new(
         transport: Arc<dyn ghinvite_github::HttpTransportDyn>,
+        github: &ghinvite_config::github::GithubBases,
         installed: Vec<ghinvite_github::InstalledApp>,
     ) -> Result<Self, ghinvite_github::ApiError> {
-        let env = ghinvite_github::rest::RestEnv::new(
-            transport.clone(),
-            ghinvite_github::rest::DEFAULT_API_BASE,
-            "p1",
-        )?;
+        let env = ghinvite_github::rest::RestEnv::new(transport.clone(), github.api(), "p1")?;
         Ok(Self {
             transport,
             apps: ghinvite_github::GithubApps::new(env, installed)?,

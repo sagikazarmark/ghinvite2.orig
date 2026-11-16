@@ -142,6 +142,14 @@ fn kv_error() -> session_store::Error {
     session_store::Error::Backend("session KV unavailable".into())
 }
 
+/// Deployed builds talk to GitHub only; the `runtime-tests` harness builds
+/// also accept `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE`.
+const DEPLOYMENT: ghinvite_config::github::Deployment = if cfg!(feature = "runtime-tests") {
+    ghinvite_config::github::Deployment::Development
+} else {
+    ghinvite_config::github::Deployment::Production
+};
+
 fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
     ghinvite_web::link_secret_entropy::configure(
         env.var("P1_LINK_SECRET_FIXTURE")
@@ -156,7 +164,7 @@ fn config_from_env(env: &Env) -> worker::Result<ghinvite_web::WebConfig> {
     if let Some(config) = CONFIG.get() {
         return Ok(config.clone());
     }
-    let config = ghinvite_web::WebConfig::for_production(|field| {
+    let config = ghinvite_web::WebConfig::for_deployment(DEPLOYMENT, |field| {
         env.secret(field)
             .ok()
             .map(|v| v.to_string())
@@ -310,6 +318,7 @@ async fn fetch(
     // isolate-scope statics inside `GithubApps` (PD-4).
     let github = match ghinvite_web::WebGithub::new(
         Arc::new(ghinvite_github::worker::WorkerFetchTransport::new()),
+        &config.github,
         config.github_apps.clone(),
     ) {
         Ok(github) => github,

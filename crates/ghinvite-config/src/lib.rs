@@ -7,4 +7,6 @@ pub mod apps;
 
 pub mod bulk;
 
+pub mod github;
+
 pub mod reissue;

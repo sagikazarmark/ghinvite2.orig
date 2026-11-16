@@ -8,7 +8,7 @@
 //! `--target wasm32-unknown-unknown`.
 #![cfg(target_arch = "wasm32")]
 
-use ghinvite_config::apps::{AppStage, organization_delivery_enabled, parse_mint_apps};
+use ghinvite_config::apps::{AppStage, Deployment, organization_delivery_enabled, parse_mint_apps};
 use http_body_util::BodyExt;
 use restate_sdk::endpoint::{HandleOptions, ProtocolMode};
 use std::sync::Arc;
@@ -22,6 +22,14 @@ mod fixture;
 fn worker_err(e: impl std::fmt::Display) -> worker::Error {
     worker::Error::RustError(e.to_string())
 }
+
+/// Deployed builds talk to GitHub only; the `runtime-tests` harness builds
+/// also accept `GITHUB_API_BASE` (and the other `GITHUB_*_BASE`).
+const DEPLOYMENT: Deployment = if cfg!(feature = "runtime-tests") {
+    Deployment::Development
+} else {
+    Deployment::Production
+};
 
 /// The installed apps' `GithubApps` over the Worker fetch transport. Token
 /// providers are isolate-wide (`ghinvite_github::apps`, PD-4).
@@ -41,7 +49,7 @@ fn github_from_env(env: &Env) -> worker::Result<(Arc<ghinvite_workflows::Reposit
             .as_deref(),
     )
     .map_err(worker_err)?;
-    let apps = parse_mint_apps(stage, |field| {
+    let apps = parse_mint_apps(stage, DEPLOYMENT, |field| {
         if matches!(field, "GH_REPO_PRIVATE_KEYS" | "GH_ORG_PRIVATE_KEYS") {
             env.secret(field).ok().map(|v| v.to_string())
         } else {
@@ -52,7 +60,7 @@ fn github_from_env(env: &Env) -> worker::Result<(Arc<ghinvite_workflows::Reposit
     let github_transport = Arc::new(ghinvite_github::worker::WorkerFetchTransport::new());
     let typed = ghinvite_workflows::RepositoryGithub::new(
         github_transport,
-        "https://api.github.com",
+        apps.github.api(),
         apps.installed,
     )
     .map_err(worker_err)?;

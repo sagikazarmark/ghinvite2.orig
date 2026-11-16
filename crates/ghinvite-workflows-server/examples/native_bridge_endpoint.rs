@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ghinvite_config::apps::{AppStage, organization_delivery_enabled, parse_mint_apps};
+use ghinvite_config::apps::{AppStage, Deployment, organization_delivery_enabled, parse_mint_apps};
 use ghinvite_workflows::{
     AppState, RepositoryGithub, build_endpoint_with_identity, endpoint_identity::EndpointIdentity,
 };
@@ -50,7 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let email_ring =
         ghinvite_config::bulk::email_keyring(bulk_enabled && organization_enabled, email_setting)?;
     // Validated as in production, though tokens are created at the fixture.
-    parse_mint_apps(stage, |field| std::env::var(field).ok())?;
+    parse_mint_apps(stage, Deployment::Production, |field| {
+        std::env::var(field).ok()
+    })?;
     let local_unsigned = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
         [] => false,
         [flag] if flag == "--local-unsigned" => true,

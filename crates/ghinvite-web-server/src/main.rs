@@ -45,12 +45,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // GitHub: real reqwest. The installed apps (setup verification, Console
-    // authority reads) and avatars go through ghinvite-github, sign-in
-    // through octologin (its own client); the apps'
+    // GitHub: real reqwest, at `config.github`'s bases (GitHub itself in
+    // production; `--local-dev` accepts GITHUB_API_BASE, GITHUB_WEB_BASE and
+    // GITHUB_AVATAR_BASE, e.g. an octoemu emulator). The installed apps
+    // (setup verification, Console authority reads) and avatars go through
+    // ghinvite-github, sign-in through octologin (its own client); the apps'
     // installation-token caches live in `github` for the process's life.
     let github = WebGithub::new(
         Arc::new(ghinvite_github::transport::ReqwestTransport::new()?),
+        &config.github,
         config.github_apps.clone(),
     )?;
 

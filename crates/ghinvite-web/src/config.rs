@@ -19,6 +19,12 @@ pub struct WebConfig {
     /// from, for setup verification and Console authority reads. Empty
     /// unless parsed from deployment configuration.
     pub github_apps: Vec<apps::InstalledApp>,
+    /// GitHub's REST API, web and avatar bases: GitHub's own unless a
+    /// non-production deployment sets `GITHUB_API_BASE`, `GITHUB_WEB_BASE`
+    /// or `GITHUB_AVATAR_BASE`. `github_apps` and `signin_apps` already use
+    /// them; [`WebGithub`](crate::WebGithub) and avatar reads take them from
+    /// here.
+    pub github: apps::GithubBases,
     /// Each installed app's App ID and webhook secrets, which verify
     /// `/webhooks/{app}`. `None` answers webhooks as unavailable.
     pub webhooks: Option<Arc<apps::InstalledWebhooks>>,
@@ -58,8 +64,18 @@ pub struct WebConfig {
 impl WebConfig {
     /// Production bindings have no unsigned-ingress or legacy-host fallback.
     /// Sign-in is always typed and token-free: the sign-in app's credentials
-    /// are required.
+    /// are required. GitHub's bases cannot be overridden.
     pub fn for_production(
+        read: impl FnMut(&'static str) -> Option<String>,
+    ) -> Result<Self, ConfigError> {
+        Self::for_deployment(apps::Deployment::Production, read)
+    }
+
+    /// [`for_production`](Self::for_production)'s bindings, for a root that
+    /// says whether it serves production: a test harness's Worker build
+    /// ([`apps::Deployment::Development`]) also accepts `GITHUB_*_BASE`.
+    pub fn for_deployment(
+        deployment: apps::Deployment,
         mut read: impl FnMut(&'static str) -> Option<String>,
     ) -> Result<Self, ConfigError> {
         let stage = apps::AppStage::from_config(read("P1_APP_STAGE").as_deref())?;
@@ -77,7 +93,7 @@ impl WebConfig {
             .map_err(|_| ConfigError::Field("RESTATE_INGRESS_TOKEN"))?;
         let keyring = parse_keyring(&required(&mut read, "P1_KEYRING")?)?;
         let operator_ids = parse_operator_ids(&read("P1_OPERATOR_IDS").unwrap_or_default())?;
-        let parsed = apps::parse_web_apps(stage, &mut read)?;
+        let parsed = apps::parse_web_apps(stage, deployment, &mut read)?;
         let github_install_url = required(&mut read, "GHINVITE_GITHUB_INSTALL_URL")?;
         let install = validate_https_url(&github_install_url, "GHINVITE_GITHUB_INSTALL_URL")?;
         if install.host_str() != Some("github.com")
@@ -101,6 +117,7 @@ impl WebConfig {
                 read("GH_ACCESS_REMOVAL_ENABLED").as_deref(),
             )?,
             github_apps: parsed.installed,
+            github: parsed.github,
             webhooks: Some(Arc::new(parsed.webhooks)),
             signin_apps: Some(Arc::new(parsed.signin)),
             base_url,
@@ -118,17 +135,26 @@ impl WebConfig {
     /// key is mandatory; other fields have local defaults. Sign-in needs the
     /// sign-in app's `GH_SIGNIN_CLIENT_ID`/`GH_SIGNIN_CLIENT_SECRET`, with
     /// `{GHINVITE_BASE_URL}/oauth/callback` as its callback URL; without
-    /// them `/login` answers that sign-in is unavailable.
+    /// them `/login` answers that sign-in is unavailable. `GITHUB_API_BASE`,
+    /// `GITHUB_WEB_BASE` and `GITHUB_AVATAR_BASE` may point every GitHub
+    /// client at a stand-in such as the `octoemu` emulator.
     pub fn for_local_dev() -> Result<Self, ConfigError> {
         let descriptor = std::env::var("P1_KEYRING").map_err(|_| SessionKeyError)?;
         let keyring = parse_keyring(&descriptor)?;
         let mut config = Self::with_keyring(keyring);
-        let installed = apps::parse_installed_web(apps::AppStage::from_environment()?, |field| {
-            std::env::var(field).ok()
-        })?;
+        for field in ghinvite_config::github::OVERRIDES {
+            optional_env(field)?;
+        }
+        let installed = apps::parse_installed_web(
+            apps::AppStage::from_environment()?,
+            apps::Deployment::Development,
+            |field| std::env::var(field).ok(),
+        )?;
         config.github_apps = installed.installed;
+        config.github = installed.github;
         config.webhooks = Some(Arc::new(installed.webhooks));
-        config.signin_apps = local_signin_app(&config.base_url)?.map(Arc::new);
+        config.signin_apps =
+            local_signin_app(&config.base_url)?.map(|app| Arc::new(app.with_bases(&config.github)));
         config.organization_delivery_enabled = apps::organization_delivery_enabled(
             apps::AppStage::from_environment()?,
             optional_env("GH_ORG_DELIVERY_ENABLED")?.as_deref(),
@@ -171,6 +197,7 @@ impl WebConfig {
             organization_delivery_enabled: false,
             access_removal_enabled: false,
             github_apps: Vec::new(),
+            github: apps::GithubBases::github(),
             webhooks: None,
             signin_apps: None,
             base_url: std::env::var("GHINVITE_BASE_URL")
