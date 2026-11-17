@@ -337,9 +337,21 @@ base-URL variables (`GITHUB_API_BASE`, `GITHUB_WEB_BASE`, `GITHUB_AVATAR_BASE`;
 accept: `ghinvite-web-server --local-dev`, `ghinvite-workflows-server
 --local-unsigned`, and the Workers' `runtime-tests` builds (as Miniflare
 bindings). `crates/ghinvite-web/tests/emulator_config.rs` runs web's local
-configuration end to end against an embedded emulator that way. The Worker
-drivers still intercept the real hostnames with Miniflare's `outboundService`
-until GE-09b moves them.
+configuration end to end against an embedded emulator that way, and
+`tests/browser/emulator-signin.config.mjs` signs a real browser in on the
+emulator's authorize page (including the expired-session form bounce, which
+the Content-Security-Policy's `form-action` allows because it names the
+configured web origin).
+
+The web Worker sign-in drivers (`pending-signin`, `signin-cutover`,
+`domain-signin`, `decision-queue`, `request-history`) start the emulator
+binary through `tests/worker/octoemu.mjs` (`node tests/worker/build-octoemu.mjs`
+builds it; `OCTOEMU_BIN` or `OCTOEMU_TARGET_DIR` select another build) and
+point the Worker at it with the bindings. Failures are fault rules (a 503 on
+`/user/emails`) and counts come from the emulator's call log. The remaining
+Worker drivers (the `admission.mjs` family, `operational-signals`, `broker`)
+still use the stub or intercept the real hostnames with Miniflare's
+`outboundService` until GE-09b-2 moves them.
 
 ```bash
 cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
