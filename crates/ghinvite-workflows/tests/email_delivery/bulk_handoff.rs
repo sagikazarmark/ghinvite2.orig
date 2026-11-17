@@ -238,7 +238,7 @@ async fn killed_batch_submit_recovers_after_first_email_retirement_without_react
         for entry in f.h.restate.admin().journal(id).await {
             assert!(!entry.raw_contains(MAIL));
             assert!(!entry.raw_contains("BULK60_EMAIL_PRIVACY_MARKER"));
-            assert!(!entry.raw_contains("ghs_EMAIL_TOKEN_MARKER"));
+            assert!(!entry.raw_contains("ghs_"));
         }
     }
 }

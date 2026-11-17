@@ -156,7 +156,17 @@ async fn sixty_bulk_email_rows_obey_real_fifty_org_cap_without_link_uses_or_plai
     }).await.expect("real paced batch did not reach its 50-write cap");
     assert!(!progress.handoff_pending);
     assert!(progress.requests.is_empty());
-    let times = f.g.batch_posts.lock().unwrap().clone();
+    // When GitHub took each row's invitation (the call log's virtual clock
+    // ticks with real time).
+    let times: Vec<_> =
+        f.h.emulator()
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                call.method == "POST" && call.path == "/orgs/acme/invitations" && call.status == 201
+            })
+            .map(|call| call.at)
+            .collect();
     assert_eq!(times.len(), 50);
     assert!(
         times
@@ -262,7 +272,7 @@ async fn sixty_bulk_email_rows_obey_real_fifty_org_cap_without_link_uses_or_plai
                             .expect("valid journal hex")
                     })
                     .collect();
-                for marker in ["BULK60_EMAIL_PRIVACY_MARKER", "ghs_EMAIL_TOKEN_MARKER"] {
+                for marker in ["BULK60_EMAIL_PRIVACY_MARKER", "ghs_"] {
                     assert!(!bytes.windows(marker.len()).any(|s| s == marker.as_bytes()));
                 }
             }
@@ -283,7 +293,7 @@ async fn sixty_bulk_email_rows_obey_real_fifty_org_cap_without_link_uses_or_plai
     fn scan(value: &Value) {
         match value {
             Value::String(s) => {
-                for marker in ["BULK60_EMAIL_PRIVACY_MARKER", "ghs_EMAIL_TOKEN_MARKER"] {
+                for marker in ["BULK60_EMAIL_PRIVACY_MARKER", "ghs_"] {
                     assert!(!s.contains(marker));
                     if !s.is_empty()
                         && s.len().is_multiple_of(2)

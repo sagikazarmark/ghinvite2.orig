@@ -289,7 +289,7 @@ async fn bulk_email_submit_callback_uses_actual_owner_and_fixed_all_handler_inve
                 .await
         {
             assert!(!entry.raw_contains(MAIL));
-            assert!(!entry.raw_contains("ghs_EMAIL_TOKEN_MARKER"));
+            assert!(!entry.raw_contains("ghs_"));
         }
     }
     assert_eq!(f.posts(), 1);

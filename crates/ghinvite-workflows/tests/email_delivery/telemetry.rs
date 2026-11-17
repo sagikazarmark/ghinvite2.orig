@@ -43,7 +43,7 @@ async fn pending_complete_observation_advances_clock_and_rename_preserves_receip
         observation_started_at: at,
         observed_at: at,
         pending: vec![ListedOrganizationInvitation {
-            upstream_id: 77,
+            upstream_id: f.invitation(MAIL).expect("GitHub holds the invitation"),
             login: None,
             role: OrganizationInvitationRole::DirectMember,
             created_at: created.confirmed_at.unwrap(),
@@ -69,7 +69,7 @@ async fn pending_complete_observation_advances_clock_and_rename_preserves_receip
         "older absence cannot settle newer pending evidence"
     );
 
-    *f.g.account_login.lock().unwrap() = Some("renamed".into());
+    f.rename("renamed").await;
     let mut setup = ghinvite_e2e::setup_command(json!({"installation_id":2,"account_id":100,
         "account_login":"renamed","account_type":"Organization","selected_repos":[],
         "installed_at":"2026-01-01T00:00:00Z"}));
