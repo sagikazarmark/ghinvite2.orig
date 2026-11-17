@@ -1,76 +1,31 @@
 //! Real Restate owner transitions driven by typed GitHub HTTP observations.
+//!
+//! GitHub is the octoemu emulator ([`ghinvite_e2e::github`]): alice's
+//! invitation, acceptance, role and expiry are GitHub's own state, changed
+//! through the admin API; only a repository read that fails (404) and a lost
+//! write response are fault rules.
 #![cfg(feature = "integration")]
-use axum::{
-    Json,
-    extract::State,
-    response::{IntoResponse, Response},
-};
 use chrono::Utc;
 use ghinvite_core::{
     GithubInvitationId, InvitationLinkId, RequestId,
     delivery::{CreateCommand, CreateOutcome, DeliverySnapshot},
     storage::{ConsoleStorage, RecordStorage},
 };
+use ghinvite_e2e::github::Outcome;
 use ghinvite_e2e::{Call, Harness};
 use ghinvite_workflows::settlement_policy::{Evidence, Observation};
+use octoemu::faults::{Fault, FaultAction};
+use octoemu::seed::{RepositoryInvitation, Role, Seed};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-#[derive(Default)]
-struct Github {
-    pending: bool,
-    expired: bool,
-    role: Option<&'static str>,
-    unavailable: bool,
-    lose_write_reply: bool,
-    calls: Vec<(String, String)>,
-}
-async fn github(
-    State(state): State<Arc<Mutex<Github>>>,
-    request: axum::extract::Request,
-) -> Response {
-    let path = request.uri().path().to_owned();
-    let method = request.method().to_string();
-    let mut state = state.lock().unwrap();
-    state.calls.push((method.clone(), path.clone()));
-    let body = match (method.as_str(),path.as_str()) {
-        ("POST", "/app/installations/1/access_tokens") => return (axum::http::StatusCode::CREATED,Json(json!({"token":"settlement-fixture-token","expires_at":Utc::now()+chrono::Duration::hours(1)}))).into_response(),
-        ("GET", "/app/installations/1") => json!({"id":1,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}),
-        ("GET", "/installation/repositories") => json!({"total_count":1,"repositories":[{"id":10,"full_name":"acme/api","private":true}]}),
-        ("GET", "/repos/acme/api") if state.unavailable => return axum::http::StatusCode::NOT_FOUND.into_response(),
-        ("GET", "/repos/acme/api") => json!({"id":10,"full_name":"acme/api","private":true}),
-        ("GET", "/user/8") | ("GET", "/users/alice") => json!({"id":8,"login":"alice"}),
-        ("GET", "/repos/acme/api/collaborators/alice/permission") => match state.role {
-            Some(role) => json!({"user":{"id":8,"login":"alice"},"permission":"write","role_name":role}),
-            None => json!({"user":{"id":8,"login":"alice"},"permission":"none","role_name":"none"}),
-        },
-        ("GET", "/repos/acme/api/collaborators/alice") => return if state.role.is_some() { axum::http::StatusCode::NO_CONTENT } else { axum::http::StatusCode::NOT_FOUND }.into_response(),
-        ("GET", "/repos/acme/api/invitations") => if state.pending { {let mut value=invitation(); value["expired"]=json!(state.expired); Value::Array(vec![value])} } else { json!([]) },
-        ("PUT", "/repos/acme/api/collaborators/alice") => {
-            state.pending=true;
-            return if state.lose_write_reply { axum::http::StatusCode::BAD_GATEWAY.into_response() }
-                else { (axum::http::StatusCode::CREATED,Json(invitation())).into_response() };
-        }
-        // Any DELETE is a test failure even if the handler ignores its response.
-        _ => return axum::http::StatusCode::NOT_IMPLEMENTED.into_response(),
-    };
-    Json(body).into_response()
-}
-fn invitation() -> Value {
-    json!({"id":99,"invitee":{"id":8,"login":"alice"},"permissions":"write","created_at":"2026-05-04T12:00:00Z","expired":false})
-}
 struct Runtime {
     harness: Harness,
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
-    github: Arc<Mutex<Github>>,
 }
 impl Runtime {
     async fn start() -> Self {
-        let github_state = Arc::new(Mutex::new(Github::default()));
-        let router = axum::Router::new()
-            .fallback(github)
-            .with_state(github_state.clone());
-        let harness = Harness::start_with_github_router(router).await;
+        let harness = Harness::start().await;
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
                 .await
@@ -102,11 +57,7 @@ impl Runtime {
         harness.restate.deploy(endpoint).await;
         let reply=harness.restate.invoke(&Call::object("AccountInstallation", "repo:100","onboard"),Some(&ghinvite_e2e::setup_command(json!({"app":"repo","installation_id":1,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":Utc::now()}))),None).await;
         assert_eq!(reply.status, 200, "{reply:?}");
-        Self {
-            harness,
-            storage,
-            github: github_state,
-        }
+        Self { harness, storage }
     }
     async fn command(&self) -> CreateCommand {
         let link:ghinvite_core::InvitationLink=serde_json::from_value(json!({"secret":{"secret_generation":1,"sha256":"2a".repeat(32)},
@@ -186,8 +137,28 @@ impl Runtime {
         .await
         .expect("retained settlement projection must converge");
     }
-    fn reset(&self) {
-        *self.github.lock().unwrap() = Github::default();
+    /// A fresh GitHub side: no invitations, collaborators or staged
+    /// answers, and an empty call log.
+    async fn reset(&self) {
+        self.harness.github().reset().await;
+    }
+    /// alice's open invitation to `acme/api`.
+    fn invitation(&self) -> Option<u64> {
+        self.harness
+            .github()
+            .invitations("alice")
+            .into_iter()
+            .find(|(_, repo)| repo == "acme/api")
+            .map(|(id, _)| id)
+    }
+    /// `(method, path)` of every call since the log was last emptied.
+    fn calls(&self) -> Vec<(String, String)> {
+        self.harness
+            .emulator()
+            .calls()
+            .into_iter()
+            .map(|call| (call.method, call.path))
+            .collect()
     }
 }
 
@@ -198,19 +169,20 @@ async fn real_owner_applies_only_complete_current_evidence() {
     let command = runtime.command().await;
     runtime.owner(&command, "create", &json!(command)).await;
     let created = runtime.snapshot(&command).await;
-    assert!(
-        matches!(
-            created.create.outcome,
-            CreateOutcome::Created { upstream_id: 99 }
-        ),
-        "{created:?}; calls={:?}",
-        runtime.github.lock().unwrap().calls
+    let invitation = runtime.invitation().expect("alice is invited");
+    assert_eq!(
+        created.create.outcome,
+        CreateOutcome::Created {
+            upstream_id: invitation
+        },
+        "calls={:?}",
+        runtime.calls()
     );
-    {
-        let mut gh = runtime.github.lock().unwrap();
-        gh.pending = false;
-        gh.role = Some("read");
-    }
+    // alice declines, and reads the repository anyway (a direct read
+    // collaborator).
+    let github = runtime.harness.github();
+    github.decline("alice", invitation).await;
+    github.collaborate("alice", Role::Pull).await;
     runtime.observe(&command).await;
     let declined = runtime.snapshot(&command).await;
     assert_eq!(
@@ -259,34 +231,39 @@ async fn real_owner_applies_only_complete_current_evidence() {
     );
 
     // AC-ACC-4: full empty invitation list followed by repository 404 never settles.
-    runtime.reset();
+    runtime.reset().await;
     let command = runtime.command().await;
     runtime.owner(&command, "create", &json!(command)).await;
     let created = runtime.snapshot(&command).await;
-    {
-        let mut gh = runtime.github.lock().unwrap();
-        gh.pending = false;
-        gh.role = Some("write");
-        gh.unavailable = true;
-        gh.calls.clear();
-    }
+    // alice accepts (a write collaborator; the list is empty), but the
+    // repository read answers 404 (a fault rule).
+    github
+        .accept("alice", runtime.invitation().expect("alice is invited"))
+        .await;
+    let unavailable = github.rule(
+        "repository unavailable",
+        Fault::on(
+            "GET",
+            "/repos/acme/api",
+            FaultAction::respond_json(404, json!({"message":"Not Found"})),
+        ),
+    );
+    runtime.harness.emulator().clear_calls();
     runtime.observe(&command).await;
     assert_eq!(runtime.snapshot(&command).await, created);
     {
-        let gh = runtime.github.lock().unwrap();
-        let list = gh
-            .calls
+        let calls = runtime.calls();
+        let list = calls
             .iter()
-            .position(|(_, p)| p.ends_with("/invitations"))
+            .position(|(_, p)| p.split('?').next().unwrap().ends_with("/invitations"))
             .unwrap();
-        let verify = gh
-            .calls
+        let verify = calls
             .iter()
             .position(|(_, p)| p == "/repos/acme/api")
             .unwrap();
         assert!(list < verify);
     }
-    runtime.github.lock().unwrap().unavailable = false;
+    runtime.harness.emulator().remove_fault(unavailable);
     runtime.observe(&command).await;
     assert_eq!(
         runtime.snapshot(&command).await.settlement.unwrap().state,
@@ -295,35 +272,44 @@ async fn real_owner_applies_only_complete_current_evidence() {
 
     // Existing pending invitations are foreign. Revocation and own expiry stop
     // local tracking, leave upstream pending, and never invent an upstream fact.
-    for handler in ["cancel", "tick_expire"] {
-        runtime.reset();
-        runtime.github.lock().unwrap().pending = true;
+    for (handler, id) in [("cancel", 9001), ("tick_expire", 9002)] {
+        runtime.reset().await;
+        // The organization's owner already invited alice to write.
+        runtime
+            .harness
+            .emulator()
+            .seed(Seed::new().repository_invitation(
+                RepositoryInvitation::new(id, "acme/api", "alice", Role::Push).inviter("creator"),
+            ))
+            .unwrap();
         let command = runtime.command().await;
         runtime.owner(&command, "create", &json!(command)).await;
         let foreign = runtime.snapshot(&command).await;
         assert!(foreign.create.outcome.tracked_foreign());
-        runtime.github.lock().unwrap().calls.clear();
+        runtime.harness.emulator().clear_calls();
         runtime.owner(&command,handler,&json!({"invitation_id":command.invitation_id,"installation_id":1,"at":Utc::now(),"by_user":7})).await;
         let stopped = runtime.snapshot(&command).await;
         assert!(stopped.tracking_stopped.is_some());
         assert!(stopped.settlement.is_none());
         assert_eq!(stopped.create, foreign.create);
         runtime.observe(&command).await;
-        assert!(runtime.github.lock().unwrap().calls.is_empty());
-        assert!(runtime.github.lock().unwrap().pending);
+        assert!(runtime.calls().is_empty());
+        assert_eq!(runtime.invitation(), Some(id));
         runtime.projected(&stopped).await;
     }
 
     // The seven-day tick must not mistake an unexpired pending invitation for
     // GitHub expiry; explicit expired=true is required and preserves create history.
-    runtime.reset();
+    runtime.reset().await;
     let command = runtime.command().await;
     runtime.owner(&command, "create", &json!(command)).await;
     let created = runtime.snapshot(&command).await;
     let tick = json!({"invitation_id":command.invitation_id,"installation_id":1,"at":Utc::now()});
     runtime.owner(&command, "tick_expire", &tick).await;
     assert_eq!(runtime.snapshot(&command).await, created);
-    runtime.github.lock().unwrap().expired = true;
+    github
+        .expire(runtime.invitation().expect("alice is invited"))
+        .await;
     runtime.owner(&command, "tick_expire", &tick).await;
     let expired = runtime.snapshot(&command).await;
     assert_eq!(
@@ -332,48 +318,48 @@ async fn real_owner_applies_only_complete_current_evidence() {
     );
     assert_eq!(expired.create, created.create);
     runtime.projected(&expired).await;
-    assert!(
-        !runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
-            .iter()
-            .any(|(method, _)| method == "DELETE")
-    );
+    assert!(!runtime.calls().iter().any(|(method, _)| method == "DELETE"));
 
     // Ambiguous creation: absence, even with strong role, cannot resolve it.
-    runtime.reset();
-    runtime.github.lock().unwrap().lose_write_reply = true;
+    // The write is applied but its response is lost; alice accepts and
+    // becomes an admin, so her invitation is gone.
+    runtime.reset().await;
+    github
+        .outcome("acme/api", "alice", Outcome::CreatedResponseLost)
+        .await;
     let command = runtime.command().await;
     runtime.owner(&command, "create", &json!(command)).await;
     let unknown = runtime.snapshot(&command).await;
     assert_eq!(unknown.create.outcome, CreateOutcome::OutcomeUnknown);
-    {
-        let mut gh = runtime.github.lock().unwrap();
-        gh.pending = false;
-        gh.role = Some("admin");
-    }
+    github
+        .accept(
+            "alice",
+            runtime.invitation().expect("the lost write applied"),
+        )
+        .await;
+    github.collaborate("alice", Role::Admin).await;
     runtime.observe(&command).await;
     assert_eq!(runtime.snapshot(&command).await, unknown);
-    runtime.github.lock().unwrap().pending = true;
+    assert_eq!(github.writes(), 1);
+    // Presence resolves it: the same lost write, the invitation still open.
+    runtime.reset().await;
+    github
+        .outcome("acme/api", "alice", Outcome::CreatedResponseLost)
+        .await;
+    let command = runtime.command().await;
+    runtime.owner(&command, "create", &json!(command)).await;
+    let unknown = runtime.snapshot(&command).await;
+    assert_eq!(unknown.create.outcome, CreateOutcome::OutcomeUnknown);
+    let invitation = runtime.invitation().expect("the lost write applied");
     runtime.observe(&command).await;
     let resolved = runtime.snapshot(&command).await;
     assert_eq!(
         resolved.create.outcome,
-        CreateOutcome::Created { upstream_id: 99 }
+        CreateOutcome::Created {
+            upstream_id: invitation
+        }
     );
     assert!(resolved.settlement.is_none());
-    assert_eq!(
-        runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
-            .iter()
-            .filter(|(m, _)| m == "PUT")
-            .count(),
-        1
-    );
+    assert_eq!(github.writes(), 1);
     runtime.harness.finish().await;
 }
