@@ -263,6 +263,7 @@ async fn real_owner_applies_only_complete_current_evidence() {
             .unwrap();
         assert!(list < verify);
     }
+    assert!(runtime.harness.emulator().fault(unavailable).unwrap().fired > 0);
     runtime.harness.emulator().remove_fault(unavailable);
     runtime.observe(&command).await;
     assert_eq!(

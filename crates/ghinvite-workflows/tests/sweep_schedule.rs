@@ -1,102 +1,66 @@
 //! Real Restate owner transitions driven by typed GitHub HTTP observations.
+//!
+//! GitHub is the octoemu emulator ([`ghinvite_e2e::github`]): alice's
+//! invitation, acceptance, role and expiry and the other invitations that
+//! make the listing span two pages are GitHub's own state, changed through
+//! the admin API. A failing second page, a failing repository read and an
+//! unanswered write are fault rules.
 #![cfg(feature = "integration")]
-use axum::{
-    Json,
-    extract::State,
-    response::{IntoResponse, Response},
-};
 use chrono::Utc;
 use ghinvite_core::{
     GithubInvitationId, InvitationLinkId, RequestId,
     delivery::{CreateCommand, CreateOutcome, DeliverySnapshot},
     storage::{ConsoleStorage, RecordStorage},
 };
+use ghinvite_e2e::github::Outcome;
 use ghinvite_e2e::{Call, Harness};
 use ghinvite_workflows::sweep_schedule::Schedule;
+use octoemu::faults::{Fault, FaultAction};
+use octoemu::seed::{RepositoryInvitation, Role, Seed, User};
 use serde_json::{Value, json};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-#[derive(Default)]
-struct Github {
-    pending: bool,
-    expired: bool,
-    role: Option<&'static str>,
-    unavailable: bool,
-    lose_write_reply: bool,
-    calls: Vec<(String, String)>,
-    pages: bool,
-    page_failure: bool,
+/// 150 other users invited to `acme/api` by its owner, so its invitation
+/// list spans two pages of 100.
+fn crowd() -> Seed {
+    (0..150).fold(Seed::new(), |seed, n| {
+        seed.user(User::new(2000 + n, format!("other-{n}")))
+            .repository_invitation(
+                RepositoryInvitation::new(5000 + n, "acme/api", format!("other-{n}"), Role::Pull)
+                    .inviter("creator"),
+            )
+    })
 }
-async fn github(
-    State(state): State<Arc<Mutex<Github>>>,
-    request: axum::extract::Request,
-) -> Response {
-    let path = request.uri().path().to_owned();
-    let method = request.method().to_string();
-    let query = request.uri().query().unwrap_or("").to_owned();
-    let mut state = state.lock().unwrap();
-    state.calls.push((method.clone(), path.clone()));
-    if path == "/repos/acme/api/invitations"
-        && state.pages
-        && state.page_failure
-        && query.contains("page=2")
-    {
-        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-    }
-    if path == "/repos/acme/api/invitations" && state.pages && !query.contains("page=2") {
-        let first = (1000..1100).map(|id| json!({"id":id,"invitee":{"id":id,"login":"other"},"permissions":"read","created_at":"2026-05-04T12:00:00Z","expired":false})).collect::<Vec<_>>();
-        let host = request.headers().get("host").unwrap().to_str().unwrap();
-        return (
-            [(
-                "link",
-                format!(
-                    "<http://{host}/repos/acme/api/invitations?per_page=100&page=2>; rel=\"next\""
-                ),
-            )],
-            Json(first),
-        )
-            .into_response();
-    }
-    let body = match (method.as_str(),path.as_str()) {
-        ("POST", "/app/installations/1/access_tokens") => return (axum::http::StatusCode::CREATED,Json(json!({"token":"settlement-fixture-token","expires_at":Utc::now()+chrono::Duration::hours(1)}))).into_response(),
-        ("GET", "/app/installations/1") => json!({"id":1,"account":{"id":100,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}),
-        ("GET", "/installation/repositories") => json!({"total_count":1,"repositories":[{"id":10,"full_name":"acme/api","private":true}]}),
-        ("GET", "/repos/acme/api") if state.unavailable => return axum::http::StatusCode::NOT_FOUND.into_response(),
-        ("GET", "/repos/acme/api") => json!({"id":10,"full_name":"acme/api","private":true}),
-        ("GET", "/user/8") | ("GET", "/users/alice") => json!({"id":8,"login":"alice"}),
-        ("GET", "/repos/acme/api/collaborators/alice/permission") => match state.role {
-            Some(role) => json!({"user":{"id":8,"login":"alice"},"permission":"write","role_name":role}),
-            None => json!({"user":{"id":8,"login":"alice"},"permission":"none","role_name":"none"}),
-        },
-        ("GET", "/repos/acme/api/collaborators/alice") => return if state.role.is_some() { axum::http::StatusCode::NO_CONTENT } else { axum::http::StatusCode::NOT_FOUND }.into_response(),
-        ("GET", "/repos/acme/api/invitations") => if state.pending { {let mut value=invitation(); value["expired"]=json!(state.expired); Value::Array(vec![value])} } else { json!([]) },
-        ("PUT", "/repos/acme/api/collaborators/alice") => {
-            state.pending = !state.lose_write_reply;
-            return if state.lose_write_reply { axum::http::StatusCode::BAD_GATEWAY.into_response() }
-                else { (axum::http::StatusCode::CREATED,Json(invitation())).into_response() };
-        }
-        // Any DELETE is a test failure even if the handler ignores its response.
-        _ => return axum::http::StatusCode::NOT_IMPLEMENTED.into_response(),
-    };
-    Json(body).into_response()
+
+/// The second page of `acme/api`'s invitation list fails (the list's `Link`
+/// follows the `/repositories/{id}/invitations` alias).
+fn second_page_fails() -> Fault {
+    Fault::on(
+        "GET",
+        "/repositories/10/invitations",
+        FaultAction::respond_json(503, json!({"message": "Service Unavailable"})),
+    )
+    .query_contains("page=2")
 }
-fn invitation() -> Value {
-    json!({"id":99,"invitee":{"id":8,"login":"alice"},"permissions":"write","created_at":"2026-05-04T12:00:00Z","expired":false})
+
+/// `GET /repos/acme/api` answers 404.
+fn repository_unavailable() -> Fault {
+    Fault::on(
+        "GET",
+        "/repos/acme/api",
+        FaultAction::respond_json(404, json!({"message": "Not Found"})),
+    )
 }
+
 struct Runtime {
     harness: Harness,
     storage: Arc<ghinvite_storage_sqlx::SqlxStorage>,
-    github: Arc<Mutex<Github>>,
     clock: Arc<std::sync::atomic::AtomicI64>,
     faults: Arc<ghinvite_workflows::delivery::DeliveryFaults>,
 }
 impl Runtime {
     async fn start() -> Self {
-        let github_state = Arc::new(Mutex::new(Github::default()));
-        let router = axum::Router::new()
-            .fallback(github)
-            .with_state(github_state.clone());
-        let harness = Harness::start_with_github_router(router).await;
+        let harness = Harness::start().await;
         let storage = Arc::new(
             ghinvite_storage_sqlx::SqlxStorage::in_memory()
                 .await
@@ -151,7 +115,6 @@ impl Runtime {
         Self {
             harness,
             storage,
-            github: github_state,
             clock,
             faults,
         }
@@ -203,6 +166,24 @@ impl Runtime {
     }
     async fn snapshot(&self, command: &CreateCommand) -> DeliverySnapshot {
         serde_json::from_value(self.owner(command, "status", &Value::Null).await).unwrap()
+    }
+    /// alice's open invitation to `acme/api`.
+    fn invitation(&self) -> Option<u64> {
+        self.harness
+            .github()
+            .invitations("alice")
+            .into_iter()
+            .find(|(_, repo)| repo == "acme/api")
+            .map(|(id, _)| id)
+    }
+    /// `(method, path)` of every call since the log was last emptied.
+    fn calls(&self) -> Vec<(String, String)> {
+        self.harness
+            .emulator()
+            .calls()
+            .into_iter()
+            .map(|call| (call.method, call.path))
+            .collect()
     }
     async fn projected(&self, expected: &DeliverySnapshot) {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -367,7 +348,7 @@ async fn retained_schedule_pulls_forward_once_and_settles_without_sql_or_webhook
         "projection is unavailable while sweep registration succeeds"
     );
     assert!(runtime.faults.projection_failures.load(SeqCst) > 0);
-    let before = runtime.github.lock().unwrap().calls.len();
+    let before = runtime.calls().len();
     let reply = audit
         .invoke(
             &runtime.harness,
@@ -379,19 +360,16 @@ async fn retained_schedule_pulls_forward_once_and_settles_without_sql_or_webhook
         .await;
     assert_eq!(reply.status, 200);
     assert_eq!(schedule(&runtime).await.token, active.token);
-    assert_eq!(
-        runtime.github.lock().unwrap().calls.len(),
-        before,
-        "old idle timer is inert"
-    );
+    assert_eq!(runtime.calls().len(), before, "old idle timer is inert");
     runtime.clock.store(t + 5 * 60_000, SeqCst);
-    {
-        let mut github = runtime.github.lock().unwrap();
-        github.pending = false;
-        github.role = Some("write");
-        github.pages = true;
-        github.calls.clear();
-    }
+    // alice accepts (a write collaborator), and 150 others are invited, so
+    // the list she is absent from spans two pages.
+    let github = runtime.harness.github();
+    github
+        .accept("alice", runtime.invitation().expect("alice is invited"))
+        .await;
+    runtime.harness.emulator().seed(crowd()).unwrap();
+    runtime.harness.emulator().clear_calls();
     let reply = audit
         .invoke(
             &runtime.harness,
@@ -426,24 +404,24 @@ async fn retained_schedule_pulls_forward_once_and_settles_without_sql_or_webhook
     }
     let state = registered(&runtime, 0).await;
     assert_eq!(state.completed_runs, 2);
-    assert_eq!(
+    let pages = |page: &str| {
         runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
+            .calls()
             .iter()
-            .filter(|(method, path)| method == "GET" && path == "/repos/acme/api/invitations")
-            .count(),
-        2,
+            .filter(|(method, path)| method == "GET" && path.split('?').next() == Some(page))
+            .count()
+    };
+    assert_eq!(
+        (
+            pages("/repos/acme/api/invitations"),
+            pages("/repositories/10/invitations")
+        ),
+        (1, 1),
         "exactly one full two-page walk for both deliveries"
     );
     assert!(
         runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
+            .calls()
             .iter()
             .all(|(method, _)| method != "PUT" && method != "PATCH" && method != "DELETE")
     );
@@ -568,34 +546,38 @@ async fn scheduled_evidence_preserves_unknown_and_checks_same_sweep_access() {
     let command = runtime.command().await;
     runtime.owner(&command, "create", &json!(command)).await;
     registered(&runtime, 1).await;
-    {
-        let mut github = runtime.github.lock().unwrap();
-        github.pending = false;
-        github.role = Some("write");
-        github.pages = true;
-        github.page_failure = true;
-    }
+    // alice accepts (a write collaborator), 150 others are invited, and the
+    // list's second page fails.
+    let github = runtime.harness.github();
+    github
+        .accept("alice", runtime.invitation().expect("alice is invited"))
+        .await;
+    runtime.harness.emulator().seed(crowd()).unwrap();
+    let page_failure = github.rule("second page fails", second_page_fails());
     sweep_now(&runtime).await;
     assert!(
         runtime.snapshot(&command).await.settlement.is_none(),
         "a failed later page is not an empty complete listing"
     );
-    {
-        let mut github = runtime.github.lock().unwrap();
-        github.pages = false;
-        github.page_failure = false;
-        github.unavailable = true;
-    }
+    assert!(
+        runtime
+            .harness
+            .emulator()
+            .fault(page_failure)
+            .unwrap()
+            .fired
+            > 0
+    );
+    runtime.harness.emulator().remove_fault(page_failure);
+    let unavailable = github.rule("repository unavailable", repository_unavailable());
     sweep_now(&runtime).await;
+    assert!(runtime.harness.emulator().fault(unavailable).unwrap().fired > 0);
     assert!(
         runtime.snapshot(&command).await.settlement.is_none(),
         "absence with repository 404 is never acceptance"
     );
-    {
-        let mut github = runtime.github.lock().unwrap();
-        github.unavailable = false;
-        github.role = Some("read");
-    }
+    runtime.harness.emulator().remove_fault(unavailable);
+    github.collaborate("alice", Role::Pull).await;
     sweep_now(&runtime).await;
     assert_eq!(
         settled(&runtime, &command).await.settlement.unwrap().state,
@@ -603,26 +585,20 @@ async fn scheduled_evidence_preserves_unknown_and_checks_same_sweep_access() {
         "base read cannot satisfy write"
     );
     registered(&runtime, 0).await;
-    {
-        let mut github = runtime.github.lock().unwrap();
-        github.role = None;
-        github.lose_write_reply = true;
-    }
+    // alice has no access; the next write goes unanswered and is not applied.
+    github.revoke("alice").await;
+    github
+        .outcome("acme/api", "alice", Outcome::Unanswered)
+        .await;
     let unknown = runtime.command().await;
     assert_eq!(
         runtime.owner(&unknown, "create", &json!(unknown)).await["outcome"]["kind"],
         "outcome_unknown"
     );
     registered(&runtime, 1).await;
-    runtime.github.lock().unwrap().role = Some("write");
-    let puts_before = runtime
-        .github
-        .lock()
-        .unwrap()
-        .calls
-        .iter()
-        .filter(|(m, _)| m == "PUT")
-        .count();
+    // alice gains write access some other way; no invitation is open.
+    github.collaborate("alice", Role::Push).await;
+    let puts_before = github.writes();
     sweep_now(&runtime).await;
     assert!(
         matches!(
@@ -631,13 +607,23 @@ async fn scheduled_evidence_preserves_unknown_and_checks_same_sweep_access() {
         ),
         "absence plus access never clears the write fence"
     );
-    runtime.github.lock().unwrap().pending = true;
+    // GitHub applies the App's write after all: alice, without access again,
+    // has the App's open invitation.
+    github.revoke("alice").await;
+    let mut late = RepositoryInvitation::new(9001, "acme/api", "alice", Role::Push)
+        .created_at(runtime.harness.emulator().now());
+    late.inviter_app_id = Some(ghinvite_e2e::github::REPO_APP_ID);
+    runtime
+        .harness
+        .emulator()
+        .seed(Seed::new().repository_invitation(late))
+        .unwrap();
     sweep_now(&runtime).await;
     assert!(matches!(
         runtime.snapshot(&unknown).await.create.outcome,
-        CreateOutcome::Created { upstream_id: 99 }
+        CreateOutcome::Created { upstream_id: 9001 }
     ));
-    runtime.github.lock().unwrap().expired = true;
+    github.expire(9001).await;
     sweep_now(&runtime).await;
     assert_eq!(
         settled(&runtime, &unknown).await.settlement.unwrap().state,
@@ -645,14 +631,7 @@ async fn scheduled_evidence_preserves_unknown_and_checks_same_sweep_access() {
     );
     registered(&runtime, 0).await;
     assert_eq!(
-        runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
-            .iter()
-            .filter(|(m, _)| m == "PUT")
-            .count(),
+        github.writes(),
         puts_before,
         "unknown resolution is read only"
     );
@@ -689,7 +668,11 @@ async fn operational_watermarks_survive_projection_outage_and_preserve_receipts(
     }
 
     let runtime = Runtime::start().await;
-    runtime.github.lock().unwrap().lose_write_reply = true;
+    runtime
+        .harness
+        .github()
+        .outcome("acme/api", "alice", Outcome::Unanswered)
+        .await;
     runtime.faults.projection_unavailable.store(true, SeqCst);
     let command = runtime.command().await;
     let receipt = runtime.owner(&command, "create", &json!(command)).await;
@@ -824,16 +807,6 @@ async fn operational_watermarks_survive_projection_outage_and_preserve_receipts(
         "older same-revision absence cannot settle after a newer complete listing"
     );
     runtime.projected(&resolved).await;
-    assert_eq!(
-        runtime
-            .github
-            .lock()
-            .unwrap()
-            .calls
-            .iter()
-            .filter(|(m, _)| m == "PUT")
-            .count(),
-        1
-    );
+    assert_eq!(runtime.harness.github().writes(), 1);
     runtime.harness.finish().await;
 }
