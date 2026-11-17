@@ -1,4 +1,4 @@
-import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
+import { installedWebApp, signinApp } from './app-config.mjs';
 import { capabilityFor } from './capability.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -8,7 +8,8 @@ import { stalledResponse } from './deadline-recovery.mjs';
 
 const ingressApiKey = 'synthetic-worker-ingress-key';
 
-export async function browserAdmission(ingress, code, requester, operation, recovery) {
+// GitHub is octoemu (`github`, a GithubWorld): the requester signs in on its authorize page.
+export async function browserAdmission(github, ingress, code, requester, operation, recovery) {
   let authenticatedIngressCalls = 0;
   let stall;
   let committed;
@@ -26,7 +27,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
       P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7', RESTATE_INGRESS_URL: 'https://ingress.fixture.test',
       RESTATE_INGRESS_TOKEN: ingressApiKey,
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-      ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',
+      ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy', ...github.emulator.bindings,
     },
     async outboundService(request) {
       const url = new URL(request.url);
@@ -45,10 +46,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
         }
         return new Response(await response.arrayBuffer(), { status: response.status, headers: response.headers });
       }
-      // Controlled OAuth boundary only; Rust session creation/rotation is real.
-      if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
-      const revoked = signinRevocation(request); if (revoked) return revoked;
-      if (request.url === 'https://api.github.com/user') return Response.json({ id: requester, login: `user-${requester}`, avatar_url: null });
+      if (github.emulator.owns(request)) return github.emulator.forward(request);
       throw new Error(`unexpected browser outbound ${url.origin}${url.pathname}`);
     },
   });
@@ -58,12 +56,7 @@ export async function browserAdmission(ingress, code, requester, operation, reco
       const schema = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
       await db.exec(schema.replace(/^[ \t]*--.*$/gm, '').replaceAll('\n', ' '));
     }
-    const login = await mf.dispatchFetch('https://browser.test/login', { redirect: 'manual' });
-    const state = new URL(login.headers.get('location')).searchParams.get('state');
-    let cookie = login.headers.get('set-cookie').split(';')[0];
-    const callback = await mf.dispatchFetch(`https://browser.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie, 'CF-Connecting-IP': '192.0.2.20' }, redirect: 'manual' });
-    assert.equal(callback.status, 303, await callback.clone().text());
-    cookie = callback.headers.get('set-cookie').split(';')[0];
+    const cookie = await github.emulator.signIn((url, init) => mf.dispatchFetch(url, init), 'https://browser.test', `user-${requester}`, { 'CF-Connecting-IP': '192.0.2.20' });
     const select = async linkId => {
       const capability = capabilityFor(linkId);
       await db.prepare('INSERT INTO link_secrets (secret_sha256,link_id,secret_generation,created_at,retired_at) VALUES (?,?,?,?,NULL)').bind(capability.sha256, linkId, capability.generation, new Date().toISOString()).run();

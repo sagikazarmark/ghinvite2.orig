@@ -3,12 +3,11 @@ import {setupCommand,establishInstallingOwner} from './installation-fixture.mjs'
 import {admitCapability} from './capability.mjs';
 
 // Real signed Worker endpoint, retained request/delivery/access/budget owners and
-// D1 projection. HTTP fixtures supply observations, never replacement receipts.
-export async function reissue({ingress,githubUrl,http,db,id,creation,eventually}) {
+// D1 projection. GitHub is octoemu; nothing supplies replacement receipts.
+export async function reissue({ingress,github,http,db,id,creation,eventually}) {
   for(const user of [7,91]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user,`user-${user}`).run();
   await http(`${ingress}/Installation/repo:1/onboard`,setupCommand({installation_id:1,account_id:100,account_login:'acme',account_type:'Organization',selected_repos:'all',installed_at:'2026-01-01T00:00:00Z'}));
   await establishInstallingOwner({http,ingress});
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91});
   const create=creation();
   assert.ok((await http(`${ingress}/InvitationLink/${create.link_id}/create`,create)).Ok);
   const removal=await fetch(`${ingress}/InvitationLink/${create.link_id}/prepare_access_removal`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({link_id:create.link_id,admin:create.admin,operation_id:id()})});
@@ -63,9 +62,8 @@ export async function reissue({ingress,githubUrl,http,db,id,creation,eventually}
   const events=await eventually(()=>db.prepare("SELECT id,occurred_at,metadata FROM audit_events WHERE event_type='delivery.reissued' AND target_id=?").bind(request).all(),r=>r.results.length===1);
   assert.deepEqual(await req('reissue',input),result);
   assert.deepEqual((await db.prepare("SELECT id,occurred_at,metadata FROM audit_events WHERE event_type='delivery.reissued' AND target_id=?").bind(request).all()).results,events.results);
-  const calls=await http(`${githubUrl}/calls`,undefined,'GET');
-  assert.equal(calls.requests.filter(r=>r.method==='PUT').length,2);
-  assert.equal(calls.requests.filter(r=>r.method==='DELETE').length,1);
+  assert.equal((await github.requests('PUT')).length,2);
+  assert.equal((await github.requests('DELETE')).length,1);
   const link=await http(`${ingress}/InvitationLink/${create.link_id}/link_status`,{link_id:create.link_id,admin:create.admin});
   assert.equal(link.uses,1,'administrator reissue consumes no additional link use');
   console.log('Signed Worker reissue: generation2, exact replay/conflict, old cancellation barrier, original approval/admission, administrator budget attribution and D1 proof/audit passed');

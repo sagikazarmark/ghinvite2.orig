@@ -1,28 +1,18 @@
 import { setupCommand, establishInstallingOwner } from './installation-fixture.mjs';
-import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
+import { installedWebApp, signinApp } from './app-config.mjs';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { Response } from 'miniflare';
-import { createHmac, createHash, randomBytes } from 'node:crypto';
-
-const credentialNonce = randomBytes(16).toString('hex');
-export const journeyCredentials = Object.freeze({
-  creatorCode: `OAUTH_CODE_MARKER_CREATOR_${credentialNonce}`,
-  requesterCode: `OAUTH_CODE_MARKER_REQUESTER_${credentialNonce}`,
-  creatorToken: `ghu_MARKER_CREATOR_${credentialNonce}`,
-  requesterToken: `ghu_MARKER_REQUESTER_${credentialNonce}`,
-  authorityToken: `ghs_MARKER_AUTHORITY_${credentialNonce}`,
-  workflowReadToken: `ghs_MARKER_WORKFLOW_READ_${credentialNonce}`,
-  workflowWriteToken: `ghs_MARKER_WORKFLOW_WRITE_${credentialNonce}`,
-});
+import { createHmac, createHash } from 'node:crypto';
 
 const entropyFixture = process.env.LINK_SECRET_FIXTURE === '1';
 const knownSecret = sequence => Buffer.from(`LINKSECRET_MARKER_${String(sequence).padStart(14, '0')}`).toString('base64url');
 const secretHash = secret => createHash('sha256').update(Buffer.from(secret, 'base64url')).digest('hex');
 
-// Actual web Wasm + workflow Wasm + Restate + shared D1. Only OAuth/GitHub HTTP
-// responses and the ingress acknowledgement are controlled at network boundaries.
-export function journeyWorker(ingress) {
+// Actual web Wasm + workflow Wasm + Restate + shared D1. GitHub is octoemu
+// (`github`, through the bindings); only the ingress acknowledgement is
+// controlled at a network boundary.
+export function journeyWorker(ingress, github) {
   const lost = new Set();
   const commands = new Map();
   return {
@@ -38,7 +28,7 @@ export function journeyWorker(ingress) {
       P1_HOST: 'journey.test', P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',
       RESTATE_INGRESS_URL: 'https://ingress.fixture.test', RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
       GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-      ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'journey-secret',
+      ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'journey-secret', ...github.bindings,
     },
     async outboundService(request) {
       const url = new URL(request.url);
@@ -56,33 +46,13 @@ export function journeyWorker(ingress) {
         }
         return new Response(body, { status: response.status, headers: response.headers });
       }
-      if (request.url === 'https://github.com/login/oauth/access_token') {
-        assert.match(request.headers.get("content-type"), /^application\/x-www-form-urlencoded/);
-        const code = new URLSearchParams(await request.text()).get("code");
-        assert.ok([journeyCredentials.creatorCode, journeyCredentials.requesterCode].includes(code), 'OAuth exchange must consume the exact fixture code');
-        return Response.json({ access_token: code === journeyCredentials.requesterCode ? journeyCredentials.requesterToken : journeyCredentials.creatorToken, token_type: 'bearer', scope: '' });
-      }
-      if (request.url === 'https://api.github.com/user') {
-        const authorization = request.headers.get('authorization');
-        assert.ok([`Bearer ${journeyCredentials.creatorToken}`, `Bearer ${journeyCredentials.requesterToken}`].includes(authorization), 'user read must consume the actual exchanged fixture token');
-        return Response.json(authorization === `Bearer ${journeyCredentials.requesterToken}` ? { id: 8, login: 'alice' } : { id: 7, login: 'creator' });
-      }
-      const revoked = signinRevocation(request); if (revoked) return revoked;
-      if (url.pathname === '/app/installations/1/access_tokens') {
-        assert.match(request.headers.get('authorization'), /^Bearer [^.]+\.[^.]+\.[^.]+$/);
-        assert.deepEqual(await request.json(), {permissions:{metadata:'read'}});
-        return Response.json({token:journeyCredentials.authorityToken,expires_at:'2099-01-01T00:00:00Z'},{status:201});
-      }
-      assert.equal(request.headers.get('authorization'),`Bearer ${journeyCredentials.authorityToken}`);
-      if (url.pathname === '/installation/repositories') return Response.json({total_count:1,repositories:[{id:10,full_name:'acme/api',owner:{id:100,login:'acme'}}]});
-      if (url.pathname === '/repos/acme/api') return Response.json({id:10,full_name:'acme/api',owner:{id:100,login:'acme'}});
-      if (url.pathname === '/repos/acme/api/collaborators/creator/permission') return Response.json({user:{id:7,login:'creator'},role_name:'admin'});
+      if (github.owns(request)) return github.forward(request);
       throw new Error(`unexpected journey outbound ${url.origin}${url.pathname}`);
     },
   };
 }
 
-export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http, storage, db, eventually, id }) {
+export async function invitationJourney({ mf, adminUrl, ingress, github, http, storage, db, eventually, id }) {
   const web = await mf.getWorker('journey-web');
   const field = (html, name) => {
     const value = html.match(new RegExp(`name="${name}"[^>]*value="([^"]*)"`))?.[1];
@@ -94,17 +64,12 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     headers: { cookie, 'CF-Connecting-IP': '192.0.2.21', ...(body === undefined ? {} : { 'content-type': 'application/x-www-form-urlencoded' }) },
     body: body === undefined ? undefined : new URLSearchParams(body).toString(),
   });
-  const login = async (code) => {
-    const start = await visit('', '/login');
-    const state = new URL(start.headers.get('location')).searchParams.get('state');
-    const response = await visit(start.headers.get('set-cookie').split(';')[0], `/oauth/callback?code=${code}&state=${state}`);
-    assert.equal(response.status, 303, await response.clone().text());
-    return response.headers.get('set-cookie').split(';')[0];
-  };
+  // Each user signs in on the emulator's authorize page.
+  const login = user => github.emulator.signIn((url, init) => web.fetch(url, init), 'https://journey.test', user, { 'CF-Connecting-IP': '192.0.2.21' });
     await http(`${ingress}/Installation/repo:1/onboard`, setupCommand({ installation_id: 1, actor_user_id: 7, account_id: 100, account_login: 'acme', account_type: 'Organization', selected_repos: 'all', installed_at: new Date().toISOString() }));
     await establishInstallingOwner({http,ingress});
     await eventually(async () => (await db.prepare("SELECT installed_by_user_id FROM installations WHERE app='repo' AND installation_id=1").first())?.installed_by_user_id === 7, Boolean);
-    const admin = await login(journeyCredentials.creatorCode);
+    const admin = await login('creator');
     const form = await (await visit(admin, '/console/accounts/acme/links/new')).text();
     const action = form.match(/action="(\/console\/accounts\/acme\/links\?[^"]+)"/)[1].replaceAll('&#38;', '&').replaceAll('&amp;', '&');
     const link = new URL(action, 'https://journey.test').searchParams.get('link_id');
@@ -134,7 +99,7 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
       assert.equal(capability.secret.sha256, secretHash(knownSecret(2)));
       assert.equal(capability.secret.secret_generation, 2);
     }
-    const alice = await login(journeyCredentials.requesterCode);
+    const alice = await login('alice');
     const bootstrap = await (await visit(alice,'/i')).text();
     const selected = await visit(alice,'/i',{secret,csrf_token:field(bootstrap,'csrf_token')});
     assert.equal(selected.status,303,await selected.clone().text());
@@ -192,8 +157,8 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     assert.match(await (await visit(admin, '/console/accounts/acme/requests')).text(), /Request approved/);
     await db.prepare('DROP TRIGGER delay_link').run();
     const sent = await eventually(() => storage('delivery-by-key', `${requestId}:10:1`), row => row?.create.outcome.kind === 'created' && !row.settlement);
-    await http(`${githubUrl}/repos/acme/api/invitations/${sent.create.outcome.upstream_id}`, undefined, 'DELETE');
-    await http(`${githubUrl}/identity`, { login: 'alice', addressed_id: 8, role_name: 'read' });
+    // alice accepts the invitation on GitHub.
+    await github.accept('alice', { id: sent.create.outcome.upstream_id });
     const payload = JSON.stringify({ action: 'added', installation: { id: 1 }, repository: { id: 10, owner: { id: 100 } }, member: { id: 8 } });
     const signature = createHmac('sha256', 'fixture-repo-webhook-current').update(payload).digest('hex');
     for (let n = 0; n < 2; n++) {
@@ -213,7 +178,14 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     const recovery = await http(`${ingress}/DeliveryRecovery/recover`, { link_id: link, request_id: requestId, requester_id: 8 });
     for (const submitted of recovery.submitted) await http(`${ingress}/restate/invocation/${submitted.invocation_id}/attach`, undefined, 'GET');
     await eventually(() => http(`${adminUrl}/query`, { query: `SELECT id FROM sys_invocation WHERE target_service_name = 'DeliveryProjection' AND target_service_key = '${requestId}:10:1' AND status != 'completed'` }), result => result.rows.length === 0);
-    assert.equal((await http(`${githubUrl}/calls`, undefined, 'GET')).requests.filter(call => call.method === 'PUT').length, 1);
+    assert.equal((await github.requests('PUT')).length, 1);
+    // The workflows Worker read with a read-only and wrote with a write
+    // installation token (octoemu's records of the tokens it minted).
+    const minted = new Map((await github.emulator.state()).tokens.map(token => [token.id, token.permissions.administration]));
+    const profile = call => minted.get(call.identity?.token_id);
+    const put = (await github.requests('PUT'))[0];
+    assert.equal(profile(put), 'write', 'the PUT used a write-profile installation token');
+    assert.ok((await github.requests('GET', '/repos/acme/api/invitations')).some(call => profile(call) === 'read'), 'reads used a read-profile installation token');
     console.log('PASS three real guarded ctx.run failures, immutable confirmed receipt replay, and exactly one GitHub PUT');
     assert.deepEqual((await storage('audit', 100)).events, events);
     // Real request batch commits; only the D1 binding acknowledgement is lost.
@@ -239,7 +211,6 @@ export async function invitationJourney({ mf, adminUrl, ingress, githubUrl, http
     await storage('apply-request', envelope);
     console.log('PASS authenticated web Worker → real Restate owners → production GitHub client → signed settlement, shared D1, delayed projections and lost creation/admission/decision responses');
     return {
-      credentialMarkers: Object.values(journeyCredentials),
       ...(entropyFixture
         ? { secrets: [knownSecret(1), knownSecret(2)], markerPrefixes: ['LINKSECRET_MARKER_'] }
         : { secrets: [secret] }),

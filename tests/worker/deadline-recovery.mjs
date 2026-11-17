@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { Response } from 'miniflare';
 import { admitCapability } from './capability.mjs';
 
-// The upstream never finishes. Cleanup releases it only after assertions, and
-// cannot turn a watchdog failure into a successful application timeout.
+// A non-GitHub upstream (Restate ingress, the transport fixtures) that never
+// finishes. Cleanup releases it only after assertions, and cannot turn a
+// watchdog failure into a successful application timeout. GitHub's stalls
+// are octoemu `stall` fault rules (below).
 export function stalledResponse(phase, cleanup) {
   if (phase === 'headers') return new Promise(resolve => cleanup.push(() => resolve(Response.json({ late: true }))));
   return new Response(new ReadableStream({ start(controller) {
@@ -12,7 +14,26 @@ export function stalledResponse(phase, cleanup) {
   } }), { headers: { 'content-type': 'application/json' } });
 }
 
-export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, pause, fault }) {
+export async function deadlineRecovery({ ingress, github, http, storage, id, creation, eventually, pause }) {
+  // GitHub stops answering in `phase` (headers or body): the next PUT, and
+  // once it is in flight the installation read. Neither request reaches the
+  // emulator's handler.
+  const rules = [];
+  const fault = async (phase, installationId) => {
+    for (const rule of rules.splice(0)) await github.emulator.removeFault(rule);
+    if (!phase) return;
+    const stall = { kind: 'stall', phase };
+    const put = await github.emulator.fault({ method: 'PUT', path: '/repos/{owner}/{repo}/collaborators/{username}', label: `${phase} stall`, action: stall });
+    rules.push(put);
+    // The read's rule is in place before the write counts as reached.
+    let read;
+    const write = github.emulator.waitHeld(put, 1, 10_000).then(async () => {
+      read = await github.emulator.fault({ method: 'GET', path: `/app/installations/${installationId}`, label: `${phase} stall`, action: stall });
+      rules.push(read);
+    });
+    const observation = write.then(() => github.emulator.waitHeld(read, 1, 10_000));
+    return { write, observation, puts: async () => (await github.requests('PUT')).length };
+  };
   const installation = await http(`${ingress}/AccountInstallation/repo:100/status`);
   const installationId = installation.account.installation_id;
   const waitForFault = async (promise, label) => {
@@ -32,8 +53,10 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
   pause(true);
   try {
     for (const phase of ['headers', 'body']) {
-      await http(`${githubUrl}/reset`, undefined, 'DELETE');
-      await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+      // A clean GitHub side: no invitations for the requester, and the
+      // installation back on acme/api and acme/web (repo-12 out of scope).
+      await github.reset('user-91');
+      await github.select([10, 11]);
       // Start each phase from the scope the reset stub reports, so the previous
       // phase's restored observation cannot answer this one's admission.
       await http(`${ingress}/AccountInstallation/repo:100/refresh`, installationId);
@@ -53,7 +76,7 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       const pending = { ...base, targets: {...base.targets, repos: [...base.targets.repos, { repo_id: 12, repo_full_name: 'acme/repo-12', grant: 'read' }]} };
       await http(`${ingress}/InvitationLink/${pending.link_id}/create`, pending);
       const attempt = { link_id: pending.link_id, operation_id: id(), requester_id: 91, ...admitCapability(pending.link_id) };
-      const seen = fault(phase, installationId);
+      const seen = await fault(phase, installationId);
       const write = call(`RepositoryDelivery/${command.request_id}:${command.repo_id}:${command.delivery_generation}/create`, command);
       await waitForFault(seen.write, 'GitHub PUT');
       const observation = call('AccountInstallation/repo:100/admission_evidence', { account_id: 100, repo_ids: pending.targets.repos.map(repo => repo.repo_id) });
@@ -69,10 +92,10 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
       assert.equal(admitted.value.result.kind, 'accepted', 'missing evidence does not reject admission');
       assert.equal(status.status, 200, `queued exclusive status must complete: ${JSON.stringify(status.value)}`);
       assert.equal(status.value.observation.kind, 'unknown');
-      fault(null);
+      await fault(null);
       // Restore observation/projection, then replay with no pending invitation
       // or collaborator evidence. Absence must never authorize another PUT.
-      await http(`${githubUrl}/installation-repositories`, [10, 11, 12]);
+      await github.select([10, 11, 12]);
       await http(`${ingress}/AccountInstallation/repo:100/refresh`, installationId);
       const recovered = await http(`${ingress}/InvitationLink/${pending.link_id}/admit`, attempt);
       assert.deepEqual(recovered, admitted.value, 'later evidence cannot alter the retained admission receipt');
@@ -82,11 +105,11 @@ export async function deadlineRecovery({ ingress, githubUrl, http, storage, id, 
         assert.equal(replay.outcome.kind, 'outcome_unknown');
       }
       assert.equal((await http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}:${command.delivery_generation}/status`)).create.outcome.kind, 'outcome_unknown');
-      assert.equal(seen.puts(), 1, 'timeout fence prohibits automatic repeat PUT');
+      assert.equal(await seen.puts(), 1, 'timeout fence prohibits automatic repeat PUT');
       console.log(`PASS Worker ${phase} timeout: retained unknown delivery/fence, unknown caller scope evidence, released account exclusivity, missing-evidence admission and exact replay`);
     }
     // Leave the installation making exactly what every other fixture expects.
-    await http(`${githubUrl}/installation-repositories`, [10, 11]);
+    await github.select([10, 11]);
     await http(`${ingress}/AccountInstallation/repo:100/refresh`, installationId);
-  } finally { fault(null); pause(false); }
+  } finally { await fault(null); pause(false); }
 }

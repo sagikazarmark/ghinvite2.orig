@@ -27,7 +27,7 @@ export async function bulkEmailHandoff({api,setup,vaultCall,status,key,budget,sc
     assert.ok(pending.invocationId);
     original=await retired(emails[0]);
     first=await status(emails[0]);assert.equal(first.outcome.kind,'created');
-    assert.equal(scenarios.get(915).posts,1);await noFence(emails[1]);
+    assert.equal((await scenarios.get(915).posts),1);await noFence(emails[1]);
     await eventually(()=>sql(`SELECT value_utf8 FROM state WHERE service_name='BulkInviteBatch' AND service_key='${query.batch_id}' AND key='batch/current'`),r=>r.rows[0]&&JSON.parse(r.rows[0].value_utf8).handoff.emails===1);
     const second=await record(emails[1]);assert.equal(second.activated_at,null);assert.equal(second.retired_at,null);
     await eventually(()=>sql(`SELECT status FROM sys_invocation WHERE id='${pending.invocationId}'`),r=>r.rows[0]&&r.rows[0].status!=='completed');
@@ -42,12 +42,12 @@ export async function bulkEmailHandoff({api,setup,vaultCall,status,key,budget,sc
   assert.notEqual(second.outcome.upstream_id,first.outcome.upstream_id);
   assert.deepEqual(await status(emails[0]),first);
   assert.deepEqual(await record(emails[0]),original);
-  assert.equal(scenarios.get(915).posts,2);assert.equal((await budget(915)).content_used_hour,2);
+  assert.equal((await scenarios.get(915).posts),2);assert.equal((await budget(915)).content_used_hour,2);
   assert.deepEqual(await api('BulkInviteBatch',query.batch_id,'submit',submit),accepted);
   const cancelled=await api('BulkInviteBatch',query.batch_id,'cancel_remaining',{query,operation_id:id()});
   assert.equal(cancelled.already_written,2);
   assert.deepEqual(await status(emails[0]),first);assert.deepEqual(await status(emails[1]),second);
-  assert.deepEqual(await record(emails[0]),original);assert.equal(scenarios.get(915).posts,2);
+  assert.deepEqual(await record(emails[0]),original);assert.equal((await scenarios.get(915).posts),2);
   console.log('PASS signed Bulk Submit killed after first retired child recovers exact handoff; two POSTs, unchanged receipts and retirement clocks');
 
   for(const [account,stagedAt] of [[916,null],[917,Math.floor(Date.now()/1000)-86401]]){
@@ -57,14 +57,14 @@ export async function bulkEmailHandoff({api,setup,vaultCall,status,key,budget,sc
       await eventually(()=>status(c),s=>s?.outcome.kind==='blocked'&&s.outcome.reason==='email_recovery_unavailable');
       await noFence(c);
     }
-    assert.equal(scenarios.get(account).posts,0);assert.equal((await budget(account)).content_used_hour,0);
+    assert.equal((await scenarios.get(account).posts),0);assert.equal((await budget(account)).content_used_hour,0);
     assert.deepEqual(await api('BulkInviteBatch',query.batch_id,'submit',submit),accepted);
     const cancel={query,operation_id:id()};
     const cancelled=await api('BulkInviteBatch',query.batch_id,'cancel_remaining',cancel);
     assert.equal(cancelled.aborted,2);
     assert.deepEqual(await api('BulkInviteBatch',query.batch_id,'cancel_remaining',cancel),cancelled);
     for(const c of emails)await noFence(c);
-    assert.equal(scenarios.get(account).posts,0);assert.equal((await budget(account)).content_used_hour,0);
+    assert.equal((await scenarios.get(account).posts),0);assert.equal((await budget(account)).content_used_hour,0);
   }
   console.log('PASS signed Bulk missing/expired mailbox recovery retains precise Blocked, exact accepted Submit and cancellability without fence, budget charge or POST');
 }

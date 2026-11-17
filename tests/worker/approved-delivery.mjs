@@ -3,13 +3,12 @@ import assert from 'node:assert/strict';
 import { admitCapability } from './capability.mjs';
 
 // Production Worker/D1 + real Restate + production Fetch GitHub client.
-export async function approvedDelivery({ ingress, githubUrl, http, db, creation, id, eventually }) {
-  const puts = async () => (await http(`${githubUrl}/calls`, undefined, 'GET')).requests.filter(row => row.method === 'PUT').length;
+export async function approvedDelivery({ ingress, github, http, db, creation, id, eventually }) {
+  const puts = async () => (await github.requests('PUT')).length;
   await db.prepare("CREATE TRIGGER hold_installation BEFORE INSERT ON installations BEGIN SELECT RAISE(ABORT, 'projection withheld'); END").run();
   await http(`${ingress}/Installation/repo:1/onboard`, setupCommand({ app:'repo', installation_id: 1, actor_user_id: 7, account_id: 100,
     account_login: 'acme', account_type: 'Organization', selected_repos: 'all', installed_at: '2026-01-01T00:00:00Z' }));
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
-  await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'created_response_lost' });
+  await github.outcome('user-91', 'created_response_lost');
   const input = { ...creation(), approval_required: false };
   const link = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   await link('create', input);
@@ -31,8 +30,8 @@ export async function approvedDelivery({ ingress, githubUrl, http, db, creation,
   assert.deepEqual(confirmed, replay);
   assert.deepEqual(confirmed.command, command);
   assert.equal(await puts(), 1, 'unknown reconciliation only reads');
-  await http(`${githubUrl}/repos/acme/api/invitations/${confirmed.outcome.upstream_id}`, undefined, 'DELETE');
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91, role_name: 'write' });
+  // The requester accepts the invitation on GitHub.
+  await github.accept('user-91', { id: confirmed.outcome.upstream_id });
   await http(`${ingress}/DeliveryObservation/observe`,await receiver('status'));
   const settled = await eventually(() => receiver('status'), value => value?.settlement?.state === 'accepted');
   assert.deepEqual(settled.create, confirmed);
@@ -47,6 +46,5 @@ export async function approvedDelivery({ ingress, githubUrl, http, db, creation,
   assert.deepEqual(events.results.map(event=>event.event_type).sort(),['delivery.outcome_unknown','invitation.accepted','invitation.sent']);
   assert.deepEqual(await receiver('create', command), confirmed);
   assert.equal(await puts(), 1);
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   console.log('PASS Worker/D1 approved delivery with all projected parents withheld, applied PUT/result loss, read-only recovery and independent convergence');
 }

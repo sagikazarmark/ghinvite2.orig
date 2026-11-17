@@ -5,17 +5,18 @@ import { revokeCommand } from './revocation-fixture.mjs';
 
 // Runs only against the separately compiled preactivation composition, with
 // real Restate owners, D1 fences and InviteBudget. No production enable switch.
-export async function cancellation({ingress,githubUrl,http,db,id,creation,eventually,loseNextDelete,lostDeletes,setClock,holdPut}) {
+export async function cancellation({ingress,github,http,db,id,creation,eventually,setClock}) {
+  // The Worker's pinned clock and GitHub's move together (JWTs are checked).
+  const setTime=async ms=>{setClock(ms);await github.follow(ms);};
   for (const user of [7,91,92,93,94,95,96,97]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')")
     .bind(user,`user-${user}`).run();
   await http(`${ingress}/Installation/repo:1/onboard`,setupCommand({app:'repo',installation_id:1,account_id:100,account_login:'acme',account_type:'Organization',selected_repos:'all',installed_at:'2026-01-01T00:00:00Z'}));
   await establishInstallingOwner({http,ingress});
   const budget=()=>http(`${ingress}/InviteBudget/repo:100/snapshot`);
-  const calls=()=>http(`${githubUrl}/calls`,undefined,'GET');
-  const deletions=async upstream=>(await calls()).requests.filter(row=>row.method==='DELETE' && row.path===`/repos/acme/api/invitations/${upstream}`);
+  const deletions=upstream=>github.requests('DELETE',`/repos/acme/api/invitations/${upstream}`);
   const fixture=async(user,foreign=false,lifetime=604800,queueCancel=false)=>{
-    await http(`${githubUrl}/identity`,{login:`user-${user}`,addressed_id:user});
-    if(foreign) await http(`${githubUrl}/repos/acme/api/collaborators/user-${user}`,{permission:'pull'},'PUT');
+    // Foreign: someone else (the organization's owner) invited the requester already.
+    if(foreign) await github.foreignInvitation(`user-${user}`,{id:900000+user});
     const create={...creation(),max_uses:3,approval_required:true,invitation_lifetime_seconds:lifetime};
     await http(`${ingress}/InvitationLink/${create.link_id}/create`,create);
     const admission=await http(`${ingress}/InvitationLink/${create.link_id}/admit`,{...admitCapability(create.link_id),link_id:create.link_id,requester_id:user,operation_id:id()});
@@ -27,7 +28,7 @@ export async function cancellation({ingress,githubUrl,http,db,id,creation,eventu
     const key=`${request_id}:10:1`, call=(handler,input)=>http(`${ingress}/RepositoryDelivery/${key}/${handler}`,input);
     const control={envelope:{identity:{link_id:create.link_id,request_id,kind:'repository',target_id:10,delivery_generation:1},operation_id:id(),revision:100,hold_epoch:0,at:new Date().toISOString(),
       control:{kind:'revoked',cancel_pending_invitations:true,decline_pending_requests:false,abort_hold:null}},admitted_at:request.admitted_at,invitation_lifetime_seconds:lifetime};
-    const held=queueCancel?holdPut():null;
+    const held=queueCancel?await github.holdPut():null;
     let approved;
     try {
       approved=await http(`${ingress}/InvitationRequest/${request_id}/decide`,decision);
@@ -75,9 +76,11 @@ export async function cancellation({ingress,githubUrl,http,db,id,creation,eventu
   console.log('PASS signed cancellation: foreign invitation stops tracking without DELETE, cancellation fence, settlement or budget charge');
 
   const unknown=await fixture(93), beforeUnknown=await budget();
-  loseNextDelete();
+  // The DELETE is applied on GitHub, but its response is lost.
+  const lost=await github.emulator.fault({method:'DELETE',path:'/repos/{owner}/{repo}/invitations/{id}',times:1,label:'lost delete',action:{kind:'apply_then_lose',status:502}});
   await unknown.call('control',unknown.control);
-  await eventually(async()=>({lost:lostDeletes(),calls:(await deletions(unknown.upstream)).length}),value=>value.lost===1&&value.calls===1);
+  const lostDeletes=async()=>(await github.emulator.admin('GET',`/faults/${lost}`)).fired;
+  await eventually(async()=>({lost:await lostDeletes(),calls:(await deletions(unknown.upstream)).length}),value=>value.lost===1&&value.calls===1);
   await replay(unknown);
   const unresolved=await unknown.call('status');
   assert.deepEqual(unresolved.create,unknown.snapshot.create);assert.equal(unresolved.settlement,null);
@@ -98,8 +101,7 @@ export async function cancellation({ingress,githubUrl,http,db,id,creation,eventu
 
   const accepted=await fixture(96), beforeAccepted=await budget();
   // Upstream acceptance: invitation disappears and the numeric user has access.
-  await http(`${githubUrl}/repos/acme/api/invitations/${accepted.upstream}`,undefined,'DELETE');
-  await http(`${githubUrl}/identity`,{login:'user-96',addressed_id:96,role_name:'read'});
+  await github.accept('user-96',{id:accepted.upstream});
   const acceptanceDeletes=(await deletions(accepted.upstream)).length;
   await accepted.call('control',accepted.control);
   const acceptedWinner=await eventually(()=>accepted.call('status'),value=>value?.settlement?.state==='accepted');
@@ -138,13 +140,13 @@ export async function cancellation({ingress,githubUrl,http,db,id,creation,eventu
   assert.equal((await deletions(expiring.upstream)).length,0);
   const chargedHour=(await budget()).content_used_hour;
   for(let retry=1;retry<=3;retry++) {
-    setClock(Date.now()+retry*70_000);
+    await setTime(Date.now()+retry*70_000);
     await unknown.call('drive_cancellation');
     assert.equal((await unknown.call('status')).settlement,null);
     assert.equal((await deletions(unknown.upstream)).length,1);
     assert.equal((await budget()).content_used_hour,chargedHour,'due unknown recovery never refunds or acquires another write slot');
   }
-  setClock(Date.now()+3_610_000);
+  await setTime(Date.now()+3_610_000);
   try {
     await expiring.call('tick_own_expiry',{generation:99,upstream_id:expiring.upstream});
     assert.equal((await deletions(expiring.upstream)).length,0,'wrong timer generation cannot cancel');

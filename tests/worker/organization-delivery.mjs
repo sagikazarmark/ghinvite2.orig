@@ -1,48 +1,37 @@
 import assert from 'node:assert/strict';
 import { isDeepStrictEqual } from 'node:util';
-import { Response } from 'miniflare';
+import { orgApp } from './github-world.mjs';
 
-// Signed Restate -> production Worker composition -> real D1 and budget. Only
-// GitHub HTTP is scripted, with distinct read/write credentials and numeric IDs.
-export async function organizationDelivery({ingress,http,id,db,eventually,observe}) {
-  const account=840,installation=8402,user=8,team=50,upstream=84099;
-  let pending=false,createdAt,seatsFull=true;
-  const trace=[],profiles=new Set();
-  const invitation=()=>({id:upstream,login:'alice',email:null,role:'direct_member',created_at:createdAt,inviter:{id:7,login:'owner'},team_count:1});
-  observe(async request=>{
-    const path=new URL(request.url).pathname,method=request.method,authorization=request.headers.get('authorization');
-    const body=['GET','HEAD'].includes(method)?null:await request.json();
-    trace.push({path,method,body});
-    if(path===`/app/installations/${installation}` || path===`/app/installations/${installation}/access_tokens`) {
-      assert.equal(JSON.parse(Buffer.from(authorization.split('.')[1],'base64url').toString()).iss,'Iv.fixture-org');
-      if(path.endsWith('/access_tokens')) {
-        const profile=body.permissions.members;
-        assert.ok(['read','write'].includes(profile));
-        assert.deepEqual(body,{permissions:{members:profile,metadata:'read'}});
-        profiles.add(profile);
-        return Response.json({token:`ghs_org_delivery_${profile}`,permissions:body.permissions,expires_at:'2099-01-01T00:00:00Z'},{status:201});
-      }
-      return Response.json({id:installation,app_id:456,account:{id:account,login:'org-fixture',type:'Organization'},repository_selection:'all',permissions:{members:'write',metadata:'read'},created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z',suspended_at:null});
-    }
-    assert.equal(authorization,`Bearer ghs_org_delivery_${method==='GET'?'read':'write'}`);
-    if(path==='/orgs/org-fixture') return Response.json({id:account,login:'org-fixture',created_at:'2020-01-01T00:00:00Z',plan:{name:'enterprise',seats:10,filled_seats:seatsFull?10:9},two_factor_requirement_enabled:true,default_repository_permission:'read'});
-    if(path===`/user/${user}` || path==='/users/alice') return Response.json({id:user,login:'alice'});
-    if(path==='/orgs/org-fixture/memberships/alice') return pending
-      ? Response.json({role:'member',state:'pending',user:{id:user,login:'alice'},organization:{id:account,login:'org-fixture'}})
-      : Response.json({}, {status:404});
-    if(path==='/orgs/org-fixture/teams/devs') return Response.json({id:team,slug:'devs',name:'Developers'});
-    if(path==='/orgs/org-fixture/teams/devs/memberships/alice') return Response.json({}, {status:404});
-    if(path===`/orgs/org-fixture/invitations/${upstream}/teams`) return Response.json([{id:team,slug:'devs',name:'Developers'}]);
-    if(path==='/orgs/org-fixture/invitations') {
-      if(method==='GET') return Response.json(pending?[invitation()]:[]);
-      assert.equal(method,'POST');
-      assert.equal(pending,false,'only one org invitation may be created');
-      assert.deepEqual(body,{invitee_id:user,role:'direct_member',team_ids:[team]});
-      pending=true;createdAt=new Date().toISOString();
-      return Response.json(invitation(),{status:201});
-    }
-    assert.fail(`unexpected organization delivery HTTP ${method} ${path}`);
-  });
+const account=840,installation=8402,user=8,team=50;
+
+// GitHub (octoemu): `org-fixture` (840, owner 7) with the team `devs` (50),
+// alice (8), the organization App installed as 8402; and, for the spam
+// case, `spam-fixture` (841) with `spam-user` (9), installed as 8412.
+export const seed = () => ({
+  users:[{id:7,login:'owner'},{id:user,login:'alice'},{id:9,login:'spam-user'},{id:6,login:'spam-owner'}],
+  orgs:[{id:account,login:'org-fixture',created_at:'2020-01-01T00:00:00Z',two_factor_requirement_enabled:true,default_repository_permission:'read'},
+    {id:841,login:'spam-fixture',created_at:'2020-01-01T00:00:00Z'}],
+  teams:[{id:team,org:'org-fixture',slug:'devs',name:'Developers'}],
+  apps:[orgApp],
+  installations:[{id:installation,app_id:456,account:'org-fixture',repository_selection:'all',created_at:'2026-01-01T00:00:00Z'},
+    {id:8412,app_id:456,account:'spam-fixture',repository_selection:'all',created_at:'2026-01-01T00:00:00Z'}],
+  memberships:[{org:'org-fixture',user:'owner',role:'admin',state:'active'},{org:'spam-fixture',user:'spam-owner',role:'admin',state:'active'}],
+});
+
+// The installation token's read of the organization with the plan's seats.
+// GitHub shows `plan` only to a token holding `organization_plan`
+// (documented), which ghinvite's ORG_READ profile does not ask for, so the
+// emulator leaves it out; this injected answer is what such a token would
+// see, keeping the NoSeat path reachable (see the GE-09b-2 notes).
+const organization=filled=>({id:account,login:'org-fixture',created_at:'2020-01-01T00:00:00Z',
+  plan:{name:'enterprise',seats:10,filled_seats:filled},two_factor_requirement_enabled:true,default_repository_permission:'read'});
+
+// Signed Restate -> production Worker composition -> real D1 and budget.
+// GitHub is octoemu, with distinct read/write credentials and numeric IDs.
+export async function organizationDelivery({ingress,http,id,db,eventually,github}) {
+  const emulator=github.emulator;
+  const trace=async()=>(await github.calls()).map(call=>({method:call.method,path:call.path.split('?')[0],identity:call.identity}));
+  let plan=await emulator.fault({method:'GET',path:'/orgs/org-fixture',label:'plan seats',action:{kind:'respond',status:200,body:organization(10)}});
   try {
     for(const [uid,login] of [[7,'owner'],[user,'alice']]) await db.prepare('INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, ?)').bind(uid,login,new Date().toISOString()).run();
     const onboarding={operation_id:id(),verified:{app:'org',account:{installation_id:installation,account_id:account,account_login:'org-fixture',account_type:'Organization',selected_repos:[],installed_at:'2026-01-01T00:00:00Z',uninstalled_at:null},suspended_at:null,permissions:{members:'write',metadata:'read'}}};
@@ -52,9 +41,9 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     assert.deepEqual(cached.seats,{capacity:10,used:10});
     assert.equal(cached.two_factor_required,true);assert.equal(cached.base_permission,'read');
     assert.equal(cached.managed_enterprise,null);
-    const reads=trace.length;
+    const reads=(await trace()).length;
     assert.deepEqual(await facts(),cached);
-    assert.equal(trace.length,reads,'same-hour cache does not repeat GitHub reads');
+    assert.equal((await trace()).length,reads,'same-hour cache does not repeat GitHub reads');
     const link=id(),secret='2a'.repeat(32);
     const creation={link_id:link,secret_sha256:secret,account_id:account,installation_id:installation,budget_share_pct:17,admin:{account_id:account,user_id:7},description:'Signed org delivery',max_uses:10,approval_required:false,targets:{organization:{org_id:account,org_login:'org-fixture',grant:'member'},teams:[{team_id:team,team_slug:'devs',grant:'member'}],repos:[]}};
     assert.deepEqual(await http(`${ingress}/InvitationLink/${link}/create`,creation),{Ok:{link_id:link,secret_generation:1}});
@@ -68,7 +57,7 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     const request=admission.result.request_id,key=`${request}:${account}:1`;
     const status=()=>http(`${ingress}/OrganizationDelivery/${key}/status`);
     await eventually(status,value=>value?.create.outcome.kind==='blocked'&&value.create.outcome.reason==='no_seat');
-    assert.equal(trace.filter(t=>t.method==='POST'&&t.path==='/orgs/org-fixture/invitations').length,0);
+    assert.equal((await trace()).filter(t=>t.method==='POST'&&t.path==='/orgs/org-fixture/invitations').length,0);
     const auditRows=async()=> (await db.prepare("SELECT id,event_type,occurred_at,target_kind,target_id,metadata FROM audit_events WHERE request_id=? AND event_type IN ('delivery.blocked','delivery.outcome_unknown','delivery.held','delivery.released') ORDER BY id").bind(request).all()).results;
     const blockedAudits=await eventually(auditRows,rows=>rows.length===1);
     assert.deepEqual(blockedAudits.map(row=>row.target_id).sort(),[`org:${key}`]);
@@ -83,7 +72,8 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     const blocked=await status();
     for(let replay=0;replay<2;replay++) await http(`${ingress}/OrganizationDelivery/${key}/create`,blocked.create.command);
     assert.deepEqual(await auditRows(),blockedAudits,'repeated NoSeat polls preserve exact audit identity and time');
-    seatsFull=false;
+    await emulator.removeFault(plan);
+    plan=await emulator.fault({method:'GET',path:'/orgs/org-fixture',label:'plan seats',action:{kind:'respond',status:200,body:organization(9)}});
     // A verified installation event refreshes facts, but cached facts alone do
     // not bypass the retained daily NoSeat deadline.
     await http(`${ingress}/Installation/org:${installation}/onboard_webhook`,{delivery_id:'ab'.repeat(32),updated_at:new Date().toISOString(),action:'new_permissions_accepted',verified:onboarding.verified,sender_id:7,sender_login:'owner'});
@@ -93,9 +83,10 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     const capacityHint={account_id:account,installation_id:installation,removed_user_id:999,payload_sha256:Array(32).fill(42)};
     await http(`${ingress}/OrganizationEligibility/org:${account}/member_removed`,capacityHint);
     const receipt=await eventually(status,value=>value?.create.outcome.kind==='created');
-    const afterWake=trace.length;
+    const afterWake=(await trace()).length;
     await http(`${ingress}/OrganizationEligibility/org:${account}/member_removed`,capacityHint);
-    assert.equal(trace.length,afterWake,'exact account hint replay does not repeat delivery checks');
+    assert.equal((await trace()).length,afterWake,'exact account hint replay does not repeat delivery checks');
+    const upstream=(await github.api('GET','/orgs/org-fixture/invitations',undefined,{installation})).find(value=>value.login==='alice').id;
     assert.equal(receipt.invitation_timing.upstream_id,upstream);
     assert.equal(Date.parse(receipt.invitation_timing.created_at),Date.parse(receipt.create.outcome.created_at));
     assert.equal(receipt.invitation_timing.owned_lifetime_seconds,604800);
@@ -121,9 +112,13 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     const budget=await http(`${ingress}/InviteBudget/org:${account}/snapshot`);
     const orgBucket=budget.buckets.find(b=>b.bucket.kind==='org');
     assert.equal(orgBucket.used_24h,1,'exact recovery cannot charge another invitation');
-    assert.deepEqual([...profiles].sort(),['read','write']);
-    assert.equal(trace.filter(t=>t.method==='POST'&&t.path==='/orgs/org-fixture/invitations').length,1);
-    assert.equal(trace.filter(t=>t.method==='PUT').length,0,'all selected teams ride the original org POST');
+    const minted=new Map((await emulator.state()).tokens.map(token=>[token.id,token.permissions.members]));
+    const calls=await trace();
+    assert.deepEqual([...new Set(calls.filter(t=>t.identity?.kind==='installation').map(t=>minted.get(t.identity.token_id)))].sort(),['read','write']);
+    for(const t of calls.filter(t=>t.identity?.kind==='installation')) assert.equal(minted.get(t.identity.token_id),t.method==='GET'?'read':'write',`${t.method} ${t.path} uses the matching profile`);
+    const posts=calls.filter(t=>t.method==='POST'&&t.path==='/orgs/org-fixture/invitations');
+    assert.equal(posts.length,1);
+    assert.equal(calls.filter(t=>t.method==='PUT').length,0,'all selected teams ride the original org POST');
     assert.deepEqual(await auditRows(),blockedAudits,'later confirmation preserves historical NoSeat facts without duplicate transient events');
     assert.equal(receipt.create.audit_version,'canonical_v2');
     const sent=await eventually(async()=> (await db.prepare("SELECT id,target_kind,target_id FROM audit_events WHERE request_id=? AND event_type='org_invitation.sent'").bind(request).all()).results,rows=>rows.length===1);
@@ -135,37 +130,18 @@ export async function organizationDelivery({ingress,http,id,db,eventually,observ
     assert.ok(telemetry.every(row=>Date.parse(row.last_observed_at)>=Date.parse(receipt.create.command.approved_at)));
 
     console.log('PASS signed Worker organization eligibility cache, installation refresh, NoSeat account wake and duplicate receipt; organization delivery: real onboarding/admission/dispatch/budget/D1, exact ORG_READ/ORG_WRITE mint, one POST with all teams, immutable admission/recovery and requester progress; exact NoSeat audit fact survives confirmation and replays; canonical org invitation audit, per-step observation clocks and minimal requester 2FA advisory');
-  } finally { observe(null); }
-  await organizationSpam({ingress,http,id,db,eventually,observe});
+  } finally { await emulator.removeFault(plan); }
+  await organizationSpam({ingress,http,id,db,eventually,github});
 }
 
 // A different real account/budget isolates this refusal from the successful
 // invitation above. No direct record_limit injection: the HTTP response must
 // pass through the owner, retained completion, governor and D1 projector.
-async function organizationSpam({ingress,http,id,db,eventually,observe}) {
+async function organizationSpam({ingress,http,id,db,eventually,github}) {
   const account=841,installation=8412,user=9,login='spam-fixture';
-  let posts=0;
-  observe(async request=>{
-    const path=new URL(request.url).pathname,method=request.method;
-    if(path===`/app/installations/${installation}`) return Response.json({id:installation,app_id:456,account:{id:account,login,type:'Organization'},repository_selection:'all',permissions:{members:'write',metadata:'read'},created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z',suspended_at:null});
-    if(path===`/app/installations/${installation}/access_tokens`) {
-      const body=await request.json();
-      assert.deepEqual(body,{permissions:{members:body.permissions.members,metadata:'read'}});
-      return Response.json({token:`ghs_spam_${body.permissions.members}`,permissions:body.permissions,expires_at:'2099-01-01T00:00:00Z'},{status:201});
-    }
-    assert.equal(request.headers.get('authorization'),`Bearer ghs_spam_${method==='GET'?'read':'write'}`);
-    if(path===`/orgs/${login}`) return Response.json({id:account,login,created_at:'2020-01-01T00:00:00Z'});
-    if(path===`/user/${user}` || path==='/users/spam-user') return Response.json({id:user,login:'spam-user'});
-    if(path===`/orgs/${login}/memberships/spam-user`) return Response.json({}, {status:404});
-    if(path===`/orgs/${login}/invitations`) {
-      if(method==='GET') return Response.json([]);
-      assert.equal(method,'POST');
-      assert.deepEqual(await request.json(),{invitee_id:user,role:'direct_member',team_ids:[]});
-      posts++;
-      return Response.json({message:'Validation Failed',errors:[{resource:'OrganizationInvitation',code:'spammed'}]},{status:422});
-    }
-    assert.fail(`unexpected spam fixture HTTP ${method} ${path}`);
-  });
+  // GitHub flags the organization: its invitation writes answer `spammed`.
+  await github.emulator.admin('POST',`/orgs/${login}/spammed`,{spammed:true});
+  const posts=async()=>(await github.requests('POST',`/orgs/${login}/invitations`)).length;
   try {
     await db.prepare('INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, ?)').bind(user,'spam-user',new Date().toISOString()).run();
     await http(`${ingress}/Installation/org:${installation}/onboard`,{operation_id:id(),verified:{app:'org',account:{installation_id:installation,account_id:account,account_login:login,account_type:'Organization',selected_repos:[],installed_at:'2026-01-01T00:00:00Z',uninstalled_at:null},suspended_at:null,permissions:{members:'write',metadata:'read'}}});
@@ -184,7 +160,7 @@ async function organizationSpam({ingress,http,id,db,eventually,observe}) {
     const closed=first.buckets.find(bucket=>bucket.bucket.kind==='org').closed_until;
     assert.ok(Date.parse(closed)>Date.now()+23*3600*1000);
     for(let replay=0;replay<3;replay++) await http(`${ingress}/OrganizationDelivery/${key}/create`,receipt.create.command);
-    assert.equal(posts,1,'positive spam refusal and retained retries must not repeat POST');
+    assert.equal(await posts(),1,'positive spam refusal and retained retries must not repeat POST');
     const repeated=await snapshot();
     assert.deepEqual(repeated.limit_counts,first.limit_counts,'same classified refusal is counted once');
     assert.equal(repeated.buckets.find(bucket=>bucket.bucket.kind==='org').closed_until,closed);
@@ -197,5 +173,5 @@ async function organizationSpam({ingress,http,id,db,eventually,observe}) {
     assert.deepEqual(projected.limit_counts,first.limit_counts,'D1 preserves classified refusal counts and coverage');
     assert.equal(projected.buckets.find(bucket=>bucket.bucket.kind==='org').closed_until,closed);
     console.log('PASS signed Worker org spam: one rejected POST, immutable retry refusal, one classified observation, closed org bucket and real D1 count persistence');
-  } finally { observe(null); }
+  } finally { await github.emulator.admin('POST',`/orgs/${login}/spammed`,{spammed:false}); }
 }

@@ -1,5 +1,6 @@
 import { registerFinalLogScan } from './runtime-output.mjs';
 import assert from 'node:assert/strict';
+import { GITHUB_TOKEN } from './octoemu.mjs';
 
 // Both ordinary random capabilities and the dedicated deterministic entropy
 // fixture use these same raw persistence and runtime-log scans.
@@ -12,6 +13,8 @@ export async function capabilitySecrecy({ secrets, markerPrefixes = [], credenti
   const scan = data => {
     const bytes = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
     for (const needle of needles) assert.equal(bytes.includes(needle), false, 'secret marker escaped its permitted boundary');
+    // The emulator's GitHub tokens are random: no marker, so look for the shape.
+    assert.doesNotMatch(bytes.toString('latin1'), GITHUB_TOKEN, 'a GitHub token escaped its permitted boundary');
   };
   registerFinalLogScan(scan);
   const scanValue = value => {
@@ -116,5 +119,5 @@ export async function capabilitySecrecy({ secrets, markerPrefixes = [], credenti
   assert.ok(authorityRows > 0, 'journey exercised persisted authority decisions');
   for (const log of logs()) scan(log);
   console.log(`PASS discovered system inventory (${systemRows} rows): ${inventoryCounts.join(', ')}`);
-  console.log(`PASS ${markerPrefixes.length ? 'deterministic entropy-hook' : 'dynamically generated'} capability and ${credentialMarkers.length} credential marker absence: ${journals.rows.length} retained raw journal entries, ${state.rows.length} state rows, ${rows} rows across ${applicationTables.length} D1 application tables, ${sessionRows} session KV rows, ${authorityRows} authority-cache KV rows, body-prefix runtime logs (launcher verifies shutdown suffix); persisted BLOB/encoded-text negative controls rejected`);
+  console.log(`PASS ${markerPrefixes.length ? 'deterministic entropy-hook' : 'dynamically generated'} capability, ${credentialMarkers.length} credential marker and GitHub token shape absence: ${journals.rows.length} retained raw journal entries, ${state.rows.length} state rows, ${rows} rows across ${applicationTables.length} D1 application tables, ${sessionRows} session KV rows, ${authorityRows} authority-cache KV rows, body-prefix runtime logs (launcher verifies shutdown suffix); persisted BLOB/encoded-text negative controls rejected`);
 }

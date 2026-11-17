@@ -2,13 +2,11 @@ import assert from 'node:assert/strict';
 import { setupCommand, establishInstallingOwner } from './installation-fixture.mjs';
 import { admitCapability } from './capability.mjs';
 
-export async function deliveryControl({ingress,githubUrl,http,db,id,creation,eventually,storage}) {
+export async function deliveryControl({ingress,github,http,db,id,creation,eventually,storage}) {
   for (const user of [7,91]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user,`user-${user}`).run();
   await http(`${ingress}/Installation/repo:1/onboard`,setupCommand({app:'repo',installation_id:1,account_id:100,account_login:'acme',account_type:'Organization',selected_repos:'all',installed_at:'2026-01-01T00:00:00Z'}));
   await establishInstallingOwner({http,ingress});
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91});
-  const calls=()=>http(`${githubUrl}/calls`,undefined,'GET');
-  const writes=async()=> (await calls()).requests.filter(r=>r.method==='PUT');
+  const writes=()=>github.requests('PUT');
   const auditFacts=async key=>(await db.prepare("SELECT id,event_type,occurred_at,target_kind,target_id,metadata FROM audit_events WHERE json_extract(metadata,'$.delivery_id')=? AND event_type IN ('delivery.blocked','delivery.outcome_unknown','delivery.held','delivery.released') ORDER BY json_extract(metadata,'$.transition_revision'),event_type").bind(key).all()).results.map(row=>({...row,metadata:JSON.parse(row.metadata)}));
 
 
@@ -117,9 +115,8 @@ export async function deliveryControl({ingress,githubUrl,http,db,id,creation,eve
 
   // An already-applied create with a lost HTTP response remains uncertain until
   // positive presence resolves it. Cascade retains intent and never DELETEs.
-  await http(`${githubUrl}/reset`,undefined,'DELETE');
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91});
-  await http(`${githubUrl}/outcomes`,{owner:'acme',repo:'api',user:'user-91',outcome:'created_response_lost'});
+  await github.reset('user-91');
+  await github.outcome('user-91','created_response_lost');
   const uncertain=await fixture();
   const approvedUnknown=await uncertain.approve();
   const unknownSnapshot=await eventually(()=>uncertain.call('status'),v=>v?.create.outcome.kind==='outcome_unknown');
@@ -133,7 +130,7 @@ export async function deliveryControl({ingress,githubUrl,http,db,id,creation,eve
   await assertFence(recovered.command,uncertain.key);
   assert.deepEqual(await uncertain.call('create',approvedUnknown.command),recovered);
   assert.equal((await writes()).length,1);
-  assert.equal((await calls()).requests.filter(r=>r.method==='DELETE').length,0);
+  assert.equal((await github.requests('DELETE')).length,0);
   assert.deepEqual(await uncertain.call('control',cascade),pending,'original operation receipt survives resolution');
   const unknownHistory=await eventually(()=>auditFacts(uncertain.key),rows=>rows.length===1);
   assertCanonicalFacts(unknownHistory,uncertain.key);
@@ -144,13 +141,17 @@ export async function deliveryControl({ingress,githubUrl,http,db,id,creation,eve
 
   // Park before approval dispatch, then release into a fresh negative numeric
   // identity read. Rechecks of the same bounded reason are one audit episode.
-  await http(`${githubUrl}/reset`,undefined,'DELETE');
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91});
+  await github.reset('user-91');
   const blocked=await fixture();
   await blocked.call('control',blocked.control(100,100,{kind:'auto_pause',window:blocked.window}));
   const blockedApproved=await blocked.approve();
   await eventually(()=>blocked.call('status'),v=>v?.create.outcome.kind==='held');
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:999});
+  // User 91 renamed and a new account 999 took the login, while the read by
+  // ID still answers the old login (a stale lookup, injected): the two
+  // identity reads disagree on every recheck.
+  await github.rename('user-91','user-91-renamed');
+  await github.emulator.seed({users:[{id:999,login:'user-91'}]});
+  await github.emulator.fault({method:'GET',path:'/user/91',label:'stale identity',action:{kind:'respond',status:200,body:{id:91,login:'user-91',type:'User'}}});
   await blocked.call('control',blocked.control(101,100,{kind:'active'}));
   await eventually(()=>blocked.call('status'),v=>v?.create.outcome.kind==='blocked');
   for(let n=0;n<2;n++) assert.equal((await blocked.call('create',blockedApproved.command)).outcome.kind,'blocked');

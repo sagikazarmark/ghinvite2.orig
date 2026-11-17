@@ -3,7 +3,7 @@ import { setupCommand, establishInstallingOwner } from './installation-fixture.m
 import { admitCapability } from './capability.mjs';
 import { revokeCommand } from './revocation-fixture.mjs';
 
-export async function linkPause({ ingress,githubUrl,http,db,id,creation,eventually }) {
+export async function linkPause({ ingress,github,http,db,id,creation,eventually }) {
   // Projection parents normally come from sign-in; direct owner calls bypass it.
   for (const user of [7, 91]) {
     await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')")
@@ -61,15 +61,14 @@ export async function linkPause({ ingress,githubUrl,http,db,id,creation,eventual
   const audit=await eventually(()=>db.prepare("SELECT event_type,COUNT(*) AS count FROM audit_events WHERE target_id=? AND event_type IN ('invitation_link.paused','invitation_link.resumed') GROUP BY event_type ORDER BY event_type").bind(link).all(),value=>value.results.length===2);
   assert.deepEqual(audit.results,[{event_type:'invitation_link.paused',count:1},{event_type:'invitation_link.resumed',count:1}]);
   await establishInstallingOwner({http,ingress});
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91});
-  const writes=async()=> (await http(`${githubUrl}/calls`,undefined,'GET')).requests.filter(row=>['PUT','DELETE'].includes(row.method)).length;
+  const writes=async()=> (await github.calls()).filter(row=>['PUT','DELETE'].includes(row.method)).length;
   for(const revoke of [false,true]) {
     const command={...creation(),max_uses:null,approval_required:revoke,abuse_threshold_per_hour:1,
       expires_at:revoke?null:new Date(Date.now()+86400000).toISOString()};
     const link=command.link_id, call=(handler,input)=>http(`${ingress}/InvitationLink/${link}/${handler}`,input);
     await call('create',command);
     if(!revoke) {
-      await http(`${githubUrl}/installation-repositories`,[]);
+      await github.select([]);
       await http(`${ingress}/Installation/repo:1/repos_changed`,{app:'repo',installation_id:1,selected_repos:[]});
       assert.deepEqual((await http(`${ingress}/AccountInstallation/repo:100/current_installation`)).selected_repos,[]);
     }
@@ -101,7 +100,7 @@ export async function linkPause({ ingress,githubUrl,http,db,id,creation,eventual
       assert.deepEqual(await call('revoke',revocation),revoked);
       assert.deepEqual(await call('admit',attempt),accepted);
     } else {
-      await http(`${githubUrl}/installation-repositories`,[10,11]);
+      await github.select([10,11]);
       await http(`${ingress}/Installation/repo:1/repos_changed`,{app:'repo',installation_id:1,selected_repos:[10,11]});
       assert.equal(await writes(),before);
       const resume={link_id:link,admin:command.admin,operation_id:id()};

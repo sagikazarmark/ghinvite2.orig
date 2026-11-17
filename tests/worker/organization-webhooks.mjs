@@ -3,6 +3,20 @@ import { createHash, createHmac } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Response } from 'miniflare';
 import { installedWebApp, signinApp } from './app-config.mjs';
+import { orgApp } from './github-world.mjs';
+
+const account=860, installation=8602, user=8, team=50;
+
+// GitHub (octoemu): `org-fixture` (860, owner 7) with the team `devs` (50),
+// alice (8), the organization App installed as 8602.
+export const seed = () => ({
+  users:[{id:7,login:'owner'},{id:user,login:'alice'}],
+  orgs:[{id:account,login:'org-fixture',created_at:'2020-01-01T00:00:00Z'}],
+  teams:[{id:team,org:'org-fixture',slug:'devs',name:'Developers'}],
+  apps:[orgApp],
+  installations:[{id:installation,app_id:456,account:'org-fixture',repository_selection:'all',created_at:'2026-01-01T00:00:00Z'}],
+  memberships:[{org:'org-fixture',user:'owner',role:'admin',state:'active'}],
+});
 
 const forwarded = [];
 let loseAcknowledgement = true;
@@ -46,45 +60,11 @@ export function organizationWebhookWorker(ingress) {
 }
 
 // Real HMAC ingress, D1 exact routing, signed Restate dispatch and fresh owner
-// observation. GitHub alone is scripted; webhook claims never settle a target.
-export async function organizationWebhooks({ mf, ingress, http, id, db, eventually, observe }) {
-  const account=860, installation=8602, user=8, team=50, upstream=86099;
-  let pending=false, active=false, createdAt, membershipReads=0, posts=0;
-  const invitation=()=>({id:upstream,login:'alice',email:null,role:'direct_member',created_at:createdAt,inviter:{id:7,login:'owner'},team_count:1});
-  observe(async request=>{
-    const path=new URL(request.url).pathname, method=request.method, authorization=request.headers.get('authorization');
-    const body=['GET','HEAD'].includes(method)?null:await request.json();
-    if(path===`/app/installations/${installation}` || path===`/app/installations/${installation}/access_tokens`) {
-      assert.equal(JSON.parse(Buffer.from(authorization.split('.')[1],'base64url').toString()).iss,'Iv.fixture-org');
-      if(path.endsWith('/access_tokens')) {
-        const profile=body.permissions.members;
-        assert.ok(['read','write'].includes(profile));
-        assert.deepEqual(body,{permissions:{members:profile,metadata:'read'}});
-        return Response.json({token:`ghs_org_webhook_${profile}`,permissions:body.permissions,expires_at:'2099-01-01T00:00:00Z'},{status:201});
-      }
-      return Response.json({id:installation,app_id:456,account:{id:account,login:'org-fixture',type:'Organization'},repository_selection:'all',permissions:{members:'write',metadata:'read'},created_at:'2026-01-01T00:00:00Z',updated_at:'2026-01-01T00:00:00Z',suspended_at:null});
-    }
-    assert.equal(authorization,`Bearer ghs_org_webhook_${method==='GET'?'read':'write'}`);
-    if(path==='/orgs/org-fixture') return Response.json({id:account,login:'org-fixture',created_at:'2020-01-01T00:00:00Z'});
-    if(path===`/user/${user}` || path==='/users/alice') return Response.json({id:user,login:'alice'});
-    if(path==='/orgs/org-fixture/memberships/alice') {
-      membershipReads++;
-      return active || pending ? Response.json({role:'member',state:active?'active':'pending',user:{id:user,login:'alice'},organization:{id:account,login:'org-fixture'}}) : Response.json({}, {status:404});
-    }
-    if(path==='/orgs/org-fixture/teams/devs') return Response.json({id:team,slug:'devs',name:'Developers'});
-    if(path==='/orgs/org-fixture/teams/devs/memberships/alice') return active ? Response.json({role:'member',state:'active'}) : Response.json({}, {status:404});
-    if(path===`/orgs/org-fixture/invitations/${upstream}/teams`) return Response.json([{id:team,slug:'devs',name:'Developers'}]);
-    if(path==='/orgs/org-fixture/failed_invitations') return Response.json([]);
-    if(path==='/orgs/org-fixture/invitations') {
-      if(method==='GET') return Response.json(pending?[invitation()]:[]);
-      assert.equal(method,'POST');
-      assert.equal(posts++,0);
-      assert.deepEqual(body,{invitee_id:user,role:'direct_member',team_ids:[team]});
-      pending=true;createdAt=new Date().toISOString();
-      return Response.json(invitation(),{status:201});
-    }
-    assert.fail(`unexpected webhook observation HTTP ${method} ${path}`);
-  });
+// observation. GitHub is octoemu (alice accepts there); webhook claims never
+// settle a target.
+export async function organizationWebhooks({ mf, ingress, http, id, db, eventually, github }) {
+  const membershipReads=async()=>(await github.requests('GET','/orgs/org-fixture/memberships/alice')).length;
+  const posts=async()=>(await github.requests('POST','/orgs/org-fixture/invitations')).length;
   try {
     for(const [uid,login] of [[7,'owner'],[user,'alice']]) await db.prepare('INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, ?)').bind(uid,login,new Date().toISOString()).run();
     await http(`${ingress}/Installation/org:${installation}/onboard`,{operation_id:id(),verified:{app:'org',account:{installation_id:installation,account_id:account,account_login:'org-fixture',account_type:'Organization',selected_repos:[],installed_at:'2026-01-01T00:00:00Z',uninstalled_at:null},suspended_at:null,permissions:{members:'write',metadata:'read'}}});
@@ -105,13 +85,14 @@ export async function organizationWebhooks({ mf, ingress, http, id, db, eventual
     const payload={action:'member_added',installation:{id:installation,app_id:456},organization:{id:account},membership:{user:{id:user}},sender:{id:999}};
     assert.equal((await send('organization',payload,'fixture-repo-webhook-current')).status,401);
     assert.equal(forwarded.length,0);
+    const upstream=(await github.api('GET','/orgs/org-fixture/invitations',undefined,{installation})).find(value=>value.login==='alice').id;
     const wrong={...payload,membership:{user:{id:upstream}},sender:{id:user}};
     assert.equal((await send('organization',wrong)).status,202);
     assert.equal(forwarded.length,0,'invitation and sender IDs cannot replace member identity');
     const wrongHash=createHash('sha256').update(JSON.stringify(wrong)).digest('hex');
     const noMatch=await db.prepare('SELECT receipt FROM organization_webhook_receipts WHERE payload_sha256=?').bind(wrongHash).first();
     assert.equal(noMatch.receipt,null);
-    const readsBefore=membershipReads;
+    const readsBefore=await membershipReads();
     assert.equal((await send('organization',payload)).status,502,'lost ingress acknowledgement remains retryable');
     assert.equal((await send('organization',payload,'org-previous')).status,202);
     assert.equal(forwarded.length,2);
@@ -119,16 +100,17 @@ export async function organizationWebhooks({ mf, ingress, http, id, db, eventual
     assert.equal(forwarded[0].identity.request_id,request);
     assert.equal(forwarded[0].identity.delivery_generation,1);
     assert.equal(forwarded[0].requester_id,user);
-    await eventually(async()=>membershipReads,value=>value>readsBefore);
+    await eventually(membershipReads,value=>value>readsBefore);
     assert.equal((await status()).settlement,null,'member_added is only a wake while invitation remains pending');
-    active=true;pending=false;
+    // alice accepts on GitHub: an active member, and of the team.
+    await github.emulator.act('alice','orgs/org-fixture/accept');
     assert.equal((await send('membership',{action:'added',scope:'team',installation:{id:installation,app_id:456},organization:{id:account},member:{id:user},team:{id:team},sender:{id:999}})).status,202);
     const settled=await eventually(status,value=>value?.settlement?.state==='accepted');
     assert.equal(settled.teams[team].settlement.state,'accepted');
     assert.equal(forwarded.at(-1).source,'team_membership_added');
     assert.equal(forwarded.at(-1).team_id,team);
-    assert.equal(posts,1,'webhook retries do not write GitHub');
+    assert.equal(await posts(),1,'webhook retries do not write GitHub');
     await eventually(async()=>JSON.parse((await db.prepare('SELECT receipt FROM delivery_outcomes WHERE delivery_id=?').bind(`org:${key}`).first()).receipt),value=>value.settlement?.state==='accepted');
     console.log('PASS authenticated organization Worker webhooks: HMAC app separation, numeric member/team routing, exact lost-ack replay in D1, payload cannot settle, fresh reads settle org and attached team, one original POST');
-  } finally { observe(null); }
+  } finally { /* GitHub-side state needs no restoring */ }
 }

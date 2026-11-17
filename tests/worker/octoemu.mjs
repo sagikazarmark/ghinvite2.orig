@@ -221,8 +221,10 @@ export async function startOctoemu(seed, { idleTimeout = 900, binary = octoemuBi
 }
 
 /**
- * Any GitHub credential shape (`ghu_`, `ghs_`, `ghr_`, `ghp_`, `gho_`): the
- * emulator mints real-looking random tokens the drivers never see, so their
- * privacy scans look for the shape instead of a fixture marker.
+ * The GitHub credentials octoemu mints (`ghu_`/`ghp_` + 36, `ghr_` + 76,
+ * `ghs_<APPID>_<JWT>`), standing alone (not inside a longer base64 run, so
+ * random encoded bytes do not match): the emulator's tokens are random and
+ * never seen by the drivers, so their privacy scans look for the shape
+ * instead of a fixture marker.
  */
-export const GITHUB_TOKEN = /gh[pousr]_[A-Za-z0-9_]{20,}/;
+export const GITHUB_TOKEN = /(?<![A-Za-z0-9+/_=-])(?:gh[up]_[A-Za-z0-9]{36}|ghr_[A-Za-z0-9]{76}|ghs_\d+_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)(?![A-Za-z0-9])/;

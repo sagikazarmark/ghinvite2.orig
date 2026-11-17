@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { Miniflare, Response, Log, LogLevel } from 'miniflare';
-import { execFileSync, execFile, spawn } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:http2';
 import { randomBytes } from 'node:crypto';
@@ -18,7 +18,7 @@ import { browserAdmission } from './browser-admission.mjs';
 import { settlement } from './settlement.mjs';
 import { sweepSchedule } from './sweep-schedule.mjs';
 import { frames, fields } from './protocol.mjs';
-import { deadlineRecovery, stalledResponse } from './deadline-recovery.mjs';
+import { deadlineRecovery } from './deadline-recovery.mjs';
 import { installationRecovery } from './installation.mjs';
 import { orgObservation } from './org-observation.mjs';
 import { organizationDelivery } from './organization-delivery.mjs';
@@ -27,11 +27,12 @@ import { linkPause } from './link-pause.mjs';
 import { deliveryControl } from './delivery-control.mjs';
 import { cancellation } from './cancellation.mjs';
 import { approvedDelivery } from './approved-delivery.mjs';
-import { invitationJourney, journeyWorker, journeyCredentials } from './invitation-journey.mjs';
+import { invitationJourney, journeyWorker } from './invitation-journey.mjs';
+import { startOctoemu } from './octoemu.mjs';
+import { GithubWorld, acmeSeed } from './github-world.mjs';
 
 const signer = identitySigner();
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], { cwd: root, encoding: 'utf8', timeout: 120_000 }));
 const project = `ghinvite-worker-${process.pid}-${randomBytes(4).toString('hex')}`;
 const composeFiles = ['-f', 'compose.yaml', ...(process.env.JOURNEY_ONLY === '1' ? ['-f', 'tests/worker/journey-compose.yaml'] : [])];
 const compose = (...args) => execFileSync('docker', ['compose', ...composeFiles, '--profile', 'smoke', '-p', project, ...args], {
@@ -47,45 +48,31 @@ const runtimeLogs = [];
 let runtimeLogBytes = 0;
 let runtimeLogOverflow = false;
 const traffic = [];
-const journeyTokenUses = { read: 0, write: 0 };
-const journeyTokenMints = new Set();
 let interruption;
 let clock;
 let sweepClock;
-const sweepCalls=[];
 let pauseWorkflows = false;
-let github;
-let githubUrl;
 let unexpectedOutbound = 0;
-let loseDeleteResponse = false;
-let lostDeleteResponses = 0;
-const children = new Set();
 let cleanupPromise;
 let primaryFailure;
-let networkFault;
-let installationObservation;
 let auditAckAccount;
 let lostAuditAcks = 0;
 let lostAuditInvocation;
-let faultPuts = 0;
-let heldPut;
-function holdPut() {
-  let reached, release;
-  const entered = new Promise(resolve => { reached = resolve; });
-  const resume = new Promise(resolve => { release = resolve; });
-  heldPut = { reached, resume };
-  return { entered, release: () => { heldPut = null; release(); } };
-}
-const stalledCleanup = [];
-function fault(phase, installationId) {
-  if (!phase) { networkFault = null; return; }
-  faultPuts = 0;
-  let wrote, observed;
-  const write = new Promise(resolve => { wrote = resolve; });
-  const observation = new Promise(resolve => { observed = resolve; });
-  networkFault = { phase, installationId, wrote, observed };
-  return { write, observation, puts: () => faultPuts };
-}
+// GitHub is the octoemu emulator; each mode starts from its own world
+// (github-world.mjs, or the sub-driver's `seed`).
+const modeSeeds = {
+  ORG_OBSERVATION_ONLY: () => import('./org-observation.mjs').then(m => m.seed),
+  BUDGET_CAP_ONLY: () => import('./org-observation.mjs').then(m => m.seed),
+  ORG_DELIVERY_ONLY: () => import('./organization-delivery.mjs').then(m => m.seed),
+  ORG_CANCELLATION_ONLY: () => import('./organization-cancellation.mjs').then(m => m.seed),
+  ORG_WEBHOOK_ONLY: () => import('./organization-webhooks.mjs').then(m => m.seed),
+  ACCESS_REMOVAL_ONLY: () => import('./access-removal.mjs').then(m => m.seed),
+  EMAIL_DELIVERY_ONLY: () => import('./email-delivery.mjs').then(m => m.seed),
+  INSTALLATION_ONLY: () => import('./installation.mjs').then(m => m.seed),
+};
+const mode = Object.keys(modeSeeds).find(name => process.env[name] === '1');
+const github = await startOctoemu(mode ? (await modeSeeds[mode]())() : acmeSeed());
+const world = new GithubWorld(github);
 const composeCleanup = args => new Promise((resolve, reject) => {
   execFile('docker', ['compose', ...composeFiles, '--profile', 'smoke', '-p', project, ...args],
     { cwd: root, timeout: 15_000, killSignal: 'SIGKILL', maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -111,16 +98,7 @@ async function cleanup() {
     const errors = [];
     const step = async action => { try { await action(); } catch (error) { errors.push(error); } };
     await step(stopCompose);
-    for (const release of stalledCleanup) release();
-    for (const child of children) await step(async () => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
-      const exited = once(child, 'close');
-      child.kill('SIGTERM');
-      const kill = setTimeout(() => child.kill('SIGKILL'), 2000);
-      let timeout;
-      try { await Promise.race([exited, new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('child cleanup timeout')), 5000); })]); }
-      finally { clearTimeout(kill); clearTimeout(timeout); }
-    });
+    await step(() => github.stop());
     await step(async () => {
       if (server) { for (const session of sessions) session.destroy(); await new Promise(resolve => server.close(resolve)); }
     });
@@ -182,53 +160,16 @@ const workflowOptions = {
     ...(process.env.ACCESS_REMOVAL_ONLY === '1' ? {GH_ACCESS_REMOVAL_ENABLED:'true'} : {}),
     ...(process.env.REISSUE_ONLY === '1' ? {GH_REISSUE_ENABLED:'true'} : {}),
     ...(process.env.EMAIL_DELIVERY_ONLY === '1' ? {GH_BULK_ENABLED:'true',P1_EMAIL_KEYRING:emailRing} : {}),
+    ...github.bindings,
     RESTATE_IDENTITY_KEYS: signer.key,
     P1_HOST: 'production.test', GH_REPO_APP_ID: '123', GH_REPO_CLIENT_ID: 'Iv.fixture-repo',
     GH_REPO_PRIVATE_KEYS: `fixture:${readFileSync(new URL('../../test-fixtures/github-app-rsa.pem', import.meta.url)).toString('base64')}`,
   },
+  // Only GitHub (the emulator) is reachable; it is passed through unchanged.
   async outboundService(request) {
-    if (new URL(request.url).origin !== 'https://api.github.com' || !githubUrl) {
-      unexpectedOutbound++;
-      return new Response('Outbound network disabled', { status: 502 });
-    }
-    if(process.env.SWEEP_ONLY==='1') sweepCalls.push({method:request.method,path:new URL(request.url).pathname});
-    if (process.env.JOURNEY_ONLY === '1') {
-      const authorization = request.headers.get('authorization');
-      if (request.method === 'GET' && authorization === `Bearer ${journeyCredentials.workflowReadToken}`) journeyTokenUses.read++;
-      if (request.method === 'PUT' && authorization === `Bearer ${journeyCredentials.workflowWriteToken}`) journeyTokenUses.write++;
-    }
-    if (request.method === 'PUT') faultPuts++;
-    if (request.method === 'PUT' && heldPut) {
-      const held = heldPut;
-      held.reached();
-      await held.resume;
-    }
-    if (installationObservation) return installationObservation(request);
-    if (networkFault && (request.method === 'PUT' || (faultPuts > 0 && new URL(request.url).pathname === `/app/installations/${networkFault.installationId}`))) {
-      if (request.method === 'PUT') networkFault.wrote(); else networkFault.observed();
-      return stalledResponse(networkFault.phase, stalledCleanup);
-    }
-    const mintProfile = process.env.JOURNEY_ONLY === '1' && /\/app\/installations\/\d+\/access_tokens$/.test(new URL(request.url).pathname)
-      ? (await request.clone().json()).permissions?.administration : undefined;
-    const response = await fetch(githubUrl + new URL(request.url).pathname + new URL(request.url).search, {
-      method: request.method, headers: request.headers,
-      body: ['GET', 'HEAD'].includes(request.method) ? undefined : Buffer.from(await request.arrayBuffer()),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (loseDeleteResponse && request.method === 'DELETE') {
-      loseDeleteResponse = false;
-      lostDeleteResponses++;
-      await response.arrayBuffer();
-      return new Response('fixture: upstream response lost', {status:502});
-    }
-    if (mintProfile !== undefined && response.status === 201) {
-      assert.ok(['read', 'write'].includes(mintProfile), 'journey uses explicit read/write installation profiles');
-      const minted = await response.json();
-      minted.token = mintProfile === 'read' ? journeyCredentials.workflowReadToken : journeyCredentials.workflowWriteToken;
-      journeyTokenMints.add(mintProfile);
-      return Response.json(minted, {status:201});
-    }
-    return new Response([204, 205, 304].includes(response.status) ? null : await response.arrayBuffer(), { status: response.status, headers: response.headers });
+    if (github.owns(request)) return github.forward(request);
+    unexpectedOutbound++;
+    return new Response('Outbound network disabled', { status: 502 });
   },
 };
 const mf = new Miniflare(workflowOptions);
@@ -262,7 +203,7 @@ try {
   const ingress = `http://${compose('port', 'restate-smoke', '8080').trim()}`;
   if (process.env.JOURNEY_ONLY === '1') {
     const { log, handleRuntimeStdio, ...worker } = workflowOptions;
-    await mf.setOptions({ log, handleRuntimeStdio, workers: [worker, journeyWorker(ingress)] });
+    await mf.setOptions({ log, handleRuntimeStdio, workers: [worker, journeyWorker(ingress, github)] });
   } else if (process.env.EMAIL_DELIVERY_ONLY === '1') {
     const { log, handleRuntimeStdio, ...worker } = workflowOptions;
     await mf.setOptions({log,handleRuntimeStdio,workers:[worker,emailVaultWorker()]});
@@ -319,29 +260,13 @@ try {
   server.on('session', session => { sessions.add(session); session.on('close', () => sessions.delete(session)); });
   await new Promise(resolve => server.listen(0, '0.0.0.0', resolve));
   await http(`${admin}/deployments`, { uri: `http://host.docker.internal:${server.address().port}`, additionalHeaders: {} });
-  github = spawn(`${metadata.target_directory}/debug/examples/stub`, ['--port', '0'], { stdio: ['ignore', 'ignore', 'pipe'] });
-  children.add(github);
-  trackFixtureOutput(github, 'github-stub');
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('GitHub stub startup timeout')), 10_000);
-    let diagnostics = '';
-    github.once('error', error => { clearTimeout(timer); reject(error); });
-    github.once('exit', code => { clearTimeout(timer); reject(new Error(`GitHub stub exited ${code}: ${diagnostics}`)); });
-    github.stderr.on('data', chunk => {
-      diagnostics += chunk;
-      const address = diagnostics.match(/github-stub listening on (127\.0\.0\.1:\d+)\s/)?.[1];
-      if (address) { githubUrl = `http://${address}`; clearTimeout(timer); resolve(); }
-    });
-  });
   const db = await mf.getD1Database('DB');
   for (const file of readdirSync(new URL('../../migrations/', import.meta.url)).filter(file => file.endsWith('.sql')).sort()) {
     const sql = readFileSync(new URL(`../../migrations/${file}`, import.meta.url), 'utf8');
     await db.exec(sql.replace(/^[ \t]*--.*$/gm, '').replaceAll('\n', ' '));
   }
   if (process.env.JOURNEY_ONLY === '1') {
-    const proof = await invitationJourney({ mf, adminUrl: admin, ingress, githubUrl, http, storage, db, eventually, id });
-    assert.deepEqual([...journeyTokenMints].sort(), ['read', 'write']);
-    assert.ok(journeyTokenUses.read > 0 && journeyTokenUses.write > 0, 'both minted marker credentials must actually authorize production requests');
+    const proof = await invitationJourney({ mf, adminUrl: admin, ingress, github: world, http, storage, db, eventually, id });
     await capabilitySecrecy({ ...proof, http, admin, db, sessions: await mf.getKVNamespace('SESSIONS','journey-web'), authorityCache: await mf.getKVNamespace('AUTHZ_CACHE','journey-web'), logs: () => {
       assert.equal(runtimeLogOverflow,false,'complete journey runtime log capture exceeded16MiB');
       return [...runtimeLogs, compose('logs', '--no-color', 'restate-smoke')];
@@ -349,68 +274,66 @@ try {
     assert.equal(unexpectedOutbound, 0);
   } else if (process.env.EMAIL_DELIVERY_ONLY === '1') {
     for(const name of ['BulkInviteBatch','EmailInviteDelivery','InviteBudget'])assert.ok(manifest.services.some(s=>s.name===name));
-    await emailDelivery({mf,ingress,admin,http,id,db,eventually,observe:value=>{installationObservation=value;},logs:()=>{
+    await emailDelivery({mf,ingress,admin,http,id,db,eventually,github:world,logs:()=>{
       assert.equal(runtimeLogOverflow,false,'complete email runtime log capture exceeded16MiB');
       return [...runtimeLogs,compose('logs','--no-color','restate-smoke')];
     }});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.CANCELLATION_ONLY === '1') {
     assert.ok(manifest.services.some(service=>service.name==='InviteBudget'),'explicit composition binds the real budget owner');
-    await cancellation({ingress,githubUrl,http,db,id,creation,eventually,holdPut,
-      loseNextDelete:()=>{loseDeleteResponse=true;},lostDeletes:()=>lostDeleteResponses,
-      setClock:value=>{clock=value;}});
+    await cancellation({ingress,github:world,http,db,id,creation,eventually,setClock:value=>{clock=value;}});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.DELIVERY_CONTROL_ONLY === '1') {
-    await deliveryControl({ingress,githubUrl,http,db,id,creation,eventually,storage});
+    await deliveryControl({ingress,github:world,http,db,id,creation,eventually,storage});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.SWEEP_ONLY === '1') {
-    await sweepSchedule({ingress,githubUrl,http,storage,db,id,creation,eventually,pause:value=>{pauseWorkflows=value;},setClock:value=>{sweepClock=value;},calls:sweepCalls});
+    await sweepSchedule({ingress,github:world,http,storage,db,id,creation,eventually,pause:value=>{pauseWorkflows=value;},setClock:value=>{sweepClock=value;}});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.APPROVED_DELIVERY_ONLY === '1') {
-    await approvedDelivery({ ingress, githubUrl, http, db, creation, id, eventually });
+    await approvedDelivery({ ingress, github: world, http, db, creation, id, eventually });
     assert.equal(unexpectedOutbound, 0);
   } else if (process.env.DEADLINE_ONLY === '1') {
     for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
     await http(`${ingress}/Installation/repo:1/onboard`, setupCommand({ app:'repo', installation_id: 1, actor_user_id: 7, account_id: 100,
       account_login: 'acme', account_type: 'Organization', selected_repos: 'all', installed_at: '2026-01-01T00:00:00Z' }));
-    await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
+    await deadlineRecovery({ ingress, github: world, http, storage, id, creation, eventually,
       pause: value => { pauseWorkflows = value; } });
     assert.equal(unexpectedOutbound, 0);
   } else if (process.env.PAUSE_ONLY === '1') {
-    await linkPause({ingress,githubUrl,http,db,id,creation,eventually});
+    await linkPause({ingress,github:world,http,db,id,creation,eventually});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.ORG_WEBHOOK_ONLY === '1') {
     const { organizationWebhooks } = await import('./organization-webhooks.mjs');
-    await organizationWebhooks({mf,ingress,http,id,db,eventually,observe:value=>{installationObservation=value;}});
+    await organizationWebhooks({mf,ingress,http,id,db,eventually,github:world});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.REISSUE_ONLY === '1') {
     const { reissue } = await import('./reissue.mjs');
     assert.ok(manifest.services.some(service=>service.name==='AccessGrant'));
     assert.ok(manifest.services.some(service=>service.name==='InviteBudget'));
-    await reissue({ingress,githubUrl,http,db,id,creation,eventually});
+    await reissue({ingress,github:world,http,db,id,creation,eventually});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.ACCESS_REMOVAL_ONLY === '1') {
     const { accessRemoval } = await import('./access-removal.mjs');
     assert.ok(manifest.services.some(service=>service.name==='AccessGrant'));
-    await accessRemoval({ingress,http,id,db,eventually,observe:value=>{installationObservation=value;}});
+    await accessRemoval({ingress,http,id,db,eventually,github:world});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.ORG_CANCELLATION_ONLY === '1') {
     assert.ok(manifest.services.some(service=>service.name==='OrganizationDelivery'));
     assert.ok(manifest.services.some(service=>service.name==='InviteBudget'));
-    await organizationCancellation({ingress,http,id,db,eventually,observe:value=>{installationObservation=value;},setClock:value=>{clock=value;}});
+    await organizationCancellation({ingress,http,id,db,eventually,github:world,setClock:value=>{clock=value;}});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.ORG_DELIVERY_ONLY === '1') {
     assert.ok(manifest.services.some(service=>service.name==='OrganizationDelivery'));
     assert.ok(manifest.services.some(service=>service.name==='InviteBudget'));
-    await organizationDelivery({ingress,http,id,db,eventually,observe:value=>{installationObservation=value;}});
+    await organizationDelivery({ingress,http,id,db,eventually,github:world});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.ORG_OBSERVATION_ONLY === '1' || process.env.BUDGET_CAP_ONLY === '1') {
-    await orgObservation({ingress,http,id,observe:value=>{installationObservation=value;},budget:process.env.BUDGET_CAP_ONLY === '1' ? {db,eventually} : null});
+    await orgObservation({ingress,http,id,github:world,budget:process.env.BUDGET_CAP_ONLY === '1' ? {db,eventually} : null});
     assert.equal(unexpectedOutbound,0);
   } else if (process.env.INSTALLATION_ONLY === '1') {
     for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
     await installationRecovery({ ingress, http, storage, id, creation, eventually,
-      observe: value => { installationObservation = value; },
+      github: world,
       loseAuditAck: account => {
         auditAckAccount = account == null ? null : `repo:${account}`; lostAuditAcks = 0; lostAuditInvocation = undefined;
         return { count: async () => lostAuditAcks, invocation: () => lostAuditInvocation,
@@ -459,7 +382,7 @@ try {
   assert.equal(conflict.status, 409);
   assert.equal((await command('link_status', { link_id: input.link_id, admin: input.admin })).uses, 1);
   console.log('PASS final-use concurrency, seven-day deadline, revoke/replay/conflict while D1 unavailable');
-   await browserAdmission(ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id);
+   await browserAdmission(world, ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id);
   for (const user of [7, 91, 92]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user, `user-${user}`).run();
   console.log('PASS compatible D1 migrations and restored identity parents');
   await eventually(() => storage('link', input.link_id), link => link?.uses_count === 1 && link.revoked_at);
@@ -602,7 +525,6 @@ try {
   const bounds = { before, after, maxStateWrite: Math.max(...observed.filter(f => f.type === 0x0403).map(f => f.bytes)),
     maxMessage: Math.max(...observed.map(f => f.bytes)) };
   console.log(`PASS lazy history bounds (bytes): ${JSON.stringify(bounds)}`);
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
   const autoInput = { ...creation(), approval_required: false };
   const auto = (handler, body) => http(`${ingress}/InvitationLink/${autoInput.link_id}/${handler}`, body);
   await auto('create', autoInput);
@@ -658,21 +580,22 @@ try {
     assert.deepEqual(await createEvents(receipt), events);
   }
   console.log('PASS actual D1 audit-write failure rollback and lost-ack replay for all three confirmed outcomes');
-  const calls = await http(`${githubUrl}/calls`, undefined, 'GET');
-  assert.equal(calls.requests.filter(call => call.method === 'PUT' && call.path.includes('/repos/acme/api/')).length, 1);
+  const apiPuts = async () => (await world.requests('PUT')).filter(call => call.path.startsWith('/repos/acme/api/')).length;
+  assert.equal(await apiPuts(), 1);
   assert.deepEqual(await auto('admit', autoAttempt), approved);
   assert.deepEqual(await http(`${ingress}/InvitationRequest/${approved.result.request_id}/delivery_progress`, progressQuery), progress);
-  assert.equal((await http(`${githubUrl}/calls`, undefined, 'GET')).requests.filter(call => call.method === 'PUT' && call.path.includes('/repos/acme/api/')).length, 1);
+  assert.equal(await apiPuts(), 1);
   assert.equal(unexpectedOutbound, 0);
-  console.log('PASS auto-approval, actual Worker GitHub stub delivery and confirmed-create replay');
+  console.log('PASS auto-approval, actual Worker GitHub (octoemu) delivery and confirmed-create replay');
   for (const [requesterId, stubOutcome, kind, eventType, actor] of [
+    // A read collaborator asked for write: GitHub changes the role (204).
     [92, 'already_collaborator', 'upgraded', 'delivery.upgraded', 'system'],
     [93, 'terminal_failure', 'failed', 'invitation.send_failed', 'system'],
   ]) {
     await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z') ON CONFLICT(user_id) DO NOTHING").bind(requesterId, `user-${requesterId}`).run();
-    await http(`${githubUrl}/identity`, { login: `user-${requesterId}`, addressed_id: requesterId });
-    await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: `user-${requesterId}`, outcome: stubOutcome });
+    await world.outcome(`user-${requesterId}`, stubOutcome);
     const input = { ...creation(), approval_required: false };
+    if (stubOutcome === 'already_collaborator') input.targets.repos[0].grant = 'write';
     const call = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
     await call('create', input);
     const admitted = await call('admit', { ...admitCapability(input.link_id), link_id: input.link_id, operation_id: id(), requester_id: requesterId });
@@ -687,8 +610,8 @@ try {
     assert.deepEqual(await delivery(receipt.command, 'create', receipt.command), receipt);
     assert.deepEqual(await createEvents(receipt), events);
   }
-  await http(`${githubUrl}/reset`, undefined, 'DELETE');
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  // Start the next scenarios from a clean GitHub side for these requesters.
+  await world.reset('user-91', 'user-92', 'user-93');
   console.log('PASS actual Worker GitHub 204/422 outcomes publish retained D1 audit events');
   const manualInput = creation();
   const manual = (handler, body) => http(`${ingress}/InvitationLink/${manualInput.link_id}/${handler}`, body);
@@ -700,15 +623,15 @@ try {
    const manualPlan = await http(`${ingress}/InvitationRequest/${manualReceipt.result.request_id}/approved_plan`, {link_id: manualInput.link_id, request_id: manualReceipt.result.request_id, requester_id:91});
    await eventually(() => delivery(manualPlan.commands[0], 'status'), value => value?.create.outcome.kind === 'created');
    console.log('PASS manual approval and request-owned Worker dispatch');
-  await settlement({ admin, ingress, githubUrl, http, storage, db, id, creation, eventually, holdPut,
+  await settlement({ admin, ingress, github: world, http, storage, db, id, creation, eventually,
     requestId: approved.result.request_id, initialCommand: plan.commands[0],
     pause: value => { pauseWorkflows = value; } });
   if (process.env.SETTLEMENT_ONLY !== '1') {
-  await deadlineRecovery({ ingress, githubUrl, http, storage, id, creation, eventually, fault,
+  await deadlineRecovery({ ingress, github: world, http, storage, id, creation, eventually,
     pause: value => { pauseWorkflows = value; } });
-   await browserAdmission(ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
+   await browserAdmission(world, ingress, created.link_id, attempts[winner].requester_id, attempts[winner].operation_id, { creation, http });
    // Fresh onboarding and refresh require no installation read projection.
-   await http(`${githubUrl}/installation-identity`, { id: 300, login: 'adopted', type: 'Organization' });
+   // The App is installed on `adopted` (300) as 40 (github-world.mjs).
    // Installation reads fail on the real binding while GitHub stays reachable.
    await db.prepare('ALTER TABLE installations RENAME TO installations_offline').run();
    await http(`${ingress}/Installation/repo:40/onboard`, setupCommand({ app:'repo', installation_id: 40, actor_user_id: 7, account_id: 300,
@@ -727,11 +650,10 @@ try {
   await db.prepare('ALTER TABLE installations_offline RENAME TO installations').run();
   // Restoration alone converges: no further webhook and no user action.
   await eventually(() => db.prepare('SELECT selected_repos FROM installations WHERE installation_id=40').first(),
-    row => row?.selected_repos === '[10,11]');
+    row => row?.selected_repos === '[30,31]');
   const adopted = await http(`${ingress}/AccountInstallation/repo:300/status`);
   assert.equal(adopted.account.installation_id, 40);
-  assert.deepEqual(adopted.observation.repo_ids, [10, 11]);
-  await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
+  assert.deepEqual(adopted.observation.repo_ids, [30, 31]);
    console.log('PASS onboarding and refresh during D1 projection outage converge without another event');
   }
   }

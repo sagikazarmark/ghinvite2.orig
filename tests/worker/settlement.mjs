@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import { admitCapability } from './capability.mjs';
 
 // Public command and Storage boundaries; SQL is used only for fault injection.
-export async function settlement({ admin, ingress, githubUrl, http, storage, db, id, creation, eventually, requestId, initialCommand, pause, holdPut }) {
+export async function settlement({ admin, ingress, github, http, storage, db, id, creation, eventually, requestId, initialCommand, pause }) {
   const at = new Date().toISOString();
   const registered = command => eventually(()=>http(`${ingress}/SweepSchedule/repo:100/status`), state=>state?.tracked?.[String(command.repo_id)]?.includes(`${command.request_id}:${command.repo_id}:${command.delivery_generation}`));
   const sweep = async () => {
@@ -30,11 +30,8 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   const beforeWinner = await lifecycle(sentCommand, 'status');
   const evidence = { delivery_key: key(sentCommand), expected_revision: beforeWinner.revision, at,
     evidence: { kind: 'absent', availability_verified: true, role_name: 'none', direct_collaborator: null, membership: null } };
-  const pendingBeforeAcceptance = await http(`${githubUrl}/repos/acme/api/invitations`, undefined, 'GET');
-  if (pendingBeforeAcceptance.some(value => value.id === sent.create.outcome.upstream_id)) {
-    await http(`${githubUrl}/repos/acme/api/invitations/${sent.create.outcome.upstream_id}`, undefined, 'DELETE');
-  }
-  await http(`${githubUrl}/identity`, { login: `user-${requester}`, addressed_id: requester, role_name: 'write' });
+  // The requester is a write collaborator on GitHub (accepted, role raised).
+  await github.grant(`user-${requester}`, 'push');
   await db.prepare("CREATE TRIGGER settlement_audit_failure BEFORE INSERT ON audit_events WHEN NEW.target_kind = 'repository_delivery' BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END").run();
   const invocation = await http(`${ingress}/DeliveryObservation/observe/send`,beforeWinner);
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -74,15 +71,14 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   // A real blocked receiver, ordinary concurrent sweeps, then safe recovery.
   // Other scenarios' pending invitations would correctly trigger S1's
   // AlreadyPending result instead of exercising this fresh write failure.
-  await http(`${githubUrl}/reset`, undefined, 'DELETE');
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  await github.reset('user-91');
   pause(true);
   const input = { ...creation(), approval_required: false };
   const link = (handler, body) => http(`${ingress}/InvitationLink/${input.link_id}/${handler}`, body);
   await link('create', input);
   const admitted = await link('admit', { ...admitCapability(input.link_id), link_id: input.link_id, operation_id: id(), requester_id: 91 });
   const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
-  await http(`${githubUrl}/outcomes`, { owner: 'acme', repo: 'api', user: 'user-91', outcome: 'access_lost_once' });
+  await github.outcome('user-91', 'access_lost_once');
   const command = plan.commands[0];
   const create = () => http(`${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}:${command.delivery_generation}/create`, command);
   assert.equal((await create()).outcome.kind, 'blocked');
@@ -94,11 +90,13 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   const repaired = await eventually(() => read(command), pending);
   assert.ok(pending(repaired));
   assert.equal(repaired.create.outcome.upstream_id, recovered.outcome.upstream_id);
-  await http(`${githubUrl}/repos/acme/api/invitations/${recovered.outcome.upstream_id}`, undefined, 'DELETE');
-  await http(`${githubUrl}/identity`, { login: 'renamed', addressed_id: 91, role_name: 'write' });
+  // Accepted, raised to write, then renamed: settlement follows the user ID.
+  await github.accept('user-91', { id: recovered.outcome.upstream_id, role: 'push' });
+  await github.rename('user-91', 'renamed');
   await sweep();
   await eventually(() => read(command), row => row?.settlement?.state === 'accepted');
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  await github.rename('renamed', 'user-91');
+  await github.forget('user-91');
   // #65: retained sweep-set discovery across installation provenance, with the
   // replacement established through the production account installation owner.
   const historicalInput = { ...creation(), approval_required: false };
@@ -112,6 +110,11 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   const originalRequest = await storage('request', query.request_id);
   const account = (handler, body) => http(`${ingress}/AccountInstallation/repo:100/${handler}`, body);
   await account('uninstall', { app:'repo', installation_id: 1, uninstalled_at: at });
+  // On GitHub too: the App's installation on acme is now 19.
+  await github.emulator.admin('DELETE', '/installations/1');
+  await github.emulator.admin('POST', '/installations', { installation: { id: 19, app_id: 123, account: 'acme',
+    repository_selection: 'selected', repositories: ['acme/api', 'acme/web'] } }, 201);
+  github.installation = 19;
   await account('onboard', setupCommand({ app:'repo', installation_id: 19, account_id: 100, account_login: 'acme', account_type: 'Organization',
     actor_user_id: 7, selected_repos: 'all', installed_at: at }));
   const historicalCommand = historicalPlan.commands[0];
@@ -119,12 +122,15 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   const delivered = await eventually(() => http(`${deliveryUrl}/create`, historicalCommand), value => value.outcome.kind === 'created');
   assert.equal(delivered.command.installation_id, 1);
   await registered(historicalCommand);
-  await http(`${githubUrl}/repos/acme/api/invitations/${delivered.outcome.upstream_id}`, undefined, 'DELETE');
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91, role_name: 'write' });
-  await http(`${githubUrl}/installation-identity`, { id: 200, login: 'acme', type: 'Organization' });
+  await github.accept('user-91', { id: delivered.outcome.upstream_id, role: 'push' });
+  // GitHub reports the installation under another account ID (an injected
+  // answer: GitHub never moves an installation between accounts).
+  const mismatch = await github.emulator.fault({ method: 'GET', path: '/app/installations/19', label: 'account mismatch', action: { kind: 'respond', status: 200,
+    body: { id: 19, app_id: 123, account: { id: 200, login: 'acme', type: 'Organization' }, repository_selection: 'selected',
+      permissions: { administration: 'write', metadata: 'read' }, events: [], created_at: at, updated_at: at, suspended_at: null } } });
   await sweep();
   assert.ok(pending(await read(historicalCommand)), 'another account cannot settle history');
-  await http(`${githubUrl}/installation-identity`, { id: 100, login: 'acme', type: 'Organization' });
+  await github.emulator.removeFault(mismatch);
   await sweep();
   const settled = await eventually(() => read(historicalCommand), row => row?.settlement?.state === 'accepted');
   assert.equal(settled.settlement.state, 'accepted');
@@ -136,7 +142,7 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
   const accepted = (await auditHistory(storage, 100)).filter(event => event.target_id === key(historicalCommand) && event.event_type === 'invitation.accepted');
   assert.equal(accepted.length, 1);
   assert.deepEqual(accepted[0].metadata, { reconciled: true, evidence: { kind: 'effective_role', role_name: 'write' } });
-  await http(`${githubUrl}/identity`, { login: 'user-91', addressed_id: 91 });
+  await github.forget('user-91');
   // A blocked PUT queues refused legacy cancellation or stale canonical evidence.
   // Actual complete observation after the race establishes GitHub expiry.
   for (const handler of ['cancel', 'reconcile']) {
@@ -146,7 +152,7 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
     const plan = await http(`${ingress}/InvitationRequest/${admitted.result.request_id}/approved_plan`, { link_id: input.link_id, request_id: admitted.result.request_id, requester_id: 91 });
     const command = plan.commands[0];
     const url = `${ingress}/RepositoryDelivery/${command.request_id}:${command.repo_id}:${command.delivery_generation}`;
-    const held = holdPut();
+    const held = await github.holdPut();
     let created;
     try {
       const creating = http(`${url}/create`, command);
@@ -164,24 +170,22 @@ export async function settlement({ admin, ingress, githubUrl, http, storage, db,
     if(handler==='cancel') {
       assert.equal(winner.settlement,null,'legacy input cannot authorize an owned DELETE');
       assert.deepEqual(winner.create,created);
-      const calls=await http(`${githubUrl}/calls`,undefined,'GET');
-      assert.equal(calls.requests.filter(call=>call.method==='DELETE'&&call.path===`/repos/acme/api/invitations/${created.outcome.upstream_id}`).length,0);
+      assert.equal((await github.requests('DELETE',`/repos/acme/api/invitations/${created.outcome.upstream_id}`)).length,0);
       assert.deepEqual(await http(`${url}/create`,command),created);
       // Explicit upstream fixture cleanup after all no-DELETE assertions keeps
       // the next expiry race independent; this is not a workflow cancellation.
-      await http(`${githubUrl}/repos/acme/api/invitations/${created.outcome.upstream_id}`, undefined, 'DELETE');
+      await github.api('DELETE', `/repos/acme/api/invitations/${created.outcome.upstream_id}`, undefined, { expected: 204 });
       continue; // Positive cancellation races run in the isolated real-budget fixture.
     }
 
     if (handler === 'reconcile') {
       assert.equal(winner.settlement, null, 'a listed unexpired invitation is not GitHub expiry');
       assert.deepEqual(winner.create, created);
-      const callsBefore = await http(`${githubUrl}/calls`, undefined, 'GET');
-      await http(`${githubUrl}/invitation-expired`, { owner: 'acme', repo: 'api', id: created.outcome.upstream_id, expired: true });
+      const deletesBefore = (await github.requests('DELETE')).length;
+      await github.expire(created.outcome.upstream_id);
       await http(`${ingress}/DeliveryObservation/observe`,winner);
       winner = await eventually(()=>http(`${url}/status`),value=>value?.settlement?.state==='expired');
-      const callsAfter = await http(`${githubUrl}/calls`, undefined, 'GET');
-      assert.equal(callsAfter.requests.filter(call => call.method === 'DELETE').length, callsBefore.requests.filter(call => call.method === 'DELETE').length, 'GitHub expiry observation never deletes');
+      assert.equal((await github.requests('DELETE')).length, deletesBefore, 'GitHub expiry observation never deletes');
     }
     assert.equal(winner.settlement.state, handler === 'cancel' ? 'cancelled' : 'expired');
     assert.deepEqual(winner.create, created);

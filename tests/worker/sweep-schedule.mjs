@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { setupCommand } from './installation-fixture.mjs';
 import { admitCapability } from './capability.mjs';
 
-export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id, creation, eventually, pause, setClock, calls }) {
+export async function sweepSchedule({ ingress, github, http, storage, db, id, creation, eventually, pause, setClock }) {
+  const path = call => call.path.split('?')[0];
   pause(true);
   for (const user of [7,91]) await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES (?, ?, NULL, '2026-01-01T00:00:00Z')").bind(user,`user-${user}`).run();
   await http(`${ingress}/Installation/repo:1/onboard`,setupCommand({app:'repo',installation_id:1,account_id:100,account_login:'acme',account_type:'Organization',selected_repos:'all',installed_at:'2026-01-01T00:00:00Z'}));
@@ -15,7 +16,6 @@ export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id,
   assert.equal(idle.completed_runs,1);
   const t=Date.parse(idle.next_run)-86400000+60000;
   setClock(t);
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91,role_name:'none'});
   const commands=[];
   // Parent projections exist; only delivery projection is unavailable.
   for(let i=0;i<2;i++) {
@@ -49,18 +49,19 @@ export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id,
     evidence:{kind:'absent',availability_verified:true,role_name:'none',direct_collaborator:null,membership:null}});
   assert.deepEqual(await delivery(commands[0],'status'),pendingSnapshot,
     'a newer no-change listing protects the same revision from stale absence');
-  await http(`${githubUrl}/repos/acme/api/invitations/${created.outcome.upstream_id}`,undefined,'DELETE');
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91,role_name:'write'});
+  // The requester accepts the (write) invitation on GitHub.
+  await github.accept('user-91',{id:created.outcome.upstream_id});
   setClock(t+300000);
   await schedule('run',active.token);
   assert.equal((await delivery(commands[0],'status')).settlement,null);
-  calls.length=0;
+  await github.emulator.clearCalls();
   setClock(t+3600000);
   await schedule('run',active.token);
   for(const command of commands) await eventually(()=>delivery(command,'status'),value=>value?.settlement?.state==='accepted');
   const emptied=await eventually(()=>schedule('status'),state=>Object.keys(state.tracked).length===0);
   assert.equal(emptied.completed_runs,2);
-  assert.equal(calls.filter(call=>call.method==='GET'&&call.path==='/repos/acme/api/invitations').length,1,'one repository list shared by both delivery observations');
+  const calls=await github.calls();
+  assert.equal(calls.filter(call=>call.method==='GET'&&path(call)==='/repos/acme/api/invitations').length,1,'one repository list shared by both delivery observations');
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM deliveries').first()).n,0,'actual D1 outage cannot hide or prevent retained acceptance');
   assert.ok(calls.every(call=>!['PUT','PATCH','DELETE'].includes(call.method)),'scheduled recovery is read only');
   await schedule('run',active.token);
@@ -88,8 +89,8 @@ export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id,
     assert.ok(['created','already_pending'].includes(row.create_outcome));
   }
   setClock(undefined);
-  await http(`${githubUrl}/identity`,{login:'user-91',addressed_id:91,role_name:'none'});
-  await http(`${githubUrl}/outcomes`,{owner:'acme',repo:'api',user:'user-91',outcome:'transient_once'});
+  await github.forget('user-91');
+  await github.outcome('user-91','transient_once');
   const input={...creation(),approval_required:false}; input.targets.repos[0].grant='write';
   await http(`${ingress}/InvitationLink/${input.link_id}/create`,input);
   const admitted=await http(`${ingress}/InvitationLink/${input.link_id}/admit`,{...admitCapability(input.link_id),link_id:input.link_id,operation_id:id(),requester_id:91});
@@ -97,7 +98,7 @@ export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id,
   const plan=await http(`${ingress}/InvitationRequest/${request}/approved_plan`,{link_id:input.link_id,request_id:request,requester_id:91});
   await eventually(()=>storage('request',request),row=>row?.state==='approved');
   const unknown=plan.commands[0];
-  const putsBefore=calls.filter(call=>call.method==='PUT').length;
+  const putsBefore=(await github.requests('PUT')).length;
   const receipt=await delivery(unknown,'create',unknown);
   assert.equal(receipt.outcome.kind,'outcome_unknown');
   const readUnknown=()=>db.prepare('SELECT * FROM deliveries WHERE request_id=?').bind(request).first();
@@ -106,7 +107,7 @@ export async function sweepSchedule({ ingress, githubUrl, http, storage, db, id,
   assert.ok(Date.parse(row.unknown_since)>=Date.parse(unknown.approved_at));
   assert.deepEqual(await delivery(unknown,'create',unknown),receipt);
   assert.deepEqual(await readUnknown(),row,'read-only recovery does not reset uncertainty or alter receipt');
-  assert.equal(calls.filter(call=>call.method==='PUT').length,putsBefore+1);
+  assert.equal((await github.requests('PUT')).length,putsBefore+1);
   pause(false);
   console.log('PASS actual Restate/workerd/D1 sweep: idle24h→active1h, one chain, shared repository walk, no webhook, stale tokens/track inert, projection outage then convergence, durable observation and immutable unknown timing with one PUT');
 }
