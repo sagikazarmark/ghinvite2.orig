@@ -1394,3 +1394,111 @@ async fn refuse_assumed_mode_refuses_the_guesses() {
     .await;
     assert_eq!(listed.body["behaviour"], "user-token-org-membership-list");
 }
+
+#[tokio::test]
+async fn the_admin_api_renames_an_organization() {
+    let world = World::start().await;
+    let admin = |path: &str| format!("{}{path}", world.emulator.admin_base());
+    let widgetco = mint(&world.emulator, json!({"installation_id": 6})).await;
+    let invited = send(
+        Method::POST,
+        &world.url("/orgs/widgetco/invitations"),
+        Some(&widgetco),
+        Some(json!({"invitee_id": 1001})),
+    )
+    .await;
+    assert_eq!(invited.status, StatusCode::CREATED, "{}", invited.body);
+    let renamed = send(
+        Method::POST,
+        &admin("/orgs/widgetco/rename"),
+        None,
+        Some(json!({"login": "widgets-inc"})),
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::NO_CONTENT, "{}", renamed.body);
+    // Same ID, installation and invitation; the old login names nothing.
+    let org = send(
+        Method::GET,
+        &world.url("/orgs/widgets-inc"),
+        Some(&widgetco),
+        None,
+    )
+    .await;
+    assert_eq!(
+        (org.status, org.body["id"].as_u64()),
+        (StatusCode::OK, Some(200))
+    );
+    assert_eq!(org.body["login"], "widgets-inc");
+    assert_eq!(
+        send(
+            Method::GET,
+            &world.url("/orgs/widgetco"),
+            Some(&widgetco),
+            None
+        )
+        .await
+        .status,
+        StatusCode::NOT_FOUND
+    );
+    let listed = send(
+        Method::GET,
+        &world.url("/orgs/widgets-inc/invitations"),
+        Some(&widgetco),
+        None,
+    )
+    .await;
+    assert_eq!(listed.body[0]["id"], invited.body["id"]);
+    assert_eq!(
+        world.act("u001", "widgets-inc", "accept").await,
+        StatusCode::NO_CONTENT
+    );
+    let state = world.emulator.state();
+    let installation = state["world"]["installations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == 6)
+        .unwrap();
+    assert_eq!(installation["account"], "widgets-inc");
+    assert!(
+        state["world"]["memberships"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["org"] == "widgets-inc" && m["user"] == "u001")
+    );
+    for (org, body, status) in [
+        ("nobody", json!({"login": "x"}), StatusCode::NOT_FOUND),
+        // Taken by a user, and by an organization.
+        (
+            "widgets-inc",
+            json!({"login": "boss"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "widgets-inc",
+            json!({"login": "acme"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "widgets-inc",
+            json!({"login": "bad name"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        // An emulator limitation: an owner of repositories.
+        (
+            "acme",
+            json!({"login": "acme-2"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let reply = send(
+            Method::POST,
+            &admin(&format!("/orgs/{org}/rename")),
+            None,
+            Some(body),
+        )
+        .await;
+        assert_eq!(reply.status, status, "{org}: {}", reply.body);
+    }
+}

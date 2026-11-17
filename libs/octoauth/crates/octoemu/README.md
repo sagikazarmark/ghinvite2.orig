@@ -30,7 +30,8 @@ and team memberships with their repository grants, the user's
 `/user/memberships/orgs` routes, and `organization` / `membership` events
 (GE-06); fault rules (GE-07; `stall`, `hold_response` and
 `query_contains` since GE-09b), the admin user-rename and
-invitation-expiry routes (GE-09b). The temporary stub-compatibility shim
+invitation-expiry routes (GE-09b), the admin organization rename
+(GE-09c). The temporary stub-compatibility shim
 of GE-07 is gone (GE-09c): ghinvite's suites build their world from the
 native seed and admin API (`ghinvite_e2e::github`).
 
@@ -488,6 +489,7 @@ applies whole or not at all; it may not set `start_time`.
 | `POST /act/{login}/orgs/{org}/leave` | A member leaves (204, `organization.member_removed`) |
 | `POST /orgs/{org}/spammed` | `{"spammed": bool}`: the organization's invitation writes (create, cancel) answer GitHub's `spammed` 422 (assumed shape) while on (204; 404 unknown) |
 | `POST /users/{login}/rename` | `{"login"}`: the user changes their login; ID, collaborations, memberships and invitations stay theirs (`user-rename`, documented). 204; 404 unknown; 422 for a taken login or a user owning repositories, an App or an installation (an emulator limitation: GitHub redirects a renamed owner's repositories) |
+| `POST /orgs/{org}/rename` | `{"login"}`: the organization changes its login; ID, members, teams, invitations and installations stay its own (`org-rename`, documented). 204; 404 unknown; 422 for a taken login or an organization owning repositories (an emulator limitation: GitHub redirects their old names) |
 | `POST /repository_invitations/{id}/expire` | Dates the invitation back past its 7 days, so it is expired now without moving the clock for everything else (204; 404) |
 | `GET /faults` | `{"faults": […]}`: every [fault rule](#fault-rules) with `id`, its fields, `matched`, `fired`, `held` and `released` |
 | `POST /faults` | Adds a rule: 201 with it as listed; 422 for a bad pattern, method, status or header |

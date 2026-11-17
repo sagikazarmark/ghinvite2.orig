@@ -73,6 +73,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "org-no-seat",
     "org-out-of-scope",
     "org-plan-visibility",
+    "org-rename",
     "org-reput-pending",
     "org-spammed",
     "out-of-scope-repository",

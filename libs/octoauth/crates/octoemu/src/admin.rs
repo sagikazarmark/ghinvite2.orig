@@ -69,6 +69,7 @@ pub(crate) fn router() -> Router<SharedState> {
         )
         .route("/__octoemu/orgs/{org}/spammed", post(set_spammed))
         .route("/__octoemu/users/{login}/rename", post(rename_user))
+        .route("/__octoemu/orgs/{org}/rename", post(rename_org))
         .route(
             "/__octoemu/repository_invitations/{id}/expire",
             post(expire_invitation),
@@ -282,6 +283,59 @@ async fn rename_user(
         }
         Err(problem) => unprocessable(&problem),
     }
+}
+
+/// `POST /__octoemu/orgs/{org}/rename` `{"login"}`: the organization
+/// changes its login; its ID, members, teams, invitations and
+/// installations stay its own (`org-rename`). 204; 404 for an unknown
+/// organization; 422 for a login that is taken, or an organization owning
+/// repositories (an emulator limitation: GitHub redirects their old names).
+async fn rename_org(
+    State(shared): State<SharedState>,
+    Path(org): Path<String>,
+    bytes: Bytes,
+) -> Response {
+    let Rename { login: new } = match body(&bytes) {
+        Ok(rename) => rename,
+        Err(response) => return *response,
+    };
+    if new.is_empty() || !new.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return unprocessable("a login is letters, digits and hyphens");
+    }
+    let mut state = shared.state();
+    if !state
+        .world
+        .orgs
+        .iter()
+        .any(|o| o.login.eq_ignore_ascii_case(&org))
+    {
+        return error(
+            StatusCode::NOT_FOUND,
+            "octoemu: no such organization",
+            OCTOEMU_DOCS,
+        );
+    }
+    let mut world = state.world.clone();
+    if let Err(problem) = crate::users::rename_org(&mut world, &org, &new) {
+        return unprocessable(&problem);
+    }
+    state.world = world;
+    // The budget, former members and the spammed switch follow it too.
+    let (old, new) = (org.to_ascii_lowercase(), new.to_ascii_lowercase());
+    for (sent, _) in &mut state.org_invitations_sent {
+        if *sent == old {
+            sent.clone_from(&new);
+        }
+    }
+    for (former, _, _) in &mut state.former_members {
+        if *former == old {
+            former.clone_from(&new);
+        }
+    }
+    if state.spammed_orgs.remove(&old) {
+        state.spammed_orgs.insert(new);
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 /// `POST /__octoemu/repository_invitations/{id}/expire`: dates the

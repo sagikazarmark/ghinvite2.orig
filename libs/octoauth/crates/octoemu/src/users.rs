@@ -149,6 +149,74 @@ pub(crate) async fn emails(
     json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
 }
 
+/// Renames organization `old` to `new`: it keeps its ID, and every
+/// reference (memberships, teams and their memberships, invitations,
+/// custom repository roles, installations, installation requests, owned
+/// Apps) follows it. Refused for a login already taken and, as an emulator
+/// limitation (GitHub redirects their old names), for an organization
+/// owning repositories.
+pub(crate) fn rename_org(
+    world: &mut crate::seed::Seed,
+    old: &str,
+    new: &str,
+) -> Result<(), String> {
+    let same = |login: &str| login.eq_ignore_ascii_case(old);
+    if !world.orgs.iter().any(|o| same(&o.login)) {
+        return Err(format!("no organization {old:?}"));
+    }
+    if !old.eq_ignore_ascii_case(new)
+        && (world
+            .users
+            .iter()
+            .any(|u| u.login.eq_ignore_ascii_case(new))
+            || world.orgs.iter().any(|o| o.login.eq_ignore_ascii_case(new)))
+    {
+        return Err(format!("the login {new:?} is taken"));
+    }
+    if world.repos.iter().any(|r| same(&r.owner)) {
+        return Err(format!("{old:?} owns repositories"));
+    }
+    let rename = |login: &mut String| {
+        if same(login) {
+            *login = new.to_owned();
+        }
+    };
+    for org in &mut world.orgs {
+        rename(&mut org.login);
+    }
+    for membership in &mut world.memberships {
+        rename(&mut membership.org);
+    }
+    for team in &mut world.teams {
+        rename(&mut team.org);
+    }
+    for membership in &mut world.team_memberships {
+        if let Some((org, slug)) = membership.team.split_once('/')
+            && same(org)
+        {
+            membership.team = format!("{new}/{slug}");
+        }
+    }
+    for invitation in &mut world.org_invitations {
+        rename(&mut invitation.org);
+    }
+    for role in &mut world.repository_roles {
+        rename(&mut role.org);
+    }
+    for installation in &mut world.installations {
+        rename(&mut installation.account);
+    }
+    for request in &mut world.installation_requests {
+        rename(&mut request.account);
+    }
+    for app in &mut world.apps {
+        if let Some(owner) = app.owner.as_mut() {
+            rename(owner);
+        }
+    }
+    Ok(())
+}
+
 /// Renames user `old` to `new`: the user keeps their ID, and every
 /// reference (collaborations, memberships, invitations, installation
 /// requests) follows them. Refused for a login already taken and, as an
