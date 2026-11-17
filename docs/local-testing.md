@@ -294,22 +294,30 @@ container-to-host discovery path before any invocation is sent.
 
 **GitHub is the emulator.** `ghinvite_e2e::Harness::start` (and
 `start_owned`, `github_emulator*`) serves an embedded
-[octoemu](../libs/octoauth/crates/octoemu/README.md) on `127.0.0.1:0` with its
-temporary stub-compatibility world (`octoemu::compat::seed`: `acme` 100,
-`acme/api` 10, `acme/web` 11, `creator` 7, `alice` 8, App 123 installed as 1,
-App 456 as 2). The production `InstallationClient` and `ReqwestTransport` sign
-real App JWTs with `test-fixtures/github-app-rsa.pem`, which the emulator
-verifies, and use the stateless `ghs_…` installation tokens it mints. The old
-stub's control routes live under `/__octoemu/compat/` (`identity`, `outcomes`,
-`installation-identity`, `installation-repositories`, `invitation-expired`,
-`calls`, `reset`; `ghinvite_e2e::compat_url`), and the suites inject failures
-with [fault rules](../libs/octoauth/crates/octoemu/README.md#fault-rules)
-(`harness.emulator().add_fault(…)`) instead of axum middleware around the
-stub. The shim is temporary: GE-09 rewrites the suites against the native
-admin API and deletes it. Suites with their own scenario fakes
-(`start_with_github_router`: the organization suites, `email_delivery`,
-`repository_protocol`, `settlement_evidence`, `sweep_schedule`,
-`installation_availability`) keep them until GE-09. The emulator and the
+[octoemu](../libs/octoauth/crates/octoemu/README.md) on `127.0.0.1:0` seeded
+with `ghinvite_e2e::github::seed` (`acme` 100, `acme/api` 10, `acme/web` 11,
+`creator` 7, `alice` 8, App 123 installed as 1, App 456 as 2). The production
+`InstallationClient` and `ReqwestTransport` sign real App JWTs with
+`test-fixtures/github-app-rsa.pem`, which the emulator verifies, and use the
+stateless `ghs_…` installation tokens it mints. GitHub-side actions go
+through the emulator's admin API (`harness.github()`, a
+`ghinvite_e2e::github::World`): invitees accept or decline, users rename or
+leave, an installation's repositories change, an invitation expires, an
+organization renames itself. Answers GitHub would not give on its own (a
+refused, throttled, unanswered or lost write, a recycled login, an
+installation reported under another account, an outage) are
+[fault rules](../libs/octoauth/crates/octoemu/README.md#fault-rules), and
+counts come from the emulator's call log. Every suite runs on it except
+`repository_protocol` and `organization_delivery`, which keep their
+scenario fakes (`start_with_github_router`). Their AC-DLV-3 sequence
+properties (`tests/common/delivery_sequence.rs`, checked by
+`verify-delivery-sequences.py`) script one generated answer per write,
+including answers GitHub never gives to that route (a 204 to an
+organization invitation POST). `repository_protocol`'s fake also reads
+ghinvite's own write fence from SQLite as each request arrives, tells
+token generations apart by their fixed names, and empties the
+invitation list right after a listing it counts (`presence_listings`):
+none of that is GitHub behaviour an emulator could offer. The emulator and the
 servers are Tokio tasks owned by the test runtime, so success, assertion
 failure, or process termination closes their sockets. No credentials are
 injected into this gate.
