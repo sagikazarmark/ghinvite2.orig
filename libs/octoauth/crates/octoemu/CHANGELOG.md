@@ -27,12 +27,16 @@ Not yet published; developed inside the ghinvite repository.
   `identity` when a rule answered instead of the route, and `body_fields`
   (the non-secret request body fields `permission`, `permissions`, `role`,
   `state`, `invitee_id`, `team_ids`, `repository_ids`, `repositories`).
-- The stub-compatibility shim (temporary, deleted in GE-09):
-  `octoemu::compat::seed()` / `seed_with_installation(id)` (the binary's
-  `--seed compat`), the stub's default world, and its control routes under
-  `/__octoemu/compat/` (`identity`, `outcomes`, `installation-identity`,
-  `installation-repositories`, `invitation-expired`, `calls`, `reset`) on
-  emulator state and `compat:` fault rules.
+- Admin organization rename (GE-09c): `POST /__octoemu/orgs/{org}/rename`
+  `{"login"}`; the organization keeps its ID, and its memberships, teams,
+  invitations, custom roles, installations and Apps follow it (`org-rename`,
+  documented). An owner of repositories is refused (422), as for users.
+- Fault actions `stall` and `hold_response`, `query_contains` matching, and
+  the admin `users/{login}/rename` (`user-rename`, documented) and
+  `repository_invitations/{id}/expire` routes (GE-09b).
+
+The temporary stub-compatibility shim of GE-07 (`octoemu::compat`, `--seed
+compat`, `/__octoemu/compat/`) was never released and is gone (GE-09c).
 
 - Organizations (GE-06): `GET /orgs/{org}` (`plan` with
   `organization_plan`), `GET /orgs/{org}/members`, `GET`/`PUT`/`DELETE
