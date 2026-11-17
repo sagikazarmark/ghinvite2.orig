@@ -23,6 +23,23 @@ POST carrying the original token and operation ID. The recovery UI checks the ex
 retained operation before showing the stopped link; current revoked state alone does
 not prove another operation succeeded. Disabled executor options remain unavailable.
 
+## Sign-in through the GitHub emulator
+
+```bash
+npm exec --prefix tests/browser -- playwright test --config tests/browser/emulator-signin.config.mjs
+```
+
+The fixture (`crates/ghinvite-web/tests/emulator_browser.rs`, port 4176) is
+the `--local-dev` configuration with `GITHUB_API_BASE`, `GITHUB_WEB_BASE`
+and `GITHUB_AVATAR_BASE` pointing at an embedded
+[octoemu](../../libs/octoauth/crates/octoemu/README.md) emulator; nothing on
+GitHub's side is simulated by the browser test. Chromium, with and without
+JavaScript, signs in on the emulator's authorize page, and a Console form
+submitted after the session's cookies are gone bounces `303 → /login → 303`
+to the emulator's authorize page and back. That bounce needs the
+Content-Security-Policy's `form-action` to name the configured web origin:
+Chromium enforces `form-action` across redirects.
+
 ## Console accessibility
 
 ```bash
