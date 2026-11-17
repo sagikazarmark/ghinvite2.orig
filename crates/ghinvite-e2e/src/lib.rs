@@ -1,11 +1,12 @@
 //! Native test support for P1: a real Restate server and an emulated GitHub
-//! HTTP API (octoemu with its temporary stub-compatibility world).
+//! HTTP API (octoemu, with the world in [`github`]).
 //!
 //! No production crate depends on this library. CI must supply a server binary
 //! or both reuse URLs; a missing server always fails these application tests.
 
 use std::time::Duration;
 
+pub mod github;
 pub mod journal;
 
 pub use restate_e2e_harness::{Call, Reply, Restate, RunPath, Table};
@@ -61,20 +62,18 @@ pub fn github_transport(
     ))
 }
 
-/// An embedded GitHub emulator with the stub-compatibility world
-/// (`octoemu::compat::seed`): `acme` (100) with `acme/api` (10) and
-/// `acme/web` (11), `creator` (7, an owner), `alice` (8), the repository App
-/// (123) installed as installation 1 and the organization App (456) as 2,
-/// both verifying [`installed_apps`]' key. Its `api_base` is what
-/// [`installed_apps`] takes; the stub's control routes are under
-/// [`compat_url`] (temporary, GE-09).
+/// An embedded GitHub emulator with [`github::seed`]: `acme` (100) with
+/// `acme/api` (10) and `acme/web` (11), `creator` (7, an owner), `alice`
+/// (8), the repository App (123) installed as installation 1 and the
+/// organization App (456) as 2, both verifying [`installed_apps`]' key. Its
+/// `api_base` is what [`installed_apps`] takes; [`github::World`] acts on it.
 pub async fn github_emulator() -> octoemu::Emulator {
-    github_emulator_with(octoemu::compat::seed()).await
+    github_emulator_with(github::seed()).await
 }
 
 /// [`github_emulator`] with the repository App installed as `installation_id`.
 pub async fn github_emulator_for(installation_id: u64) -> octoemu::Emulator {
-    github_emulator_with(octoemu::compat::seed_with_installation(installation_id)).await
+    github_emulator_with(github::seed_with_installation(installation_id)).await
 }
 
 /// An embedded GitHub emulator with `seed`.
@@ -82,13 +81,6 @@ pub async fn github_emulator_with(seed: octoemu::seed::Seed) -> octoemu::Emulato
     octoemu::Emulator::start(seed)
         .await
         .expect("GitHub emulator starts")
-}
-
-/// The emulator's stub-compatibility route `route` (`identity`, `outcomes`,
-/// `installation-identity`, `installation-repositories`,
-/// `invitation-expired`, `calls`, `reset`) for an emulator at `base`.
-pub fn compat_url(base: &str, route: &str) -> String {
-    format!("{base}/__octoemu/compat/{route}")
 }
 
 /// Owns both the GitHub fixture and the actual Restate process/endpoint lifecycle.
@@ -190,9 +182,9 @@ impl Harness {
         }
     }
 
-    /// [`compat_url`] for this harness's emulator.
-    pub fn compat(&self, route: &str) -> String {
-        compat_url(&self.github_url, route)
+    /// GitHub-side actions on this harness's emulator.
+    pub fn github(&self) -> github::World<'_> {
+        github::World::new(self.emulator())
     }
 
     /// Finish endpoints before dropping the GitHub server and detect task panics.
