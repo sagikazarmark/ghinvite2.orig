@@ -61,9 +61,6 @@ pub(crate) struct State {
     pub(crate) oauth: OAuthControls,
     /// Fault rules (`crate::faults`).
     pub(crate) faults: crate::faults::Faults,
-    /// The stub-compatibility shim's state (`crate::compat`; GE-09 deletes
-    /// it).
-    pub(crate) compat: crate::compat::CompatState,
 }
 
 /// The `message` sent instead of an `assumed` one in refuse-assumed mode:
@@ -102,7 +99,6 @@ impl Shared {
         port: u16,
     ) -> Self {
         let clock = Clock::new(world.settings.start_time);
-        let initial = world.clone();
         let strict = AtomicBool::new(world.settings.refuse_assumed);
         let events = Outbox::default();
         let wake = events.waker();
@@ -127,9 +123,6 @@ impl Shared {
                 user_tokens: UserTokens::default(),
                 oauth: OAuthControls::default(),
                 faults: crate::faults::Faults::default(),
-                compat: crate::compat::CompatState {
-                    initial: Some(initial),
-                },
             }),
             manifest,
             registered,

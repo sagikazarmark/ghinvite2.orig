@@ -83,7 +83,6 @@ pub(crate) fn router() -> Router<SharedState> {
         )
         .route("/__octoemu/faults/{id}/release", post(release_fault))
         .route("/__octoemu/faults/{id}/wait", post(wait_for_held))
-        .merge(crate::compat::router())
 }
 
 fn no_such_fault() -> Response {

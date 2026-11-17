@@ -8,7 +8,7 @@ Plan, design and task list: [`docs/specs/github-emulator.md`](../../../../docs/s
 in the ghinvite repository. Modelled on AWS's emulator: real checks, explicit
 gaps, fidelity measured against the real service.
 
-## Status: fault rules (GE-07)
+## Status
 
 Built: the server, the two modes, the seed model and its validation, the
 virtual clock, the admin API, the call log, the fidelity manifest (GE-01);
@@ -28,7 +28,11 @@ organizations, memberships, organization invitations (by user or email,
 with teams; expiry, the failed list, the daily budget and seats), teams
 and team memberships with their repository grants, the user's
 `/user/memberships/orgs` routes, and `organization` / `membership` events
-(GE-06); fault rules and the temporary stub-compatibility shim (GE-07).
+(GE-06); fault rules (GE-07; `stall`, `hold_response` and
+`query_contains` since GE-09b), the admin user-rename and
+invitation-expiry routes (GE-09b). The temporary stub-compatibility shim
+of GE-07 is gone (GE-09c): ghinvite's suites build their world from the
+native seed and admin API (`ghinvite_e2e::github`).
 
 ### Implemented routes
 
@@ -360,8 +364,7 @@ $ octoemu --port 0 [--bind 127.0.0.1] [--seed seed.json] [--idle-timeout SECS] [
 {"api_base":"http://127.0.0.1:41234","web_base":"http://127.0.0.1:41234","admin_base":"http://127.0.0.1:41234/__octoemu","port":41234,"pid":4242}
 ```
 
-`--seed compat` starts the [stub-compatibility](#compatibility-shim-temporary)
-world instead of a file. Exactly one JSON line on stdout, once listening;
+Exactly one JSON line on stdout, once listening;
 nothing else goes to stdout.
 `--idle-timeout` exits (status 0) after that many seconds without a request.
 SIGTERM or Ctrl-C stops it. A bad argument or seed exits with status 2.
@@ -493,7 +496,6 @@ applies whole or not at all; it may not set `start_time`.
 | `DELETE /faults/{id}` | Removes it (204; 404), letting its held requests go on |
 | `POST /faults/{id}/release` | A hold, hold-response or stall rule lets what it holds go on (a stall ends) and holds no more (204; 404) |
 | `POST /faults/{id}/wait` | `{"held"?: n (1), "timeout_ms"?}`: 200 `{"held": n}` once the hold, hold-response or stall rule holds at least `n` requests, 504 at the timeout (default 30 s) |
-| `/compat/…` | The temporary [stub-compatibility shim](#compatibility-shim-temporary) |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
 ticks with real time, and jumps on advance. Every response, admin included,
@@ -597,46 +599,6 @@ rule fires on is marked in the call log.
   rule can drop the connection a request came on.
 - The organization `spammed` switch (`POST /orgs/{org}/spammed`) stays an
   `assumed` GitHub behaviour, not a fault rule.
-
-## Compatibility shim (temporary)
-
-**Deleted in GE-09.** It lets ghinvite's Rust workflow tests, written
-against `ghinvite_github::stub`, run against the emulator before they are
-rewritten for the native admin API. `octoemu::compat::seed()` (the binary's
-`--seed compat`) is the stub's default world: the organization `acme` (100,
-created 2020) with the private `acme/api` (10) and `acme/web` (11);
-`creator` (7) owns `acme` (so is admin everywhere); `alice` (8); the
-repository App 123 (`Iv-p1-runtime-fixture`, `administration: write`,
-`metadata: read`) installed on all of `acme` as installation 1, and the
-organization App 456 (`Iv-p1-runtime-fixture-org`, `members: write`,
-`metadata: read`) as 2, both created 2026-01-01, without webhooks, verifying
-JWTs against `compat::PUBLIC_KEY` (the public half of
-`tests/fixtures/rsa2048.pem`, which is ghinvite's
-`test-fixtures/github-app-rsa.pem`). `compat::seed_with_installation(id)`
-installs the repository App as `id` (the stub answered for any ID).
-
-The stub's control routes, under `/__octoemu/compat/`, act on emulator
-state and on fault rules labelled `compat:…`:
-
-| Route | Does |
-|---|---|
-| `POST /identity` `{"login"?, "addressed_id"?, "role_name"?}` | Custom rules make `GET /user/{id}` answer `login` (default `alice`) for every ID and `GET /users/{username}` answer `addressed_id` (default 8) for every username, as the stub did, so a login that now resolves to another account can be staged. In the world, user `addressed_id` carries `login` (created if needed; a previous holder of the login is renamed `{login}-former-{id}`); with `role_name` (`read`, `triage`, `write`, `maintain`, `admin`, a custom role, `none`) they become a direct collaborator with that role on every repository and their pending invitations are accepted (gone from the list); without it they lose direct access |
-| `POST /outcomes` `{"owner", "repo", "user", "outcome"}` | `already_collaborator` makes the user a direct `pull` collaborator (so PUTs answer 204); the rest are rules on that PUT: `terminal_failure` (422 every time), `transient_once` (502 once), `created_response_lost` (`apply_then_lose` 502 every time), `created_then_declined` (502 every time, nothing left behind), `access_lost_once` (403 once), `throttled_once` (403 with `Retry-After: 1` and the secondary-rate-limit message, once) |
-| `POST /installation-identity` `<account>` | `GET /app/installations/{id}` reports this `account` (a custom rule; the rest is the real installation); the real account removes the rule |
-| `POST /installation-repositories` `[ids]` | Every installation of App 123 selects exactly these repositories (an unknown ID becomes `acme/repo-{id}`) |
-| `POST /invitation-expired` `{"owner", "repo", "id", "expired"}` | Dates the invitation back past its 7 days (or to now) |
-| `GET /calls` | The stub's ledger, `{"count", "requests": [{"method", "path", "permission", "status"}]}`: token minting, collaborator PUT/GET/DELETE, invitation lists and deletions, without the query; a lost write shows the status its handler chose |
-| `DELETE /reset` | 200; removes the `compat:` rules, empties the call log, gives users their starting logins and returns collaborators, invitations, memberships and App 123's repository selection to the start; installations, tokens, the clock and invitation IDs (never reused) stay |
-
-Where the emulator differs from the stub (and the workflow tests now see
-GitHub's documented behaviour): JWTs and installation tokens are verified
-(`ghs_…`, not `test-token-for-{id}`); unknown users, repositories and
-installations are 404; a PUT for a user with a pending invitation returns
-that invitation again (assumed) instead of a new one; an accepted
-invitation leaves the pending list; `/repos/{owner}/{repo}` is the real
-repository; `permission` follows the role (`read` is `read`, not
-`write`); an installation narrowed to some repositories reports
-`repository_selection: "selected"`.
 
 ## Fidelity
 
@@ -761,11 +723,11 @@ events to ghinvite-web's org webhook intake.
 pattern, credential and body, `nth`/`times`, every action (a dropped
 connection is an error at the client, a lost response still changes
 state, a virtual delay expires a token), holds and their release, the
-admin API and the call log's marks. `tests/compat.rs` covers the
-stub-compatibility shim: the `compat` seed reached with octoauth and
-ghinvite's fixture key, and every `/__octoemu/compat/` route. In the
-ghinvite workspace, `ghinvite_e2e::Harness::start` serves the compat world
-to the Restate workflow suites (`crates/ghinvite-workflows/tests`).
+admin API and the call log's marks. In the ghinvite workspace,
+`ghinvite_e2e::Harness::start` serves the Restate workflow suites
+(`crates/ghinvite-workflows/tests`) an emulator seeded with
+`ghinvite_e2e::github::seed`, and `ghinvite_e2e::github::World` takes their
+GitHub-side actions through the admin API.
 
 `tests/app_auth.rs` runs octoauth's App client and octotoken's provider
 against an embedded emulator: minting, pagination, expiry on the clock and

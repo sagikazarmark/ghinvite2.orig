@@ -36,8 +36,7 @@ on stdout once listening: {\"api_base\",\"web_base\",\"admin_base\",\"port\",\"p
 Options:
   --port N             Port to listen on; 0 picks a free one [default: 0]
   --bind IP            Address to listen on [default: 127.0.0.1]
-  --seed PATH          JSON seed file (users, orgs, teams, repos, apps, ...);
-                       `compat` is the stub-compatibility world (temporary)
+  --seed PATH          JSON seed file (users, orgs, teams, repos, apps, ...)
   --idle-timeout SECS  Exit after SECS seconds without a request
   --refuse-assumed     Refuse behaviour fidelity.toml labels `assumed`
   --fidelity           Print the fidelity table and exit
@@ -144,7 +143,6 @@ Options:
         }
         let seed = match &args.seed {
             None => Seed::new(),
-            Some(path) if path.as_os_str() == "compat" => octoemu::compat::seed(),
             Some(path) => match std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
                 .and_then(|text| Seed::from_json(&text).map_err(|e| e.to_string()))

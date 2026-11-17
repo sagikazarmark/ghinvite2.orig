@@ -17,9 +17,8 @@
 //! memberships, organization invitations (expiry, the failed list, the
 //! budget, seats), teams and team memberships with repository grants, the
 //! user's `/user/memberships/orgs` routes and `organization` / `membership`
-//! events (GE-06); fault rules ([`faults`]) and the temporary
-//! stub-compatibility shim ([`compat`], deleted in GE-09) (GE-07). Every
-//! other API and web route answers
+//! events (GE-06); fault rules ([`faults`], GE-07). Every other API and
+//! web route answers
 //! `501 {"message": "octoemu: not implemented", "route": …}`, never 404. The
 //! plan is `docs/specs/github-emulator.md` in the ghinvite repository.
 //!
@@ -41,7 +40,8 @@
 //! `calls`, `fidelity`, `tokens/installation`, `tokens/user`, `oauth…`,
 //! `installations…`,
 //! `apps/{id}/webhook`, `events`, `deliveries…`, `act/{login}/…`,
-//! `orgs/{org}/spammed`, `faults…`, `compat/…`). Every
+//! `orgs/{org}/spammed`, `users/{login}/rename`,
+//! `repository_invitations/{id}/expire`, `faults…`). Every
 //! response carries `Date` from the virtual clock. The binary
 //! (`octoemu --port 0`) prints one JSON line with the base URLs once it
 //! listens.
@@ -65,7 +65,6 @@ mod auth;
 pub mod calls;
 mod clock;
 mod collaboration;
-pub mod compat;
 mod connection;
 mod emulator;
 pub mod events;

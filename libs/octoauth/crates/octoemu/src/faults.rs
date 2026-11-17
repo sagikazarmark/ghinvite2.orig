@@ -702,19 +702,6 @@ impl Faults {
         self.rules.len() != before
     }
 
-    /// Removes every rule labelled `label`.
-    pub(crate) fn remove_labelled(&mut self, label: &str) {
-        let ids: Vec<u64> = self
-            .rules
-            .iter()
-            .filter(|rule| rule.fault.label.as_deref() == Some(label))
-            .map(|rule| rule.id)
-            .collect();
-        for id in ids {
-            self.remove(id);
-        }
-    }
-
     /// Removes every rule, releasing what they hold.
     pub(crate) fn clear(&mut self) {
         for rule in &self.rules {
