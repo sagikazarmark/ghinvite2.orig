@@ -1,78 +1,107 @@
 //! Actual retained org-owner authority; no org delivery is activated.
 #![cfg(feature = "integration")]
-use axum::{
-    body::to_bytes,
-    extract::{Request, State},
-    response::{IntoResponse, Response},
-};
 use ghinvite_core::storage::{AppInstallationReadStorage, RecordStorage};
 use ghinvite_e2e::{Call, Harness};
+use octoemu::faults::{Fault, FaultAction};
+use octoemu::seed::{Membership, OrgRole, Seed, User};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-};
-#[derive(Default)]
-struct Github {
-    suspended: AtomicBool,
-    unavailable: AtomicBool,
-    roles: Mutex<BTreeMap<u64, (&'static str, &'static str)>>,
-    mints: Mutex<Vec<Value>>,
-}
-async fn github(State(state): State<Arc<Github>>, req: Request) -> Response {
-    let path = req.uri().path().to_owned();
-    if path.starts_with("/app/installations/") {
-        let id: u64 = path.split('/').nth(3).unwrap().parse().unwrap();
-        let org = id == 2;
-        if path.ends_with("/access_tokens") {
-            let body: Value =
-                serde_json::from_slice(&to_bytes(req.into_body(), 10000).await.unwrap()).unwrap();
-            if org {
-                assert!(body["permissions"].get("administration").is_none());
-                assert!(matches!(
-                    body["permissions"]["members"].as_str(),
-                    Some("read" | "write")
-                ));
+use std::sync::Arc;
+
+/// The suites' world with acme's people replaced: `user-7`, `user-8` and
+/// `user-9`, each with the given membership (`pending` or active), if any.
+fn world(members: &[(u64, OrgRole, bool)]) -> Seed {
+    let mut seed = ghinvite_e2e::github::seed();
+    seed.users = [7, 8, 9]
+        .into_iter()
+        .map(|id| User::new(id, format!("user-{id}")))
+        .collect();
+    seed.memberships = members
+        .iter()
+        .map(|(id, role, pending)| {
+            let membership = Membership::new("acme", format!("user-{id}"), *role);
+            if *pending {
+                membership.pending()
+            } else {
+                membership
             }
-            state.mints.lock().unwrap().push(body);
-            return (axum::http::StatusCode::CREATED, axum::Json(json!({"token":format!("fixture-{id}"), "expires_at":chrono::Utc::now()+chrono::Duration::hours(1)}))).into_response();
-        }
-        return axum::Json(json!({"id":id,"app_id":if org {456}else{123},
-            "account":{"id":100,"login":"acme","type":"Organization"},
-            "permissions":if org {json!({"members":"write","metadata":"read"})}else{json!({"administration":"write","metadata":"read"})},
-            "repository_selection":"all","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z",
-            "suspended_at": if org && state.suspended.load(Ordering::SeqCst) {json!("2026-01-02T00:00:00Z")}else{Value::Null}})).into_response();
+        })
+        .collect();
+    seed
+}
+
+/// A Restate harness on the emulator with [`world`].
+async fn start(members: &[(u64, OrgRole, bool)]) -> Harness {
+    Harness::start_with_emulator(ghinvite_e2e::github_emulator_with(world(members)).await).await
+}
+
+/// `GET /orgs/acme` answers 503 while `on` (a fault rule).
+fn org_unavailable(h: &Harness, on: bool) {
+    if on {
+        h.github().rule(
+            "organization unavailable",
+            Fault::on(
+                "GET",
+                "/orgs/acme",
+                FaultAction::respond_json(503, json!({"message":"Service Unavailable"})),
+            ),
+        );
+    } else {
+        h.github().clear_rules();
     }
-    if path == "/installation/repositories" {
-        return axum::Json(json!({"total_count":1,"repositories":[{"id":10,"full_name":"acme/api","owner":{"id":100,"login":"acme"}}]})).into_response();
-    }
-    if path == "/orgs/acme" {
-        if state.unavailable.load(Ordering::SeqCst) {
-            return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-        return axum::Json(json!({"id":100,"login":"acme","created_at":"2020-01-01T00:00:00Z"}))
-            .into_response();
-    }
-    if let Some(id) = path
-        .strip_prefix("/user/")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return axum::Json(json!({"id":id,"login":format!("user-{id}")})).into_response();
-    }
-    if let Some(id) = path
-        .strip_prefix("/orgs/acme/memberships/user-")
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        let roles = state.roles.lock().unwrap();
-        return match roles.get(&id) {
-            Some((role, membership)) => axum::Json(json!({"role":role,"state":membership,"user":{"id":id,"login":format!("user-{id}")},"organization":{"id":100,"login":"acme"}})).into_response(),
-            None => axum::http::StatusCode::NOT_FOUND.into_response(),
+}
+
+/// `user-{id}` is an active member of acme now, no longer an owner.
+async fn demote(h: &Harness, id: u64) {
+    let login = format!("user-{id}");
+    let admin = h.emulator().admin_base().to_owned();
+    h.client
+        .post(format!("{admin}/act/{login}/orgs/acme/leave"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    h.emulator()
+        .seed(Seed::new().membership(Membership::new("acme", login, OrgRole::Member)))
+        .unwrap();
+}
+
+/// The installation tokens minted, after checking every call: only the
+/// routes this authority reads (the fake refused any other), each
+/// organization token without `administration` and with `members`.
+fn checked_mints(h: &Harness) -> usize {
+    let calls = h.emulator().calls();
+    for call in &calls {
+        let path = call.path.split('?').next().unwrap_or_default();
+        let segments: Vec<&str> = path.split('/').collect();
+        let allowed = match segments.as_slice() {
+            ["", "app", "installations", _] | ["", "app", "installations", _, "access_tokens"] => {
+                true
+            }
+            ["", "installation", "repositories"] | ["", "orgs", "acme"] => true,
+            ["", "user", id] => id.parse::<u64>().is_ok(),
+            ["", "orgs", "acme", "memberships", _] => true,
+            _ => false,
         };
+        assert!(allowed, "unexpected {} {path}", call.method);
+        if call.method == "POST" && path == "/app/installations/2/access_tokens" {
+            let permissions = call
+                .body_fields
+                .as_ref()
+                .and_then(|fields| fields.get("permissions"))
+                .cloned()
+                .unwrap_or_default();
+            assert!(permissions.get("administration").is_none());
+            assert!(matches!(
+                permissions["members"].as_str(),
+                Some("read" | "write")
+            ));
+        }
     }
-    panic!("unexpected fixture endpoint {path}")
+    calls
+        .iter()
+        .filter(|call| call.method == "POST" && call.path.ends_with("/access_tokens"))
+        .count()
 }
 async fn call(
     h: &Harness,
@@ -121,17 +150,11 @@ fn delegation(actor: u64, on: bool) -> Value {
 }
 #[tokio::test]
 async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_receipts() {
-    let github = Arc::new(Github::default());
-    github.roles.lock().unwrap().extend([
-        (7, ("member", "active")),
-        (8, ("admin", "active")),
-        (9, ("admin", "pending")),
-    ]);
-    let h = Harness::start_with_github_router(
-        axum::Router::new()
-            .fallback(github_handler())
-            .with_state(github.clone()),
-    )
+    let h = start(&[
+        (7, OrgRole::Member, false),
+        (8, OrgRole::Admin, false),
+        (9, OrgRole::Admin, true),
+    ])
     .await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -300,7 +323,7 @@ async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_rec
         decide(&h, &decision(&h, 9).await, 200).await["outcome"],
         "not_authorized"
     );
-    github.suspended.store(true, Ordering::SeqCst);
+    assert!(h.emulator().suspend_installation(2));
     let suspended = delegation(8, false);
     assert_eq!(
         call(
@@ -318,8 +341,8 @@ async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_rec
         decide(&h, &decision(&h, 8).await, 200).await["outcome"],
         "not_authorized"
     );
-    github.suspended.store(false, Ordering::SeqCst);
-    github.unavailable.store(true, Ordering::SeqCst);
+    assert!(h.emulator().unsuspend_installation(2));
+    org_unavailable(&h, true);
     let retry = delegation(8, false);
     call(
         &h,
@@ -332,7 +355,7 @@ async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_rec
     .await;
     let retry_decision = decision(&h, 8).await;
     decide(&h, &retry_decision, 503).await;
-    github.unavailable.store(false, Ordering::SeqCst);
+    org_unavailable(&h, false);
     assert_eq!(
         call(
             &h,
@@ -393,7 +416,7 @@ async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_rec
             .revision,
         6
     );
-    github.roles.lock().unwrap().insert(8, ("member", "active"));
+    demote(&h, 8).await;
     assert_eq!(
         call(
             &h,
@@ -430,10 +453,7 @@ async fn org_owner_supersedes_installer_with_one_settings_sequence_and_exact_rec
         409,
     )
     .await;
-    assert!(!github.mints.lock().unwrap().is_empty());
-}
-fn github_handler() -> axum::routing::MethodRouter<Arc<Github>> {
-    axum::routing::any(github)
+    assert!(checked_mints(&h) > 0);
 }
 
 #[path = "organization_authority/budget_policy.rs"]

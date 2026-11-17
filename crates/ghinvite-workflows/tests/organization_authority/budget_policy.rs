@@ -1,21 +1,20 @@
 use super::*;
+use axum::{
+    extract::{Request, State},
+    response::{IntoResponse, Response},
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn command(actor: u64, confirmed: bool) -> Value {
     json!({"operation_id":ghinvite_core::RequestId::new(),"actor_user_id":actor,"confirmed_established":confirmed})
 }
 #[tokio::test]
 async fn org_budget_policy_requires_live_owner_and_replays_without_reverting_later_policy() {
-    let github = Arc::new(Github::default());
-    github.roles.lock().unwrap().extend([
-        (7, ("member", "active")),
-        (8, ("admin", "active")),
-        (9, ("admin", "pending")),
-    ]);
-    let h = Harness::start_with_github_router(
-        axum::Router::new()
-            .fallback(github_handler())
-            .with_state(github.clone()),
-    )
+    let h = start(&[
+        (7, OrgRole::Member, false),
+        (8, OrgRole::Admin, false),
+        (9, OrgRole::Admin, true),
+    ])
     .await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -84,7 +83,7 @@ async fn org_budget_policy_requires_live_owner_and_replays_without_reverting_lat
         json!({"Err":"org_app_required"})
     );
     let raised = command(8, true);
-    github.unavailable.store(true, Ordering::SeqCst);
+    org_unavailable(&h, true);
     call(
         &h,
         "AccountInstallation",
@@ -94,7 +93,7 @@ async fn org_budget_policy_requires_live_owner_and_replays_without_reverting_lat
         503,
     )
     .await;
-    github.unavailable.store(false, Ordering::SeqCst);
+    org_unavailable(&h, false);
     let original = call(
         &h,
         "AccountInstallation",
@@ -120,7 +119,7 @@ async fn org_budget_policy_requires_live_owner_and_replays_without_reverting_lat
         .await["Ok"]["revision"],
         2
     );
-    github.roles.lock().unwrap().insert(8, ("member", "active"));
+    demote(&h, 8).await;
     assert_eq!(
         call(
             &h,
@@ -193,6 +192,7 @@ async fn org_budget_policy_requires_live_owner_and_replays_without_reverting_lat
     let audit = audit.expect("two immutable cap audits");
     assert_ne!(audit.events[0].id, audit.events[1].id);
     assert!(audit.events.iter().all(|e| e.actor_id == Some(8)));
+    checked_mints(&h);
     h.finish().await;
 }
 
@@ -239,14 +239,7 @@ async fn await_refused(boundary: &BudgetBoundary, after: usize) {
 
 #[tokio::test]
 async fn completed_policy_replays_during_unrelated_pending_change_and_fresh_command_drains_it() {
-    let github = Arc::new(Github::default());
-    github.roles.lock().unwrap().insert(8, ("admin", "active"));
-    let h = Harness::start_with_github_router(
-        axum::Router::new()
-            .fallback(github_handler())
-            .with_state(github.clone()),
-    )
-    .await;
+    let h = start(&[(8, OrgRole::Admin, false)]).await;
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
             .await
@@ -339,7 +332,7 @@ async fn completed_policy_replays_during_unrelated_pending_change_and_fresh_comm
         .await;
     // The completed receipt is independent of both currently unavailable
     // dependencies and does not need to finish B as a side effect.
-    github.unavailable.store(true, Ordering::SeqCst);
+    org_unavailable(&h, true);
     let replay = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         call(
@@ -441,7 +434,7 @@ async fn completed_policy_replays_during_unrelated_pending_change_and_fresh_comm
     )
     .await;
     assert_eq!(replay_b["Ok"], retained_b["policy"]);
-    github.unavailable.store(false, Ordering::SeqCst);
+    org_unavailable(&h, false);
     let third = call(
         &h,
         "AccountInstallation",
@@ -489,7 +482,7 @@ async fn completed_policy_replays_during_unrelated_pending_change_and_fresh_comm
         .await_status(sent_d.invocation_id(), &["completed"])
         .await;
     boundary.unavailable.store(false, Ordering::SeqCst);
-    github.unavailable.store(true, Ordering::SeqCst);
+    org_unavailable(&h, true);
     let fourth = call(
         &h,
         "AccountInstallation",
@@ -548,6 +541,7 @@ async fn completed_policy_replays_during_unrelated_pending_change_and_fresh_comm
     })
     .await
     .expect("exactly one immutable audit per applied operation");
+    checked_mints(&h);
     h.finish().await;
     drop(task);
 }
