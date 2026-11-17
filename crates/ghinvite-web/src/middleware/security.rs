@@ -1,12 +1,14 @@
 //! Public capability surfaces must not leak through referrers, caches or indexes.
 use axum::{
-    extract::Request,
+    extract::{Request, State},
     http::{HeaderValue, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 
-pub async fn headers(request: Request, next: Next) -> Response {
+/// Privacy and security headers on every response. `policy` is the
+/// deployment's Content-Security-Policy ([`super::csp::policy`]).
+pub async fn headers(State(policy): State<HeaderValue>, request: Request, next: Next) -> Response {
     let sensitive = capability_path(request.uri().path());
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -22,10 +24,7 @@ pub async fn headers(request: Request, next: Next) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(super::csp::CONTENT_SECURITY_POLICY),
-    );
+    headers.insert(header::CONTENT_SECURITY_POLICY, policy);
     if sensitive {
         headers.insert("x-robots-tag", HeaderValue::from_static("noindex"));
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -72,7 +71,10 @@ mod tests {
                     ],
                 )
             }))
-            .layer(axum::middleware::from_fn(headers));
+            .layer(axum::middleware::from_fn_with_state(
+                HeaderValue::from_static(super::super::csp::CONTENT_SECURITY_POLICY),
+                headers,
+            ));
         for path in [
             "/i",
             "/i/SECRET_MARKER",
@@ -105,7 +107,10 @@ mod tests {
         }
         let error = Router::new()
             .fallback(any(|| async { StatusCode::SERVICE_UNAVAILABLE }))
-            .layer(axum::middleware::from_fn(headers));
+            .layer(axum::middleware::from_fn_with_state(
+                HeaderValue::from_static(super::super::csp::CONTENT_SECURITY_POLICY),
+                headers,
+            ));
         let response = error
             .oneshot(Request::builder().uri("/join").body(Body::empty()).unwrap())
             .await

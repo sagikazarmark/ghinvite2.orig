@@ -36,7 +36,9 @@ use tower_http::set_header::SetResponseHeaderLayer;
 ///   origin, but a POST from an expired session is answered with
 ///   `303 → /login → 303 → https://github.com/login/oauth/authorize`. Browsers
 ///   that enforce `form-action` across redirects (Chromium) need the final
-///   hop listed or the sign-in bounce is silently blocked.
+///   hop listed or the sign-in bounce is silently blocked. The listed origin
+///   is GitHub's web origin as configured ([`policy`]): `https://github.com`
+///   in production, a stand-in's (`GITHUB_WEB_BASE`) outside it.
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      script-src 'self' 'wasm-unsafe-eval'; \
      style-src 'self'; \
@@ -46,15 +48,40 @@ pub const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; \
      frame-ancestors 'none'; \
      form-action 'self' https://github.com";
 
-/// Tower layer that sets [`CONTENT_SECURITY_POLICY`] on every `text/html`
-/// response that does not already carry a policy. Mounted once in
+/// [`CONTENT_SECURITY_POLICY`] for a deployment whose GitHub web origin is
+/// `github`'s web base: the sign-in bounce's final hop is that origin. With
+/// GitHub's own bases (always, in production) this is exactly
+/// [`CONTENT_SECURITY_POLICY`]; a non-production `GITHUB_WEB_BASE` (such as
+/// the `octoemu` emulator) replaces `https://github.com` with its origin.
+pub fn policy(github: &ghinvite_config::github::GithubBases) -> HeaderValue {
+    // The base is validated at configuration (https, or http on loopback;
+    // no credentials, query or fragment), so its origin is a plain
+    // `scheme://host[:port]`: nothing in it can end the directive.
+    let origin = url::Url::parse(github.web())
+        .map(|url| url.origin().ascii_serialization())
+        .ok()
+        .filter(|origin| origin != "null");
+    match origin {
+        Some(origin) if origin != "https://github.com" => HeaderValue::from_str(&format!(
+            "{} {origin}",
+            CONTENT_SECURITY_POLICY
+                .strip_suffix(" https://github.com")
+                .expect("the policy ends with GitHub's origin")
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static(CONTENT_SECURITY_POLICY)),
+        _ => HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+    }
+}
+
+/// Tower layer that sets `policy` ([`policy`]) on every `text/html` response
+/// that does not already carry a policy. Mounted once in
 /// [`crate::build_app`] so it covers every route and the HTML fallback.
-pub fn layer<B>() -> SetResponseHeaderLayer<impl Fn(&Response<B>) -> Option<HeaderValue> + Clone> {
+pub fn layer<B>(
+    policy: HeaderValue,
+) -> SetResponseHeaderLayer<impl Fn(&Response<B>) -> Option<HeaderValue> + Clone> {
     SetResponseHeaderLayer::if_not_present(
         header::CONTENT_SECURITY_POLICY,
-        |response: &Response<B>| {
-            is_html(response).then(|| HeaderValue::from_static(CONTENT_SECURITY_POLICY))
-        },
+        move |response: &Response<B>| is_html(response).then(|| policy.clone()),
     )
 }
 
@@ -87,6 +114,51 @@ mod tests {
         assert!(!CONTENT_SECURITY_POLICY.contains("'unsafe-inline'"));
         assert!(!CONTENT_SECURITY_POLICY.contains("'unsafe-eval'"));
         HeaderValue::from_static(CONTENT_SECURITY_POLICY);
+    }
+
+    fn bases(web: Option<&str>) -> ghinvite_config::github::GithubBases {
+        ghinvite_config::github::GithubBases::from_config(
+            ghinvite_config::github::Deployment::Development,
+            |field| match field {
+                "GITHUB_WEB_BASE" => web.map(str::to_owned),
+                _ => None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn github_bases_keep_the_production_policy() {
+        assert_eq!(policy(&bases(None)), CONTENT_SECURITY_POLICY);
+        assert_eq!(
+            policy(&ghinvite_config::github::GithubBases::github()),
+            CONTENT_SECURITY_POLICY
+        );
+    }
+
+    #[test]
+    fn form_action_names_the_configured_web_origin() {
+        for (web, origin) in [
+            ("http://127.0.0.1:41234", "http://127.0.0.1:41234"),
+            ("http://127.0.0.1:41234/", "http://127.0.0.1:41234"),
+            ("http://[::1]:8080/github/", "http://[::1]:8080"),
+            ("https://ghe.example.test/", "https://ghe.example.test"),
+            ("https://github.com:443/", "https://github.com"),
+        ] {
+            let value = policy(&bases(Some(web)));
+            let value = value.to_str().unwrap();
+            assert!(
+                value.ends_with(&format!("; form-action 'self' {origin}")),
+                "{web}: {value}"
+            );
+            assert_eq!(value.matches("form-action").count(), 1);
+            assert!(!value.contains("https://github.com") || origin == "https://github.com");
+            assert_eq!(
+                value.strip_suffix(origin),
+                CONTENT_SECURITY_POLICY.strip_suffix("https://github.com"),
+                "only the form-action origin changes"
+            );
+        }
     }
 
     #[test]

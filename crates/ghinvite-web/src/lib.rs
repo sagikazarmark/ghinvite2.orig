@@ -77,6 +77,8 @@ where
 {
     use tower_sessions::{Expiry, SessionManagerLayer};
 
+    // The sign-in bounce's final hop is GitHub's web origin as configured.
+    let policy = middleware::csp::policy(&state.config.github);
     let session_layer = SessionManagerLayer::new(session_store)
         .with_secure(state.config.cookie_secure)
         .with_http_only(true)
@@ -112,7 +114,7 @@ where
 
     router
         .fallback(routes::not_found::public)
-        .layer(middleware::csp::layer())
+        .layer(middleware::csp::layer(policy.clone()))
         // Every rendered page can contain logout authority, including errors.
         .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
             axum::http::header::CACHE_CONTROL,
@@ -133,7 +135,10 @@ where
             session_store::require_readable_session,
         ))
         .layer(session_layer)
-        .layer(axum::middleware::from_fn(middleware::security::headers))
+        .layer(axum::middleware::from_fn_with_state(
+            policy,
+            middleware::security::headers,
+        ))
         .with_state(state)
 }
 
