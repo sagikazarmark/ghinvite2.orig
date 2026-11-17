@@ -15,7 +15,7 @@ runtime-tests = []
 # Native-only: runs the handlers against the local `restate-server`
 # (compose.yaml) via `scripts/test-restate.sh`. Never enabled for the Workers
 # build, which is why `axum` and `ghinvite-web` can be plain optional deps.
-integration = ["dep:ghinvite-web", "dep:axum", "ghinvite-github/test-stub"]
+integration = ["dep:ghinvite-web", "dep:axum"]
 
 [dependencies]
 async-trait.workspace = true

@@ -10,10 +10,8 @@ axum.workspace = true
 base64.workspace = true
 chrono.workspace = true
 ghinvite-config.workspace = true
-# `test-stub` is no longer used here (GE-07 moved the suites to octoemu); it
-# keeps the stub's own tests in `cargo test --workspace` until GE-09 deletes
-# the stub.
-ghinvite-github = { workspace = true, features = ["test-stub"] }
+# `test-mock`: `ReqwestTransport::with_client` for `github_transport`.
+ghinvite-github = { workspace = true, features = ["test-mock"] }
 restate-e2e-harness = "0.4"
 restate-sdk = { workspace = true, features = ["http_server"] }
 reqwest.workspace = true

@@ -248,6 +248,36 @@ async fn repository_collaboration_end_to_end() {
     );
 }
 
+/// A real `AppTokenProvider` creates one token through the emulator's
+/// token route, `read` calls an endpoint with it, the next read reuses the
+/// cached token, and `get_installation` reads the installation with the
+/// App's JWT.
+#[tokio::test]
+async fn the_provider_reuses_its_token() {
+    let emulator = Emulator::start(seed()).await.unwrap();
+    let app = repo_app(&emulator);
+    for _ in 0..2 {
+        let id = read!(app, |rest| endpoints::get_repository(&rest, WIDGETS)).unwrap();
+        assert_eq!(id.id, 101);
+    }
+    let created = emulator
+        .calls()
+        .iter()
+        .filter(|call| {
+            call.method == "POST"
+                && call.path == format!("/app/installations/{INSTALLATION}/access_tokens")
+        })
+        .count();
+    assert_eq!(created, 1);
+    let info = app.get_installation(INSTALLATION).await.unwrap();
+    assert_eq!(
+        info.id,
+        ghinvite_github::ids::InstallationId::new(INSTALLATION)
+    );
+    assert_eq!(info.app_id, ghinvite_github::ids::AppId::new(4));
+    assert_eq!(info.account.kind, octoauth::AccountKind::Organization);
+}
+
 #[tokio::test]
 async fn users_resolve_by_login_and_id() {
     let emulator = Emulator::start(seed()).await.unwrap();

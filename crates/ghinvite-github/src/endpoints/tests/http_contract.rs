@@ -1,5 +1,5 @@
 //! Native actual-TCP execution of every synthetic HTTP pair through the
-//! reusable `stub::wire_contract_router`.
+//! frozen synthetic fixture (`wire_router`).
 use super::wire_contract::*;
 use crate::{
     rest::{Rest, RestEnv},
@@ -9,12 +9,12 @@ use std::{sync::Arc, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot};
 
 #[tokio::test]
-async fn reusable_stub_router_serves_all_typed_pairs_and_header_status_families() {
+async fn wire_router_serves_all_typed_pairs_and_header_status_families() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let (stop, stopped) = oneshot::channel();
     let task = tokio::spawn(async move {
-        axum::serve(listener, crate::stub::wire_contract_router())
+        axum::serve(listener, super::wire_router::router())
             .with_graceful_shutdown(async {
                 let _ = stopped.await;
             })
@@ -92,7 +92,7 @@ async fn wire_router_refuses_mismatched_credentials() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(listener, crate::stub::wire_contract_router())
+        axum::serve(listener, super::wire_router::router())
             .await
             .unwrap();
     });

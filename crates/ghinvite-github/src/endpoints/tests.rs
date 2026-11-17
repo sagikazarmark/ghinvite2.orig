@@ -900,6 +900,8 @@ async fn invitation_numeric_alias_is_pinned_and_partial_metadata_survives() {
 
 mod stub_contract;
 
-#[cfg(all(feature = "test-stub", not(target_arch = "wasm32")))]
+#[cfg(not(target_arch = "wasm32"))]
 mod http_contract;
 mod wire_contract;
+#[cfg(not(target_arch = "wasm32"))]
+mod wire_router;

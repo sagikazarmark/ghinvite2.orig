@@ -213,7 +213,7 @@ impl ReqwestTransport {
 
     /// Fixture seam. The caller must disable redirects: a client's redirect
     /// policy cannot be inspected after construction.
-    #[cfg(any(test, feature = "test-mock", feature = "test-stub"))]
+    #[cfg(any(test, feature = "test-mock"))]
     pub fn with_client(client: reqwest::Client) -> Self {
         Self { client }
     }

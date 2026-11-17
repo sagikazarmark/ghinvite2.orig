@@ -18,8 +18,8 @@
 //!   (octotoken providers), and the operations ghinvite calls GitHub with.
 //! - [`profiles`]: the token scopes ghinvite requests.
 //!
-//! Tests use `mocks::MockTransport` (feature `test-mock`) or the native
-//! `stub` HTTP fixture (feature `test-stub`).
+//! Tests use `mocks::MockTransport` (feature `test-mock`) or, natively, the
+//! `octoemu` GitHub emulator (a dev-dependency).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -44,9 +44,6 @@ pub mod worker;
 
 #[cfg(any(test, feature = "test-mock"))]
 pub mod mocks;
-
-#[cfg(all(feature = "test-stub", not(target_arch = "wasm32")))]
-pub mod stub;
 
 pub use apps::{
     AppSlot, AppUnavailable, GithubApp, GithubApps, InstallationRest, InstalledApp, TokenCallError,

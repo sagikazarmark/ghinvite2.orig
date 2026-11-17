@@ -13,8 +13,6 @@ publish.workspace = true
 [features]
 # In-process `MockTransport` and credential builders for other crates' tests.
 test-mock = []
-# Native fake-GitHub HTTP fixture (`stub::router`) and the `stub` example.
-test-stub = ["dep:axum"]
 
 [dependencies]
 chrono.workspace = true
@@ -32,8 +30,6 @@ zeroize = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 reqwest.workspace = true
-# The fixture binds native TCP listeners; keep it off the wasm graph.
-axum = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 futures-util = "0.3"
@@ -45,14 +41,10 @@ worker = "0.8"
 futures-util = "0.3"
 ghinvite-github = { path = ".", features = ["test-mock"] }
 tokio = { workspace = true, features = ["net", "io-util", "time"] }
-# examples/stub.rs only:
-clap = { version = "4", features = ["derive"] }
 
 # The endpoint tests against the GitHub emulator (tests/emulator.rs). Native
 # only, and a dev-dependency only: never in a wasm32 or production graph.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 octoemu.workspace = true
-
-[[example]]
-name = "stub"
-required-features = ["test-stub"]
+# `http_contract` serves the frozen wire corpus over real TCP.
+axum.workspace = true

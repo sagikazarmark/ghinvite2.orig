@@ -1,4 +1,14 @@
-//! Reusable native-only, synthetic provider fixture. Never deploy this router.
+//! The frozen synthetic HTTP fixture for every typed endpoint, served over
+//! real TCP for `http_contract` (test-only; never deploy it).
+//!
+//! Requests must match the corpus's literal method, target, authentication,
+//! headers and serialized body. The default serves the first reviewed success
+//! pair. `POST /__fixture/select` accepts `{ "endpoint": "PutCollaborator",
+//! "response": 1 }` to select another listed success response, or
+//! `{ "protocol_case": "sso-partial" }` for a named header/status family.
+//! `GET /__fixture/summary` returns only request/match/refusal counts. All inputs
+//! and responses are synthetic fixtures; they do not establish live GitHub
+//! behavior, permissions, or unresolved spike results.
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -25,7 +35,7 @@ struct Fixture {
     counts: Arc<Mutex<Counters>>,
 }
 pub(super) fn router() -> Router {
-    let corpus = serde_json::from_str(include_str!("../../fixtures/http-fixtures.json"))
+    let corpus = serde_json::from_str(include_str!("../../../fixtures/http-fixtures.json"))
         .expect("reviewed wire fixture JSON");
     Router::new().fallback(any(serve)).with_state(Fixture {
         corpus: Arc::new(corpus),

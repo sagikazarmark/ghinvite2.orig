@@ -1,6 +1,6 @@
 {
  "schema": 1,
- "scope": "Executable synthetic HTTP pairs for every declared Endpoint of ghinvite-github; trimmed from gh-toolkit's contract/http-fixtures.json (GM-01). Native test-stub fixture only. No live-provider claim.",
+ "scope": "Executable synthetic HTTP pairs for every declared Endpoint of ghinvite-github; trimmed from gh-toolkit's contract/http-fixtures.json (GM-01). Native test fixture only. No live-provider claim.",
  "endpoints": [
   {
    "endpoint": "CancelOrgInvitation",
