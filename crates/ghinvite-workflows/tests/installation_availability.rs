@@ -1,13 +1,56 @@
 //! #60: availability through public commands and a real GitHub HTTP boundary.
+//!
+//! GitHub is the octoemu emulator: installations are installed, replaced and
+//! uninstalled, and their repository selections change, through the admin
+//! API. An outage, a rate limit and an installation reported under another
+//! account are fault rules; read counts come from the call log.
 #![cfg(feature = "integration")]
 use ghinvite_core::RequestId;
 use ghinvite_core::storage::AppInstallationReadStorage as _;
 use ghinvite_core::storage::{AuditStorage, ConsoleStorage, RecordStorage};
+use octoemu::faults::{Fault, FaultAction, Reply};
+use octoemu::seed::{Installation, Org, Repo, Seed};
 use serde_json::{Value, json};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
+
+/// The suites' world with the repository App installed on acme as 9 for
+/// `acme/api` only, acme's repositories 12 to 110 (`acme/repo-{id}`) and
+/// 200 (`acme/extra`), and the organization `adopted` (300) with
+/// `adopted/api` (301) and `adopted/web` (302), where the App is installed as
+/// 40 (#66's pre-existing installation).
+fn world() -> Seed {
+    let mut seed = ghinvite_e2e::github::seed_with_installation(9);
+    for installation in &mut seed.installations {
+        if installation.id == 9 {
+            *installation = installation.clone().selected(["acme/api"]);
+        }
+    }
+    let created = "2020-01-01T00:00:00Z".parse().unwrap();
+    let mut seed = (12..=110)
+        .fold(seed, |seed, id| {
+            seed.repo(Repo::new(id, "acme", format!("repo-{id}")).private())
+        })
+        .repo(Repo::new(200, "acme", "extra").private())
+        .org(Org::new(300, "adopted").created_at(created))
+        .repo(Repo::new(301, "adopted", "api").private())
+        .repo(Repo::new(302, "adopted", "web").private());
+    let mut adopted = Installation::new(40, ghinvite_e2e::github::REPO_APP_ID, "adopted");
+    adopted.created_at = "2026-01-01T00:00:00Z".parse().ok();
+    seed = seed.installation(adopted);
+    seed
+}
+
+/// Installation `id` of the repository App on acme, created now.
+fn on_acme(id: u64, repositories: &[u64]) -> Installation {
+    ghinvite_e2e::github::installed(id, ghinvite_e2e::github::REPO_APP_ID).selected(
+        repositories.iter().map(|id| match id {
+            10 => "acme/api".to_owned(),
+            11 => "acme/web".to_owned(),
+            200 => "acme/extra".to_owned(),
+            id => format!("acme/repo-{id}"),
+        }),
+    )
+}
 
 #[tokio::test]
 async fn availability_preserves_admission_and_pending_decisions() {
@@ -41,50 +84,49 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .await
             .unwrap();
     }
-    // `adopted` is #66's pre-existing installation, observed alongside `id` so
-    // the account it belongs to is the only one it can answer for.
-    let observed = Arc::new(Mutex::new(
-        json!({"id":9,"adopted":40,"repos":[10],"failed":false}),
-    ));
-    let stub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", stub.local_addr().unwrap());
-    let data = observed.clone();
-    let stub_server = tokio::spawn(async move {
-        axum::serve(stub, axum::Router::new().fallback(move |request: axum::extract::Request| {
-            let data = data.clone();
-            async move {
-                let mut data = data.lock().unwrap();
-                let path = request.uri().path();
-                // Counted so a scenario can say how many times GitHub was read,
-                // not merely what it answered. A repository listing is counted
-                // once per observation, at its first page.
-                let observation = if path == "/installation/repositories" && !request.uri().query().unwrap_or_default().contains("page=2") { Some("repo_reads") }
-                else if path.starts_with("/app/installations/") && !path.ends_with("/access_tokens") { Some("identity_reads") }
-                else { None };
-                let (status, body) = if data["failed"] == true { (503, json!({})) }
-                else if path.ends_with("/access_tokens") { (201, json!({"token":"fixture","expires_at":"2099-01-01T00:00:00Z"})) }
-                else if path == "/installation/repositories" && data["rate_limited"] == true { (403, json!({"message":"API rate limit exceeded"})) }
-                else if path == "/installation/repositories" {
-                    let page = if request.uri().query().unwrap_or_default().contains("page=2") { 1 } else { 0 };
-                    let repos = data["repos"].as_array().unwrap();
-                    (200, json!({"total_count":repos.len(),"repositories":repos.iter().skip(page * 100).take(100).map(|id|json!({"id":id,"full_name":"acme/api","private":true})).collect::<Vec<_>>()}))
-                }
-                else if path == format!("/app/installations/{}", data["adopted"]) { (200, json!({"id":data["adopted"],"account":{"id":300,"login":"adopted","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null})) }
-                else if path == format!("/app/installations/{}", data["id"]) { (200, json!({"id":data["id"],"account":{"id":data.get("account_id").unwrap_or(&json!(100)),"login":"renamed","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"all","permissions":{"administration":"write","metadata":"read"},"suspended_at":null})) }
-                else { (404, json!({})) };
-                if let Some(counter) = observation {
-                    let read = data[counter].as_u64().unwrap_or(0);
-                    data[counter] = json!(read + 1);
-                }
-                let mut headers = axum::http::HeaderMap::new();
-                if path == "/installation/repositories" && body["total_count"].as_u64().unwrap_or(0)>100 && !request.uri().query().unwrap_or_default().contains("page=2") {
-                    let host=request.headers().get("host").unwrap().to_str().unwrap();
-                    headers.insert("link",format!("<http://{host}/installation/repositories?per_page=100&page=2>; rel=\"next\"").parse().unwrap());
-                }
-                (axum::http::StatusCode::from_u16(status).unwrap(), headers, axum::Json(body))
-            }
-        })).await.unwrap();
-    });
+    let harness = ghinvite_e2e::Harness::start_with_emulator(
+        ghinvite_e2e::github_emulator_with(world()).await,
+    )
+    .await;
+    let emulator = harness.emulator();
+    let github = harness.github();
+    let base = harness.github_url.clone();
+    // How often GitHub was read since a mark (the call log's `seq`): a
+    // repository listing once per observation, at its first page, and
+    // installation identity reads.
+    let mark = || emulator.calls().last().map_or(0, |call| call.seq);
+    let repo_reads = |since: u64| {
+        emulator
+            .calls()
+            .iter()
+            .filter(|call| {
+                call.seq > since
+                    && call.method == "GET"
+                    && call.path.split('?').next() == Some("/installation/repositories")
+                    && !call.path.contains("page=2")
+            })
+            .count()
+    };
+    let identity_reads = |since: u64| {
+        emulator
+            .calls()
+            .iter()
+            .filter(|call| {
+                let path = call.path.split('?').next().unwrap_or("");
+                call.seq > since
+                    && call.method == "GET"
+                    && path.starts_with("/app/installations/")
+                    && !path.ends_with("/access_tokens")
+            })
+            .count()
+    };
+    // GitHub answers nothing (503 everywhere) while this rule stands.
+    let outage = || {
+        github.rule(
+            "GitHub unavailable",
+            Fault::new("/**", FaultAction::respond_json(503, json!({}))),
+        )
+    };
     let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
         ghinvite_workflows::RepositoryGithub::new(
             ghinvite_e2e::github_transport(client.clone()),
@@ -94,7 +136,6 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap(),
     ));
     let endpoint = ghinvite_workflows::build_endpoint(state, storage.clone(), None).unwrap();
-    let harness = ghinvite_e2e::Harness::start().await;
     let ingress = harness.restate.ingress_url().to_owned();
     let admin = harness.restate.admin_url().to_owned();
     harness.restate.deploy(endpoint).await;
@@ -159,7 +200,6 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "{}",
         signed.text().await.unwrap()
     );
-    observed.lock().unwrap()["repos"] = json!([10]);
     let response = installation(
         9,
         "repos_changed",
@@ -186,7 +226,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         unavailable["result"],
         json!({"kind":"rejected","reason":"scope_unavailable"})
     );
-    observed.lock().unwrap()["repos"] = json!([10, 11]);
+    github.select(9, &[10, 11]).await;
     let replay: Value = call("admit", attempt)
         .send()
         .await
@@ -196,7 +236,22 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap();
     assert_eq!(replay, unavailable);
     let accepted_attempt = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":8,"operation_id":RequestId::new()});
-    observed.lock().unwrap()["rate_limited"] = json!(true);
+    let rate_limited = github.rule(
+        "rate limited",
+        Fault::on(
+            "GET",
+            "/installation/repositories",
+            FaultAction::Respond(
+                Reply::new(403)
+                    .header("x-ratelimit-remaining", "0")
+                    .header(
+                        "x-ratelimit-reset",
+                        (chrono::Utc::now().timestamp() + 3600).to_string(),
+                    )
+                    .json(json!({"message":"API rate limit exceeded"})),
+            ),
+        ),
+    );
     let limited: Value = scope_call(&client, &ingress, 100, &[10, 11])
         .send()
         .await
@@ -205,7 +260,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .await
         .unwrap();
     assert_eq!(limited["eligibility"]["kind"], "unknown");
-    observed.lock().unwrap()["rate_limited"] = json!(false);
+    assert!(emulator.fault(rate_limited).unwrap().fired > 0);
+    emulator.remove_fault(rate_limited);
     let accepted: Value = call("admit", accepted_attempt.clone())
         .send()
         .await
@@ -217,7 +273,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
     // Pause installation SQL projection, not its authoritative commands. Neither
     // new admission nor subsequent pending decisions may wait for that write.
     sqlx::query("CREATE TRIGGER fixture_outage BEFORE UPDATE ON installations BEGIN SELECT RAISE(ABORT, 'fixture: storage unavailable'); END").execute(&failures).await.unwrap();
-    observed.lock().unwrap()["failed"] = json!(true);
+    let unavailable_github = outage();
     assert!(
         installation(
             9,
@@ -318,7 +374,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .execute(&failures)
         .await
         .unwrap();
-    observed.lock().unwrap()["failed"] = json!(false);
+    assert!(emulator.fault(unavailable_github).unwrap().fired > 0);
+    emulator.remove_fault(unavailable_github);
     // Invoke the same public command the durable refresh timer uses. Restoration
     // must repair delivery prerequisites even without another GitHub webhook.
     assert!(
@@ -348,10 +405,8 @@ async fn availability_preserves_admission_and_pending_decisions() {
     })
     .await
     .unwrap();
-    observed.lock().unwrap()["failed"] = json!(false);
     // Fresh onboarding, refresh and admission use retained context while the
     // entire installation projection is unreadable. No SQL adoption is needed.
-    observed.lock().unwrap()["repos"] = json!([10, 11]);
     sqlx::query("ALTER TABLE installations RENAME TO installations_offline")
         .execute(&failures)
         .await
@@ -392,7 +447,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         client
             .post(format!("{ingress}/InvitationLink/{adopted_link}/create"))
             .json(&json!({"secret_sha256":"2a".repeat(32),"link_id":adopted_link,"account_id":300,"installation_id":40,"admin":{"account_id":300,"user_id":7},
-                "description":"Adopted","max_uses":2,"approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"read"}]}}))
+                "description":"Adopted","max_uses":2,"approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":301,"repo_full_name":"adopted/api","grant":"read"}]}}))
             .send()
             .await
             .unwrap()
@@ -508,7 +563,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
                 .map(|value| value.map(|installation| installation.account))
                 .unwrap()
                 .is_some_and(|a| {
-                    a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![10, 11])
+                    a.selected_repos == ghinvite_core::SelectedRepos::Subset(vec![301, 302])
                 })
             {
                 break;
@@ -527,7 +582,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .await
         .unwrap();
     assert_eq!(adopted["account"]["installation_id"], 40);
-    assert_eq!(adopted["observation"]["repo_ids"], json!([10, 11]));
+    assert_eq!(adopted["observation"]["repo_ids"], json!([301, 302]));
     // Admission replay retains the successful result after projection repair.
     assert_eq!(
         client
@@ -582,11 +637,14 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .unwrap()
             .unwrap()
             .selected_repos,
-        ghinvite_core::SelectedRepos::Subset(vec![10, 11])
+        ghinvite_core::SelectedRepos::Subset(vec![301, 302])
     );
     // New installation arrives before the old uninstall. Numeric account identity
     // survives a renamed account and obsolete events cannot mutate the replacement.
-    observed.lock().unwrap()["id"] = json!(20);
+    // On GitHub the App was uninstalled (9) and installed again (as 20); its
+    // events reach the workflows out of order.
+    assert!(emulator.uninstall(9));
+    emulator.install(on_acme(20, &[10, 11])).unwrap();
     let mut replacement = onboard.clone();
     replacement["operation_id"] = json!(RequestId::new());
     replacement["verified"]["account"]["installation_id"] = json!(20);
@@ -641,11 +699,12 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .unwrap();
     assert_eq!(status["account"]["installation_id"], 20);
     assert_eq!(status["account"]["account_id"], 100);
-    assert_eq!(status["account"]["account_login"], "renamed");
+    // GitHub's login, not the replacement command's untrusted one.
+    assert_eq!(status["account"]["account_login"], "acme");
     assert_eq!(status["observation"]["repo_ids"], json!([10, 11]));
     // Concurrent/stale payloads cannot overwrite a current authoritative refresh,
     // including repositories beyond the first GitHub page.
-    observed.lock().unwrap()["repos"] = json!((10..=110).collect::<Vec<_>>());
+    github.select(20, &(10..=110).collect::<Vec<_>>()).await;
     let (first, second) = tokio::join!(
         installation(
             20,
@@ -698,7 +757,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .is_success()
     );
     let scoped_attempt = |requester_id: u64| json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":scoped_link,"requester_id":requester_id,"operation_id":RequestId::new()});
-    observed.lock().unwrap()["repo_reads"] = json!(0);
+    let since = mark();
     let mut scoped_negative = scoped_attempt(15);
     scoped_negative["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 200]).await;
     let refused: Value = scoped("admit", scoped_negative)
@@ -712,16 +771,14 @@ async fn availability_preserves_admission_and_pending_decisions() {
         refused["result"],
         json!({"kind":"rejected","reason":"scope_unavailable"})
     );
-    assert_eq!(
-        observed.lock().unwrap()["repo_reads"],
-        json!(1),
-        "a rejection rests on a live read"
-    );
+    assert_eq!(repo_reads(since), 1, "a rejection rests on a live read");
     // GitHub gains the repository without a webhook. The attempts below still
     // read GitHub once between them — the first, whose scope the retained
     // observation does not cover — and the rest rest on what it observed.
-    observed.lock().unwrap()["repos"] = json!((10..=110).chain([200]).collect::<Vec<_>>());
-    observed.lock().unwrap()["repo_reads"] = json!(0);
+    github
+        .select(20, &(10..=110).chain([200]).collect::<Vec<_>>())
+        .await;
+    let since = mark();
     for requester_id in [31, 32, 33] {
         let mut input = scoped_attempt(requester_id);
         input["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 200]).await;
@@ -735,11 +792,23 @@ async fn availability_preserves_admission_and_pending_decisions() {
         assert_eq!(admitted["result"]["kind"], "accepted", "{admitted}");
     }
     assert_eq!(
-        observed.lock().unwrap()["repo_reads"],
-        json!(1),
+        repo_reads(since),
+        1,
         "one observation admits every attempt it covers"
     );
-    observed.lock().unwrap()["account_id"] = json!(200);
+    // GitHub reports installation 20 under another account (200): an
+    // injected answer.
+    let other_account = github.rule(
+        "installation under another account",
+        Fault::on(
+            "GET",
+            "/app/installations/20",
+            FaultAction::respond_json(
+                200,
+                json!({"id":20,"account":{"id":200,"login":"acme","type":"Organization"},"app_id":123,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","repository_selection":"selected","permissions":{"administration":"write","metadata":"read"},"suspended_at":null}),
+            ),
+        ),
+    );
     // A changed installation identity reaches the account through its own
     // observation; admission then confirms the refusal against GitHub.
     assert!(
@@ -751,7 +820,7 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .status()
             .is_success()
     );
-    observed.lock().unwrap()["identity_reads"] = json!(0);
+    let since = mark();
     let mut foreign = json!({"scope_evidence":[],"secret_sha256":"2a".repeat(32),"secret_generation":1,"link_id":link,"requester_id":15,"operation_id":RequestId::new()});
     foreign["scope_evidence"] = scope_evidence(&client, &ingress, 100, &[10, 11]).await;
     assert_eq!(
@@ -765,10 +834,11 @@ async fn availability_preserves_admission_and_pending_decisions() {
         "scope_unavailable"
     );
     assert!(
-        observed.lock().unwrap()["identity_reads"].as_u64().unwrap() > 0,
+        identity_reads(since) > 0,
         "a rejection rests on a live read"
     );
-    observed.lock().unwrap()["account_id"] = json!(100);
+    assert!(emulator.fault(other_account).unwrap().fired > 0);
+    emulator.remove_fault(other_account);
     let restored: Value = call("admit", fresh)
         .send()
         .await
@@ -868,7 +938,9 @@ async fn availability_preserves_admission_and_pending_decisions() {
         .status()
         .is_success()
     );
-    observed.lock().unwrap()["id"] = json!(30);
+    // On GitHub the App is uninstalled (20) and installed again (as 30).
+    assert!(emulator.uninstall(20));
+    emulator.install(on_acme(30, &[10, 11])).unwrap();
     replacement["operation_id"] = json!(RequestId::new());
     replacement["verified"]["account"]["installation_id"] = json!(30);
     assert!(
@@ -916,7 +988,6 @@ async fn availability_preserves_admission_and_pending_decisions() {
             .len(),
         events.len()
     );
-    stub_server.abort();
     failures.close().await;
     std::fs::remove_file(database).unwrap();
 }
