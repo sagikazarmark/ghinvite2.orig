@@ -1,5 +1,6 @@
 import { seedPersonalInstallation } from './installation-fixture.mjs';
-import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
+import { installedWebApp, signinApp } from './app-config.mjs';
+import { signinAppSeed, startOctoemu } from './octoemu.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,8 @@ import { Miniflare, Response, Log, LogLevel } from 'miniflare';
 
 // Exercise the production D1 adapter and authenticated HTTP routes. Only the
 // external OAuth and lifecycle service responses are controlled at the boundary.
+// GitHub is octoemu; octocat (42) signs in.
+const github = await startOctoemu({ users: [{ id: 42, login: 'octocat' }], apps: [signinAppSeed({ hosts: ['queue.test'] })] });
 let receipt;
 let loseAcknowledgement = false;
 const decisions = [];
@@ -22,12 +25,10 @@ const mf = new Miniflare({
     P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7', RESTATE_INGRESS_URL: 'https://restate.test',
     RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-    ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',
+    ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy', ...github.bindings,
   },
   async outboundService(request) {
-    if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
-    const revoked = signinRevocation(request); if (revoked) return revoked;
-    if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
+    if (github.owns(request)) return github.forward(request);
     if (/^https:\/\/restate.test\/InvitationRequest\/[A-Z0-9]+\/decide$/.test(request.url)) {
       decisions.push(await request.json());
       assert.ok(receipt, 'unexpected decision');
@@ -63,12 +64,7 @@ try {
   await db.prepare(`INSERT INTO invitation_requests (id,invitation_link_id,requester_id,state,created_at,decision_deadline,projection_revision)
     VALUES (?,?,99,'pending','2026-01-01T01:00:00Z','2026-01-03T12:34:56Z',1)`).bind(request, link).run();
 
-  const login = await mf.dispatchFetch('https://queue.test/login', { redirect: 'manual' });
-  const state = new URL(login.headers.get('location')).searchParams.get('state');
-  let cookie = login.headers.get('set-cookie').split(';')[0];
-  const callback = await mf.dispatchFetch(`https://queue.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie, 'CF-Connecting-IP':'192.0.2.30' }, redirect: 'manual' });
-  assert.equal(callback.status, 303, await callback.clone().text());
-  cookie = callback.headers.get('set-cookie').split(';')[0];
+  let cookie = await github.signIn((url, init) => mf.dispatchFetch(url, init), 'https://queue.test', 'octocat', { 'CF-Connecting-IP': '192.0.2.30' });
   const queue = async () => {
     const response = await mf.dispatchFetch('https://queue.test/console/accounts/octocat/requests', { headers: { cookie } });
     assert.equal(response.status, 200, await response.clone().text());
@@ -272,4 +268,5 @@ try {
   console.log('PASS Worker/D1 decision queue: independent historical deadlines, missing data, auto-approval, overdue projection and authoritative late actions');
 } finally {
   await mf.dispose();
+  await github.stop();
 }

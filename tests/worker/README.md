@@ -63,6 +63,23 @@ D1 bindings. This catches runtime failures that a successful Wasm build misses,
 including unsupported clocks and tracing APIs. There are no clock, crypto,
 logging, or Wasm-import bypasses.
 
+## GitHub: the octoemu emulator
+
+The sign-in drivers (`pending-signin`, `signin-cutover`, `domain-signin`,
+`decision-queue`, `request-history`) talk to the
+[octoemu](../../libs/octoauth/crates/octoemu/README.md) GitHub emulator, never
+to an inline fake. `octoemu.mjs` starts the binary on a free loopback port
+(`--port 0 --idle-timeout`), seeds it through the admin API and stops it;
+the Worker reaches it through the `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and
+`GITHUB_AVATAR_BASE` bindings, which only `runtime-tests` builds accept.
+Sign-in goes through the emulator's authorize page (`emulator.signIn`,
+`emulator.authorize`), failures are fault rules (`emulator.fault`) and
+counts come from its call log (`emulator.count`). The privacy scans look for
+any GitHub token shape (`GITHUB_TOKEN`), since the emulator's tokens are
+random. Build the binary once with `node tests/worker/build-octoemu.mjs`
+(the npm scripts do); `OCTOEMU_BIN` selects a prebuilt one and
+`OCTOEMU_TARGET_DIR` another target directory (CI uses the root one).
+
 ## Run
 
 Requirements: Node.js 20+, GNU `timeout` (coreutils), the repo's Rust toolchain with

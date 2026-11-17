@@ -107,11 +107,19 @@ pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<axum::response
                 .into_response(),
         }
     } else {
+        // GitHub's bases as the Worker reads them (`GITHUB_*_BASE`, accepted
+        // by `runtime-tests` builds): the driver points them at octoemu.
+        let bases = ghinvite_config::github::GithubBases::from_config(
+            ghinvite_config::github::Deployment::Development,
+            |field| env.var(field).ok().map(|value| value.to_string()),
+        )
+        .map_err(|_| worker::Error::RustError("fixture configuration".into()))?;
         let app = ghinvite_config::apps::SignInApp::new(
             "Iv.fixture-signin",
             "fixture-client-secret",
             "https://signin.test/oauth/callback".parse().unwrap(),
-        );
+        )
+        .with_bases(&bases);
         let service = SignInService::new(&app)
             .map_err(|_| worker::Error::RustError("fixture configuration".into()))?;
         let state = input["state"].as_str().unwrap_or_default().to_owned();

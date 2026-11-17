@@ -1,9 +1,13 @@
 import { seedPersonalInstallation } from './installation-fixture.mjs';
-import { installedWebApp, signinApp, signinRevocation } from './app-config.mjs';
+import { installedWebApp, signinApp } from './app-config.mjs';
+import { signinAppSeed, startOctoemu } from './octoemu.mjs';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { Miniflare, Response, Log, LogLevel } from 'miniflare';
+import { Miniflare, Log, LogLevel } from 'miniflare';
+
+// GitHub is octoemu; octocat (42) signs in.
+const github = await startOctoemu({ users: [{ id: 42, login: 'octocat' }], apps: [signinAppSeed({ hosts: ['history.test'] })] });
 
 const mf = new Miniflare({
   log: new Log(LogLevel.ERROR), modules: true,
@@ -16,13 +20,7 @@ const mf = new Miniflare({
     P1_HOST: 'history.test', P1_KEYRING: 'kekring1;name=p1;current=1;hwm=1;k1=BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc.9fdab21f330c89b7',
     RESTATE_INGRESS_URL: 'https://restate.test', RESTATE_INGRESS_TOKEN: 'synthetic-worker-ingress-key',
     GHINVITE_GITHUB_INSTALL_URL: 'https://github.com/apps/dummy/installations/new',
-    ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy',
-  },
-  async outboundService(request) {
-    if (request.url === 'https://github.com/login/oauth/access_token') return Response.json({ access_token: 'fixture', token_type: 'bearer', scope: '' });
-    const revoked = signinRevocation(request); if (revoked) return revoked;
-    if (request.url === 'https://api.github.com/user') return Response.json({ id: 42, login: 'octocat', avatar_url: null });
-    throw new Error(`unexpected outbound ${request.url}`);
+    ...signinApp, ...installedWebApp, GHINVITE_WEBHOOK_SECRET: 'dummy', ...github.bindings,
   },
 });
 
@@ -41,12 +39,7 @@ try {
       VALUES (?,?,?,42,'2026-01-01T00:00:00Z',1,'History fixture',1,'{}',1,'2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a')`).bind(id, account === 42 ? 1 : 2, account).run();
     await db.prepare("INSERT INTO invitation_link_targets VALUES (?,'repo',10,'octocat/api','read')").bind(id).run();
   }
-  const login = await mf.dispatchFetch('https://history.test/login', { redirect: 'manual' });
-  const state = new URL(login.headers.get('location')).searchParams.get('state');
-  let cookie = login.headers.get('set-cookie').split(';')[0];
-  const callback = await mf.dispatchFetch(`https://history.test/oauth/callback?code=dummy&state=${state}`, { headers: { cookie, 'CF-Connecting-IP':'192.0.2.30' }, redirect: 'manual' });
-  assert.equal(callback.status, 303);
-  cookie = callback.headers.get('set-cookie').split(';')[0];
+  const cookie = await github.signIn((url, init) => mf.dispatchFetch(url, init), 'https://history.test', 'octocat', { 'CF-Connecting-IP': '192.0.2.30' });
   const get = async (path, status = 200) => {
     const response = await mf.dispatchFetch(`https://history.test${path}`, { headers: { cookie } });
     assert.equal(response.status, status, await response.clone().text());
@@ -96,4 +89,5 @@ try {
   console.log('PASS D1 request history: bounded pages, timestamp precision, terminal details, foreign concealment, missing profile and unavailable reads');
 } finally {
   await mf.dispose();
+  await github.stop();
 }
