@@ -13,23 +13,26 @@ use ghinvite_github::{
     worker::WorkerFetchTransport,
 };
 use std::{convert::Infallible, sync::Arc, time::UNIX_EPOCH};
-use worker::HttpRequest;
+use worker::{Env, HttpRequest};
 
-/// Where the fixture app creates tokens and calls the API.
-const BASE: &str = "https://broker.test";
+/// The driver's control endpoint (not GitHub): answers when a token creation
+/// should be cancelled.
+const CONTROL: &str = "https://broker.test";
 
-/// A new `GithubApps` for this request, over the isolate's token cache.
-fn app() -> Result<GithubApp, String> {
+/// A new `GithubApps` for this request, over the isolate's token cache,
+/// creating tokens and calling the API at `base` (`GITHUB_API_BASE`: the
+/// drivers' octoemu emulator).
+fn app(base: &str) -> Result<GithubApp, String> {
     let key =
         octoauth::SigningKey::from_pem(include_str!("../../../test-fixtures/github-app-rsa.pem"))
             .map_err(|_| "fixture key")?;
     let app = octoauth::App::builder(99001, key)
         .client_id("Iv-runtime-broker")
         .user_agent("runtime-broker-fixture")
-        .base_url(BASE)
+        .base_url(base)
         .build()
         .map_err(|_| "fixture app")?;
-    let env = RestEnv::new(Arc::new(WorkerFetchTransport::new()), BASE, "runtime")
+    let env = RestEnv::new(Arc::new(WorkerFetchTransport::new()), base, "runtime")
         .map_err(|e| e.code().to_owned())?;
     let installed = InstalledApp {
         slot: AppSlot::Repo,
@@ -46,7 +49,7 @@ async fn cancel_creation(app: &GithubApp, installation: u64) -> Result<(), Strin
     let transport = WorkerFetchTransport::new();
     let control = transport.send(Request::new(
         Method::Get,
-        format!("{BASE}/control/cancel/{installation}"),
+        format!("{CONTROL}/control/cancel/{installation}"),
     ));
     match select(
         Box::pin(app.ensure(installation, &CONSOLE_REPO_READ)),
@@ -68,8 +71,14 @@ async fn cancel_creation(app: &GithubApp, installation: u64) -> Result<(), Strin
         }
     }
 }
-pub async fn fetch(req: HttpRequest) -> worker::Result<axum::response::Response> {
-    let result = run(req).await;
+pub async fn fetch(req: HttpRequest, env: &Env) -> worker::Result<axum::response::Response> {
+    let base = ghinvite_config::github::GithubBases::from_config(
+        ghinvite_config::github::Deployment::Development,
+        |field| env.var(field).ok().map(|value| value.to_string()),
+    )
+    .map(|bases| bases.api().to_owned())
+    .map_err(|_| worker::Error::RustError("fixture configuration".into()))?;
+    let result = run(req, &base).await;
     Ok(match result {
         Ok(value) => axum::Json(value).into_response(),
         Err(error) => (
@@ -79,7 +88,7 @@ pub async fn fetch(req: HttpRequest) -> worker::Result<axum::response::Response>
             .into_response(),
     })
 }
-async fn run(req: HttpRequest) -> Result<serde_json::Value, String> {
+async fn run(req: HttpRequest, base: &str) -> Result<serde_json::Value, String> {
     let case = req.uri().path().trim_start_matches("/__fixture/broker/");
     let installation = req
         .uri()
@@ -88,7 +97,7 @@ async fn run(req: HttpRequest) -> Result<serde_json::Value, String> {
         .and_then(|id| id.parse::<u64>().ok())
         .ok_or("invalid installation")?;
     let scope = &*CONSOLE_REPO_READ;
-    let app = app()?;
+    let app = app(base)?;
     match case {
         // Concurrent misses in one request: on Workers each may create its
         // own token (no coalescing); all must succeed.

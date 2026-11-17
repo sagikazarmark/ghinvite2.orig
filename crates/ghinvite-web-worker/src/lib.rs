@@ -228,7 +228,7 @@ async fn fetch(
 
     #[cfg(feature = "runtime-tests")]
     if req.uri().path().starts_with("/__fixture/broker/") {
-        return broker_fixture::fetch(req).await;
+        return broker_fixture::fetch(req, &env).await;
     }
 
     #[cfg(feature = "runtime-tests")]
