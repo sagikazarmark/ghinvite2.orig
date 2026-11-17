@@ -328,18 +328,17 @@ and [request lifecycle](request-lifecycle-v1.md), [retained delivery](delivery-r
 [durable projection](admission-v1.md#projection-tests). Focused HTTP
 authorization/session tests remain in `console_flow`, `route_smoke`, and `oauth_flow`.
 
-**Boundaries:** local emulator and stub responses are not evidence of live GitHub webhook
+**Boundaries:** local emulator responses are not evidence of live GitHub webhook
 availability or delivery. Native SQLx runtime tests are **not D1 adapter
 conformance**. Full browser OAuth is outside this gate. No test claims
 exactly-once delivery across a GitHub-success/database-failure gap.
 
-#### Standalone GitHub stub
+#### GitHub outside the Rust suites
 
-The Rust workflow suites and the Worker drivers no longer use it; the native
-D1 bridge still does, until GE-09c deletes it.
-
-Their replacement is the `octoemu` emulator reached through the GitHub
-base-URL variables (`GITHUB_API_BASE`, `GITHUB_WEB_BASE`, `GITHUB_AVATAR_BASE`;
+The old standalone GitHub stub (`ghinvite-github`'s `test-stub` feature and
+`examples/stub.rs`) is gone (GE-09c). Every other process reaches the
+`octoemu` emulator through the GitHub base-URL variables (`GITHUB_API_BASE`,
+`GITHUB_WEB_BASE`, `GITHUB_AVATAR_BASE`;
 [deploy](deploy.md#p1-app-split-configuration)), which non-production roots
 accept: `ghinvite-web-server --local-dev`, `ghinvite-workflows-server
 --local-unsigned`, and the Workers' `runtime-tests` builds (as Miniflare
@@ -365,22 +364,12 @@ emulator's requests through. `transport.mjs` and `deadlines.mjs` keep their
 own upstream (`transport.test`): they test the generic transport's redirect,
 size and stall handling, not GitHub.
 
-```bash
-cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
-```
-
-This loopback-only fixture provides token minting, collaborator PUT/GET/DELETE,
-and pending-invitation GET/DELETE. Successful PUTs return JSON with an invitation
-ID, invitee, repository, permissions, and creation timestamp; pending invitations
-do not count as accepted collaborators. It models the consumed API subset, not
-all GitHub validation, authorization, pagination, or pending-invitation updates.
-
-`POST /outcomes` accepts `{"owner":"test-org","repo":"api","user":"requester",
-"outcome":"transient_once"}`. Outcomes are `already_collaborator` (204),
-`terminal_failure` (422), or `transient_once` (one 502, then normal 201).
-`GET /calls` returns `{"count":N,"requests":[...]}` with method, path, permission,
-and status only, never headers/JWTs/tokens. `DELETE /reset` clears all fixture
-state. Configuration and ledger requests are excluded from the API call count.
+The native D1 cutover rehearsal (`scripts/verify-native-d1-cutover.sh`,
+[native fallback](native-fallback.md)) starts the emulator binary too: the
+pinned workflows Worker (a `runtime-tests` build) and the signed
+`native-bridge-endpoint` example both reach it through `GITHUB_API_BASE`
+(the example requires it and never reaches GitHub), and the provider writes
+it checks come from the emulator's call log.
 
 The shell bounds each compilation/contract-test step (600s), container startup/pull (180s), test execution
 (150s), and cleanup (30s), escalating to a kill after a further 5s if a child

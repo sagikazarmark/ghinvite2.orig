@@ -476,7 +476,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92.0
       - uses: Swatinem/rust-cache@v2
       # The runner owns the disposable runtime; the test owns loopback GitHub
-      # stub/endpoint tasks. Failure diagnostics stay in retained Actions logs.
+      # emulator/endpoint tasks. Failure diagnostics stay in retained Actions logs.
       - name: Verify authoritative admission, recovery and 500-call lifecycle ordering
         env:
           CI: 'true'

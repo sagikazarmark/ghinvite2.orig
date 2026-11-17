@@ -290,8 +290,9 @@ GitHub access is split between the toolkit crates in `libs/octoauth`
 (`octoauth`/`octotoken` for App authentication and installation tokens,
 `octologin` for sign-in, `octoscrub` for redaction; `octoevents` from crates.io
 for webhooks) and `crates/ghinvite-github`, ghinvite's own REST client: transport
-(native and Worker), typed endpoints and fixtures. Its `examples/stub.rs`
-supplies the GitHub API fixture for integration tests. Third-party sources,
+(native and Worker), typed endpoints and fixtures. Integration tests run
+against `octoemu` (`libs/octoauth/crates/octoemu`), a stateful GitHub App
+emulator reached through `GITHUB_API_BASE` outside production. Third-party sources,
 pinned forks and their reasons are listed in [`PROVENANCE.md`](PROVENANCE.md).
 
 ## CI
@@ -303,4 +304,4 @@ GitHub Actions runs on every push and PR to `main`:
 - **GitHub App toolkit** — fmt, clippy, tests and the wasm32 check of the `libs/octoauth` workspace
 - **wasm32 build** — `cargo check -p ghinvite-ui` and `-p ghinvite-island` (browser) plus `cargo build` for the three Worker-side crates, each with `-p` and `--target wasm32-unknown-unknown`
 - **Island bundle** — `scripts/build-island.sh` (dx bundle, size budget), `cargo test -p ghinvite-island` (markup parity), clippy for wasm32; uploads `dist/public` as an artifact
-- **Restate approval and delivery gate** — `authoritative_admission` against a spawned native `restate-server` (one per test), and `bash scripts/test-restate.sh <target>` for `request_owner`, `canonical_link`, `retained_delivery`, `approved_delivery`, `installation_availability`, `installation_audit_replay` and `durable_projection`: digest-pinned disposable Restate, real GitHub HTTP client against a local GitHub stub, authoritative admission/lifecycle, retained delivery and projection recovery
+- **Restate approval and delivery gate** — `authoritative_admission` against a spawned native `restate-server` (one per test), and `bash scripts/test-restate.sh <target>` for `request_owner`, `canonical_link`, `retained_delivery`, `approved_delivery`, `installation_availability`, `installation_audit_replay` and `durable_projection`: digest-pinned disposable Restate, real GitHub HTTP client against the octoemu GitHub emulator, authoritative admission/lifecycle, retained delivery and projection recovery
