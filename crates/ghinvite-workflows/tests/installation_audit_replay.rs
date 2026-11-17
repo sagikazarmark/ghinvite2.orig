@@ -222,7 +222,7 @@ async fn a_retried_projection_leaves_one_installation_audit_event() {
         .unwrap();
 
     // GitHub confirms installation 9 belongs to account 100 and shares one repo.
-    let mut github = octoemu::compat::seed_with_installation(9);
+    let mut github = ghinvite_e2e::github::seed_with_installation(9);
     for installation in &mut github.installations {
         if installation.id == 9 {
             *installation = installation.clone().selected(["acme/api"]);

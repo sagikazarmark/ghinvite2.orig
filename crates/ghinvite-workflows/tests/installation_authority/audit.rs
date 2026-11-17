@@ -25,7 +25,9 @@ impl Runtime {
         let suspension = Arc::new(Mutex::new(Value::Null));
         let observed = suspension.clone();
         // The installation as GitHub reports it, suspended at exactly the
-        // time a step sets (a canned rule over the emulator's compat world).
+        // time a step sets: an injected answer (a fault rule over the
+        // emulator's world), since a real suspension is stamped with the
+        // emulator's own clock.
         let emulator = ghinvite_e2e::github_emulator().await;
         emulator
             .add_fault(octoemu::faults::Fault::on(

@@ -30,12 +30,12 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .unwrap();
     sqlx::query("CREATE TRIGGER hold_installation BEFORE INSERT ON installations BEGIN SELECT RAISE(ABORT, 'projection withheld'); END")
         .execute(&sql).await.unwrap();
-    // GitHub: the emulator's compat world with the repository App installed
-    // as 9. Fault rules stand in for the stub's middleware: a lost fence
-    // after a write, failing invitation reads and a wrong repository owner.
+    // GitHub: the suites' emulator world with the repository App installed
+    // as 9. Fault rules inject what GitHub would not answer on its own: a
+    // held write, failing invitation reads and a wrong repository owner.
     let emulator = harness.emulator();
+    let github = harness.github();
     let base = harness.github_url.clone();
-    let github_admin = emulator.admin_base().to_owned();
     let state = ghinvite_workflows::AppState::new(storage.clone()).with_github_apps(Arc::new(
         ghinvite_workflows::RepositoryGithub::new(
             ghinvite_e2e::github_transport(client.clone()),
@@ -111,12 +111,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .status(),
         503
     );
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/installation-repositories"),
-        json!([10]),
-    )
-    .await;
+    github.select(9, &[10]).await;
     let onboard = ghinvite_e2e::setup_command(
         json!({"app":"repo","installation_id":9,"actor_user_id":7,"account_id":100,"account_login":"acme","account_type":"Organization","selected_repos":"all","installed_at":chrono::Utc::now()}),
     );
@@ -193,23 +188,12 @@ async fn approved_delivery_progresses_without_projected_parents() {
     let receipt: Value = response.json().await.unwrap();
     assert_eq!(receipt["outcome"]["kind"], "created");
     assert_eq!(receipt["command"], command);
-    // The invitee declines (the stub took an unauthenticated DELETE).
-    client
-        .post(format!(
-            "{github_admin}/act/alice/repository_invitations/{}/decline",
-            receipt["outcome"]["upstream_id"]
-        ))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"alice","addressed_id":8,"role_name":"write"}),
-    )
-    .await;
+    // The invitee declines, and is a write collaborator anyway (added
+    // directly), so the read-only verification sees acceptance.
+    github
+        .decline("alice", receipt["outcome"]["upstream_id"].as_u64().unwrap())
+        .await;
+    github.collaborate("alice", octoemu::seed::Role::Push).await;
     // Settlement is retained beside the original create even while every
     // projected parent is unavailable. Replays return that original receipt.
     let pending = post(
@@ -272,23 +256,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .unwrap()
             .is_none()
     );
-    let calls: Value = client
-        .get(format!("{base}/__octoemu/compat/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        calls["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c["method"] == "PUT")
-            .count(),
-        1
-    );
+    assert_eq!(github.writes(), 1);
     let blocked_command = plan["commands"][1].clone();
     let blocked_url = format!(
         "{ingress}/RepositoryDelivery/{}:{}:{}/create",
@@ -337,12 +305,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     emulator
         .install(octoemu::seed::Installation::new(19, 123, "acme"))
         .unwrap();
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/installation-repositories"),
-        json!([10, 11]),
-    )
-    .await;
+    github.select(19, &[10, 11]).await;
     let mut replacement = onboard.clone();
     replacement["operation_id"] = json!(ghinvite_core::RequestId::new());
     replacement["verified"]["account"]["installation_id"] = json!(19);
@@ -365,12 +328,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     )
     .await;
     // The installation-token repository read must bind the numeric owner.
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"alice","addressed_id":8}),
-    )
-    .await;
+    github.revoke("alice").await;
     let wrong_owner = emulator
         .add_fault(octoemu::faults::Fault::on(
             "GET",
@@ -385,25 +343,18 @@ async fn approved_delivery_progresses_without_projected_parents() {
         post(&client, &blocked_url, blocked_command.clone()).await["outcome"]["kind"],
         "blocked"
     );
-    assert_eq!(puts(&client, &base).await, 1);
+    assert_eq!(github.writes(), 1);
     emulator.remove_fault(wrong_owner);
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"renamed","addressed_id":99}),
-    )
-    .await;
+    // alice renames, and her new login names another account (99) when it
+    // is resolved, then her own again.
+    github.rename("alice", "renamed").await;
+    let recycled = github.recycled_login("renamed", 99);
     assert_eq!(
         post(&client, &blocked_url, blocked_command.clone()).await["outcome"]["kind"],
         "blocked"
     );
-    assert_eq!(puts(&client, &base).await, 1);
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"renamed","addressed_id":8}),
-    )
-    .await;
+    assert_eq!(github.writes(), 1);
+    emulator.remove_fault(recycled);
     let resumed = post(&client, &blocked_url, blocked_command.clone()).await;
     assert_eq!(resumed["outcome"]["kind"], "created");
     assert_eq!(resumed["command"], blocked_command);
@@ -440,29 +391,9 @@ async fn approved_delivery_progresses_without_projected_parents() {
         post(&client, &blocked_url, blocked_command.clone()).await,
         resumed
     );
-    let ledger: Value = client
-        .get(format!("{base}/__octoemu/compat/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        ledger["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["path"] == "/repos/acme/web/collaborators/renamed" && c["method"] == "PUT")
-    );
-    assert!(
-        ledger["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["path"] == "/app/installations/19/access_tokens")
-    );
-    assert_eq!(puts(&client, &base).await, 2);
+    assert!(github.called("PUT", "/repos/acme/web/collaborators/renamed"));
+    assert!(github.called("POST", "/app/installations/19/access_tokens"));
+    assert_eq!(github.writes(), 2);
     // Restore only the missing prerequisites: independently queued projections
     // establish all rows, receipts and immutable audit without another PUT.
     sqlx::query("DROP TRIGGER hold_installation")
@@ -499,20 +430,10 @@ async fn approved_delivery_progresses_without_projected_parents() {
     })
     .await
     .expect("independent receipt projection converges");
-    assert_eq!(puts(&client, &base).await, 2);
+    assert_eq!(github.writes(), 2);
 
     // Authoritative manual approval progresses while SQL still says Pending.
-    client
-        .delete(format!("{base}/__octoemu/compat/reset"))
-        .send()
-        .await
-        .unwrap();
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"renamed","addressed_id":8}),
-    )
-    .await;
+    github.reset().await;
     let manual = ghinvite_core::InvitationLinkId::new();
     post(&client, &format!("{ingress}/InvitationLink/{manual}/create"), json!({"max_uses":1000,"secret_sha256":"2a".repeat(32),"link_id":manual,"account_id":100,"installation_id":19,"admin":{"account_id":100,"user_id":7},"description":"Stale pending","approval_required":true,"targets":{"organization":null,"teams":[],"repos":[{"repo_id":10,"repo_full_name":"acme/api","grant":"write"}]}})).await;
     let admission = post(
@@ -577,7 +498,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         503,
         "fence outage before claim releases owner exclusivity"
     );
-    assert_eq!(puts(&client, &base).await, 0);
+    assert_eq!(github.writes(), 0);
     let recheck_url = manual_url.replace("/create", "/recheck");
     // Each failed wake must arrange a new generation even though preflight
     // failures publish no receipt. Redrive each old payload as a new invocation.
@@ -607,7 +528,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .await
         .is_null()
     );
-    assert_eq!(puts(&client, &base).await, 0);
+    assert_eq!(github.writes(), 0);
     assert_eq!(
         storage
             .get_invitation_request(request.parse().unwrap())
@@ -617,12 +538,13 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .state,
         ghinvite_core::RequestState::Pending
     );
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/outcomes"),
-        json!({"owner":"acme","repo":"api","user":"renamed","outcome":"created_then_declined"}),
-    )
-    .await;
+    github
+        .outcome(
+            "acme/api",
+            "renamed",
+            ghinvite_e2e::github::Outcome::Unanswered,
+        )
+        .await;
     sqlx::query("ALTER TABLE delivery_attempts_offline RENAME TO delivery_attempts")
         .execute(&sql)
         .await
@@ -653,7 +575,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     .await
     .unwrap();
     assert_eq!(unknown["command"], manual_command);
-    assert_eq!(puts(&client, &base).await, 1);
+    assert_eq!(github.writes(), 1);
     // An absent read result and even loss of the fence row do not permit an
     // unknown retained receipt to write. Projected parents are unreadable too.
     sqlx::query("DELETE FROM delivery_attempts WHERE delivery_key = ? AND step = 'repo'")
@@ -675,7 +597,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         post(&client, &manual_url, manual_command.clone()).await["outcome"]["kind"],
         "outcome_unknown"
     );
-    assert_eq!(puts(&client, &base).await, 1);
+    assert_eq!(github.writes(), 1);
     sqlx::query("ALTER TABLE invitation_requests_offline RENAME TO invitation_requests")
         .execute(&sql)
         .await
@@ -686,12 +608,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         .unwrap();
     // Applied GitHub PUT + lost Restate result + failed fence read on replay.
     // The receipt must retain uncertainty even though no earlier receipt exists.
-    post(
-        &client,
-        &format!("{base}/__octoemu/compat/identity"),
-        json!({"login":"recovered-user","addressed_id":8}),
-    )
-    .await;
+    github.rename("renamed", "recovered-user").await;
     // The fence goes offline while the next write is in flight.
     let hold = emulator
         .add_fault(
@@ -753,7 +670,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
             .load(std::sync::atomic::Ordering::SeqCst),
         1
     );
-    assert_eq!(puts(&client, &base).await, 2);
+    assert_eq!(github.writes(), 2);
     sqlx::query("ALTER TABLE delivery_attempts_offline RENAME TO delivery_attempts")
         .execute(&sql)
         .await
@@ -765,7 +682,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
     )
     .await;
     assert_eq!(confirmed["outcome"]["kind"], "created");
-    assert_eq!(puts(&client, &base).await, 2);
+    assert_eq!(github.writes(), 2);
 
     // A real delayed observation retry wakes after another event has settled.
     let sent = post(&client, &format!("{owner}/status"), Value::Null).await;
@@ -814,21 +731,7 @@ async fn approved_delivery_progresses_without_projected_parents() {
         post(&client, &format!("{owner}/status"), Value::Null).await["settlement"]["state"],
         "declined"
     );
-    let calls: Value = client
-        .get(format!("{base}/__octoemu/compat/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(
-        !calls["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|call| call["method"] == "DELETE")
-    );
+    assert_eq!(github.deletions(), 0);
     harness.finish().await;
     server.abort();
 }
@@ -863,23 +766,6 @@ async fn post(client: &reqwest::Client, url: &str, input: Value) -> Value {
     } else {
         serde_json::from_str(&body).unwrap()
     }
-}
-
-async fn puts(client: &reqwest::Client, base: &str) -> usize {
-    let calls: Value = client
-        .get(format!("{base}/__octoemu/compat/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    calls["requests"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["method"] == "PUT")
-        .count()
 }
 
 async fn refuse_cancel(client: &reqwest::Client, url: &str, input: Value) {

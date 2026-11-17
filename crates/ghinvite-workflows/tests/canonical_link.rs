@@ -189,9 +189,11 @@ async fn select_secret(app: &axum::Router, cookie: &str, secret: &str) {
 async fn authenticated_journey_settles_and_recovers_across_projection_and_response_loss() {
     let requester_login = Arc::new(AtomicBool::new(false));
     let login_identity = requester_login.clone();
-    // GitHub: the emulator's compat world. The sign-in side stays canned
-    // (fault rules standing in for the stub's extra routes) until the
-    // browser sign-in moves to the emulated OAuth flow (GE-09).
+    // GitHub: the suites' emulator world. The sign-in side stays canned
+    // (labelled fault rules): the step switches the signed-in user under one
+    // session, and `/user/installations/{id}/repositories` is outside the
+    // emulator's routes. `crates/ghinvite-web/tests/emulator_signin.rs` and
+    // the browser suite cover the real OAuth flow on the emulator.
     let harness = ghinvite_e2e::Harness::start().await;
     {
         use octoemu::faults::{Fault, FaultAction};
@@ -701,22 +703,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     assert!(!status.contains("Awaiting review"));
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            let calls: serde_json::Value = client
-                .get(format!("{base}/__octoemu/compat/calls"))
-                .send()
-                .await
-                .unwrap()
-                .json()
-                .await
-                .unwrap();
-            if calls["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|c| c["method"] == "PUT")
-                .count()
-                == 1
-            {
+            if harness.github().writes() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -776,25 +763,13 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     let upstream = delivered["create"]["outcome"]["upstream_id"]
         .as_u64()
         .unwrap();
-    // The invitee declines (the stub took an unauthenticated DELETE).
-    client
-        .post(format!(
-            "{}/act/alice/repository_invitations/{upstream}/decline",
-            harness.emulator().admin_base()
-        ))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    client
-        .post(format!("{base}/__octoemu/compat/identity"))
-        .json(&json!({"login":"alice","addressed_id":8,"role_name":"read"}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    // The invitee declines, and reads the repositories anyway (a direct
+    // read collaborator).
+    harness.github().decline("alice", upstream).await;
+    harness
+        .github()
+        .collaborate("alice", octoemu::seed::Role::Pull)
+        .await;
     tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             if storage
@@ -1004,43 +979,14 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .events,
         before
     );
-    let calls: serde_json::Value = client
-        .get(format!("{base}/__octoemu/compat/calls"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(
-        calls["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|call| call["method"] == "PUT")
-            .count(),
-        1
-    );
-    client
-        .post(format!("{base}/__octoemu/compat/identity"))
-        .json(&json!({"login":"alice","addressed_id":8}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    assert_eq!(harness.github().writes(), 1);
+    harness.github().revoke("alice").await;
     // The same authenticated routes cover fresh admission after decline and
     // admission-time auto approval. Keep the deadline/race matrix in request_owner.
     for auto in [false, true] {
         // Independent delivery scenarios need independent upstream invitations;
         // the typed protocol correctly tracks a previous scenario's pending invite.
-        client
-            .delete(format!("{base}/__octoemu/compat/reset"))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
+        harness.github().reset().await;
         let form =
             html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
         let action = form
@@ -1145,7 +1091,14 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             let fresh = page["request"]["request_id"].as_str().unwrap();
             assert_ne!(fresh, request_id);
             request_id = fresh.to_owned();
-            client.post(format!("{base}/__octoemu/compat/outcomes")).json(&json!({"owner":"acme","repo":"web","user":"alice","outcome":"access_lost_once"})).send().await.unwrap().error_for_status().unwrap();
+            harness
+                .github()
+                .outcome(
+                    "acme/web",
+                    "alice",
+                    ghinvite_e2e::github::Outcome::AccessLostOnce,
+                )
+                .await;
             let approve = format!("/console/accounts/acme/requests/{request_id}/approve");
             let body = format!(
                 "csrf_token={csrf}&link_id={link_id}&operation_id={}",
@@ -1232,29 +1185,16 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             .await
             .expect("explicit recovery resumes refused repository");
         }
-        let calls: serde_json::Value = client
-            .get(format!("{base}/__octoemu/compat/calls"))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
         for (path, permission) in [
             ("/repos/acme/api/collaborators/alice", "pull"),
             ("/repos/acme/web/collaborators/alice", "push"),
         ] {
-            let writes = calls["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|call| call["method"] == "PUT" && call["path"] == path)
-                .collect::<Vec<_>>();
+            let writes = harness.github().write_permissions(path);
             assert!(!writes.is_empty());
             assert!(
-                writes.iter().all(|call| call["permission"] == permission),
+                writes
+                    .iter()
+                    .all(|asked| asked.as_deref() == Some(permission)),
                 "each repository keeps its own grant through approval and recovery"
             );
         }

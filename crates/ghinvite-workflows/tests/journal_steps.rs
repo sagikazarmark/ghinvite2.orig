@@ -2,7 +2,7 @@
 //! This is a deployment review aid, not a cross-release replay guarantee.
 #![cfg(feature = "integration")]
 use ghinvite_core::{GithubInvitationId, InvitationLinkId, RequestId, storage::RecordStorage};
-use ghinvite_e2e::{Call, Harness, RunPath, journal::JournalAudit};
+use ghinvite_e2e::{Call, Harness, RunPath, github::Outcome, journal::JournalAudit};
 use serde_json::{Value, json};
 use std::sync::Arc;
 const SERVICES: &[&str] = &["InvitationLink", "RepositoryDelivery"];
@@ -384,17 +384,9 @@ impl Runtime {
     }
     async fn refuse_once(&self) {
         self.harness
-            .client
-            .post(format!(
-                "{}/__octoemu/compat/outcomes",
-                self.harness.github_url
-            ))
-            .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"access_lost_once"}))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
+            .github()
+            .outcome("acme/api", "alice", Outcome::AccessLostOnce)
+            .await;
     }
     async fn hold_release(&self, hold: bool) {
         let statement = if hold {
@@ -405,17 +397,9 @@ impl Runtime {
         sqlx::query(statement).execute(&self.sql).await.unwrap();
     }
     async fn command(&self) -> ghinvite_core::delivery::CreateCommand {
-        self.harness
-            .client
-            .delete(format!(
-                "{}/__octoemu/compat/reset",
-                self.harness.github_url
-            ))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap();
+        // A fresh GitHub side: no staged answers, alice without invitations
+        // or access, an empty call log.
+        self.harness.github().reset().await;
         // Approved private issuance boundary, through production projection writers.
         let link: ghinvite_core::InvitationLink = serde_json::from_value(json!({"secret":{"secret_generation":1,"sha256":"2a".repeat(32)},
             "id":InvitationLinkId::new(),"installation_id":1,"account_id":100,"created_by":7,
@@ -637,18 +621,8 @@ async fn production_handler_journals_walk_fixed_step_table() {
     }
     // S1 can stop without entering S4; both handlers retain that named path.
     let command = r.command().await;
-    r.harness
-        .client
-        .post(format!(
-            "{}/__octoemu/compat/identity",
-            r.harness.github_url
-        ))
-        .json(&json!({"addressed_id":999}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    // alice's login names another account (999) by the time it is resolved.
+    r.harness.github().recycled_login("alice", 999);
     let stopped = r.create_delivery(&command).await;
     assert_eq!(stopped["outcome"]["kind"], "blocked");
     r.ok(
@@ -699,9 +673,10 @@ async fn production_handler_journals_walk_fixed_step_table() {
                 "blocked"
             );
         }
-        r.harness.client.post(format!("{}/__octoemu/compat/outcomes",r.harness.github_url))
-            .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_response_lost"}))
-            .send().await.unwrap().error_for_status().unwrap();
+        r.harness
+            .github()
+            .outcome("acme/api", "alice", Outcome::CreatedResponseLost)
+            .await;
         assert_eq!(
             r.create_delivery(&command).await["outcome"]["kind"],
             "outcome_unknown"
@@ -748,9 +723,10 @@ async fn production_handler_journals_walk_fixed_step_table() {
                     r.hold_release(false).await;
                 }
             }
-            r.harness.client.post(format!("{}/__octoemu/compat/outcomes", r.harness.github_url))
-                .json(&json!({"owner":"acme","repo":"api","user":"alice","outcome":"created_response_lost"}))
-                .send().await.unwrap().error_for_status().unwrap();
+            r.harness
+                .github()
+                .outcome("acme/api", "alice", Outcome::CreatedResponseLost)
+                .await;
             if handler == "create" {
                 assert_eq!(
                     r.create_delivery(&command).await["outcome"]["kind"],
@@ -869,34 +845,12 @@ async fn production_handler_journals_walk_fixed_step_table() {
         &make_control(2, json!({"kind":"active"})),
     )
     .await;
-    r.harness
-        .client
-        .post(format!(
-            "{}/__octoemu/compat/identity",
-            r.harness.github_url
-        ))
-        .json(&json!({"addressed_id":999}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    let recycled = r.harness.github().recycled_login("alice", 999);
     assert_eq!(
         r.create_delivery(&command).await["outcome"]["kind"],
         "blocked"
     );
-    r.harness
-        .client
-        .post(format!(
-            "{}/__octoemu/compat/identity",
-            r.harness.github_url
-        ))
-        .json(&json!({"addressed_id":8}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    r.harness.emulator().remove_fault(recycled);
     for _ in 0..2 {
         r.ok(
             "RepositoryDelivery",

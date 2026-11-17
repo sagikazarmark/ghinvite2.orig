@@ -212,26 +212,8 @@ async fn explicit_m1_composition_revoke_reaches_created_delivery_and_fenced_dele
     assert_eq!(progress["done_deliveries"], 1);
     assert_eq!(progress["waiting_on_github"], 0);
     assert_eq!(progress["unavailable"], 0);
-    let trace: Value = rt
-        .client
-        .get(format!("{}/__octoemu/compat/calls", rt.harness.github_url))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    for method in ["PUT", "DELETE"] {
-        assert_eq!(
-            trace["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|v| v["method"] == method)
-                .count(),
-            1,
-            "{method}: {trace}"
-        );
-    }
+    let github = rt.harness.github();
+    assert_eq!(github.writes(), 1, "PUT");
+    assert_eq!(github.deletions(), 1, "DELETE");
     rt.harness.finish().await;
 }

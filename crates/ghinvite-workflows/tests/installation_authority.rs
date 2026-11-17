@@ -51,12 +51,12 @@ async fn decide(h: &Harness, input: &Value) -> Value {
     )
     .await
 }
-/// The emulator's compat world with only the repository App installed (as
-/// 1), so it can be installed again as 2.
+/// The suites' GitHub world with only the repository App installed (as 1),
+/// so it can be installed again as 2.
 async fn repository_only() -> octoemu::Emulator {
-    let mut seed = octoemu::compat::seed();
+    let mut seed = ghinvite_e2e::github::seed();
     seed.installations
-        .retain(|installation| installation.app_id == octoemu::compat::REPO_APP_ID);
+        .retain(|installation| installation.app_id == ghinvite_e2e::github::REPO_APP_ID);
     ghinvite_e2e::github_emulator_with(seed).await
 }
 #[tokio::test]

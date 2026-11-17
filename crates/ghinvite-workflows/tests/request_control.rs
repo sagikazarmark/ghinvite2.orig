@@ -368,17 +368,18 @@ async fn pending_cascade_cancels_once_projects_typed_reason_and_preserves_approv
             .repo(Repo::new(10, "owner", "api").private())
             .app(
                 App::new(
-                    octoemu::compat::REPO_APP_ID,
+                    ghinvite_e2e::github::REPO_APP_ID,
                     "ghinvite-repo-fixture",
-                    octoemu::compat::REPO_CLIENT_ID,
+                    ghinvite_e2e::github::REPO_CLIENT_ID,
                     "fixture-client-secret",
                 )
-                .public_key(octoemu::compat::PUBLIC_KEY)
+                .public_key(ghinvite_e2e::github::PUBLIC_KEY)
                 .permission("administration", Access::Write)
                 .permission("metadata", Access::Read),
             )
             .installation(
-                Installation::new(1, octoemu::compat::REPO_APP_ID, "owner").selected(["owner/api"]),
+                Installation::new(1, ghinvite_e2e::github::REPO_APP_ID, "owner")
+                    .selected(["owner/api"]),
             )
     };
     let harness = ghinvite_e2e::Harness::start_with_emulator(

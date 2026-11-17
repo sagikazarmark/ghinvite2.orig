@@ -807,21 +807,8 @@ async fn abuse_window_refuses_without_a_use_holds_approval_and_resumes_or_aborts
         .unwrap_or_else(|_| panic!("delivery did not reach {expected}"))
     }
     async fn writes(r: &Runtime) -> usize {
-        let trace: Value = r
-            .client
-            .get(format!("{}/__octoemu/compat/calls", r.harness.github_url))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        trace["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|v| matches!(v["method"].as_str(), Some("PUT" | "DELETE")))
-            .count()
+        let github = r.harness.github();
+        github.writes() + github.deletions()
     }
     for revoke in [false, true] {
         let id = InvitationLinkId::new();

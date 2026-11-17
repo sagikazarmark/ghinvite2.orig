@@ -191,24 +191,8 @@ async fn failed_initialization_replays_original_handoff_after_auto_hold_and_resu
     .await
     .expect("recovered request dispatches its released delivery");
     assert_eq!(r.uses(link).await, 1);
-    let calls: Value = r
-        .client
-        .get(format!("{}/__octoemu/compat/calls", r.harness.github_url))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
     assert_eq!(
-        calls["requests"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|call| call["method"] == "PUT")
-            .count(),
+        r.harness.github().writes(),
         1,
         "handoff and control replays dispatch exactly one GitHub write"
     );

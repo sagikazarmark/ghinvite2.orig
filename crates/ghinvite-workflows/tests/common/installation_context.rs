@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 pub struct InstallationContext {
     state: ghinvite_workflows::AppState,
-    /// GitHub: the emulator's compat world (installation 1 on acme).
+    /// GitHub: the suites' emulator world (installation 1 on acme).
     _github: octoemu::Emulator,
 }
 impl InstallationContext {
