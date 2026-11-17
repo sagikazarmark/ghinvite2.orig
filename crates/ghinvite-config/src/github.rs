@@ -82,6 +82,11 @@ impl GithubBases {
             }
             *base = ghinvite_github::rest::parse_base_url(&value).ok_or_else(|| bad(field))?;
         }
+        // The web origin becomes a CSP `form-action` host source, whose
+        // grammar has no IPv6 literals (browsers drop such a source).
+        if matches!(bases.web.host(), Some(url::Host::Ipv6(_))) {
+            return Err(bad("GITHUB_WEB_BASE"));
+        }
         Ok(bases)
     }
 
@@ -192,6 +197,17 @@ mod tests {
                 assert!(!format!("{error} {error:?}").contains("SECRET"));
             }
         }
+    }
+
+    #[test]
+    fn the_web_base_rejects_ipv6_hosts_csp_cannot_name() {
+        let error = parse(
+            Deployment::Development,
+            &[("GITHUB_WEB_BASE", "http://[::1]:8080/github/")],
+        )
+        .unwrap_err();
+        assert_eq!(error.field, "GITHUB_WEB_BASE");
+        assert_eq!(error.kind, DeploymentErrorKind::Invalid);
     }
 
     #[test]

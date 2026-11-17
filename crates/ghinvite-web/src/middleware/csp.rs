@@ -141,7 +141,6 @@ mod tests {
         for (web, origin) in [
             ("http://127.0.0.1:41234", "http://127.0.0.1:41234"),
             ("http://127.0.0.1:41234/", "http://127.0.0.1:41234"),
-            ("http://[::1]:8080/github/", "http://[::1]:8080"),
             ("https://ghe.example.test/", "https://ghe.example.test"),
             ("https://github.com:443/", "https://github.com"),
         ] {

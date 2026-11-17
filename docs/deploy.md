@@ -710,7 +710,9 @@ deployed Worker build) fail startup with `GITHUB_…_BASE is not accepted in
 production` if any is set, so never put them in `wrangler/*.toml` or a production
 secret store. A base must be `https`, or `http` on a loopback host (`localhost`,
 `127.0.0.0/8`, `::1`), without credentials, query or fragment; a trailing slash is
-optional. Errors name the variable, never its value.
+optional. `GITHUB_WEB_BASE` must not use an IPv6 literal host (`[::1]`), because
+its origin becomes a Content-Security-Policy `form-action` source, which cannot
+name one; use `localhost` or `127.0.0.1`. Errors name the variable, never its value.
 
 Bulk issuance is a separate opt-in: `GH_BULK_ENABLED=true` enables the Console
 capability and standard BulkInviteBatch owner; absent or exact `false` disables
