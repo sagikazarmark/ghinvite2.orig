@@ -54,7 +54,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ghinvite_config::bulk::email_keyring(bulk_enabled && organization_enabled, email_setting)?;
     // A fixture deployment: GitHub's bases may (and the API base must) point
     // at a stand-in. Tokens are created there too.
-    if std::env::var_os("GITHUB_API_BASE").is_none() {
+    for field in ghinvite_config::github::OVERRIDES {
+        if let Err(std::env::VarError::NotUnicode(_)) = std::env::var(field) {
+            return Err(format!("{field} invalid").into());
+        }
+    }
+    if std::env::var("GITHUB_API_BASE").is_err() {
         return Err("GITHUB_API_BASE required: the fixture never reaches GitHub".into());
     }
     let apps = parse_mint_apps(stage, Deployment::Development, |field| {
