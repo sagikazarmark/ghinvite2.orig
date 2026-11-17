@@ -254,6 +254,10 @@ jobs:
     name: Worker session and admission runtime
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # The drivers' GitHub is the octoemu emulator (tests/worker/octoemu.mjs),
+      # built into the root target directory that rust-cache keeps.
+      OCTOEMU_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.92.0
@@ -273,6 +277,8 @@ jobs:
           # rate limit, and a 403 makes binstall fall back to a source build.
           GITHUB_TOKEN: ${{ github.token }}
       - run: npm ci --prefix tests/worker
+      - name: Build the octoemu GitHub emulator
+        run: node tests/worker/build-octoemu.mjs
       - run: npm run test:runtime-output --prefix tests/worker
       - run: npm test --prefix tests/worker
       - run: npm run test:queue --prefix tests/worker
@@ -419,6 +425,9 @@ jobs:
       - name: Request history browser regressions
         working-directory: tests/browser
         run: npx playwright test --config request-history.config.mjs
+      - name: Sign-in through the octoemu emulator, expired-session bounce
+        working-directory: tests/browser
+        run: npx playwright test --config emulator-signin.config.mjs
       - name: No-JavaScript read recovery regressions
         working-directory: tests/browser
         run: npx playwright test --config read-recovery.config.mjs
