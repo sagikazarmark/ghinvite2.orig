@@ -7,7 +7,7 @@ use crate::auth;
 use crate::calls::{self, Call, CallFault, CredentialKind, Identity, Surface, redacted_path};
 use crate::clock::http_date;
 use crate::connection::Connection;
-use crate::faults::{DelayClock, FaultAction, Fired, Probe, Reply};
+use crate::faults::{DelayClock, FaultAction, Fired, Gate, Probe, Reply, StallPhase};
 use crate::response::{self, OCTOEMU_DOCS, REQUEST_ID, RateLimit};
 use crate::state::SharedState;
 use axum::Router;
@@ -100,6 +100,13 @@ const BODY_LIMIT: usize = 16 * 1024 * 1024;
 enum Outcome {
     /// Answered.
     Response(Response),
+    /// A [`FaultAction::Stall`] in the headers phase: logged, then nothing
+    /// until the gate opens (or the client goes away), then the connection
+    /// is dropped.
+    Stalled {
+        gate: Arc<Gate>,
+        identity: Option<Identity>,
+    },
     /// The connection is to be dropped without an answer.
     Dropped {
         reset: bool,
@@ -137,6 +144,7 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
                 let fired = shared.state().faults.decide(&Probe {
                     method: parts.method.as_str(),
                     path: parts.uri.path(),
+                    query: parts.uri.query().unwrap_or_default(),
                     credential,
                     body: &bytes,
                 });
@@ -159,8 +167,17 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
     };
 
     let now = shared.now();
+    let mut stalled = None;
     let (mut response, dropped) = match outcome {
         Outcome::Response(response) => (response, None),
+        Outcome::Stalled { gate, identity } => {
+            let mut response = Response::new(Body::empty());
+            if let Some(identity) = identity {
+                response.extensions_mut().insert(identity);
+            }
+            stalled = Some(gate);
+            (response, Some(false))
+        }
         Outcome::Dropped {
             reset,
             route,
@@ -215,6 +232,10 @@ async fn observe(State(shared): State<SharedState>, request: Request, next: Next
             body_fields,
             fault: mark,
         });
+    }
+    if let Some(gate) = stalled {
+        // Logged above; now the upstream says nothing until released.
+        gate.pass().await;
     }
     if let Some(reset) = dropped {
         match connection {
@@ -286,6 +307,36 @@ async fn inject(
             mark.handler_status = Some(response.status().as_u16());
             Outcome::Response(response)
         }
+        FaultAction::HoldResponse => {
+            let response = next.run(request).await;
+            mark.handler_status = Some(response.status().as_u16());
+            fired.gate.pass().await;
+            Outcome::Response(response)
+        }
+        FaultAction::Stall {
+            phase: StallPhase::Headers,
+            ..
+        } => Outcome::Stalled {
+            gate: fired.gate,
+            identity: caller(),
+        },
+        FaultAction::Stall {
+            phase: StallPhase::Body,
+            status,
+        } => {
+            let status = status
+                .and_then(|status| StatusCode::from_u16(status).ok())
+                .unwrap_or(StatusCode::OK);
+            answered(
+                (
+                    status,
+                    [(CONTENT_TYPE, "application/json; charset=utf-8")],
+                    Body::new(StalledBody::new(fired.gate)),
+                )
+                    .into_response(),
+                caller(),
+            )
+        }
         FaultAction::ApplyThenLose { status } => {
             let handled = next.run(request).await;
             mark.handler_status = Some(handled.status().as_u16());
@@ -315,6 +366,42 @@ async fn inject(
                 }
             }
         }
+    }
+}
+
+/// A [`FaultAction::Stall`] body: the first bytes of a JSON document, then
+/// nothing until the gate opens, then an error that aborts the connection
+/// with the body unfinished.
+struct StalledBody {
+    first: Option<axum::body::Bytes>,
+    wait: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+}
+
+impl StalledBody {
+    fn new(gate: Arc<Gate>) -> Self {
+        Self {
+            first: Some(axum::body::Bytes::from_static(b"{\"partial\":")),
+            wait: Box::pin(async move { gate.pass().await }),
+        }
+    }
+}
+
+impl hyper::body::Body for StalledBody {
+    type Data = axum::body::Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+        if let Some(first) = self.first.take() {
+            return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(first))));
+        }
+        self.wait.as_mut().poll(cx).map(|()| {
+            Some(Err(std::io::Error::other(
+                "octoemu: stalled body ended (fault rule)",
+            )))
+        })
     }
 }
 

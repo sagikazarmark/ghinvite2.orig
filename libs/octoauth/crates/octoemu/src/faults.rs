@@ -2,7 +2,7 @@
 //! avatars; never the admin API).
 //!
 //! A rule matches requests by method, path pattern, credential kind and,
-//! optionally, a substring of the request body, counts its matches, and
+//! optionally, a substring of the request body or of its query string, counts its matches, and
 //! fires on the `nth` match for `times` matches (or every one after). A
 //! firing rule's [`FaultAction`] answers instead of, or around, the real
 //! handler: a canned response, a delay, a hold until released, the real
@@ -53,6 +53,10 @@ pub struct Fault {
     /// Only requests whose body contains this text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_contains: Option<String>,
+    /// Only requests whose query string (without the `?`) contains this
+    /// text, e.g. `page=2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_contains: Option<String>,
     /// The first matching request the rule fires on, from 1 (the default).
     #[serde(default = "first", skip_serializing_if = "is_first")]
     pub nth: u64,
@@ -85,6 +89,7 @@ impl Fault {
             path: path.into(),
             credential: None,
             body_contains: None,
+            query_contains: None,
             nth: 1,
             times: None,
             label: None,
@@ -112,6 +117,12 @@ impl Fault {
     /// Only requests whose body contains `text`.
     pub fn body_contains(mut self, text: impl Into<String>) -> Self {
         self.body_contains = Some(text.into());
+        self
+    }
+
+    /// Only requests whose query string contains `text`.
+    pub fn query_contains(mut self, text: impl Into<String>) -> Self {
+        self.query_contains = Some(text.into());
         self
     }
 
@@ -162,6 +173,26 @@ pub enum FaultAction {
     /// removed, or the emulator stops; then runs the real handler. A
     /// released rule holds no more requests.
     Hold,
+    /// Runs the real handler (its changes happen), then holds its response
+    /// until the rule is released, removed, or the emulator stops: a slow
+    /// answer to a request that was already applied, so another request
+    /// can overtake it. A released rule holds no more responses.
+    HoldResponse,
+    /// The upstream stops answering; the handler does not run. In the
+    /// `headers` phase no response starts; in the `body` phase the status
+    /// line and headers (`status`, default 200, `application/json`) and the
+    /// first bytes of a JSON body are sent, and the body never finishes. The
+    /// call is logged when the stall begins (`status` 0 in the `headers`
+    /// phase). The stall lasts until the client gives up, the rule is
+    /// released or removed, or the emulator stops; then the connection is
+    /// closed (the body left unfinished).
+    Stall {
+        /// Where the response stops.
+        phase: StallPhase,
+        /// The status sent in the `body` phase (default 200).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<u16>,
+    },
     /// Runs the real handler (its changes happen), then loses its response:
     /// answers `status` instead (with a short text body), or, without a
     /// `status`, closes the connection without answering.
@@ -202,6 +233,8 @@ impl FaultAction {
             Self::Respond(_) => "respond",
             Self::Delay { .. } => "delay",
             Self::Hold => "hold",
+            Self::HoldResponse => "hold_response",
+            Self::Stall { .. } => "stall",
             Self::ApplyThenLose { .. } => "apply_then_lose",
             Self::Close => "close",
             Self::Reset => "reset",
@@ -226,6 +259,16 @@ pub enum DelayClock {
     Real,
     /// The virtual clock jumps forward; the response is not slowed down.
     Virtual,
+}
+
+/// Where a [`FaultAction::Stall`] stops the response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StallPhase {
+    /// Before the status line: no response starts.
+    Headers,
+    /// After the headers and the first bytes of the body.
+    Body,
 }
 
 /// A canned response.
@@ -316,6 +359,8 @@ pub struct FaultStatus {
     pub credential: Option<CredentialKind>,
     /// The body text it requires.
     pub body_contains: Option<String>,
+    /// The query text it requires.
+    pub query_contains: Option<String>,
     /// The first match it fires on.
     pub nth: u64,
     /// How many times it fires (`null`: unlimited).
@@ -328,9 +373,11 @@ pub struct FaultStatus {
     pub matched: u64,
     /// Requests it fired on so far.
     pub fired: u64,
-    /// Requests it holds now ([`FaultAction::Hold`]).
+    /// Requests (or responses) it holds now ([`FaultAction::Hold`],
+    /// [`FaultAction::HoldResponse`], [`FaultAction::Stall`]).
     pub held: usize,
-    /// Whether it was released ([`FaultAction::Hold`]).
+    /// Whether it was released ([`FaultAction::Hold`],
+    /// [`FaultAction::HoldResponse`], [`FaultAction::Stall`]).
     pub released: bool,
 }
 
@@ -487,16 +534,23 @@ impl Gate {
         *self.0.borrow()
     }
 
-    /// Waits until released (counting itself as held meanwhile).
+    /// Waits until released (counting itself as held meanwhile, also when
+    /// the wait is dropped because the client went away).
     pub(crate) async fn pass(&self) {
+        struct Held<'a>(&'a watch::Sender<GateState>);
+        impl Drop for Held<'_> {
+            fn drop(&mut self) {
+                self.0
+                    .send_modify(|state| state.held = state.held.saturating_sub(1));
+            }
+        }
         let mut released = self.0.subscribe();
         if released.borrow().released {
             return;
         }
         self.0.send_modify(|state| state.held += 1);
+        let _held = Held(&self.0);
         let _ = released.wait_for(|state| state.released).await;
-        self.0
-            .send_modify(|state| state.held = state.held.saturating_sub(1));
     }
 
     /// Waits until at least `n` requests are held, at most `timeout`.
@@ -528,6 +582,7 @@ impl Rule {
             path: self.fault.path.clone(),
             credential: self.fault.credential,
             body_contains: self.fault.body_contains.clone(),
+            query_contains: self.fault.query_contains.clone(),
             nth: self.fault.nth,
             times: self.fault.times,
             label: self.fault.label.clone(),
@@ -550,6 +605,8 @@ impl Rule {
 pub(crate) struct Probe<'a> {
     pub(crate) method: &'a str,
     pub(crate) path: &'a str,
+    /// The query string, without the `?` (empty without one).
+    pub(crate) query: &'a str,
     pub(crate) credential: CredentialKind,
     pub(crate) body: &'a [u8],
 }
@@ -574,7 +631,7 @@ impl Faults {
         let pattern = Pattern::parse(&fault.path)?;
         let status = match &fault.action {
             FaultAction::Respond(reply) => Some(reply.status),
-            FaultAction::ApplyThenLose { status } => *status,
+            FaultAction::ApplyThenLose { status } | FaultAction::Stall { status, .. } => *status,
             _ => None,
         };
         if let Some(status) = status
@@ -688,6 +745,11 @@ impl Faults {
             {
                 continue;
             }
+            if let Some(text) = &rule.fault.query_contains
+                && !probe.query.contains(text.as_str())
+            {
+                continue;
+            }
             rule.matched += 1;
             let due = rule.matched >= rule.fault.nth;
             let left = rule.fault.times.is_none_or(|times| rule.fired < times);
@@ -774,6 +836,7 @@ mod tests {
         Probe {
             method,
             path,
+            query: "",
             credential: CredentialKind::InstallationToken,
             body: b"{\"permission\":\"push\"}",
         }

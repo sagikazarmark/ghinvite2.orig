@@ -19,6 +19,7 @@ use crate::seed::{
     Role, Seed, User,
 };
 use crate::state::{Shared, SharedState};
+use crate::users::rename_user;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -174,80 +175,6 @@ fn fresh_user_id(world: &Seed) -> u64 {
         id += 1;
     }
     id
-}
-
-/// Renames user `old` to `new` and every reference to them; refused for a
-/// user owning repositories or an App, or a login already taken.
-pub(crate) fn rename_user(world: &mut Seed, old: &str, new: &str) -> Result<(), String> {
-    let same = |login: &str| login.eq_ignore_ascii_case(old);
-    if !world.users.iter().any(|u| same(&u.login)) {
-        return Err(format!("no user {old:?}"));
-    }
-    if old.eq_ignore_ascii_case(new) {
-        if let Some(user) = world.users.iter_mut().find(|u| same(&u.login)) {
-            user.login = new.to_owned();
-        }
-        return Ok(());
-    }
-    if world
-        .users
-        .iter()
-        .any(|u| u.login.eq_ignore_ascii_case(new))
-        || world.orgs.iter().any(|o| o.login.eq_ignore_ascii_case(new))
-    {
-        return Err(format!("the login {new:?} is taken"));
-    }
-    if world.repos.iter().any(|r| same(&r.owner))
-        || world
-            .apps
-            .iter()
-            .any(|a| a.owner.as_deref().is_some_and(same))
-        || world.installations.iter().any(|i| same(&i.account))
-    {
-        return Err(format!(
-            "{old:?} owns repositories, an App or an installation"
-        ));
-    }
-    let rename = |login: &mut String| {
-        if same(login) {
-            *login = new.to_owned();
-        }
-    };
-    for user in &mut world.users {
-        rename(&mut user.login);
-    }
-    for collaborator in &mut world.collaborators {
-        rename(&mut collaborator.user);
-    }
-    for membership in &mut world.memberships {
-        rename(&mut membership.user);
-    }
-    for membership in &mut world.team_memberships {
-        rename(&mut membership.user);
-    }
-    for invitation in &mut world.repository_invitations {
-        rename(&mut invitation.invitee);
-        if let Some(inviter) = invitation.inviter.as_mut() {
-            rename(inviter);
-        }
-    }
-    for invitation in &mut world.org_invitations {
-        if let Some(invitee) = invitation.invitee.as_mut() {
-            rename(invitee);
-        }
-        if let Some(inviter) = invitation.inviter.as_mut() {
-            rename(inviter);
-        }
-    }
-    for request in &mut world.installation_requests {
-        rename(&mut request.requester);
-    }
-    for installation in &mut world.installations {
-        if let Some(by) = installation.suspended_by.as_mut() {
-            rename(by);
-        }
-    }
-    Ok(())
 }
 
 /// Makes user `id` carry `login`, creating them if needed and renaming

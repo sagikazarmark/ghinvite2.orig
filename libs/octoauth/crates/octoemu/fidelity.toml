@@ -363,6 +363,14 @@ reason = "DELETE …/collaborators/{username} for a user who is not a direct col
 label = "assumed"
 reason = "A collaborator route naming a login that is no user answers 404 Not Found. GitHub documents no 404 for PUT; unmeasured. Refused in refuse-assumed mode."
 
+[behaviours.user-rename]
+label = "documented"
+doc = "https://docs.github.com/en/account-and-profile/setting-up-and-managing-your-personal-account-on-github/managing-user-account-settings/changing-your-github-username"
+# A renamed user keeps their ID; collaborations, memberships and invitations
+# stay theirs, and the old login no longer names them (admin
+# POST /__octoemu/users/{login}/rename). Not modelled: GitHub's redirects for
+# a renamed owner's repositories (the emulator refuses to rename an owner).
+
 [behaviours.out-of-scope-repository]
 label = "assumed"
 reason = "A public repository outside the installation token's repositories is visible (GET /repos/{owner}/{repo}) but its collaborator and invitation routes answer 403 Resource not accessible by integration with X-Accepted-GitHub-Permissions. Unmeasured. Refused in refuse-assumed mode."

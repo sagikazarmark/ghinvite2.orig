@@ -68,6 +68,11 @@ pub(crate) fn router() -> Router<SharedState> {
             post(act_on_org),
         )
         .route("/__octoemu/orgs/{org}/spammed", post(set_spammed))
+        .route("/__octoemu/users/{login}/rename", post(rename_user))
+        .route(
+            "/__octoemu/repository_invitations/{id}/expire",
+            post(expire_invitation),
+        )
         .route(
             "/__octoemu/faults",
             get(list_faults).post(add_fault).delete(clear_faults),
@@ -235,6 +240,75 @@ async fn set_spammed(
             "octoemu: no such organization",
             OCTOEMU_DOCS,
         )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    login: String,
+}
+
+/// `POST /__octoemu/users/{login}/rename` `{"login"}`: the user changes
+/// their login; their ID, collaborations, memberships and invitations stay
+/// theirs (`user-rename`). 204; 404 for an unknown user; 422 for a login
+/// that is taken, or a user owning repositories, an App or an installation
+/// (an emulator limitation).
+async fn rename_user(
+    State(shared): State<SharedState>,
+    Path(login): Path<String>,
+    bytes: Bytes,
+) -> Response {
+    let Rename { login: new } = match body(&bytes) {
+        Ok(rename) => rename,
+        Err(response) => return *response,
+    };
+    if new.is_empty() || !new.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return unprocessable("a login is letters, digits and hyphens");
+    }
+    let mut state = shared.state();
+    if !state
+        .world
+        .users
+        .iter()
+        .any(|user| user.login.eq_ignore_ascii_case(&login))
+    {
+        return error(StatusCode::NOT_FOUND, "octoemu: no such user", OCTOEMU_DOCS);
+    }
+    let mut world = state.world.clone();
+    match crate::users::rename_user(&mut world, &login, &new) {
+        Ok(()) => {
+            state.world = world;
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(problem) => unprocessable(&problem),
+    }
+}
+
+/// `POST /__octoemu/repository_invitations/{id}/expire`: dates the
+/// invitation back past its 7 days on the virtual clock, so it is expired
+/// now without moving the clock for everything else. 204; 404 if unknown.
+async fn expire_invitation(State(shared): State<SharedState>, Path(id): Path<String>) -> Response {
+    let mut state = shared.state();
+    let now = state.clock.now();
+    let invitation = id.parse::<u64>().ok().and_then(|id| {
+        state
+            .world
+            .repository_invitations
+            .iter_mut()
+            .find(|invitation| invitation.id == id)
+    });
+    match invitation {
+        Some(invitation) => {
+            invitation.created_at =
+                Some(now - crate::views::INVITATION_LIFETIME - chrono::TimeDelta::seconds(1));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        None => error(
+            StatusCode::NOT_FOUND,
+            "octoemu: no such invitation",
+            OCTOEMU_DOCS,
+        ),
     }
 }
 

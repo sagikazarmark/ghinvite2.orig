@@ -484,13 +484,15 @@ applies whole or not at all; it may not set `start_time`.
 | `POST /act/{login}/orgs/{org}/decline` | The user declines their invitation (204, no event) |
 | `POST /act/{login}/orgs/{org}/leave` | A member leaves (204, `organization.member_removed`) |
 | `POST /orgs/{org}/spammed` | `{"spammed": bool}`: the organization's invitation writes (create, cancel) answer GitHub's `spammed` 422 (assumed shape) while on (204; 404 unknown) |
+| `POST /users/{login}/rename` | `{"login"}`: the user changes their login; ID, collaborations, memberships and invitations stay theirs (`user-rename`, documented). 204; 404 unknown; 422 for a taken login or a user owning repositories, an App or an installation (an emulator limitation: GitHub redirects a renamed owner's repositories) |
+| `POST /repository_invitations/{id}/expire` | Dates the invitation back past its 7 days, so it is expired now without moving the clock for everything else (204; 404) |
 | `GET /faults` | `{"faults": […]}`: every [fault rule](#fault-rules) with `id`, its fields, `matched`, `fired`, `held` and `released` |
 | `POST /faults` | Adds a rule: 201 with it as listed; 422 for a bad pattern, method, status or header |
 | `DELETE /faults` | Removes every rule (204), letting held requests go on |
 | `GET /faults/{id}` | One rule (404 if unknown) |
 | `DELETE /faults/{id}` | Removes it (204; 404), letting its held requests go on |
-| `POST /faults/{id}/release` | A hold rule lets its held requests go on and holds no more (204; 404) |
-| `POST /faults/{id}/wait` | `{"held"?: n (1), "timeout_ms"?}`: 200 `{"held": n}` once the hold rule holds at least `n` requests, 504 at the timeout (default 30 s) |
+| `POST /faults/{id}/release` | A hold, hold-response or stall rule lets what it holds go on (a stall ends) and holds no more (204; 404) |
+| `POST /faults/{id}/wait` | `{"held"?: n (1), "timeout_ms"?}`: 200 `{"held": n}` once the hold, hold-response or stall rule holds at least `n` requests, 504 at the timeout (default 30 s) |
 | `/compat/…` | The temporary [stub-compatibility shim](#compatibility-shim-temporary) |
 
 **Virtual clock.** It starts at `settings.start_time` (or the real time),
@@ -549,7 +551,8 @@ rule fires on is marked in the call log.
   `{param}` (one segment) and `{*rest}` (the rest), `*` (one segment, or a
   run of characters within one) and `**` (any number of segments);
   `credential` (the call log's credential kinds); `body_contains` (a
-  substring of the raw body).
+  substring of the raw body); `query_contains` (a substring of the query
+  string, e.g. `page=2`).
 - **Counting.** A rule counts every request it matches and fires from the
   `nth` (default 1) for `times` requests (default: every one after). A
   rule that matches without firing lets later rules look; the first rule
@@ -565,6 +568,18 @@ rule fires on is marked in the call log.
     emulator stops, then the handler runs; `POST /faults/{id}/wait`
     (`Emulator::wait_for_held`) returns once requests are held, so a test
     can act while a write is in flight;
+  - `hold_response`: the handler runs (its changes happen), then its
+    response waits until the rule is released, removed or the emulator
+    stops, so a later request can overtake it (a slow answer to an applied
+    write); `wait` counts held responses;
+  - `stall`: the upstream stops answering and the handler does not run.
+    `phase: "headers"`: no response starts (the call is logged at once,
+    with `status` 0); `phase: "body"`: the status (`status`, default 200),
+    `application/json` and the first bytes of a JSON body are sent, and the
+    body never finishes. A stall lasts until the client gives up or the
+    rule is released or removed (or the emulator stops); then the
+    connection closes, the body unfinished. For testing a client's
+    deadlines;
   - `apply_then_lose`: the handler runs (its changes happen), then its
     response is lost: `status` (e.g. 502, with a short text body) is sent
     instead, or, without `status`, the connection closes unanswered (the

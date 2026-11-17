@@ -1,12 +1,12 @@
 //! Fault rules (GE-07) over HTTP: matching (method, pattern, credential,
-//! body, nth/times), every action (respond, delay, hold, apply-then-lose,
-//! close, reset, custom), the admin API, the call log's marks, and that the
+//! body, nth/times), every action (respond, delay, hold, hold-response,
+//! stall, apply-then-lose, close, reset, custom), the admin API, the call log's marks, and that the
 //! admin API is never faulted.
 #![cfg(not(target_arch = "wasm32"))]
 
 use octoemu::Emulator;
 use octoemu::calls::CredentialKind;
-use octoemu::faults::{DelayClock, Fault, FaultAction, Reply};
+use octoemu::faults::{DelayClock, Fault, FaultAction, Reply, StallPhase};
 use octoemu::seed::{Access, App, Installation, Org, Repo, Seed, User};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
@@ -440,6 +440,188 @@ async fn hold_waits_for_release() {
         )
         .await;
     assert_eq!(status, 504);
+}
+
+#[tokio::test]
+async fn rules_can_match_the_query_string() {
+    let world = World::start().await;
+    let id = world
+        .emulator
+        .add_fault(
+            Fault::on(
+                "GET",
+                "/repos/acme/widgets/invitations",
+                FaultAction::respond(503),
+            )
+            .query_contains("page=2"),
+        )
+        .unwrap();
+    let get = |query: &'static str| {
+        world
+            .client
+            .get(world.url(&format!("/repos/acme/widgets/invitations{query}")))
+            .bearer_auth(&world.token)
+            .send()
+    };
+    assert_eq!(get("").await.unwrap().status(), 200);
+    assert_eq!(get("?per_page=1&page=1").await.unwrap().status(), 200);
+    assert_eq!(get("?per_page=1&page=2").await.unwrap().status(), 503);
+    assert_eq!(get("?page=2").await.unwrap().status(), 503);
+    let status = world.emulator.fault(id).unwrap();
+    assert_eq!((status.matched, status.fired), (2, 2));
+    assert_eq!(status.query_contains.as_deref(), Some("page=2"));
+}
+
+#[tokio::test]
+async fn hold_response_applies_then_lets_a_later_request_overtake() {
+    let world = World::start().await;
+    let id = world
+        .emulator
+        .add_fault(Fault::on("PUT", PUT, FaultAction::HoldResponse).once())
+        .unwrap();
+    let first = {
+        let client = world.client.clone();
+        let url = world.url(PUT);
+        let token = world.token.clone();
+        tokio::spawn(async move {
+            client
+                .put(url)
+                .bearer_auth(token)
+                .json_body(&json!({"permission": "push"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        })
+    };
+    assert!(
+        world
+            .emulator
+            .wait_for_held(id, 1, Duration::from_secs(5))
+            .await
+    );
+    // The handler ran: the invitation exists while its answer is held.
+    assert_eq!(world.invitations().await, 1);
+    // A later request is answered first (the rule fired once).
+    assert_eq!(world.put("pull").await.unwrap().status(), 201);
+    assert!(!first.is_finished());
+    world.emulator.release_fault(id);
+    assert_eq!(first.await.unwrap(), 201);
+    let call = world
+        .emulator
+        .calls()
+        .into_iter()
+        .rfind(|c| c.method == "PUT")
+        .unwrap();
+    let mark = call.fault.unwrap();
+    assert_eq!(
+        (mark.action.as_str(), mark.handler_status),
+        ("hold_response", Some(201))
+    );
+}
+
+#[tokio::test]
+async fn stalls_never_run_the_handler_and_end_when_released() {
+    let world = World::start().await;
+    // Headers: no response starts; the call is logged when the stall begins.
+    let headers = world
+        .emulator
+        .add_fault(
+            Fault::on(
+                "PUT",
+                PUT,
+                FaultAction::Stall {
+                    phase: StallPhase::Headers,
+                    status: None,
+                },
+            )
+            .once(),
+        )
+        .unwrap();
+    let put = {
+        let client = world.client.clone();
+        let url = world.url(PUT);
+        let token = world.token.clone();
+        tokio::spawn(async move {
+            client
+                .put(url)
+                .bearer_auth(token)
+                .json_body(&json!({"permission": "push"}))
+                .send()
+                .await
+        })
+    };
+    assert!(
+        world
+            .emulator
+            .wait_for_held(headers, 1, Duration::from_secs(5))
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!put.is_finished(), "no response while stalled");
+    assert_eq!(world.invitations().await, 0);
+    let call = world
+        .emulator
+        .calls()
+        .into_iter()
+        .find(|c| c.method == "PUT")
+        .unwrap();
+    assert_eq!(
+        (call.status, call.fault.unwrap().action.as_str()),
+        (0, "stall")
+    );
+    assert!(world.emulator.remove_fault(headers));
+    let ended = put.await.unwrap();
+    assert!(ended.is_err(), "the connection closes: {ended:?}");
+    assert_eq!(world.invitations().await, 0);
+
+    // Body: the status and headers arrive, the body never finishes.
+    let body = world
+        .emulator
+        .add_fault(Fault::on(
+            "GET",
+            "/repos/acme/widgets",
+            FaultAction::Stall {
+                phase: StallPhase::Body,
+                status: None,
+            },
+        ))
+        .unwrap();
+    let response = world
+        .client
+        .get(world.url("/repos/acme/widgets"))
+        .bearer_auth(&world.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert!(
+        response.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("application/json")
+    );
+    let text = tokio::spawn(response.text());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!text.is_finished(), "the body never finishes while stalled");
+    assert_eq!(world.emulator.fault(body).unwrap().held, 1);
+    world.emulator.release_fault(body);
+    assert!(text.await.unwrap().is_err(), "the body is cut short");
+    let call = world.emulator.calls().pop().unwrap();
+    assert_eq!(
+        (call.status, call.fault.unwrap().action.as_str()),
+        (200, "stall")
+    );
+    // A released stall rule stalls no more.
+    assert_eq!(world.put("push").await.unwrap().status(), 201);
+    let (status, _) = world
+        .admin(
+            reqwest::Method::POST,
+            "/faults",
+            Some(json!({"path": "/x", "action": {"kind": "stall", "phase": "body", "status": 42}})),
+        )
+        .await;
+    assert_eq!(status, 422);
 }
 
 #[tokio::test]

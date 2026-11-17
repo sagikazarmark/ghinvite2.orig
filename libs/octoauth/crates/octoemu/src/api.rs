@@ -109,6 +109,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "unknown-user-404",
     "unsupported-grant-type",
     "user-public-email",
+    "user-rename",
     "user-repo-permission-ignored",
     "user-token-cap",
     "user-token-expiry",

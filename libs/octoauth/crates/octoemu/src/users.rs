@@ -148,3 +148,84 @@ pub(crate) async fn emails(
         .collect();
     json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
 }
+
+/// Renames user `old` to `new`: the user keeps their ID, and every
+/// reference (collaborations, memberships, invitations, installation
+/// requests) follows them. Refused for a login already taken and, as an
+/// emulator limitation (GitHub redirects their repositories), for a user
+/// owning repositories, an App or an installation.
+pub(crate) fn rename_user(
+    world: &mut crate::seed::Seed,
+    old: &str,
+    new: &str,
+) -> Result<(), String> {
+    let same = |login: &str| login.eq_ignore_ascii_case(old);
+    if !world.users.iter().any(|u| same(&u.login)) {
+        return Err(format!("no user {old:?}"));
+    }
+    if old.eq_ignore_ascii_case(new) {
+        if let Some(user) = world.users.iter_mut().find(|u| same(&u.login)) {
+            user.login = new.to_owned();
+        }
+        return Ok(());
+    }
+    if world
+        .users
+        .iter()
+        .any(|u| u.login.eq_ignore_ascii_case(new))
+        || world.orgs.iter().any(|o| o.login.eq_ignore_ascii_case(new))
+    {
+        return Err(format!("the login {new:?} is taken"));
+    }
+    if world.repos.iter().any(|r| same(&r.owner))
+        || world
+            .apps
+            .iter()
+            .any(|a| a.owner.as_deref().is_some_and(same))
+        || world.installations.iter().any(|i| same(&i.account))
+    {
+        return Err(format!(
+            "{old:?} owns repositories, an App or an installation"
+        ));
+    }
+    let rename = |login: &mut String| {
+        if same(login) {
+            *login = new.to_owned();
+        }
+    };
+    for user in &mut world.users {
+        rename(&mut user.login);
+    }
+    for collaborator in &mut world.collaborators {
+        rename(&mut collaborator.user);
+    }
+    for membership in &mut world.memberships {
+        rename(&mut membership.user);
+    }
+    for membership in &mut world.team_memberships {
+        rename(&mut membership.user);
+    }
+    for invitation in &mut world.repository_invitations {
+        rename(&mut invitation.invitee);
+        if let Some(inviter) = invitation.inviter.as_mut() {
+            rename(inviter);
+        }
+    }
+    for invitation in &mut world.org_invitations {
+        if let Some(invitee) = invitation.invitee.as_mut() {
+            rename(invitee);
+        }
+        if let Some(inviter) = invitation.inviter.as_mut() {
+            rename(inviter);
+        }
+    }
+    for request in &mut world.installation_requests {
+        rename(&mut request.requester);
+    }
+    for installation in &mut world.installations {
+        if let Some(by) = installation.suspended_by.as_mut() {
+            rename(by);
+        }
+    }
+    Ok(())
+}

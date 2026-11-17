@@ -750,6 +750,100 @@ async fn invitations_expire_after_seven_days() {
 }
 
 #[tokio::test]
+async fn the_admin_api_expires_one_invitation_and_renames_a_user() {
+    let world = World::start().await;
+    let first = world.invite("widgets", "hubot", "push").await.body["id"]
+        .as_u64()
+        .unwrap();
+    let second = world.invite("big", "hubot", "pull").await.body["id"]
+        .as_u64()
+        .unwrap();
+    let admin = |path: &str| format!("{}{path}", world.emulator.admin_base());
+    let expired = send(
+        Method::POST,
+        &admin(&format!("/repository_invitations/{first}/expire")),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(expired.status, StatusCode::NO_CONTENT);
+    // Only that invitation; the clock stays where it was.
+    assert_eq!(
+        world.get("/repos/acme/widgets/invitations").await.body[0]["expired"],
+        true
+    );
+    assert_eq!(
+        world.get("/repos/acme/big/invitations").await.body[0]["expired"],
+        false
+    );
+    let unknown = send(
+        Method::POST,
+        &admin("/repository_invitations/999999/expire"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(unknown.status, StatusCode::NOT_FOUND);
+
+    // A renamed user keeps their ID and invitations; the old login is free.
+    let renamed = send(
+        Method::POST,
+        &admin("/users/hubot/rename"),
+        None,
+        Some(json!({"login": "hubot-2"}).to_string()),
+    )
+    .await;
+    assert_eq!(renamed.status, StatusCode::NO_CONTENT, "{}", renamed.body);
+    let user = world.get("/users/hubot-2").await;
+    assert_eq!(
+        (user.body["id"].as_u64(), user.status),
+        (Some(3), StatusCode::OK)
+    );
+    assert_eq!(
+        world.get("/users/hubot").await.status,
+        StatusCode::NOT_FOUND
+    );
+    let listed = world.get("/repos/acme/big/invitations").await;
+    assert_eq!(listed.body[0]["id"], second);
+    assert_eq!(listed.body[0]["invitee"]["login"], "hubot-2");
+    let accepted = world
+        .act(&format!("hubot-2/repository_invitations/{second}/accept"))
+        .await;
+    assert_eq!(accepted.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        world.permission("big", "hubot-2").await["permission"],
+        "read"
+    );
+    for (login, body, status) in [
+        ("nobody", json!({"login": "x"}), StatusCode::NOT_FOUND),
+        (
+            "hubot-2",
+            json!({"login": "octocat"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "hubot-2",
+            json!({"login": "bad name"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "octocat",
+            json!({"login": "octo"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let reply = send(
+            Method::POST,
+            &admin(&format!("/users/{login}/rename")),
+            None,
+            Some(body.to_string()),
+        )
+        .await;
+        assert_eq!(reply.status, status, "{login}: {}", reply.body);
+    }
+}
+
+#[tokio::test]
 async fn fifty_invitations_per_repository_per_day() {
     let mut world = World::start().await;
     for n in 1..=50 {
