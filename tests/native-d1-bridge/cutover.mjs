@@ -1,5 +1,8 @@
 // Owned-local signed Restate 1.8 Worker→native cutover over one existing D1 binding.
 // Provisioning is fixture-only, before either workflow producer is registered.
+// GitHub is the octoemu emulator binary (OCTOEMU_BIN), reached by the Worker and
+// the native endpoint through GITHUB_API_BASE (a loopback proxy in front of it
+// that collects the minted installation tokens as private markers).
 import assert from 'node:assert/strict';
 import {createServer as httpServer} from 'node:http';
 import {createServer as h2Server,connect as h2connect} from 'node:http2';
@@ -20,7 +23,7 @@ import {schemaQuery,sha256} from '../../native-d1-bridge/bridge.mjs';
 const require=createRequire(new URL('../worker/package.json',import.meta.url));
 const {Miniflare,Log,LogLevel}=require('miniflare');
 const evidence=process.env.EVIDENCE_ROOT;assert.ok(evidence);mkdirSync(evidence,{recursive:true});
-for(const key of ['RESTATE_SERVER_BIN','NATIVE_BRIDGE_ENDPOINT_BIN','GITHUB_STUB_BIN'])assert.ok(process.env[key],key);
+for(const key of ['RESTATE_SERVER_BIN','NATIVE_BRIDGE_ENDPOINT_BIN','OCTOEMU_BIN'])assert.ok(process.env[key],key);
 const hash=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
 const signer=identitySigner(), token=randomBytes(32).toString('hex'), privateKeys='fixture:'+readFileSync(new URL('../../test-fixtures/github-app-rsa.pem',import.meta.url)).toString('base64');
 const privatePem=readFileSync(new URL('../../test-fixtures/github-app-rsa.pem',import.meta.url),'utf8');
@@ -56,10 +59,23 @@ const chunks=[];let n=0;for await(const b of req){n+=b.length;assert.ok(n<=32*10
  res.writeHead(result.status,Object.fromEntries(Object.entries(result.headers).filter(([k])=>!['transfer-encoding','connection','keep-alive'].includes(k))));res.end(result.body);
  }catch(error){if(!res.destroyed){res.writeHead(503);res.end();}streams.set('proxy-error-'+streams.size,String(error));}});s.on('session',x=>{sessions.add(x);x.once('close',()=>sessions.delete(x));});return s;}
 const id=()=> '01'+randomBytes(12).toString('hex').toUpperCase();
+// GitHub's side: acme (100, owned by user-7) with acme/api (10) and acme/web (11),
+// the requesters user-91 and user-92, and the repository App 123 (the Worker's and
+// the native endpoint's fixture key) installed on all of acme as 1.
+const githubSeed={users:[{id:7,login:'user-7'},{id:91,login:'user-91'},{id:92,login:'user-92'}],
+ orgs:[{id:100,login:'acme',created_at:'2020-01-01T00:00:00Z'}],memberships:[{org:'acme',user:'user-7',role:'admin',state:'active'}],
+ repos:[{id:10,owner:'acme',name:'api',private:true},{id:11,owner:'acme',name:'web',private:true}],
+ apps:[{id:123,slug:'p1-repo',client_id:'Iv.fixture-repo',client_secret:'fixture-repo-secret',public_keys:[readFileSync(new URL('../../libs/octoauth/crates/octoemu/tests/fixtures/rsa2048.pub.pem',import.meta.url),'utf8')],permissions:{administration:'write',metadata:'read'}}],
+ installations:[{id:1,app_id:123,account:'acme',repository_selection:'all',created_at:'2026-01-01T00:00:00Z'}]};
+// The provider writes as the old stub's ledger recorded them, from the emulator's call
+// log: method, path without the query, the requested permission and the status.
+async function providerCalls(admin){const {calls}=await http(admin+'/calls',undefined,'GET');const requests=calls.map(c=>({method:c.method,path:c.path.split('?')[0],permission:c.body_fields?.permission??null,status:c.status}));return {count:requests.length,requests};}
 let raw,report,primary;
 try{
- const gh=child('github',process.env.GITHUB_STUB_BIN,['--port','0'],{});
- const upstreamGithub=await until(()=>Buffer.concat(gh.logs[1]).toString().match(/github-stub listening on (127\.0\.0\.1:\d+)/)?.[1],Boolean,'GitHub stub readiness').then(x=>'http://'+x);
+ const seedPath=evidence+'/github-seed.json';writeFileSync(seedPath,JSON.stringify(githubSeed));
+ const gh=child('github',process.env.OCTOEMU_BIN,['--port','0','--seed',seedPath],{});
+ const started=await until(()=>Buffer.concat(gh.logs[0]).toString().split('\n')[0],line=>line.endsWith('}'),'GitHub emulator readiness').then(JSON.parse);
+ const upstreamGithub=started.api_base,githubAdmin=started.admin_base;
  const githubUrl=await listen(httpServer(async(req,res)=>{try{const chunks=[];for await(const b of req)chunks.push(b);const r=await fetch(upstreamGithub+req.url,{method:req.method,headers:req.headers,body:['GET','HEAD'].includes(req.method)?undefined:Buffer.concat(chunks),signal:AbortSignal.timeout(10000)});const body=Buffer.from(await r.arrayBuffer());if(/\/app\/installations\/\d+\/access_tokens$/.test(req.url)&&r.ok){const minted=JSON.parse(body);assert.ok(typeof minted.token==='string'&&minted.token.length>0);markers.add(minted.token);}res.writeHead(r.status,Object.fromEntries([...r.headers].filter(([k])=>!['transfer-encoding','connection','content-length'].includes(k))));res.end(body);}catch{res.writeHead(503);res.end();}}));
  const [nodePort,adminPort,ingressPort,metricsPort]=await Promise.all([port(),port(),port(),port()]);
  const data=evidence+'/restate';mkdirSync(data);
@@ -69,7 +85,7 @@ try{
  const databaseId=randomUUID();output=new RuntimeOutput({limit:32*1024*1024});output.install();
  const source=readFileSync(new URL('../../native-d1-bridge/bridge.mjs',import.meta.url),'utf8').replaceAll('export ','');
  const bridgeScript=source+`\nlet authority;export default {async fetch(r,e){if(new URL(r.url).pathname==='/__configure'){authority=await r.json();return new Response('ok')}return createBridge(authority).fetch(r,e)}};`;
- mf=new Miniflare({log:new Log(LogLevel.NONE),handleRuntimeStdio:(a,b)=>output.capture(a,b),workers:[{name:'bridge',modules:true,script:bridgeScript,compatibilityDate:'2026-10-01',d1Databases:{DB:databaseId},bindings:{D1_BRIDGE_TOKEN:token}},{name:'workflow',modules:true,scriptPath:process.env.WORKFLOW_WORKER_MODULE??fileURLToPath(new URL('../worker/workflows-worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:databaseId},bindings:{RESTATE_IDENTITY_KEYS:signer.key,P1_HOST:'production.test',GH_REPO_APP_ID:'123',GH_REPO_CLIENT_ID:'Iv.fixture-repo',GH_REPO_PRIVATE_KEYS:privateKeys,GH_BULK_ENABLED:'true'},async outboundService(r){if(new URL(r.url).origin!=='https://api.github.com'){unexpectedOutbound++;return new Response('disabled',{status:502});}if(r.method==='PUT')puts++;return fetch(githubUrl+new URL(r.url).pathname+new URL(r.url).search,{method:r.method,headers:r.headers,body:['GET','HEAD'].includes(r.method)?undefined:Buffer.from(await r.arrayBuffer()),signal:AbortSignal.timeout(10000)});}}]});
+ mf=new Miniflare({log:new Log(LogLevel.NONE),handleRuntimeStdio:(a,b)=>output.capture(a,b),workers:[{name:'bridge',modules:true,script:bridgeScript,compatibilityDate:'2026-10-01',d1Databases:{DB:databaseId},bindings:{D1_BRIDGE_TOKEN:token}},{name:'workflow',modules:true,scriptPath:process.env.WORKFLOW_WORKER_MODULE??fileURLToPath(new URL('../worker/workflows-worker.mjs',import.meta.url)),modulesRules:[{type:'CompiledWasm',include:['**/*.wasm']}],compatibilityDate:'2024-09-23',compatibilityFlags:['nodejs_compat'],d1Databases:{DB:databaseId},bindings:{RESTATE_IDENTITY_KEYS:signer.key,P1_HOST:'production.test',GH_REPO_APP_ID:'123',GH_REPO_CLIENT_ID:'Iv.fixture-repo',GH_REPO_PRIVATE_KEYS:privateKeys,GH_BULK_ENABLED:'true',GITHUB_API_BASE:githubUrl},async outboundService(r){if(new URL(r.url).origin!==githubUrl){unexpectedOutbound++;return new Response('disabled',{status:502});}if(r.method==='PUT')puts++;return fetch(r.url,{method:r.method,headers:r.headers,body:['GET','HEAD'].includes(r.method)?undefined:Buffer.from(await r.arrayBuffer()),signal:AbortSignal.timeout(10000)});}}]});
  db=await mf.getD1Database('DB','bridge');oldWorker=await mf.getWorker('workflow');bridgeWorker=await mf.getWorker('bridge');
  const migrations=readdirSync(new URL('../../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')).sort().map(name=>({name,sql:readFileSync(new URL('../../migrations/'+name,import.meta.url),'utf8')}));
  for(const m of migrations)await db.exec(m.sql.replace(/^[ \t]*--.*$/gm,'').replaceAll('\n',' '));
@@ -83,12 +99,11 @@ try{
  const bridgeUrl=await listen(httpServer(async(req,res)=>{try{const bytes=[];let n=0;for await(const b of req){n+=b.length;assert.ok(n<=32*1024*1024);bytes.push(b);}const r=await bridgeWorker.fetch('http://bridge'+req.url,{method:req.method,headers:req.headers,body:Buffer.concat(bytes)});res.writeHead(r.status,Object.fromEntries(r.headers));res.end(Buffer.from(await r.arrayBuffer()));}catch{res.writeHead(503);res.end();}}));
  const manifestPath=evidence+'/authority.json';writeFileSync(manifestPath,JSON.stringify(manifest));
  const nativePort=await port();nativeUrl=`http://127.0.0.1:${nativePort}`;
- child('native',process.env.NATIVE_BRIDGE_ENDPOINT_BIN,[],{P1_HOST:'production.test',GH_REPO_APP_ID:'123',GH_REPO_CLIENT_ID:'Iv.fixture-repo',GH_REPO_PRIVATE_KEYS:privateKeys,GH_BULK_ENABLED:'true',RESTATE_IDENTITY_KEYS:signer.key,GHINVITE_STORAGE:'d1-bridge',GHINVITE_D1_BRIDGE_URL:bridgeUrl+'/v1/d1',GHINVITE_D1_BRIDGE_TOKEN:token,GHINVITE_D1_AUTHORITY_MANIFEST:manifestPath,GHINVITE_LISTEN_ADDR:`127.0.0.1:${nativePort}`,BRIDGE_FIXTURE_GITHUB_URL:githubUrl});
+ child('native',process.env.NATIVE_BRIDGE_ENDPOINT_BIN,[],{P1_HOST:'production.test',GH_REPO_APP_ID:'123',GH_REPO_CLIENT_ID:'Iv.fixture-repo',GH_REPO_PRIVATE_KEYS:privateKeys,GH_BULK_ENABLED:'true',RESTATE_IDENTITY_KEYS:signer.key,GHINVITE_STORAGE:'d1-bridge',GHINVITE_D1_BRIDGE_URL:bridgeUrl+'/v1/d1',GHINVITE_D1_BRIDGE_TOKEN:token,GHINVITE_D1_AUTHORITY_MANIFEST:manifestPath,GHINVITE_LISTEN_ADDR:`127.0.0.1:${nativePort}`,GITHUB_API_BASE:githubUrl});
  await until(()=>nativeFetch('/discover','GET',{'accept':'application/vnd.restate.endpointmanifest.v3+json',...signer.headers('/discover')},Buffer.alloc(0)),r=>r.status===200,'native signed readiness');
  const oldUrl=await listen(proxy('worker')),newUrl=await listen(proxy('native'));
  const first=await http(admin+'/deployments',{uri:oldUrl});writeFileSync(evidence+'/old-deployment.json',JSON.stringify(first));
  await http(ingress+'/Installation/repo:1/onboard',setupCommand({app:'repo',installation_id:1,actor_user_id:7,account_id:100,account_login:'acme',account_type:'Organization',selected_repos:'all',installed_at:'2026-01-01T00:00:00Z'}));
- await http(githubUrl+'/identity',{login:'user-91',addressed_id:91});
  const linkId=id();markers.add(capabilityFor(linkId).secret);const creation={link_id:linkId,secret_sha256:capabilityFor(linkId).sha256,admin:{account_id:100,user_id:7},account_id:100,installation_id:1,description:'Cutover',internal_note:null,expires_at:null,max_uses:1,approval_required:false,targets:{organization:null,teams:[],repos:[{repo_id:10,repo_full_name:'acme/api',grant:'read'}]}};
  await http(`${ingress}/InvitationLink/${linkId}/create`,creation);
  const admitted=await http(`${ingress}/InvitationLink/${linkId}/admit`,{...admitCapability(linkId),link_id:linkId,operation_id:id(),requester_id:91});assert.equal(admitted.result.state,'approved');
@@ -107,12 +122,11 @@ try{
  const deliveryKey=`${command.request_id}:${command.repo_id}:${command.delivery_generation}`;
  const receipt=await http(`${ingress}/RepositoryDelivery/${deliveryKey}/create`,command);assert.equal(receipt.outcome.kind,'created');assert.deepEqual(receipt.command,command);
  const repeated=await http(`${ingress}/RepositoryDelivery/${deliveryKey}/create`,command);assert.deepEqual(repeated,receipt);
- assert.equal(puts,1);const calls=await http(githubUrl+'/calls',undefined,'GET');assert.equal(calls.requests.filter(r=>r.method==='PUT').length,1);
+ assert.equal(puts,1);const calls=await providerCalls(githubAdmin);assert.equal(calls.requests.filter(r=>r.method==='PUT').length,1);
  assert.deepEqual((await db.prepare('SELECT * FROM delivery_attempts').all()).results,fences);
  assert.deepEqual((await db.prepare('SELECT * FROM d1_migrations ORDER BY id').all()).results,ledgerBefore);
  assert.ok(traffic.some(t=>t.kind==='worker'&&t.invocation===oldInvocation));assert.ok(!traffic.some(t=>t.kind==='native'&&t.invocation===oldInvocation));assert.ok(traffic.some(t=>t.kind==='native'&&t.invocation===newInvocation.id));assert.equal(unexpectedOutbound,0);
  // A fresh native owner performs an actual provider effect, beyond native SQL projection.
- await http(githubUrl+'/identity',{login:'user-92',addressed_id:92});
  await db.prepare("INSERT INTO users(user_id,login,avatar_url,last_seen_at) VALUES(92,'user-92',NULL,'2026-01-01T00:00:00Z')").run();
  const nextLink=id();markers.add(capabilityFor(nextLink).secret);
  const next={...creation,link_id:nextLink,secret_sha256:capabilityFor(nextLink).sha256};
@@ -122,7 +136,7 @@ try{
  const nativeCommand=nativePlan.commands[0],nativeKey=`${nativeCommand.request_id}:${nativeCommand.repo_id}:${nativeCommand.delivery_generation}`;
  const nativeStatus=await until(()=>http(`${ingress}/RepositoryDelivery/${nativeKey}/status`),v=>v?.create?.outcome?.kind==='created','fresh native provider create');
  const nativeReceipt=await http(`${ingress}/RepositoryDelivery/${nativeKey}/create`,nativeCommand);assert.deepEqual(nativeReceipt,nativeStatus.create);
- const nativeCalls=await http(githubUrl+'/calls',undefined,'GET');assert.equal(nativeCalls.requests.filter(r=>r.method==='PUT').length,2);writeFileSync(evidence+'/provider-calls.json',JSON.stringify(nativeCalls));
+ const nativeCalls=await providerCalls(githubAdmin);assert.equal(nativeCalls.requests.filter(r=>r.method==='PUT').length,2);writeFileSync(evidence+'/provider-calls.json',JSON.stringify(nativeCalls));
  const nativeInvocation=(await query(`SELECT * FROM sys_invocation WHERE target_service_name='RepositoryDelivery' AND target_service_key='${nativeKey}' AND target_handler_name='create'`)).find(r=>r.pinned_deployment_id===second.id);assert.ok(nativeInvocation);
  const finalFences=(await db.prepare('SELECT * FROM delivery_attempts ORDER BY delivery_key').all()).results;assert.equal(finalFences.length,2);assert.ok(finalFences.every(f=>f.retryable===0&&f.attempt_generation===1));assert.deepEqual(finalFences.find(f=>f.delivery_key===fences[0].delivery_key),fences[0]);
  assert.deepEqual((await db.prepare('SELECT * FROM d1_migrations ORDER BY id').all()).results,ledgerBefore);
@@ -155,5 +169,5 @@ if(primary)throw primary;
 const privateScan=scanPrivate([raw,JSON.parse(readFileSync(evidence+'/journal.json','utf8')),JSON.parse(readFileSync(evidence+'/invocations.json','utf8')),JSON.parse(readFileSync(evidence+'/state.json','utf8')),JSON.parse(readFileSync(evidence+'/provider-calls.json','utf8')),...streams.values()],[...markers]);
 assert.ok(markers.size>=7,'actual capabilities and minted tokens were observed');report.private_marker_count=markers.size;report.private_scan_values=privateScan;report.children=childReceipts;
 report.runtime_streams=streams.size;report.raw_tables=Object.keys(raw).length;report.complete_eof=true;
-report.artifacts=Object.fromEntries(['RESTATE_SERVER_BIN','NATIVE_BRIDGE_ENDPOINT_BIN','GITHUB_STUB_BIN'].map(k=>[k,hash(process.env[k])]));
+report.artifacts=Object.fromEntries(['RESTATE_SERVER_BIN','NATIVE_BRIDGE_ENDPOINT_BIN','OCTOEMU_BIN'].map(k=>[k,hash(process.env[k])]));
 writeFileSync(evidence+'/results.json',JSON.stringify(report,null,2));console.log(JSON.stringify(report));

@@ -148,19 +148,20 @@ CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 \
 ```
 
 The evidence directory must be new. The helper builds the actual workflow Worker
-and selects the exact native endpoint and GitHub stub examples from Cargo JSON,
-then copies their runtime artifacts before starting owned loopback processes. Its
-underlying build commands are:
+and selects the exact native endpoint example and the octoemu GitHub emulator
+binary from Cargo JSON, then copies their runtime artifacts before starting owned
+loopback processes. Its underlying build commands are:
 
 ```sh
 cargo build --locked -p ghinvite-workflows-server --features bridge-fixture \
   --example native-bridge-endpoint --message-format=json
-cargo build --locked -p ghinvite-github --features test-stub --example stub --message-format=json
+cargo build --locked --manifest-path libs/octoauth/Cargo.toml --target-dir target \
+  -p octoemu --bin octoemu --message-format=json
 node tests/worker/build.mjs workflows
 ```
 
 The helper executes `node tests/native-d1-bridge/cutover.mjs` with
-`RESTATE_SERVER_BIN`, `NATIVE_BRIDGE_ENDPOINT_BIN`, `GITHUB_STUB_BIN`,
+`RESTATE_SERVER_BIN`, `NATIVE_BRIDGE_ENDPOINT_BIN`, `OCTOEMU_BIN`,
 `WORKFLOW_WORKER_MODULE` and `EVIDENCE_ROOT`, and verifies the resulting raw rows
 with `python3 scripts/verify-native-d1-cutover.py "$EVIDENCE_ROOT" --self-test`.
 The `native-d1-cutover` job in P1 CI runs this gate; hosted execution is not claimed
@@ -170,7 +171,10 @@ by local results. The separate `verify-native-d1-bridge.sh` gate exercises all
 The current local cutover proof keeps an unfinished invocation pinned to the
 original Worker deployment after native endpoint registration, drops its response
 ACK, recovers the exact original receipt without a second provider write, and
-runs a fresh native delivery through the real stub HTTP path. There is one PUT
+runs a fresh native delivery through the real HTTP path to the emulator. Both
+the Worker (a `runtime-tests` build) and the native endpoint reach the emulator
+through `GITHUB_API_BASE`; the emulator verifies their App JWTs and the provider
+calls come from its call log. There is one PUT
 for each of the two deliveries, retained generation-one fences, an unchanged
 Wrangler ledger, and the same D1 binding and budget authority throughout.
 Per-request test proxies add signatures checked by the production endpoint

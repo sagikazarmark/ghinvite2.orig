@@ -23,19 +23,21 @@ inputs={p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in paths if p 
 (out/'checkout.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],cwd=root).decode())
 PY
 cargo build --locked -p ghinvite-workflows-server --features bridge-fixture --example native-bridge-endpoint --message-format=json > "$EVIDENCE_ROOT/native-build.jsonl" 2> "$EVIDENCE_ROOT/native-build.log"
-cargo build --locked -p ghinvite-github --features test-stub --example stub --message-format=json > "$EVIDENCE_ROOT/stub-build.jsonl" 2> "$EVIDENCE_ROOT/stub-build.log"
+# GitHub is the octoemu emulator (libs/octoauth, its own workspace), built into
+# this checkout's target directory.
+cargo build --locked --manifest-path libs/octoauth/Cargo.toml --target-dir target -p octoemu --bin octoemu --message-format=json > "$EVIDENCE_ROOT/octoemu-build.jsonl" 2> "$EVIDENCE_ROOT/octoemu-build.log"
 python3 - "$EVIDENCE_ROOT" <<'PY'
 import hashlib,json,pathlib,shutil,sys
 out=pathlib.Path(sys.argv[1]);artifacts={}
-for log,name in [('native-build','native-bridge-endpoint'),('stub-build','stub')]:
+for log,name,kind in [('native-build','native-bridge-endpoint','example'),('octoemu-build','octoemu','bin')]:
  found=[r for line in (out/(log+'.jsonl')).read_text().splitlines() if (r:=json.loads(line)).get('reason')=='compiler-artifact' and r.get('target',{}).get('name')==name and r.get('executable')]
- assert len(found)==1 and found[0]['target']['kind']==['example'] and not found[0]['profile']['test'], 'exact example artifact required'
+ assert len(found)==1 and found[0]['target']['kind']==[kind] and not found[0]['profile']['test'], 'exact '+kind+' artifact required'
  source=pathlib.Path(found[0]['executable']);dest=out/name;shutil.copy2(source,dest);artifacts[name]=hashlib.sha256(dest.read_bytes()).hexdigest()
 (out/'native-artifacts.json').write_text(json.dumps(artifacts,indent=2))
 PY
 node tests/worker/build.mjs workflows > "$EVIDENCE_ROOT/worker-build.log" 2>&1
 export NATIVE_BRIDGE_ENDPOINT_BIN="$EVIDENCE_ROOT/native-bridge-endpoint"
-export GITHUB_STUB_BIN="$EVIDENCE_ROOT/stub"
+export OCTOEMU_BIN="$EVIDENCE_ROOT/octoemu"
 # Preserve the generated module's relative Wasm import, independent of later builds.
 mkdir -p "$EVIDENCE_ROOT/worker/.generated-workflows"
 cp tests/worker/workflows-worker.mjs "$EVIDENCE_ROOT/worker/"

@@ -3,7 +3,10 @@
 //! `build_endpoint` call for production.
 //!
 //! Required app configuration: P1_HOST, GH_REPO_APP_ID, GH_REPO_CLIENT_ID,
-//! GH_REPO_PRIVATE_KEYS (`kid:base64(PKCS#8 PEM);...`, first key signs).
+//! GH_REPO_PRIVATE_KEYS (`kid:base64(PKCS#8 PEM);...`, first key signs), and
+//! GITHUB_API_BASE: a fixture never reaches GitHub, so its GitHub stand-in
+//! (the octoemu emulator) is required, through the same seam as the
+//! development roots (`ghinvite_config::github`).
 //! Missing/invalid app configuration fails before storage or network startup.
 //! Optional local configuration: GHINVITE_LISTEN_ADDR (127.0.0.1:9080),
 //! GHINVITE_DATABASE_PATH (in-memory). RESTATE_IDENTITY_KEYS is required unless
@@ -49,8 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let email_ring =
         ghinvite_config::bulk::email_keyring(bulk_enabled && organization_enabled, email_setting)?;
-    // Validated as in production, though tokens are created at the fixture.
-    parse_mint_apps(stage, Deployment::Production, |field| {
+    // A fixture deployment: GitHub's bases may (and the API base must) point
+    // at a stand-in. Tokens are created there too.
+    if std::env::var_os("GITHUB_API_BASE").is_none() {
+        return Err("GITHUB_API_BASE required: the fixture never reaches GitHub".into());
+    }
+    let apps = parse_mint_apps(stage, Deployment::Development, |field| {
         std::env::var(field).ok()
     })?;
     let local_unsigned = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
@@ -70,17 +77,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         EndpointIdentity::required(keys.as_deref())?
     };
-    let github_url = std::env::var("BRIDGE_FIXTURE_GITHUB_URL")?;
-    // Tokens are created at the fixture too, not at GitHub.
-    let installed =
-        ghinvite_config::apps::parse_installed_github_apps(stage, &github_url, |field| {
-            std::env::var(field).ok()
-        })?;
     let github_transport = Arc::new(ghinvite_github::transport::ReqwestTransport::new()?);
     let github_apps = Arc::new(RepositoryGithub::new(
         github_transport,
-        &github_url,
-        installed,
+        apps.github.api(),
+        apps.installed,
     )?);
 
     // The macro shares the exact endpoint composition across both concrete
