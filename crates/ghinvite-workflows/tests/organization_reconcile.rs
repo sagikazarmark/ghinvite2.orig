@@ -1,9 +1,9 @@
 //! Real scheduled service/fanout with HTTP pagination and recording owners.
+//!
+//! GitHub is the octoemu emulator: 101 open invitations to acme, so the
+//! organization's invitation list spans two pages of 100. A failing second
+//! page is a fault rule; the walk is counted from the call log.
 #![cfg(feature = "integration")]
-use axum::{
-    extract::{Request, State},
-    response::{IntoResponse, Response},
-};
 use chrono::{Duration, Utc};
 use ghinvite_core::{
     Account, AccountType, GithubInvitationId, InvitationLinkId, RequestId, SelectedRepos,
@@ -11,6 +11,8 @@ use ghinvite_core::{
 };
 use ghinvite_e2e::{Call, Harness};
 use ghinvite_workflows::{AppState, RepositoryGithub};
+use octoemu::faults::{Fault, FaultAction};
+use octoemu::seed::{OrgInvitation, User};
 use restate_sdk::{
     context::{ContextReadState, ContextWriteState, ObjectContext, SharedObjectContext},
     errors::TerminalError,
@@ -18,60 +20,11 @@ use restate_sdk::{
 };
 use serde_json::{Value, json};
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicI64, Ordering},
 };
-#[derive(Default)]
-struct Github {
-    base: String,
-    fail_second: bool,
-    requests: Vec<String>,
-}
-async fn github(State(state): State<Arc<Mutex<Github>>>, request: Request) -> Response {
-    let path = request.uri().path().to_owned();
-    let query = request.uri().query().unwrap_or("").to_owned();
-    let body = axum::body::to_bytes(request.into_body(), 8192)
-        .await
-        .unwrap();
-    let mut s = state.lock().unwrap();
-    s.requests.push(format!("{path}?{query}"));
-    if path == "/app/installations/2/access_tokens" {
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).unwrap(),
-            json!({"permissions":{"members":"read","metadata":"read"}})
-        );
-        return (
-            axum::http::StatusCode::CREATED,
-            axum::Json(json!({"token":"ghs_org_sweep","expires_at":"2099-01-01T00:00:00Z"})),
-        )
-            .into_response();
-    }
-    if path == "/orgs/acme" {
-        return axum::Json(json!({"id":100,"login":"acme","created_at":"2020-01-01T00:00:00Z"}))
-            .into_response();
-    }
-    let invitation = |id| json!({"id":id,"login":"alice","email":null,"role":"direct_member","created_at":"2026-01-01T00:00:00Z","inviter":{"id":7,"login":"owner"},"team_count":0});
-    if path == "/orgs/acme/invitations" {
-        if query.contains("page=2") {
-            if s.fail_second {
-                return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
-            return axum::Json(json!([invitation(100)])).into_response();
-        }
-        return (
-            [(
-                "link",
-                format!("<{}/orgs/acme/invitations?page=2>; rel=\"next\"", s.base),
-            )],
-            axum::Json(json!([invitation(99)])),
-        )
-            .into_response();
-    }
-    if path == "/orgs/acme/failed_invitations" {
-        return axum::Json(json!([])).into_response();
-    }
-    panic!("unexpected {path}")
-}
+/// The organization's open invitations: 101, from its owner.
+const OPEN: u64 = 101;
 struct AccountInstallation;
 fn account() -> Account {
     Account {
@@ -161,17 +114,26 @@ async fn call(
 #[tokio::test]
 async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_for_all_deliveries()
 {
-    let github_state = Arc::new(Mutex::new(Github {
-        fail_second: true,
-        ..Default::default()
-    }));
-    let h = Harness::start_with_github_router(
-        axum::Router::new()
-            .fallback(github)
-            .with_state(github_state.clone()),
-    )
-    .await;
-    github_state.lock().unwrap().base = h.github_url.clone();
+    let world = (1..=OPEN).fold(ghinvite_e2e::github::seed(), |seed, n| {
+        seed.user(User::new(3000 + n, format!("invitee-{n}")))
+            .org_invitation(
+                OrgInvitation::new(n, "acme", format!("invitee-{n}")).inviter("creator"),
+            )
+    });
+    let h = Harness::start_with_emulator(ghinvite_e2e::github_emulator_with(world).await).await;
+    let emulator = h.emulator();
+    let second_page = h.github().rule(
+        "second page fails",
+        Fault::on(
+            "GET",
+            "/orgs/acme/invitations",
+            FaultAction::respond_json(503, json!({"message":"Service Unavailable"})),
+        )
+        .query_contains("page=2"),
+    );
+    // The requests since the sweep started, as `path?query`.
+    let requests =
+        || -> Vec<String> { emulator.calls().into_iter().map(|call| call.path).collect() };
     let github_transport = ghinvite_e2e::github_transport(h.client.clone());
     let storage = Arc::new(
         ghinvite_storage_sqlx::SqlxStorage::in_memory()
@@ -256,7 +218,7 @@ async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_f
     clock.fetch_add(3601000, Ordering::SeqCst);
     call(&h, "SweepSchedule", "org:100", "run", Some(&idle["token"])).await;
     assert!(
-        github_state.lock().unwrap().requests.is_empty(),
+        requests().is_empty(),
         "stale token cannot start another sweep chain"
     );
     call(
@@ -269,12 +231,10 @@ async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_f
     .await;
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if github_state
-                .lock()
-                .unwrap()
-                .requests
+            if requests()
                 .iter()
-                .any(|p| p.contains("invitations?page=2"))
+                .any(|p| p.starts_with("/orgs/acme/invitations?") && p.contains("page=2"))
+                && emulator.fault(second_page).unwrap().fired > 0
             {
                 break;
             }
@@ -285,7 +245,7 @@ async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_f
     .unwrap_or_else(|error| {
         panic!(
             "second page was not requested: {error}; trace={:?}",
-            github_state.lock().unwrap().requests
+            requests()
         )
     });
     for key in &keys {
@@ -295,7 +255,7 @@ async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_f
             "partial list supplies no evidence"
         );
     }
-    github_state.lock().unwrap().fail_second = false;
+    assert!(emulator.remove_fault(second_page));
     let next = call(&h, "SweepSchedule", "org:100", "status", None).await;
     clock.fetch_add(3601000, Ordering::SeqCst);
     call(&h, "SweepSchedule", "org:100", "run", Some(&next["token"])).await;
@@ -311,10 +271,25 @@ async fn organization_schedule_discards_partial_walk_and_reuses_complete_lists_f
         })
         .await
         .unwrap();
-        assert_eq!(view["last"]["pending"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            view["last"]["pending"].as_array().unwrap().len(),
+            OPEN as usize
+        );
         assert_eq!(view["last"]["installation_id"], 2);
     }
-    let trace = github_state.lock().unwrap().requests.clone();
+    let trace = requests();
+    // Only the organization reads, with the organization App's read token
+    // minted with its exact profile.
+    for call in emulator.calls() {
+        match call.path.split('?').next().unwrap_or_default() {
+            "/app/installations/2/access_tokens" => assert_eq!(
+                call.body_fields.as_ref().and_then(|f| f.get("permissions")),
+                Some(&json!({"members":"read","metadata":"read"}))
+            ),
+            "/orgs/acme" | "/orgs/acme/invitations" | "/orgs/acme/failed_invitations" => {}
+            other => panic!("unexpected {} {other}", call.method),
+        }
+    }
     assert_eq!(
         trace
             .iter()
