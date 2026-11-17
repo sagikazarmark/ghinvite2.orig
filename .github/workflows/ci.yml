@@ -286,6 +286,8 @@ jobs:
       - run: npm run test:deadlines --prefix tests/worker
       - name: Bounded operational events on actual Worker
         run: node tests/worker/run-runtime.mjs operational-signals.mjs
+      - name: Installation token broker concurrency on actual Worker
+        run: node tests/worker/run-runtime.mjs broker.mjs
       - name: Verified continuation CAS rotation and zero-old zero-bad gate on actual D1
         run: node tests/worker/run-runtime.mjs continuation-rotation.mjs
       - name: Admission timing and privacy on actual Worker
