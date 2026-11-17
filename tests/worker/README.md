@@ -65,20 +65,36 @@ logging, or Wasm-import bypasses.
 
 ## GitHub: the octoemu emulator
 
-The sign-in drivers (`pending-signin`, `signin-cutover`, `domain-signin`,
-`decision-queue`, `request-history`) talk to the
-[octoemu](../../libs/octoauth/crates/octoemu/README.md) GitHub emulator, never
-to an inline fake. `octoemu.mjs` starts the binary on a free loopback port
+Every driver's GitHub is the
+[octoemu](../../libs/octoauth/crates/octoemu/README.md) emulator, never an
+inline fake. `octoemu.mjs` starts the binary on a free loopback port
 (`--port 0 --idle-timeout`), seeds it through the admin API and stops it;
-the Worker reaches it through the `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and
+the Workers reach it through the `GITHUB_API_BASE`, `GITHUB_WEB_BASE` and
 `GITHUB_AVATAR_BASE` bindings, which only `runtime-tests` builds accept.
-Sign-in goes through the emulator's authorize page (`emulator.signIn`,
-`emulator.authorize`), failures are fault rules (`emulator.fault`) and
-counts come from its call log (`emulator.count`). The privacy scans look for
-any GitHub token shape (`GITHUB_TOKEN`), since the emulator's tokens are
-random. Build the binary once with `node tests/worker/build-octoemu.mjs`
-(the npm scripts do); `OCTOEMU_BIN` selects a prebuilt one and
-`OCTOEMU_TARGET_DIR` another target directory (CI uses the root one).
+
+- Sign-in goes through the emulator's authorize page (`emulator.signIn`,
+  `emulator.authorize`).
+- The `admission.mjs` family starts from a world: `github-world.mjs`'s
+  `acmeSeed` (the old stub's `acme` world, natively) or the sub-driver's
+  exported `seed`. `GithubWorld` takes GitHub-side actions: an invitee
+  accepts (`accept`, `grant`), a user renames, an installation's selection
+  changes (`select`), the stub's old outcomes (`outcome`), `reset`.
+- Failures are fault rules (`emulator.fault`): held PUTs (`holdPut`),
+  stalled upstreams (`stall`), lost answers (`apply_then_lose`,
+  `hold_response`), injected refusals and the few answers GitHub would not
+  give on its own (labelled where they are added).
+- Counts come from the call log (`emulator.count`, `GithubWorld.calls`,
+  which leaves out the test's own API calls).
+- Privacy scans look for any GitHub token shape (`GITHUB_TOKEN`), since the
+  emulator's tokens are random.
+
+Build the binary once with `node tests/worker/build-octoemu.mjs` (the npm
+scripts do); `OCTOEMU_BIN` selects a prebuilt one and `OCTOEMU_TARGET_DIR`
+another target directory (CI uses the root one).
+
+`transport.mjs` and `deadlines.mjs` are not GitHub fakes: they test the
+generic transport (redirects, oversized bodies, stalled headers and bodies)
+against their own `transport.test` upstream, which no emulator replaces.
 
 ## Run
 

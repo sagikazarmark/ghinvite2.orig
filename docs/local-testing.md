@@ -327,9 +327,8 @@ exactly-once delivery across a GitHub-success/database-failure gap.
 
 #### Standalone GitHub stub
 
-The Rust workflow suites no longer use it (see above); the Worker drivers
-(`tests/worker/build-stub.mjs`) and the native D1 bridge still do, until
-GE-09 deletes it.
+The Rust workflow suites and the Worker drivers no longer use it; the native
+D1 bridge still does, until GE-09c deletes it.
 
 Their replacement is the `octoemu` emulator reached through the GitHub
 base-URL variables (`GITHUB_API_BASE`, `GITHUB_WEB_BASE`, `GITHUB_AVATAR_BASE`;
@@ -343,15 +342,20 @@ emulator's authorize page (including the expired-session form bounce, which
 the Content-Security-Policy's `form-action` allows because it names the
 configured web origin).
 
-The web Worker sign-in drivers (`pending-signin`, `signin-cutover`,
-`domain-signin`, `decision-queue`, `request-history`) start the emulator
-binary through `tests/worker/octoemu.mjs` (`node tests/worker/build-octoemu.mjs`
-builds it; `OCTOEMU_BIN` or `OCTOEMU_TARGET_DIR` select another build) and
-point the Worker at it with the bindings. Failures are fault rules (a 503 on
-`/user/emails`) and counts come from the emulator's call log. The remaining
-Worker drivers (the `admission.mjs` family, `operational-signals`, `broker`)
-still use the stub or intercept the real hostnames with Miniflare's
-`outboundService` until GE-09b-2 moves them.
+Every Worker driver in `tests/worker` starts the emulator binary through
+`tests/worker/octoemu.mjs` (`node tests/worker/build-octoemu.mjs` builds it;
+`OCTOEMU_BIN` or `OCTOEMU_TARGET_DIR` select another build) and points the
+Workers at it with the bindings. The sign-in drivers sign in on its authorize
+page; the `admission.mjs` family starts from a native world
+(`tests/worker/github-world.mjs`, or the sub-driver's own `seed`) and takes
+GitHub-side actions through the admin API (an invitee accepts, a user
+renames, an installation's repositories change). Failures are fault rules
+(held, stalled or lost writes, injected refusals) and counts come from the
+call log. No driver intercepts GitHub's hostnames with Miniflare's
+`outboundService`; drivers whose `outboundService` handles Restate pass the
+emulator's requests through. `transport.mjs` and `deadlines.mjs` keep their
+own upstream (`transport.test`): they test the generic transport's redirect,
+size and stall handling, not GitHub.
 
 ```bash
 cargo run --locked -p ghinvite-github --features test-stub --example stub -- --port 3001
