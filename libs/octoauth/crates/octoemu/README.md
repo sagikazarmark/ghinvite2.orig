@@ -32,7 +32,11 @@ and team memberships with their repository grants, the user's
 `query_contains` since GE-09b), the admin user-rename and
 invitation-expiry routes (GE-09b), the admin organization rename
 (GE-09c), and the user's
-`/user/installations/{installation_id}/repositories` (after GE-09). The temporary stub-compatibility shim
+`/user/installations/{installation_id}/repositories` (after GE-09), and
+the fidelity suite's emulator half (GE-08: [`octoemu-conformance`](#fidelity-suite-octoemu-conformance),
+which also brought `DELETE /app/installations/{installation_id}`, the
+`X-GitHub-Api-Version` check, the outside-collaborator policy and
+schema-complete user, organization, team and repository objects). The temporary stub-compatibility shim
 of GE-07 is gone (GE-09c): ghinvite's suites build their world from the
 native seed and admin API (`ghinvite_e2e::github`).
 
@@ -43,6 +47,7 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `GET /app` | App JWT | The authenticated App |
 | `GET /app/installations` | App JWT | Paged |
 | `GET /app/installations/{installation_id}` | App JWT | 404 for an unknown installation or another App's |
+| `DELETE /app/installations/{installation_id}` | App JWT | The App uninstalls itself: 204, `installation.deleted` sent by its bot, its tokens stop working; 404 for an unknown installation or another App's |
 | `POST /app/installations/{installation_id}/access_tokens` | App JWT | 201 `{token, expires_at, permissions, repository_selection, repositories?}`; body `permissions`, `repositories`, `repository_ids` narrow |
 | `PUT`/`DELETE /app/installations/{installation_id}/suspended` | App JWT | 204 |
 | `GET /app/installation-requests` | App JWT | Paged |
@@ -56,7 +61,7 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `GET /user/installations/{installation_id}/repositories` | a GitHub App's user access token | Paged `{total_count, repository_selection, repositories}`: the installation's repositories the user has explicit access to, each with the user's `permissions`; 404 for another App's installation or one the user reaches nothing of (assumed: an empty list for the account's owner, 404 while suspended, 403 for a classic PAT) |
 | `GET /repos/{owner}/{repo}` | installation or user token, `metadata: read` | Private and internal repositories outside the token's reach are 404 |
 | `GET /repos/{owner}/{repo}/collaborators` | installation token, `metadata: read` | Paged; `affiliation=direct\|outside\|all` (default all); each with `permissions` and `role_name` |
-| `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h |
+| `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h; 403 `Inviting outside collaborators is restricted by organization policy.` for a non-member of an organization seeded `outside_collaborators_restricted` (assumed) |
 | `DELETE /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | 204 |
 | `GET /repos/{owner}/{repo}/collaborators/{username}/permission` | installation token, `metadata: read` | `permission` (`admin\|write\|read\|none`), `role_name` (exact, custom included), `user`; the highest role across sources |
 | `GET /repos/{owner}/{repo}/invitations` | installation token, `administration: read` | Paged; `Link` URLs on the alias below |
@@ -399,7 +404,8 @@ JSON (the binary's `--seed`, `POST /__octoemu/seed`) or the Rust builder in
             {"id": 3, "login": "hubot", "type": "Bot"}],
   "orgs": [{"id": 2, "login": "acme", "plan": {"name": "team", "seats": 10},
             "created_at": "2020-01-01T00:00:00Z", "two_factor_requirement_enabled": false,
-            "default_repository_permission": "read"}],
+            "default_repository_permission": "read",
+            "outside_collaborators_restricted": false}],
   "teams": [{"id": 3, "org": "acme", "slug": "core", "privacy": "closed",
              "parent": null, "repositories": [{"repo": "acme/widgets", "role": "push"}]}],
   "repos": [{"id": 4, "owner": "acme", "name": "widgets", "private": true,
@@ -536,6 +542,15 @@ per-credential budget yet) and every response an `X-GitHub-Request-Id`. Lists
 are paged GitHub's way: `per_page` (default 30, silently capped at 100),
 `page`, and a `Link` header with `prev`, `next`, `last` and `first`. Errors use GitHub's
 `{"message", "documentation_url"}`; 422s add `errors[{resource, field, code}]`.
+An `X-GitHub-Api-Version` other than `2022-11-28` or `2026-03-10` is a 400
+`Unsupported API version <value>` on every REST route, before the
+credential (assumed: the docs disagree on 400 or 410); without the header
+the default version applies. Users, organizations, teams and repositories
+carry every field their OpenAPI schema requires (`simple-user`'s and
+`organization-simple`'s URL templates, a repository's `*_url` templates,
+clone URLs, zeroed counts and `has_*` flags, a team's `type`), checked by
+the fidelity suite's schema check; counts GitHub keeps (stars, forks,
+issues, size) are always 0.
 
 ## Fault rules
 
@@ -619,6 +634,13 @@ New routes go through the registry in `src/api.rs`; a test (and
 `Emulator::start`) fails when a registered route or behaviour has no entry, or
 an entry names nothing implemented.
 
+`[scenarios]` maps each [fidelity-suite](#fidelity-suite-octoemu-conformance)
+scenario ID to the entries it measures (route keys and behaviour IDs). A
+`verified` entry must name a listed scenario, and the suite's tests fail
+when its scenarios and the table disagree. `octoemu --fidelity` prints
+every entry with its label, the scenarios measuring it (`SCENARIOS`, `-`
+for none) and its detail, then the counts per label.
+
 **Refuse-assumed mode** (`settings.refuse_assumed`, `Builder::refuse_assumed`,
 `--refuse-assumed`) makes guesses fail loudly: an `assumed` route answers 501
 `{"message": "octoemu: refusing assumed behaviour", "route": …, "reason": …}`,
@@ -635,7 +657,9 @@ whose text is a guess keeps its status with the message
 `token-error-messages`, `token-repositories-union`,
 `token-implicit-metadata`, `token-revocation-immediate`,
 `suspended-installation`, `suspended-installation-tokens`,
-`rate-limit-headers`, `request-id-header`; and for repositories
+`rate-limit-headers`, `request-id-header`, `unsupported-api-version`
+(refused), `secondary-rate-limit` (a label: no secondary limit is
+modelled); and for repositories
 `reput-pending-invitation` (201 with the same invitation, role updated),
 `reput-expired-invitation` (replaced by a new one),
 `expired-invitations-listed`, `accept-expired-invitation` (refused),
@@ -643,6 +667,7 @@ whose text is a guess keeps its status with the message
 `collaborator-affiliation` (beyond `direct`), `permission-without-access`
 (`none`/`none`), `remove-non-collaborator` (204), `unknown-user-404`,
 `out-of-scope-repository` (403), `repo-error-messages`,
+`outside-collaborator-policy` (refused),
 `member-edited-changes` (left out of the payload in refuse-assumed mode),
 `member-added-directly` (not emitted in refuse-assumed mode) and
 `app-bot-account`; for webhooks `webhook-secret-rotation`,
@@ -672,6 +697,140 @@ for a suspended installation or one the user reaches nothing of) and
 `user-installation-repository-selection` (left out); the routes `GET /repositories/{repository_id}/invitations`,
 `GET /user/{account_id}`, `GET /avatars/u/{id}` and
 `POST /login/oauth/authorize` (the consent form).
+
+## Fidelity suite (`octoemu-conformance`)
+
+The sibling crate [`crates/octoemu-conformance`](../octoemu-conformance)
+(native only, not published) runs one set of scenarios against an embedded
+octoemu or against real GitHub (plan §4, GE-08).
+
+- **Scenarios** use public GitHub routes only. On the emulator each starts
+  from a fresh instance seeded with the fidelity world (an organization,
+  a repository, a team, the fidelity App installed with
+  `administration: write`, `members: write`, `metadata: read` and the
+  `member`/`organization`/`membership` events, an invitee outside the
+  organization with a PAT, a sign-in App, an organization that keeps
+  outside collaborators to owners, a paid one with every seat filled).
+  Seeding is setup and may use the admin API; the one admin call a step
+  makes is the clock.
+- **Snapshots** (`snapshots/<scenario>.json`): each step's request line,
+  status, the headers relied on (`content-type`, `link`, `location`,
+  `retry-after`, `x-accepted-github-permissions`, `x-github-sso`,
+  `x-ratelimit-remaining`, `x-ratelimit-resource`) and the body,
+  normalised (IDs, timestamps, tokens, GUIDs, origins and the world's
+  names become placeholders; profile fields and counts become
+  `<varies>`). Compare mode checks a run against them, ignoring field
+  order; fields one side lacks are listed (on the emulator: unmodelled),
+  not failures. **Today every snapshot says `"source": "emulator
+  (unverified)"`**: they were generated from octoemu. The first live run
+  in record mode overwrites them, and the diff it shows is the fidelity
+  signal; from then on the emulator run is compared with GitHub's answers,
+  and an emulator record run never overwrites a live snapshot.
+- **Schema check**: every response is validated with the `jsonschema`
+  crate against `schemas/rest-api-subset.json`, the operations octoemu
+  implements cut out of [github/rest-api-description](https://github.com/github/rest-api-description)
+  at commit `c9c95fe34ced05fe076001f5c55704742bc8e7f8`
+  (`descriptions-next/api.github.com/api.github.com.2022-11-28.json`,
+  OpenAPI 3.1.0, sha256 `42f012de…a33aad` in the file's `source`). An
+  error status the description does not list is checked as `basic-error`.
+  `schemas/exceptions.toml` holds documented exceptions where the
+  published schema is known to be wrong (none yet). To move the pin,
+  download the description into a fresh directory outside the
+  repository and run `schemas/extract.py` (stdlib Python, run with
+  `python3 -I`; its docstring has the commands); a test fails when octoemu
+  gains a REST route the subset lacks.
+
+| Scenario | Measures | On live |
+|---|---|---|
+| `jwt-error-matrix` | App JWT rejections and their messages | runs |
+| `jwt-skew-tolerance` | how far ahead `iat` and `exp` may be | runs |
+| `token-downscoping-errors` | narrowing an installation token | runs |
+| `token-revocation-delete` | the token's shape, `DELETE /installation/token` | runs |
+| `token-revocation-uninstall` | tokens after the App uninstalls itself | destructive (reinstall by hand) |
+| `suspended-installation` | suspend and unsuspend, tokens, minting | runs (always unsuspends) |
+| `oauth-exchange-errors` | token endpoint errors: status and body | runs |
+| `user-permissionless` | `/user`, `/user/emails` with a permission-less user token | needs `OCTOEMU_LIVE_USER_TOKEN` (consent screen), else skipped |
+| `reput-pending-invitation` | re-PUT on a pending repository invitation | runs |
+| `expired-invitation` | an invitation past 7 days | live-only/slow: skipped (needs 7 days) |
+| `repo-invitation-limit` | 50 invitations per repository per day | destructive |
+| `outside-collaborator-policy` | PUT for a non-member under the owner-only policy | needs the policy organization, else skipped |
+| `member-edited-changes` | the `member.edited` payload's `changes` (via the deliveries API) | runs |
+| `org-membership-accept` | pending, accept (200 or 202), active | runs |
+| `org-invitation-limit` | the organization invitation budget | destructive |
+| `org-spammed` | the `spammed` body | emulator only (GitHub decides; skipped live) |
+| `org-no-seat` | no seat left | needs a full paid organization, else skipped |
+| `team-put-non-member` | team PUT for a non-member | runs |
+| `secondary-limit-shape` | a secondary rate limit's shape | destructive; skipped on the emulator (not modelled) |
+| `api-version-unsupported` | 400 or 410 for an unsupported API version | runs |
+
+Run it (from `libs/octoauth`):
+
+```console
+$ cargo test -p octoemu-conformance -- --nocapture            # emulator, compare; prints the report
+$ OCTOEMU_CONFORMANCE=record cargo test -p octoemu-conformance --test emulator
+$ OCTOEMU_LIVE_ENV=$HOME/.config/octoemu/live.env OCTOEMU_CONFORMANCE=record \
+    cargo test -p octoemu-conformance --test live -- --ignored --nocapture
+```
+
+Variables: `OCTOEMU_CONFORMANCE` (`compare`, the default, or `record`),
+`OCTOEMU_CONFORMANCE_ONLY` (comma-separated scenario IDs),
+`OCTOEMU_CONFORMANCE_REPORT` (write the report as JSON there),
+`OCTOEMU_LIVE_DESTRUCTIVE=1` and `OCTOEMU_LIVE_SLOW=1` (live only: the
+emulator always runs destructive scenarios). The emulator run fails on a
+mismatch, a failed scenario or a schema violation; a live run fails on a
+failed scenario or a mismatch against a live snapshot (against an
+emulator snapshot the diff is reported as the fidelity signal). CI runs
+the emulator target in the toolkit job; the manual workflow
+`.github/workflows/fidelity-live.yml` (`workflow_dispatch` only) runs the
+live target from repository secrets.
+
+**The live env file** lives outside the repository (the suite refuses a
+path inside it): `KEY=VALUE` lines, `#` comments (also after an unquoted
+value), unknown keys refused. Placeholder values:
+
+```sh
+# The fidelity App: a GitHub App installed on OCTOEMU_LIVE_ORG with
+# Administration: write, Members: write, Metadata: read, subscribed to the
+# Member, Organization and Membership events, with an active webhook (any
+# URL; deliveries are read back through the deliveries API).
+OCTOEMU_LIVE_APP_ID=123456
+OCTOEMU_LIVE_APP_CLIENT_ID=Iv23.exampleclientid       # optional: the JWT iss (else the App ID)
+OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH=/path/outside/the/repo/fidelity-app.pem
+OCTOEMU_LIVE_APP_WEBHOOK_SECRET=REPLACE_WITH_THE_WEBHOOK_SECRET  # optional, reserved
+OCTOEMU_LIVE_INSTALLATION_ID=12345678
+# A fresh free organization, one repository and one team in it.
+OCTOEMU_LIVE_ORG=example-fidelity-org
+OCTOEMU_LIVE_REPO=sandbox
+OCTOEMU_LIVE_TEAM=sandbox-team
+# The invitee: a user outside the organization, and their classic PAT
+# (scopes repo, user, admin:org).
+OCTOEMU_LIVE_INVITEE_LOGIN=example-invitee
+OCTOEMU_LIVE_INVITEE_PAT=REPLACE_WITH_THE_INVITEES_CLASSIC_PAT
+# The sign-in App: a GitHub App without user permissions (its OAuth client).
+OCTOEMU_LIVE_SIGNIN_CLIENT_ID=Iv23.examplesignin
+OCTOEMU_LIVE_SIGNIN_CLIENT_SECRET=REPLACE_WITH_THE_CLIENT_SECRET
+# Optional: the invitee's user access token of the sign-in App (from the
+# consent screen) for user-permissionless.
+OCTOEMU_LIVE_USER_TOKEN=REPLACE_WITH_A_USER_ACCESS_TOKEN
+# Optional: the fidelity App installed on an organization where only owners
+# may invite outside collaborators, with a repository (outside-collaborator-policy).
+OCTOEMU_LIVE_POLICY_INSTALLATION_ID=23456789
+OCTOEMU_LIVE_POLICY_ORG=example-restricted-org
+OCTOEMU_LIVE_POLICY_REPO=vault
+# Optional: the fidelity App installed on a paid organization with every
+# seat filled (org-no-seat).
+OCTOEMU_LIVE_NO_SEAT_INSTALLATION_ID=34567890
+OCTOEMU_LIVE_NO_SEAT_ORG=example-full-org
+# Optional overrides.
+OCTOEMU_LIVE_API_BASE=https://api.github.com
+OCTOEMU_LIVE_WEB_BASE=https://github.com
+```
+
+Scenarios clean up after themselves (pending invitations, the invitee's
+collaboration and membership, a suspension), so the live organization
+stays as it was, except after the destructive ones. Stamping `verified`
+into `fidelity.toml` from a live run, the weekly re-verify and the k-of-n
+report are GE-10.
 
 ## Tests
 
