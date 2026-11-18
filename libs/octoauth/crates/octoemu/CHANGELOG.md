@@ -16,9 +16,10 @@ Not yet published; developed inside the ghinvite repository.
   user has explicit access to, each with the user's `permissions`, paged,
   with `total_count`; 404 for another App's installation. Assumed, with
   fidelity entries: a classic PAT is a 403 (`user-installations-pat`); a
-  suspended installation, or one the user reaches no repository of, is a 404,
-  except for its account's owner, who gets an empty list
-  (`user-installation-access`); `repository_selection` is the installation's
+  suspended installation is always a 404, its account's owner included; an
+  active one the user reaches no repository of is a 404, except for its
+  account's owner, who gets an empty list (`user-installation-access`);
+  `repository_selection` is the installation's
   (`user-installation-repository-selection`).
 - Fault rules (GE-07): `POST`/`GET`/`DELETE /__octoemu/faults`, `GET`/`DELETE
   /__octoemu/faults/{id}`, `POST /__octoemu/faults/{id}/release` and
