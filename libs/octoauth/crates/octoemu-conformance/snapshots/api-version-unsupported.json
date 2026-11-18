@@ -1,0 +1,169 @@
+{
+  "scenario": "api-version-unsupported",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "version-2022-11-28",
+      "request": "GET /app",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "client_id": "<app-client-id>",
+        "created_at": "<timestamp>",
+        "description": "<varies>",
+        "events": [
+          "member",
+          "organization",
+          "membership"
+        ],
+        "external_url": "<origin>/apps/<app>",
+        "html_url": "<origin>/apps/<app>",
+        "id": "<app-id>",
+        "installations_count": 3,
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "owner": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<org>/events{/privacy}",
+          "followers_url": "<origin>/users/<org>/followers",
+          "following_url": "<origin>/users/<org>/following{/other_user}",
+          "gists_url": "<origin>/users/<org>/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/<org>",
+          "id": "<org-id>",
+          "login": "<org>",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<org>/orgs",
+          "received_events_url": "<origin>/users/<org>/received_events",
+          "repos_url": "<origin>/users/<org>/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<org>/subscriptions",
+          "type": "Organization",
+          "url": "<origin>/users/<org>"
+        },
+        "permissions": {
+          "administration": "write",
+          "members": "write",
+          "metadata": "read"
+        },
+        "slug": "<app>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "step": "version-2026-03-10",
+      "request": "GET /app",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "client_id": "<app-client-id>",
+        "created_at": "<timestamp>",
+        "description": "<varies>",
+        "events": [
+          "member",
+          "organization",
+          "membership"
+        ],
+        "external_url": "<origin>/apps/<app>",
+        "html_url": "<origin>/apps/<app>",
+        "id": "<app-id>",
+        "installations_count": 3,
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "owner": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<org>/events{/privacy}",
+          "followers_url": "<origin>/users/<org>/followers",
+          "following_url": "<origin>/users/<org>/following{/other_user}",
+          "gists_url": "<origin>/users/<org>/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/<org>",
+          "id": "<org-id>",
+          "login": "<org>",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<org>/orgs",
+          "received_events_url": "<origin>/users/<org>/received_events",
+          "repos_url": "<origin>/users/<org>/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<org>/subscriptions",
+          "type": "Organization",
+          "url": "<origin>/users/<org>"
+        },
+        "permissions": {
+          "administration": "write",
+          "members": "write",
+          "metadata": "read"
+        },
+        "slug": "<app>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "step": "version-never-served",
+      "request": "GET /app",
+      "status": 400,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
+        "message": "Unsupported API version 2021-01-01"
+      }
+    },
+    {
+      "step": "version-future",
+      "request": "GET /app",
+      "status": 400,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
+        "message": "Unsupported API version 2099-01-01"
+      }
+    },
+    {
+      "step": "version-malformed",
+      "request": "GET /app",
+      "status": 400,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
+        "message": "Unsupported API version latest"
+      }
+    },
+    {
+      "step": "version-never-served-unauthenticated",
+      "request": "GET /users/<invitee>",
+      "status": 400,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/about-the-rest-api/api-versions",
+        "message": "Unsupported API version 2021-01-01"
+      }
+    }
+  ]
+}

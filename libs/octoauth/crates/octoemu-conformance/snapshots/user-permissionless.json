@@ -1,0 +1,110 @@
+{
+  "scenario": "user-permissionless",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "user",
+      "request": "GET /user",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "avatar_url": "<avatar-url>",
+        "bio": "<varies>",
+        "blog": "<varies>",
+        "company": "<varies>",
+        "created_at": "<timestamp>",
+        "email": "<varies>",
+        "events_url": "<origin>/users/<invitee>/events{/privacy}",
+        "followers": "<varies>",
+        "followers_url": "<origin>/users/<invitee>/followers",
+        "following": "<varies>",
+        "following_url": "<origin>/users/<invitee>/following{/other_user}",
+        "gists_url": "<origin>/users/<invitee>/gists{/gist_id}",
+        "gravatar_id": "",
+        "hireable": "<varies>",
+        "html_url": "<origin>/<invitee>",
+        "id": "<invitee-id>",
+        "location": "<varies>",
+        "login": "<invitee>",
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "organizations_url": "<origin>/users/<invitee>/orgs",
+        "public_gists": "<varies>",
+        "public_repos": "<varies>",
+        "received_events_url": "<origin>/users/<invitee>/received_events",
+        "repos_url": "<origin>/users/<invitee>/repos",
+        "site_admin": false,
+        "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
+        "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
+        "twitter_username": "<varies>",
+        "type": "User",
+        "updated_at": "<timestamp>",
+        "url": "<origin>/users/<invitee>"
+      }
+    },
+    {
+      "step": "user-emails",
+      "request": "GET /user/emails",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-accepted-github-permissions": "email_addresses=read",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Resource not accessible by integration"
+      }
+    },
+    {
+      "step": "user-with-pat",
+      "request": "GET /user",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "avatar_url": "<avatar-url>",
+        "bio": "<varies>",
+        "blog": "<varies>",
+        "company": "<varies>",
+        "created_at": "<timestamp>",
+        "email": "<varies>",
+        "events_url": "<origin>/users/<invitee>/events{/privacy}",
+        "followers": "<varies>",
+        "followers_url": "<origin>/users/<invitee>/followers",
+        "following": "<varies>",
+        "following_url": "<origin>/users/<invitee>/following{/other_user}",
+        "gists_url": "<origin>/users/<invitee>/gists{/gist_id}",
+        "gravatar_id": "",
+        "hireable": "<varies>",
+        "html_url": "<origin>/<invitee>",
+        "id": "<invitee-id>",
+        "location": "<varies>",
+        "login": "<invitee>",
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "organizations_url": "<origin>/users/<invitee>/orgs",
+        "public_gists": "<varies>",
+        "public_repos": "<varies>",
+        "received_events_url": "<origin>/users/<invitee>/received_events",
+        "repos_url": "<origin>/users/<invitee>/repos",
+        "site_admin": false,
+        "starred_url": "<origin>/users/<invitee>/starred{/owner}{/repo}",
+        "subscriptions_url": "<origin>/users/<invitee>/subscriptions",
+        "twitter_username": "<varies>",
+        "type": "User",
+        "updated_at": "<timestamp>",
+        "url": "<origin>/users/<invitee>"
+      }
+    }
+  ]
+}

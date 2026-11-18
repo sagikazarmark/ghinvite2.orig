@@ -1,0 +1,78 @@
+{
+  "scenario": "org-invitation-limit",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "first-invite",
+      "request": "POST /orgs/<org>/invitations",
+      "status": 201,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "created_at": "<timestamp>",
+        "email": "<varies>",
+        "failed_at": null,
+        "failed_reason": null,
+        "id": "<id>",
+        "invitation_source": "member",
+        "invitation_teams_url": "<origin>/organizations/<org-id>/invitations/<n>/teams",
+        "inviter": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<app>[bot]/events{/privacy}",
+          "followers_url": "<origin>/users/<app>[bot]/followers",
+          "following_url": "<origin>/users/<app>[bot]/following{/other_user}",
+          "gists_url": "<origin>/users/<app>[bot]/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/apps/<app>",
+          "id": "<id>",
+          "login": "<app>[bot]",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<app>[bot]/orgs",
+          "received_events_url": "<origin>/users/<app>[bot]/received_events",
+          "repos_url": "<origin>/users/<app>[bot]/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<app>[bot]/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<app>[bot]/subscriptions",
+          "type": "Bot",
+          "url": "<origin>/users/<app>[bot]"
+        },
+        "login": "<invitee>",
+        "node_id": "<node-id>",
+        "role": "direct_member",
+        "team_count": 0
+      }
+    },
+    {
+      "step": "refused",
+      "request": "POST /orgs/<org>/invitations",
+      "status": 422,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/orgs/members#create-an-organization-invitation",
+        "errors": [
+          {
+            "code": "custom",
+            "field": "base",
+            "message": "Over invitation rate limit",
+            "resource": "OrganizationInvitation"
+          }
+        ],
+        "message": "Validation Failed"
+      }
+    },
+    {
+      "step": "count",
+      "body": {
+        "invitations_before_refusal": 50
+      }
+    }
+  ]
+}

@@ -1,0 +1,256 @@
+{
+  "scenario": "jwt-error-matrix",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "valid",
+      "request": "GET /app",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "client_id": "<app-client-id>",
+        "created_at": "<timestamp>",
+        "description": "<varies>",
+        "events": [
+          "member",
+          "organization",
+          "membership"
+        ],
+        "external_url": "<origin>/apps/<app>",
+        "html_url": "<origin>/apps/<app>",
+        "id": "<app-id>",
+        "installations_count": 3,
+        "name": "<varies>",
+        "node_id": "<node-id>",
+        "owner": {
+          "avatar_url": "<avatar-url>",
+          "events_url": "<origin>/users/<org>/events{/privacy}",
+          "followers_url": "<origin>/users/<org>/followers",
+          "following_url": "<origin>/users/<org>/following{/other_user}",
+          "gists_url": "<origin>/users/<org>/gists{/gist_id}",
+          "gravatar_id": "",
+          "html_url": "<origin>/<org>",
+          "id": "<org-id>",
+          "login": "<org>",
+          "node_id": "<node-id>",
+          "organizations_url": "<origin>/users/<org>/orgs",
+          "received_events_url": "<origin>/users/<org>/received_events",
+          "repos_url": "<origin>/users/<org>/repos",
+          "site_admin": false,
+          "starred_url": "<origin>/users/<org>/starred{/owner}{/repo}",
+          "subscriptions_url": "<origin>/users/<org>/subscriptions",
+          "type": "Organization",
+          "url": "<origin>/users/<org>"
+        },
+        "permissions": {
+          "administration": "write",
+          "members": "write",
+          "metadata": "read"
+        },
+        "slug": "<app>",
+        "updated_at": "<timestamp>"
+      }
+    },
+    {
+      "step": "no-credential",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Requires authentication"
+      }
+    },
+    {
+      "step": "not-a-jwt",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Bad credentials"
+      }
+    },
+    {
+      "step": "unregistered-key",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "A JSON web token could not be decoded"
+      }
+    },
+    {
+      "step": "alg-none",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "A JSON web token could not be decoded"
+      }
+    },
+    {
+      "step": "unknown-iss",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Integration not found"
+      }
+    },
+    {
+      "step": "missing-iat",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued"
+      }
+    },
+    {
+      "step": "missing-exp",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires"
+      }
+    },
+    {
+      "step": "string-iat",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Issued at' claim ('iat') must be an Integer representing the time that the assertion was issued"
+      }
+    },
+    {
+      "step": "expired",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Expiration time' claim ('exp') must be a numeric value representing the future time at which the assertion expires"
+      }
+    },
+    {
+      "step": "exp-too-far",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Expiration time' claim ('exp') is too far in the future"
+      }
+    },
+    {
+      "step": "exp-660s-after-iat",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "'Expiration time' claim ('exp') is too far in the future"
+      }
+    },
+    {
+      "step": "token-scheme",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Bad credentials"
+      }
+    },
+    {
+      "step": "installation-token-on-app-route",
+      "request": "GET /app",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "A JSON web token could not be decoded"
+      }
+    },
+    {
+      "step": "jwt-on-installation-route",
+      "request": "GET /repos/<org>/<repo>",
+      "status": 401,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest",
+        "message": "Bad credentials"
+      }
+    }
+  ]
+}

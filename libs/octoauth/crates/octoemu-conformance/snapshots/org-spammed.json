@@ -1,0 +1,27 @@
+{
+  "scenario": "org-spammed",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "invite",
+      "request": "POST /orgs/<org>/invitations",
+      "status": 422,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/orgs/members#create-an-organization-invitation",
+        "errors": [
+          {
+            "code": "spammed",
+            "resource": "OrganizationInvitation"
+          }
+        ],
+        "message": "Validation Failed"
+      }
+    }
+  ]
+}

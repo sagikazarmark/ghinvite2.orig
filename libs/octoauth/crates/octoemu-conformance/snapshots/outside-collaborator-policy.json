@@ -1,0 +1,21 @@
+{
+  "scenario": "outside-collaborator-policy",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "invite-outside-collaborator",
+      "request": "PUT /repos/<extra-org>/<extra-repo>/collaborators/<invitee>",
+      "status": 403,
+      "headers": {
+        "content-type": "application/json; charset=utf-8",
+        "x-ratelimit-remaining": "<n>",
+        "x-ratelimit-resource": "core"
+      },
+      "body": {
+        "documentation_url": "https://docs.github.com/rest/collaborators/collaborators#add-a-repository-collaborator",
+        "message": "Inviting outside collaborators is restricted by organization policy."
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+# Documented exceptions to the schema check: places where the published
+# description (rest-api-subset.json) is known to be wrong, so an emulator
+# response that follows GitHub's real behaviour fails it. Never add one for
+# an emulator bug: fix octoemu instead.
+#
+# [[exception]]
+# route = "METHOD /pattern"       # an operation in rest-api-subset.json
+# status = "200"                  # as the description keys it
+# pointer = "/field"              # the instance location excused, and below it ("" = all)
+# reason = "What GitHub really sends, and the evidence (an issue, a live snapshot)."

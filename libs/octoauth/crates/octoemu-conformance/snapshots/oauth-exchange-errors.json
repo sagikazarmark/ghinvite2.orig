@@ -1,0 +1,87 @@
+{
+  "scenario": "oauth-exchange-errors",
+  "source": "emulator (unverified)",
+  "note": "Generated from octoemu, not GitHub: unverified. The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.",
+  "steps": [
+    {
+      "step": "bad-code",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "error": "bad_verification_code",
+        "error_description": "The code passed is incorrect or expired.",
+        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#bad-verification-code"
+      }
+    },
+    {
+      "step": "bad-client-secret",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "error": "incorrect_client_credentials",
+        "error_description": "The client_id and/or client_secret passed are incorrect.",
+        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#incorrect-client-credentials"
+      }
+    },
+    {
+      "step": "unknown-client",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "error": "incorrect_client_credentials",
+        "error_description": "The client_id and/or client_secret passed are incorrect.",
+        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#incorrect-client-credentials"
+      }
+    },
+    {
+      "step": "bad-refresh-token",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "error": "bad_refresh_token",
+        "error_description": "The refresh token passed is incorrect or expired.",
+        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#bad-refresh-token"
+      }
+    },
+    {
+      "step": "unsupported-grant-type",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/json; charset=utf-8"
+      },
+      "body": {
+        "error": "unsupported_grant_type",
+        "error_description": "The grant type is not supported.",
+        "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#unsupported-grant-type"
+      }
+    },
+    {
+      "step": "bad-code-form-encoded",
+      "request": "POST /login/oauth/access_token",
+      "status": 200,
+      "headers": {
+        "content-type": "application/x-www-form-urlencoded; charset=utf-8"
+      },
+      "body": {
+        "$form": {
+          "error": "bad_verification_code",
+          "error_description": "The code passed is incorrect or expired.",
+          "error_uri": "/apps/managing-oauth-apps/troubleshooting-oauth-app-access-token-request-errors/#bad-verification-code"
+        }
+      }
+    }
+  ]
+}

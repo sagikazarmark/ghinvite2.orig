@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Extracts the operations octoemu implements from GitHub's OpenAPI 3.1
+description into rest-api-subset.json, the schemas the fidelity suite
+validates every emulator response against.
+
+The full bundled description is about 14 MB; only the operations named in
+octoemu's fidelity.toml (`[routes."METHOD /path"]`, the REST API ones) and
+the component schemas they reach are kept.
+
+The description is untrusted input: it is only parsed as JSON, never run.
+Download it into a fresh empty directory, outside this repository, and run
+this script with `python3 -I` so nothing is imported from beside it:
+
+    mkdir -p "$SCRATCH/restdesc" && cd "$SCRATCH/restdesc"
+    curl -sSLO https://raw.githubusercontent.com/github/rest-api-description/$COMMIT/descriptions-next/api.github.com/api.github.com.2022-11-28.json
+    python3 -I libs/octoauth/crates/octoemu-conformance/schemas/extract.py \
+        --description "$SCRATCH/restdesc/api.github.com.2022-11-28.json" \
+        --commit "$COMMIT" \
+        --fidelity libs/octoauth/crates/octoemu/fidelity.toml \
+        --out libs/octoauth/crates/octoemu-conformance/schemas/rest-api-subset.json
+
+Standard library only (tomllib needs Python 3.11+).
+"""
+
+import argparse
+import hashlib
+import json
+import sys
+import tomllib
+
+REPOSITORY = "github/rest-api-description"
+PATH = "descriptions-next/api.github.com/api.github.com.2022-11-28.json"
+
+# Routes octoemu serves that are not REST API operations.
+NOT_REST = ("/login/", "/avatars/")
+
+
+def refs(node, found):
+    """Every `#/components/schemas/<name>` reachable from `node`."""
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/components/schemas/"):
+            found.add(ref.rsplit("/", 1)[1])
+        for value in node.values():
+            refs(value, found)
+    elif isinstance(node, list):
+        for value in node:
+            refs(value, found)
+
+
+def resolve_response(description, response):
+    """A response object, following one `#/components/responses/<name>`."""
+    ref = response.get("$ref")
+    if isinstance(ref, str):
+        prefix = "#/components/responses/"
+        if not ref.startswith(prefix):
+            sys.exit(f"unexpected response reference {ref!r}")
+        return description["components"]["responses"][ref[len(prefix):]]
+    return response
+
+
+def json_schema(response):
+    """The response's JSON body schema; None for a response without one."""
+    content = response.get("content") or {}
+    for media, entry in content.items():
+        if media.startswith("application/json") or media.endswith("+json"):
+            return entry.get("schema")
+    return None
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--description", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--fidelity", required=True)
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args()
+
+    with open(args.description, "rb") as handle:
+        raw = handle.read()
+    description = json.loads(raw)
+    if not str(description.get("openapi", "")).startswith("3.1"):
+        sys.exit("expected an OpenAPI 3.1 description")
+    with open(args.fidelity, "rb") as handle:
+        manifest = tomllib.load(handle)
+
+    operations = {}
+    undocumented = []
+    names = set()
+    for route in sorted(manifest.get("routes", {})):
+        method, path = route.split(" ", 1)
+        if path.startswith(NOT_REST):
+            continue
+        item = description["paths"].get(path, {})
+        operation = item.get(method.lower())
+        if operation is None:
+            undocumented.append(route)
+            continue
+        responses = {}
+        for status, response in sorted(operation.get("responses", {}).items()):
+            schema = json_schema(resolve_response(description, response))
+            responses[status] = schema
+            refs(schema, names)
+        operations[route] = {
+            "operationId": operation.get("operationId"),
+            "responses": responses,
+        }
+
+    # The fallback for error statuses an operation does not list.
+    names.add("basic-error")
+    schemas = description["components"]["schemas"]
+    pending = sorted(names)
+    kept = {}
+    while pending:
+        name = pending.pop()
+        if name in kept:
+            continue
+        kept[name] = schemas[name]
+        more = set()
+        refs(schemas[name], more)
+        pending.extend(sorted(more - set(kept)))
+
+    subset = {
+        "source": {
+            "repository": REPOSITORY,
+            "commit": args.commit,
+            "path": PATH,
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "openapi": description["openapi"],
+            "info_version": description.get("info", {}).get("version"),
+        },
+        "note": "Generated by extract.py from the pinned description; do not edit by hand.",
+        "operations": operations,
+        "undocumented": undocumented,
+        "components": {"schemas": dict(sorted(kept.items()))},
+    }
+    with open(args.out, "w", encoding="utf-8") as handle:
+        json.dump(subset, handle, indent=1, sort_keys=False)
+        handle.write("\n")
+    print(
+        f"{len(operations)} operations, {len(kept)} component schemas, "
+        f"undocumented: {', '.join(undocumented) or 'none'}"
+    )
+
+
+if __name__ == "__main__":
+    main()
