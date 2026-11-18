@@ -5,18 +5,33 @@ use std::sync::Arc;
 /// The sign-in app's client ID: tokens are revoked at
 /// `DELETE {base}/applications/Iv1.signin/token`.
 pub const SIGNIN_CLIENT_ID: &str = "Iv1.signin";
+/// The sign-in app's client secret.
+pub const SIGNIN_CLIENT_SECRET: &str = "signin-test-secret";
+/// The sign-in app's callback; GitHub redirects the browser back to it.
+pub const SIGNIN_CALLBACK: &str = "https://p1.test/oauth/callback";
 
 /// Sign-in against `base`, a local GitHub stand-in serving both the web
 /// flow (`/login/oauth/access_token`) and the API (`/user`, revocation).
 pub fn signin_app(base: &str) -> Arc<SignInApp> {
     let mut app = SignInApp::new(
         SIGNIN_CLIENT_ID,
-        "signin-test-secret",
-        "https://p1.test/oauth/callback".parse().unwrap(),
+        SIGNIN_CLIENT_SECRET,
+        SIGNIN_CALLBACK.parse().unwrap(),
     );
     app.web_base_url = Some(base.to_owned());
     app.api_base_url = Some(base.to_owned());
     Arc::new(app)
+}
+
+/// The sign-in App (789) for the GitHub emulator, with [`signin_app`]'s
+/// client ID, secret and callback, so the emulator's OAuth web flow signs a
+/// seeded user in (`/login/oauth/authorize?…&login=<user>`).
+pub fn signin_seed() -> octoemu::seed::Seed {
+    octoemu::seed::Seed::new().app(
+        octoemu::seed::App::new(789, "p1-signin", SIGNIN_CLIENT_ID, SIGNIN_CLIENT_SECRET)
+            .public_key(ghinvite_e2e::github::PUBLIC_KEY)
+            .callback_url(SIGNIN_CALLBACK),
+    )
 }
 
 /// Sign-in against a local stand-in that forwards each request to `github`

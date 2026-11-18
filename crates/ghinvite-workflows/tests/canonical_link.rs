@@ -91,24 +91,30 @@ async fn html(response: Response) -> String {
     )
     .unwrap()
 }
-async fn sign_in(app: &axum::Router) -> String {
-    let login = request(app, "", "/login", None).await;
-    let state = login.headers()["location"]
-        .to_str()
-        .unwrap()
-        .split("state=")
-        .nth(1)
-        .unwrap()
-        .split('&')
-        .next()
+/// Signs `login` in through GitHub's OAuth web flow on the emulator:
+/// `/login`, the authorize page (consenting as `login`), then the callback
+/// with GitHub's code. The signed-in session cookie.
+async fn sign_in(app: &axum::Router, login: &str) -> String {
+    let started = request(app, "", "/login", None).await;
+    assert_eq!(started.status(), StatusCode::SEE_OTHER);
+    let authorize = started.headers()["location"].to_str().unwrap();
+    let browser = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
         .unwrap();
-    let callback = request(
-        app,
-        &cookie(&login),
-        &format!("/oauth/callback?code=fixture&state={state}"),
-        None,
-    )
-    .await;
+    let github = browser
+        .get(format!("{authorize}&login={login}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(github.status(), reqwest::StatusCode::FOUND);
+    let back = github.headers()["location"].to_str().unwrap();
+    let callback = back
+        .strip_prefix("https://p1.test")
+        .unwrap_or_else(|| panic!("GitHub redirected back to {back}"));
+    assert!(callback.starts_with("/oauth/callback?code="), "{callback}");
+    let callback = request(app, &cookie(&started), callback, None).await;
     assert_eq!(callback.status(), StatusCode::SEE_OTHER);
     cookie(&callback)
 }
@@ -187,65 +193,11 @@ async fn select_secret(app: &axum::Router, cookie: &str, secret: &str) {
 
 #[tokio::test]
 async fn authenticated_journey_settles_and_recovers_across_projection_and_response_loss() {
-    let requester_login = Arc::new(AtomicBool::new(false));
-    let login_identity = requester_login.clone();
-    // GitHub: the suites' emulator world. The sign-in side stays canned
-    // (labelled fault rules): the step switches the signed-in user under one
-    // session, and `/user/installations/{id}/repositories` is outside the
-    // emulator's routes. `crates/ghinvite-web/tests/emulator_signin.rs` and
-    // the browser suite cover the real OAuth flow on the emulator.
+    // GitHub: the suites' emulator world, plus the sign-in App. Sign-in is
+    // GitHub's OAuth web flow on the emulator (authorize, code exchange,
+    // `/user`, token revocation); `creator` and `alice` are seeded users.
     let harness = ghinvite_e2e::Harness::start().await;
-    {
-        use octoemu::faults::{Fault, FaultAction};
-        let emulator = harness.emulator();
-        let canned = [
-            Fault::on(
-                "POST",
-                "/login/oauth/access_token",
-                FaultAction::respond_json(
-                    200,
-                    json!({"access_token":"fixture", "token_type":"bearer", "scope":""}),
-                ),
-            ),
-            Fault::on(
-                "DELETE",
-                format!("/applications/{}/token", web_apps::SIGNIN_CLIENT_ID),
-                FaultAction::respond(204),
-            ),
-            Fault::on(
-                "GET",
-                "/user",
-                FaultAction::custom(move |_| {
-                    octoemu::faults::Reply::new(200).json(
-                        if login_identity.load(Ordering::SeqCst) {
-                            json!({"id":8,"login":"alice"})
-                        } else {
-                            json!({"id":7,"login":"creator"})
-                        },
-                    )
-                }),
-            ),
-            Fault::on(
-                "GET",
-                "/user/memberships/orgs/acme",
-                FaultAction::respond_json(
-                    200,
-                    json!({"role":"admin","state":"active","organization":{"id":100}}),
-                ),
-            ),
-            Fault::on(
-                "GET",
-                "/user/installations/1/repositories",
-                FaultAction::respond_json(
-                    200,
-                    json!({"total_count":2,"repositories":[{"id":10,"full_name":"acme/api","private":true},{"id":11,"full_name":"acme/web","private":true}]}),
-                ),
-            ),
-        ];
-        for fault in canned {
-            emulator.add_fault(fault.label("sign-in fixture")).unwrap();
-        }
-    }
+    harness.emulator().seed(web_apps::signin_seed()).unwrap();
     let ingress = harness.restate.ingress_url().to_owned();
     let admin = harness.restate.admin_url().to_owned();
     let client = harness.client.clone();
@@ -429,7 +381,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
         Arc::new(ghinvite_web::RestateClient::new(proxy_url).unwrap()),
         ghinvite_web::WebConfig {
             webhooks: Some(web_apps::webhooks("journey-secret")),
-            // Sign-in calls the emulator, too (canned rules above).
+            // Sign-in runs GitHub's OAuth web flow on the emulator, too.
             signin_apps: Some(web_apps::signin_app(&base)),
             ..ghinvite_web::WebConfig::for_local_dev_with_secret([7; 32])
         },
@@ -446,7 +398,7 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
             std::net::Ipv4Addr::LOCALHOST.into(),
         )),
     );
-    let cookie = sign_in(&app).await;
+    let cookie = sign_in(&app, "creator").await;
     let form = html(request(&app, &cookie, "/console/accounts/acme/links/new", None).await).await;
     let action = form
         .split("action=\"/console/accounts/acme/links?")
@@ -582,8 +534,17 @@ async fn authenticated_journey_settles_and_recovers_across_projection_and_respon
     );
     let public = "/join".to_owned();
     let capability_hash = snapshot["secret"]["sha256"].clone();
-    requester_login.store(true, Ordering::SeqCst);
-    let requester_cookie = sign_in(&app).await;
+    let requester_cookie = sign_in(&app, "alice").await;
+    // Both sign-ins ran GitHub's OAuth web flow: a code exchange, the
+    // identity read with the user's token, and its revocation, each.
+    let github = harness.github();
+    let revoke = format!("/applications/{}/token", web_apps::SIGNIN_CLIENT_ID);
+    assert_eq!(
+        github.count("POST", |path| path == "/login/oauth/access_token"),
+        2
+    );
+    assert_eq!(github.count("GET", |path| path == "/user"), 2);
+    assert_eq!(github.count("DELETE", |path| path == revoke), 2);
     assert_eq!(
         request(&app, &requester_cookie, &format!("/i/{id}"), None)
             .await

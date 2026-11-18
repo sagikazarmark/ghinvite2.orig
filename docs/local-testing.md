@@ -395,7 +395,9 @@ those values and runtime cleanup.
 ### Assembled invitation journey (#122)
 
 `canonical_link` drives authenticated native web routes through real Restate
-owners and production GitHub HTTP to signed settlement and recovery. The actual
+owners and production GitHub HTTP to signed settlement and recovery. Its owner
+and requester sign in through the emulator's OAuth web flow (authorize page,
+code exchange, `/user`, revocation), with no canned sign-in answers. The actual
 Worker/D1 equivalent is `npm run test:journey --prefix tests/worker`.
 See [ownership and evidence](invitation-ownership.md#reproducible-evidence) for
 the exact proof surface and [fresh setup](invitation-ownership.md#clean-prelaunch-replacement).
