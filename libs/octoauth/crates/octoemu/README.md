@@ -31,7 +31,8 @@ and team memberships with their repository grants, the user's
 (GE-06); fault rules (GE-07; `stall`, `hold_response` and
 `query_contains` since GE-09b), the admin user-rename and
 invitation-expiry routes (GE-09b), the admin organization rename
-(GE-09c). The temporary stub-compatibility shim
+(GE-09c), and the user's
+`/user/installations/{installation_id}/repositories` (after GE-09). The temporary stub-compatibility shim
 of GE-07 is gone (GE-09c): ghinvite's suites build their world from the
 native seed and admin API (`ghinvite_e2e::github`).
 
@@ -52,6 +53,7 @@ native seed and admin API (`ghinvite_e2e::github`).
 | `POST /app/hook/deliveries/{delivery_id}/attempts` | App JWT | 202 `{}`; the same body and GUID again, `redelivery: true` |
 | `GET /installation/repositories` | installation token, `metadata: read` | Paged; only the token's repositories |
 | `DELETE /installation/token` | installation token | 204; the token stops working |
+| `GET /user/installations/{installation_id}/repositories` | a GitHub App's user access token | Paged `{total_count, repository_selection, repositories}`: the installation's repositories the user has explicit access to, each with the user's `permissions`; 404 for another App's installation or one the user reaches nothing of (assumed: an empty list for the account's owner, 404 while suspended, 403 for a classic PAT) |
 | `GET /repos/{owner}/{repo}` | installation or user token, `metadata: read` | Private and internal repositories outside the token's reach are 404 |
 | `GET /repos/{owner}/{repo}/collaborators` | installation token, `metadata: read` | Paged; `affiliation=direct\|outside\|all` (default all); each with `permissions` and `role_name` |
 | `PUT /repos/{owner}/{repo}/collaborators/{username}` | installation token, `administration: write` | Body `{permission}` (`pull`, `triage`, `push` (default), `maintain`, `admin` or a custom role); 201 with the invitation, 204 for a user with access (a role change, an organization member added directly); 422 for another value or past 50 invitations per 24 h |
@@ -663,7 +665,11 @@ so most of these are labels only, not refused); for OAuth and user tokens
 `org-reput-pending`, `team-put-non-member`,
 `invited-team-membership-pending`, `org-accept-team-events` (not emitted),
 `remove-org-non-member`, `remove-team-non-member`, `org-out-of-scope`,
-`email-invitation-accept` and `user-token-org-membership-list`; the routes `GET /repositories/{repository_id}/invitations`,
+`email-invitation-accept` and `user-token-org-membership-list`; for
+`GET /user/installations/{installation_id}/repositories`
+`user-installations-pat` (refused), `user-installation-access` (refused
+for a suspended installation or one the user reaches nothing of) and
+`user-installation-repository-selection` (left out); the routes `GET /repositories/{repository_id}/invitations`,
 `GET /user/{account_id}`, `GET /avatars/u/{id}` and
 `POST /login/oauth/authorize` (the consent form).
 

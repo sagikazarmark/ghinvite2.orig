@@ -1,9 +1,12 @@
 //! The App and installation surface: `/app`, `/app/installations…`,
-//! `/app/installation-requests`, `/installation/repositories` and
-//! `/installation/token`, plus the installation logic the admin API shares
-//! (minting, suspension, uninstalling).
+//! `/app/installation-requests`, `/installation/repositories`,
+//! `/installation/token` and the user's
+//! `/user/installations/{installation_id}/repositories`, plus the
+//! installation logic the admin API shares (minting, suspension,
+//! uninstalling).
 
-use crate::auth::{self, AppCaller, InstallationCaller, SUSPENDED, find_installation};
+use crate::access;
+use crate::auth::{self, AppCaller, InstallationCaller, SUSPENDED, UserCaller, find_installation};
 use crate::collaboration::Actor;
 use crate::events;
 use crate::paginate::Pagination;
@@ -246,6 +249,96 @@ pub(crate) async fn repositories(
         "repositories": paged.items.iter().map(|r| view.repo(r)).collect::<Vec<_>>(),
     });
     json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
+}
+
+const USER_REPOSITORIES_DOCS: &str = "https://docs.github.com/rest/apps/installations#list-repositories-accessible-to-the-user-access-token";
+
+/// `GET /user/installations/{installation_id}/repositories`, paged: the
+/// installation's repositories the user has explicit access to (a
+/// collaboration, ownership, an organization role or a team), each with
+/// the user's `permissions` (documented). The installation must be one of
+/// the token's App's; anything else is a 404.
+///
+/// Assumed: a classic PAT is a 403 (`user-installations-pat`); a
+/// suspended installation is a 404, and an installation the user reaches
+/// no repository of is a 404 unless the user owns its account
+/// (`user-installation-access`); `repository_selection` is the
+/// installation's (`user-installation-repository-selection`).
+pub(crate) async fn user_repositories(
+    State(shared): State<SharedState>,
+    UserCaller(token): UserCaller,
+    Path(raw): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let Some(app_id) = token.app_id() else {
+        return shared.refuse("user-installations-pat").unwrap_or_else(|| {
+            response::error(
+                StatusCode::FORBIDDEN,
+                "You must authenticate with an access token authorized to a GitHub App in order to list repositories",
+                USER_REPOSITORIES_DOCS,
+            )
+        });
+    };
+    let origin = views::origin(&shared, &headers);
+    let state = shared.state();
+    let world = &state.world;
+    let Some(installation) = installation_id(&raw)
+        .and_then(|id| find_installation(world, id))
+        .filter(|i| i.app_id == app_id)
+    else {
+        return auth::not_found();
+    };
+    if installation.suspended_at.is_some() {
+        return shared
+            .refuse("user-installation-access")
+            .unwrap_or_else(auth::not_found);
+    }
+    let reachable: Vec<(&Repo, access::Grant)> = installation_repos(world, installation)
+        .into_iter()
+        .filter_map(|repo| access::effective(world, repo, &token.login).map(|g| (repo, g)))
+        .collect();
+    if reachable.is_empty() {
+        // Whether GitHub lists an empty installation for its account's
+        // owner, or 404s it like anyone else's, is unmeasured.
+        if let Some(refusal) = shared.refuse("user-installation-access") {
+            return refusal;
+        }
+        if !owns_account(world, installation, &token.login) {
+            return auth::not_found();
+        }
+    }
+    let paged = Pagination::of(&uri).apply(reachable);
+    let view = view(&state, &origin);
+    let repositories: Vec<Value> = paged
+        .items
+        .iter()
+        .map(|(repo, grant)| {
+            let mut body = view.repo(repo);
+            body["permissions"] = access::permission_flags(world, repo, &grant.role);
+            body
+        })
+        .collect();
+    let mut body = json!({
+        "total_count": paged.total,
+        "repositories": repositories,
+    });
+    if shared.allows("user-installation-repository-selection") {
+        body["repository_selection"] = json!(installation.repository_selection);
+    }
+    json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
+}
+
+/// Whether `login` is the installation's account, or an owner of the
+/// organization it is.
+fn owns_account(world: &Seed, installation: &Installation, login: &str) -> bool {
+    installation.account.eq_ignore_ascii_case(login)
+        || world.memberships.iter().any(|m| {
+            m.org.eq_ignore_ascii_case(&installation.account)
+                && m.user.eq_ignore_ascii_case(login)
+                && m.role == crate::seed::OrgRole::Admin
+                && m.state == crate::seed::MembershipState::Active
+        })
 }
 
 /// A narrowed token reports `selected`; otherwise the installation's

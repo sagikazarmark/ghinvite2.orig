@@ -11,6 +11,15 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- `GET /user/installations/{installation_id}/repositories` (documented): a
+  GitHub App's user access token lists the installation's repositories the
+  user has explicit access to, each with the user's `permissions`, paged,
+  with `total_count`; 404 for another App's installation. Assumed, with
+  fidelity entries: a classic PAT is a 403 (`user-installations-pat`); a
+  suspended installation, or one the user reaches no repository of, is a 404,
+  except for its account's owner, who gets an empty list
+  (`user-installation-access`); `repository_selection` is the installation's
+  (`user-installation-repository-selection`).
 - Fault rules (GE-07): `POST`/`GET`/`DELETE /__octoemu/faults`, `GET`/`DELETE
   /__octoemu/faults/{id}`, `POST /__octoemu/faults/{id}/release` and
   `…/wait`, and `Emulator::add_fault`, `faults`, `fault`, `remove_fault`,

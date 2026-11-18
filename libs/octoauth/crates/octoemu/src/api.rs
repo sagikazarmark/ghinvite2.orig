@@ -109,6 +109,9 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "token-revocation-immediate",
     "unknown-user-404",
     "unsupported-grant-type",
+    "user-installation-access",
+    "user-installation-repository-selection",
+    "user-installations-pat",
     "user-public-email",
     "user-rename",
     "user-repo-permission-ignored",
@@ -288,6 +291,13 @@ pub(crate) fn github() -> Api {
             "/installation/token",
             Auth::Installation(None),
             apps::revoke_token,
+        )
+        // The user's view of an installation: docs.github.com/rest/apps/installations.
+        .route(
+            Method::GET,
+            "/user/installations/{installation_id}/repositories",
+            Auth::User(None),
+            apps::user_repositories,
         )
         // Repositories: docs.github.com/rest/repos/repos.
         .route(

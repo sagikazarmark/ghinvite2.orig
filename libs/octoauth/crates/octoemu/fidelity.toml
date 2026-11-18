@@ -63,6 +63,29 @@ doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-acce
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/installations#revoke-an-installation-access-token"
 
+[routes."GET /user/installations/{installation_id}/repositories"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/installations#list-repositories-accessible-to-the-user-access-token"
+# A GitHub App user access token, no App permission. 200 {total_count,
+# repository_selection, repositories}, paged: the installation's repositories
+# the user has explicit access to (a collaboration, ownership, an organization
+# role or base permission, a team), each with the user's `permissions`
+# booleans. 404 for an unknown installation or another App's. The rest is
+# assumed: user-installations-pat, user-installation-access,
+# user-installation-repository-selection.
+
+[behaviours.user-installations-pat]
+label = "assumed"
+reason = "GET /user/installations/{installation_id}/repositories with a classic PAT: 403 'You must authenticate with an access token authorized to a GitHub App in order to list repositories'. The docs name only user access tokens and list a 403; the status for a PAT and the message (modelled on the community-reported one for GET /user/installations) are unmeasured. Refused in refuse-assumed mode."
+
+[behaviours.user-installation-access]
+label = "assumed"
+reason = "Which of its App's installations a user access token reaches on GET /user/installations/{installation_id}/repositories beyond the documented intersection: a suspended installation is a 404; one where the user has explicit access to no repository is a 404, except for its account (the user, or an owner of the organization), which gets an empty list. Unmeasured. Refused in refuse-assumed mode when it applies."
+
+[behaviours.user-installation-repository-selection]
+label = "assumed"
+reason = "GET /user/installations/{installation_id}/repositories reports `repository_selection`: the schema names the field (not required) without pinning its value; modelled as the installation's own (`all` or `selected`), as GET /installation/repositories reports it for an unnarrowed token. Left out in refuse-assumed mode."
+
 [behaviours.date-header]
 label = "documented"
 doc = "https://www.rfc-editor.org/rfc/rfc9110#name-date"
