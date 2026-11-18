@@ -74,7 +74,21 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       # Includes the error-codes.txt check (crates/octoauth/tests/error_codes.rs).
-      - run: cargo test --workspace --all-features --locked
+      - run: cargo test --workspace --all-features --locked --exclude octoemu-conformance
+      # octoemu's fidelity suite against the emulator: every scenario compared
+      # with its snapshot, every response schema-checked. The live target is
+      # the manual fidelity-live workflow.
+      - name: Fidelity suite (emulator target)
+        run: cargo test -p octoemu-conformance --all-features --locked -- --nocapture
+        env:
+          OCTOEMU_CONFORMANCE_REPORT: ${{ runner.temp }}/fidelity-emulator.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fidelity-emulator-report
+          path: ${{ runner.temp }}/fidelity-emulator.json
+          if-no-files-found: ignore
+          retention-days: 14
       - run: cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --target wasm32-unknown-unknown
       - run: cargo check --locked -p octoauth -p octotoken -p octologin -p octoscrub --all-features --target wasm32-unknown-unknown
 

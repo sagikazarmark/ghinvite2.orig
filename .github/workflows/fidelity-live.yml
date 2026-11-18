@@ -1,0 +1,122 @@
+# octoemu's fidelity suite against real GitHub (docs/specs/github-emulator.md
+# §4, GE-08). Manual only: it never runs on push or pull requests. It writes
+# the live env file (format: libs/octoauth/crates/octoemu/README.md) from
+# repository secrets into the runner's temp directory, outside the checkout,
+# and removes it afterwards. Destructive scenarios use up real invitation
+# budget and the uninstall scenario needs a reinstall by hand: run them only
+# against a throwaway organization.
+name: Fidelity suite (live GitHub)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: record (write the snapshots) or compare (against the checked-in ones)
+        type: choice
+        options: [record, compare]
+        default: record
+      destructive:
+        description: Also run the destructive scenarios (throwaway organization only)
+        type: boolean
+        default: false
+      slow:
+        description: Also run the slow scenarios
+        type: boolean
+        default: false
+      only:
+        description: Comma-separated scenario IDs (empty runs all)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fidelity-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Fidelity suite against GitHub
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: libs/octoauth
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: libs/octoauth
+      - name: Write the live env file from secrets
+        env:
+          APP_ID: ${{ secrets.OCTOEMU_LIVE_APP_ID }}
+          APP_CLIENT_ID: ${{ secrets.OCTOEMU_LIVE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.OCTOEMU_LIVE_APP_PRIVATE_KEY }}
+          APP_WEBHOOK_SECRET: ${{ secrets.OCTOEMU_LIVE_APP_WEBHOOK_SECRET }}
+          INSTALLATION_ID: ${{ secrets.OCTOEMU_LIVE_INSTALLATION_ID }}
+          ORG: ${{ secrets.OCTOEMU_LIVE_ORG }}
+          REPO: ${{ secrets.OCTOEMU_LIVE_REPO }}
+          TEAM: ${{ secrets.OCTOEMU_LIVE_TEAM }}
+          INVITEE_LOGIN: ${{ secrets.OCTOEMU_LIVE_INVITEE_LOGIN }}
+          INVITEE_PAT: ${{ secrets.OCTOEMU_LIVE_INVITEE_PAT }}
+          SIGNIN_CLIENT_ID: ${{ secrets.OCTOEMU_LIVE_SIGNIN_CLIENT_ID }}
+          SIGNIN_CLIENT_SECRET: ${{ secrets.OCTOEMU_LIVE_SIGNIN_CLIENT_SECRET }}
+          USER_TOKEN: ${{ secrets.OCTOEMU_LIVE_USER_TOKEN }}
+          POLICY_INSTALLATION_ID: ${{ secrets.OCTOEMU_LIVE_POLICY_INSTALLATION_ID }}
+          POLICY_ORG: ${{ secrets.OCTOEMU_LIVE_POLICY_ORG }}
+          POLICY_REPO: ${{ secrets.OCTOEMU_LIVE_POLICY_REPO }}
+          NO_SEAT_INSTALLATION_ID: ${{ secrets.OCTOEMU_LIVE_NO_SEAT_INSTALLATION_ID }}
+          NO_SEAT_ORG: ${{ secrets.OCTOEMU_LIVE_NO_SEAT_ORG }}
+        run: |
+          umask 077
+          dir="$RUNNER_TEMP/octoemu-live"
+          mkdir -p "$dir"
+          printf '%s\n' "$APP_PRIVATE_KEY" > "$dir/app.pem"
+          {
+            line() { if [ -n "$2" ]; then printf '%s=%s\n' "$1" "$2"; fi; }
+            line OCTOEMU_LIVE_APP_ID "$APP_ID"
+            line OCTOEMU_LIVE_APP_CLIENT_ID "$APP_CLIENT_ID"
+            line OCTOEMU_LIVE_APP_PRIVATE_KEY_PATH "$dir/app.pem"
+            line OCTOEMU_LIVE_APP_WEBHOOK_SECRET "$APP_WEBHOOK_SECRET"
+            line OCTOEMU_LIVE_INSTALLATION_ID "$INSTALLATION_ID"
+            line OCTOEMU_LIVE_ORG "$ORG"
+            line OCTOEMU_LIVE_REPO "$REPO"
+            line OCTOEMU_LIVE_TEAM "$TEAM"
+            line OCTOEMU_LIVE_INVITEE_LOGIN "$INVITEE_LOGIN"
+            line OCTOEMU_LIVE_INVITEE_PAT "$INVITEE_PAT"
+            line OCTOEMU_LIVE_SIGNIN_CLIENT_ID "$SIGNIN_CLIENT_ID"
+            line OCTOEMU_LIVE_SIGNIN_CLIENT_SECRET "$SIGNIN_CLIENT_SECRET"
+            line OCTOEMU_LIVE_USER_TOKEN "$USER_TOKEN"
+            line OCTOEMU_LIVE_POLICY_INSTALLATION_ID "$POLICY_INSTALLATION_ID"
+            line OCTOEMU_LIVE_POLICY_ORG "$POLICY_ORG"
+            line OCTOEMU_LIVE_POLICY_REPO "$POLICY_REPO"
+            line OCTOEMU_LIVE_NO_SEAT_INSTALLATION_ID "$NO_SEAT_INSTALLATION_ID"
+            line OCTOEMU_LIVE_NO_SEAT_ORG "$NO_SEAT_ORG"
+          } > "$dir/live.env"
+      - name: Run the fidelity suite against GitHub
+        env:
+          OCTOEMU_LIVE_ENV: ${{ runner.temp }}/octoemu-live/live.env
+          OCTOEMU_CONFORMANCE: ${{ inputs.mode }}
+          OCTOEMU_CONFORMANCE_ONLY: ${{ inputs.only }}
+          OCTOEMU_LIVE_DESTRUCTIVE: ${{ inputs.destructive && '1' || '0' }}
+          OCTOEMU_LIVE_SLOW: ${{ inputs.slow && '1' || '0' }}
+          OCTOEMU_CONFORMANCE_REPORT: ${{ runner.temp }}/fidelity-live.json
+        run: cargo test -p octoemu-conformance --test live --locked -- --ignored --nocapture
+      - name: Remove the live env file
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/octoemu-live"
+      # The normalised snapshots (placeholders, no secrets) and the report:
+      # commit the snapshots from a record run in a PR.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fidelity-live-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/fidelity-live.json
+            libs/octoauth/crates/octoemu-conformance/snapshots
+          if-no-files-found: ignore
+          retention-days: 7
