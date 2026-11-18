@@ -37,6 +37,17 @@ struct ExceptionFile {
     exception: Vec<Exception>,
 }
 
+/// A response body, as the check sees it.
+#[derive(Clone, Copy, Debug)]
+pub enum ResponseBody<'a> {
+    /// None at all.
+    Empty,
+    /// JSON.
+    Json(&'a Value),
+    /// Something that is not JSON.
+    Other,
+}
+
 /// What the check found for one response.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Finding {
@@ -178,8 +189,10 @@ impl Schemas {
         Ok(validator)
     }
 
-    /// Checks one response: `body` is `None` without one.
-    pub fn check(&self, method: &str, path: &str, status: u16, body: Option<&Value>) -> Finding {
+    /// Checks one response. Violation messages name the operation, the
+    /// instance pointer and the failed keyword, never the response's values
+    /// (a live response may hold addresses or tokens).
+    pub fn check(&self, method: &str, path: &str, status: u16, body: ResponseBody<'_>) -> Finding {
         let mut finding = Finding::default();
         let Some(route) = self.route_of(method, path) else {
             finding.note = Some(format!("{method} {path}: no operation in the description"));
@@ -201,20 +214,25 @@ impl Schemas {
                 serde_json::json!({"$ref": "#/components/schemas/basic-error"}),
             )
         } else {
-            finding.note = Some(format!(
+            // A success the description does not list: nothing checks the
+            // body, so the shape is unknown.
+            finding.violations.push(format!(
                 "{route}: status {status} is not in the description"
             ));
             return finding;
         };
         match (schema.is_null(), body) {
-            (true, None) => {}
-            (true, Some(_)) => finding.violations.push(format!(
+            (true, ResponseBody::Empty) => {}
+            (true, _) => finding.violations.push(format!(
                 "{route} {key}: a body where the description has none"
             )),
-            (false, None) => finding.violations.push(format!(
-                "{route} {key}: no JSON body where the description has one"
+            (false, ResponseBody::Empty) => finding.violations.push(format!(
+                "{route} {key}: no body where the description has a JSON one"
             )),
-            (false, Some(body)) => match self.validator(route, &key, &schema) {
+            (false, ResponseBody::Other) => finding.violations.push(format!(
+                "{route} {key}: a body that is not JSON where the description has a JSON one"
+            )),
+            (false, ResponseBody::Json(body)) => match self.validator(route, &key, &schema) {
                 Err(error) => finding.violations.push(error),
                 Ok(validator) => {
                     for error in validator.iter_errors(body) {
@@ -226,9 +244,11 @@ impl Schemas {
                                     || pointer.starts_with(&format!("{}/", exception.pointer)))
                         });
                         if !excused {
-                            finding
-                                .violations
-                                .push(format!("{route} {key} at {pointer:?}: {error}"));
+                            finding.violations.push(format!(
+                                "{route} {key} at {pointer:?} ({}): {}",
+                                error.kind().keyword(),
+                                error.masked()
+                            ));
                         }
                     }
                 }
@@ -260,13 +280,23 @@ mod tests {
         );
         assert_eq!(schemas.route_of("GET", "/nope"), None);
         // A wrong shape is caught; a right one passes.
-        let bad = schemas.check("GET", "/user/emails", 200, Some(&json!({"email": 1})));
+        let bad = schemas.check(
+            "GET",
+            "/user/emails",
+            200,
+            ResponseBody::Json(&json!({"email": "a@example.com"})),
+        );
         assert!(!bad.violations.is_empty());
+        // The value never shows in the diagnostic.
+        assert!(
+            bad.violations.iter().all(|v| !v.contains("a@example.com")),
+            "{bad:?}"
+        );
         let good = schemas.check(
             "GET",
             "/user/emails",
             200,
-            Some(&json!([{"email": "a@example.com", "primary": true, "verified": true, "visibility": null}])),
+            ResponseBody::Json(&json!([{"email": "a@example.com", "primary": true, "verified": true, "visibility": null}])),
         );
         assert!(good.violations.is_empty(), "{good:?}");
         // An undocumented error status falls back to basic-error.
@@ -274,12 +304,27 @@ mod tests {
             "GET",
             "/app",
             401,
-            Some(&json!({"message": "Bad credentials"})),
+            ResponseBody::Json(&json!({"message": "Bad credentials"})),
         );
         assert!(
             error.violations.is_empty() && error.note.is_some(),
             "{error:?}"
         );
+        // An undocumented success, a body where none is documented, text
+        // where JSON is: violations.
+        let app = json!({"slug": "x"});
+        for (status, body) in [
+            (201, ResponseBody::Json(&app)),
+            (200, ResponseBody::Other),
+            (200, ResponseBody::Empty),
+        ] {
+            let finding = schemas.check("GET", "/app", status, body);
+            assert!(!finding.violations.is_empty(), "{status} {body:?}");
+        }
+        let text = schemas.check("DELETE", "/installation/token", 204, ResponseBody::Other);
+        assert!(!text.violations.is_empty());
+        let none = schemas.check("DELETE", "/installation/token", 204, ResponseBody::Empty);
+        assert!(none.violations.is_empty(), "{none:?}");
         for exception in schemas.exceptions() {
             assert!(!exception.reason.trim().is_empty());
         }

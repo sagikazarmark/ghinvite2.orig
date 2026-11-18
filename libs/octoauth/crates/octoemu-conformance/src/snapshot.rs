@@ -16,6 +16,23 @@ use std::path::{Path, PathBuf};
 pub const EMULATOR_SOURCE: &str = "emulator (unverified)";
 /// `source` of a snapshot recorded against GitHub.
 pub const LIVE_SOURCE: &str = "live";
+/// `source` of a snapshot recorded by the live target pointed at another
+/// endpoint (`OCTOEMU_LIVE_API_BASE`): a smoke test, never a baseline.
+pub const CUSTOM_SOURCE: &str = "custom endpoint (not GitHub)";
+
+/// Who answered a recorded run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Provenance {
+    /// The embedded emulator.
+    Emulator,
+    /// GitHub itself.
+    GitHub,
+    /// The live target at an endpoint that is not GitHub's.
+    Custom,
+}
+
+const CUSTOM_NOTE: &str = "Recorded by the live target against an endpoint that is not GitHub's: \
+a smoke test, not a baseline. Record against GitHub to replace it.";
 
 const EMULATOR_NOTE: &str = "Generated from octoemu, not GitHub: unverified. \
 The first live run (record mode) overwrites this file; any diff it shows is the fidelity signal.";
@@ -63,13 +80,24 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// A snapshot from `source`'s run.
-    pub fn new(scenario: &str, live: bool, steps: Vec<Step>, incomplete: Option<String>) -> Self {
+    /// A snapshot of a run `provenance` answered.
+    pub fn new(
+        scenario: &str,
+        provenance: Provenance,
+        steps: Vec<Step>,
+        incomplete: Option<String>,
+    ) -> Self {
+        let (source, note) = match provenance {
+            Provenance::Emulator => (EMULATOR_SOURCE, Some(EMULATOR_NOTE)),
+            Provenance::GitHub => (LIVE_SOURCE, None),
+            Provenance::Custom => (CUSTOM_SOURCE, Some(CUSTOM_NOTE)),
+        };
         Self {
             scenario: scenario.to_owned(),
-            source: if live { LIVE_SOURCE } else { EMULATOR_SOURCE }.to_owned(),
-            recorded: live.then(|| chrono::Utc::now().format("%Y-%m-%d").to_string()),
-            note: (!live).then(|| EMULATOR_NOTE.to_owned()),
+            source: source.to_owned(),
+            recorded: (provenance != Provenance::Emulator)
+                .then(|| chrono::Utc::now().format("%Y-%m-%d").to_string()),
+            note: note.map(str::to_owned),
             incomplete,
             steps,
         }
@@ -97,13 +125,21 @@ impl Snapshot {
         }
     }
 
-    /// Writes it (pretty, with a final newline).
+    /// Writes it (pretty, with a final newline): to a temporary file
+    /// beside it first, then renamed over the old one, so a failed write
+    /// never leaves a truncated snapshot.
     pub fn save(&self, dir: &Path) -> Result<(), String> {
         let path = Self::path(dir, &self.scenario);
         let mut text = serde_json::to_string_pretty(self).map_err(|error| error.to_string())?;
         text.push('\n');
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
+        let temporary = dir.join(format!(".{}.json.tmp", self.scenario));
+        let written =
+            std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path));
+        written.map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("{}: {error}", path.display())
+        })
     }
 }
 
@@ -228,6 +264,29 @@ mod tests {
             headers: BTreeMap::from([("content-type".into(), "application/json".into())]),
             body,
         }
+    }
+
+    #[test]
+    fn snapshots_say_where_they_came_from_and_save_whole() {
+        let dir = std::env::temp_dir().join(format!("octoemu-snapshots-{}", std::process::id()));
+        for (provenance, source, live) in [
+            (Provenance::Emulator, EMULATOR_SOURCE, false),
+            (Provenance::GitHub, LIVE_SOURCE, true),
+            (Provenance::Custom, CUSTOM_SOURCE, false),
+        ] {
+            let snapshot = Snapshot::new("s", provenance, vec![step("a", 200, json!({}))], None);
+            assert_eq!(snapshot.source, source);
+            assert_eq!(snapshot.is_live(), live);
+            assert_eq!(
+                snapshot.recorded.is_some(),
+                provenance != Provenance::Emulator
+            );
+            snapshot.save(&dir).unwrap();
+            assert_eq!(Snapshot::load(&dir, "s").unwrap(), Some(snapshot));
+        }
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(left.len(), 1, "no temporary file left");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

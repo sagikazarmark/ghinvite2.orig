@@ -14,7 +14,7 @@ mod oauth;
 mod orgs;
 mod repos;
 
-use crate::ctx::{Ctx, Req, Stop};
+use crate::ctx::{Ctx, Reply, Req, Stop, fail};
 use crate::target::EmulatorSetup;
 use std::future::Future;
 use std::pin::Pin;
@@ -195,9 +195,19 @@ fn repo_path(ctx: &Ctx) -> String {
     format!("/repos/{}/{}", world.org, world.repo)
 }
 
+/// A cleanup request's answer: one of `ok`, else the scenario fails, so
+/// the next one never starts from a state left behind.
+fn cleaned(what: &str, reply: &Reply, ok: &[u16]) -> Result<(), Stop> {
+    if ok.contains(&reply.status) {
+        Ok(())
+    } else {
+        fail(format!("cleanup: {what}: {} {}", reply.status, reply.body))
+    }
+}
+
 /// Removes the invitee's collaboration and pending invitations on the
 /// world's repository (unrecorded), so a scenario starts clean and leaves
-/// nothing behind.
+/// nothing behind. Already gone (404) is clean.
 async fn clear_repository(ctx: &mut Ctx) -> Result<(), Stop> {
     let token = ctx.token().await?;
     let repo = repo_path(ctx);
@@ -205,42 +215,70 @@ async fn clear_repository(ctx: &mut Ctx) -> Result<(), Stop> {
     let list = ctx
         .call(Req::get(format!("{repo}/invitations?per_page=100")).bearer(&token))
         .await?;
-    for invitation in list.body.as_array().into_iter().flatten() {
+    cleaned("listing the invitations", &list, &[200])?;
+    let Some(invitations) = list.body.as_array() else {
+        return fail(format!(
+            "cleanup: the invitation list is not a list: {}",
+            list.body
+        ));
+    };
+    for invitation in invitations {
         let theirs = invitation["invitee"]["login"]
             .as_str()
             .is_some_and(|login| login.eq_ignore_ascii_case(&invitee));
         if let (true, Some(id)) = (theirs, invitation["id"].as_u64()) {
-            ctx.call(Req::delete(format!("{repo}/invitations/{id}")).bearer(&token))
+            let deleted = ctx
+                .call(Req::delete(format!("{repo}/invitations/{id}")).bearer(&token))
                 .await?;
+            cleaned("deleting an invitation", &deleted, &[204, 404])?;
         }
     }
-    ctx.call(Req::delete(format!("{repo}/collaborators/{invitee}")).bearer(&token))
+    let removed = ctx
+        .call(Req::delete(format!("{repo}/collaborators/{invitee}")).bearer(&token))
         .await?;
+    cleaned("removing the collaborator", &removed, &[204, 404])?;
     ctx.revoke(&token).await;
     Ok(())
 }
 
 /// Removes the invitee's organization membership or invitation
-/// (unrecorded).
+/// (unrecorded). Not a member (404) is clean.
 async fn clear_organization(ctx: &mut Ctx) -> Result<(), Stop> {
     let token = ctx.token().await?;
     let world = ctx.world().clone();
-    ctx.call(
-        Req::delete(format!("/orgs/{}/memberships/{}", world.org, world.invitee)).bearer(&token),
-    )
-    .await?;
+    let removed = ctx
+        .call(
+            Req::delete(format!("/orgs/{}/memberships/{}", world.org, world.invitee))
+                .bearer(&token),
+        )
+        .await?;
+    cleaned("removing the membership", &removed, &[204, 404])?;
     ctx.revoke(&token).await;
     Ok(())
 }
 
-/// Runs `steps`, then `cleanup` whatever happened; the steps' outcome wins.
+/// Combines a scenario's steps and its cleanup: the steps' outcome when the
+/// cleanup succeeds; a failure naming both when it does not, even if the
+/// steps passed or skipped (something may have been left behind).
+fn with_cleanup(steps: Result<(), Stop>, cleanup: Result<(), Stop>) -> Result<(), Stop> {
+    match (steps, cleanup) {
+        (steps, Ok(())) => steps,
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (
+            Err(Stop::Skip(reason) | Stop::Fail(reason)),
+            Err(Stop::Skip(cleanup) | Stop::Fail(cleanup)),
+        ) => fail(format!("{cleanup} (after: {reason})")),
+    }
+}
+
+/// Runs `cleanup` after `steps`, whatever happened; see [`with_cleanup`].
 async fn then_cleanup(
     ctx: &mut Ctx,
     steps: Result<(), Stop>,
     cleanup: for<'a> fn(&'a mut Ctx) -> BoxFuture<'a>,
 ) -> Result<(), Stop> {
     let cleaned = cleanup(ctx).await;
-    steps.and(cleaned)
+    with_cleanup(steps, cleaned)
 }
 
 fn clear_repository_boxed(ctx: &mut Ctx) -> BoxFuture<'_> {
@@ -255,6 +293,19 @@ fn clear_organization_boxed(ctx: &mut Ctx) -> BoxFuture<'_> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn a_failed_cleanup_is_never_hidden() {
+        let skip = || Err(Stop::Skip("skipped".into()));
+        let broke = || Err(Stop::Fail("cleanup: 500".into()));
+        assert_eq!(with_cleanup(Ok(()), Ok(())), Ok(()));
+        assert_eq!(with_cleanup(skip(), Ok(())), skip());
+        assert_eq!(with_cleanup(Ok(()), broke()), broke());
+        assert_eq!(
+            with_cleanup(skip(), broke()),
+            Err(Stop::Fail("cleanup: 500 (after: skipped)".into()))
+        );
+    }
 
     #[test]
     fn ids_are_unique_and_match_the_fidelity_manifest() {

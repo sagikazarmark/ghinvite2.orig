@@ -725,14 +725,24 @@ octoemu or against real GitHub (plan §4, GE-08).
   (unverified)"`**: they were generated from octoemu. The first live run
   in record mode overwrites them, and the diff it shows is the fidelity
   signal; from then on the emulator run is compared with GitHub's answers,
-  and an emulator record run never overwrites a live snapshot.
+  and an emulator record run never overwrites a live snapshot. The live
+  target pointed at another endpoint (`OCTOEMU_LIVE_API_BASE`, e.g. an
+  `octoemu` binary for a smoke test) records `"source": "custom endpoint
+  (not GitHub)"` and never overwrites a live snapshot either.
+- **Cleanup** is checked: a scenario whose cleanup request fails (an
+  invitation, collaboration, membership or suspension left behind) fails,
+  even when its steps passed or skipped.
 - **Schema check**: every response is validated with the `jsonschema`
   crate against `schemas/rest-api-subset.json`, the operations octoemu
   implements cut out of [github/rest-api-description](https://github.com/github/rest-api-description)
   at commit `c9c95fe34ced05fe076001f5c55704742bc8e7f8`
   (`descriptions-next/api.github.com/api.github.com.2022-11-28.json`,
   OpenAPI 3.1.0, sha256 `42f012de…a33aad` in the file's `source`). An
-  error status the description does not list is checked as `basic-error`.
+  error status the description does not list is checked as `basic-error`;
+  an undocumented success status, a body where none is documented and a
+  non-JSON body where JSON is are violations. Violations name the
+  operation, the instance pointer and the keyword, never the response's
+  values.
   `schemas/exceptions.toml` holds documented exceptions where the
   published schema is known to be wrong (none yet). To move the pin,
   download the description into a fresh directory outside the

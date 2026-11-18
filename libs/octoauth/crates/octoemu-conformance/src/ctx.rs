@@ -2,7 +2,7 @@
 //! routes, App JWTs, recording, and the clock.
 
 use crate::normalise::{Normaliser, RELIED_HEADERS};
-use crate::schema::{Finding, Schemas};
+use crate::schema::{Finding, ResponseBody, Schemas};
 use crate::snapshot::Step;
 use crate::target::{TargetKind, World};
 use base64::Engine as _;
@@ -428,12 +428,14 @@ impl Ctx {
         if req.base == Base::Api
             && let Some(schemas) = &self.schemas
         {
-            let finding = schemas.check(
-                req.method.as_str(),
-                req.path_only(),
-                reply.status,
-                reply.is_json.then_some(&reply.body),
-            );
+            let body = if reply.is_json {
+                ResponseBody::Json(&reply.body)
+            } else if reply.body.is_null() {
+                ResponseBody::Empty
+            } else {
+                ResponseBody::Other
+            };
+            let finding = schemas.check(req.method.as_str(), req.path_only(), reply.status, body);
             if !finding.violations.is_empty() || finding.note.is_some() {
                 self.schema_findings
                     .push((format!("{} {}", req.method, req.path), finding));

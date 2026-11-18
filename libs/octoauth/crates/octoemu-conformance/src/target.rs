@@ -163,6 +163,26 @@ impl Target {
         }
     }
 
+    /// Who answers: the emulator, GitHub, or (the live target with
+    /// `OCTOEMU_LIVE_API_BASE` or `OCTOEMU_LIVE_WEB_BASE` elsewhere) a custom
+    /// endpoint, whose recordings never count as GitHub's.
+    pub fn provenance(&self) -> crate::snapshot::Provenance {
+        use crate::snapshot::Provenance;
+        match self {
+            Self::Emulator => Provenance::Emulator,
+            Self::Live(config) => {
+                let world = config.world();
+                let github = world.api_base.trim_end_matches('/') == GITHUB_API
+                    && world.web_base.trim_end_matches('/') == GITHUB_WEB;
+                if github {
+                    Provenance::GitHub
+                } else {
+                    Provenance::Custom
+                }
+            }
+        }
+    }
+
     /// Opens a session for one scenario: on the emulator, a fresh emulator
     /// seeded with the fidelity world and `setup` applied.
     pub async fn session(&self, setup: Option<EmulatorSetup>) -> Result<Session, String> {
@@ -364,6 +384,9 @@ fn emulator_world(emulator: &Emulator) -> Result<World, String> {
 
 // --- The live env file ---------------------------------------------------------
 
+const GITHUB_API: &str = "https://api.github.com";
+const GITHUB_WEB: &str = "https://github.com";
+
 /// The live target's configuration, from the env file.
 #[derive(Debug)]
 pub struct LiveConfig {
@@ -483,10 +506,10 @@ impl LiveConfig {
         World {
             api_base: self
                 .get("OCTOEMU_LIVE_API_BASE")
-                .unwrap_or_else(|| "https://api.github.com".into()),
+                .unwrap_or_else(|| GITHUB_API.into()),
             web_base: self
                 .get("OCTOEMU_LIVE_WEB_BASE")
-                .unwrap_or_else(|| "https://github.com".into()),
+                .unwrap_or_else(|| GITHUB_WEB.into()),
             app: AppCredentials {
                 id: self.number("OCTOEMU_LIVE_APP_ID").unwrap_or_default(),
                 client_id: self.get("OCTOEMU_LIVE_APP_CLIENT_ID"),

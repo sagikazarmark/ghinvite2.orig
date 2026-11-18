@@ -269,12 +269,47 @@ pub(super) fn suspended_installation(ctx: &mut Ctx) -> BoxFuture<'_> {
         let jwt = ctx.app_jwt().await?;
         let steps = suspended_steps(ctx, &jwt, &token).await;
         // Never leave the live installation suspended.
-        let installation = format!("/app/installations/{}", ctx.world().installation_id);
-        ctx.call(Req::delete(format!("{installation}/suspended")).bearer(&jwt))
-            .await?;
+        let restored = unsuspend(ctx).await;
         ctx.revoke(&token).await;
-        steps
+        super::with_cleanup(steps, restored)
     })
+}
+
+/// Lifts the suspension (unrecorded), retrying, and checks that it is
+/// lifted.
+async fn unsuspend(ctx: &mut Ctx) -> Result<(), Stop> {
+    let installation = format!("/app/installations/{}", ctx.world().installation_id);
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            ctx.pause(Duration::from_secs(2)).await;
+        }
+        let jwt = ctx.app_jwt().await?;
+        let lifted = ctx
+            .call(Req::delete(format!("{installation}/suspended")).bearer(&jwt))
+            .await;
+        let shown = ctx.call(Req::get(&installation).bearer(&jwt)).await;
+        match (lifted, shown) {
+            (Ok(lifted), Ok(shown))
+                if lifted.status == 204
+                    && shown.status == 200
+                    && shown.body["suspended_at"].is_null() =>
+            {
+                return Ok(());
+            }
+            (Ok(lifted), Ok(shown)) => {
+                last = format!(
+                    "unsuspend {}, installation {} {}",
+                    lifted.status, shown.status, shown.body["suspended_at"]
+                );
+            }
+            (Err(Stop::Fail(error) | Stop::Skip(error)), _)
+            | (_, Err(Stop::Fail(error) | Stop::Skip(error))) => last = error,
+        }
+    }
+    fail(format!(
+        "cleanup: the installation is still suspended ({last}): lift it by hand"
+    ))
 }
 
 pub(super) fn api_version_unsupported(ctx: &mut Ctx) -> BoxFuture<'_> {

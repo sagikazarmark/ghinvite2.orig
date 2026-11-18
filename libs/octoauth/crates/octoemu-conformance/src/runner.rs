@@ -4,7 +4,7 @@
 use crate::ctx::{Ctx, Req, Stop, fail};
 use crate::scenarios::{self, Scenario};
 use crate::schema::Schemas;
-use crate::snapshot::{Diff, Snapshot};
+use crate::snapshot::{Diff, Provenance, Snapshot};
 use crate::target::{Known, Target, TargetKind};
 use serde::Serialize;
 use std::collections::BTreeSet;
@@ -375,9 +375,12 @@ async fn run_one(
             return report;
         }
     };
-    let keep_live = !live && existing.as_ref().is_some_and(Snapshot::is_live);
+    let provenance = target.provenance();
+    // Only GitHub replaces what GitHub recorded.
+    let keep_live =
+        provenance != Provenance::GitHub && existing.as_ref().is_some_and(Snapshot::is_live);
     if options.mode == Mode::Record && !keep_live && (live || incomplete.is_none()) {
-        let snapshot = Snapshot::new(scenario.id, live, steps, incomplete.clone());
+        let snapshot = Snapshot::new(scenario.id, provenance, steps, incomplete.clone());
         report.outcome = match snapshot.save(&options.snapshots) {
             Ok(()) => Outcome::Recorded,
             Err(error) => {
