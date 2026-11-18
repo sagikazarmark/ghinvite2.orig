@@ -526,6 +526,103 @@ async fn unknown_foreign_and_uninstalled_installations_are_gone() {
 }
 
 #[tokio::test]
+async fn the_app_uninstalls_itself_and_its_tokens_stop_working() {
+    let emulator = start().await;
+    let jwt = bearer(&jwt(PRIVATE_KEY, &claims(&emulator, json!(4))));
+    let minted = create_token(&emulator, 5, json!({})).await;
+    let token = minted.body["token"].as_str().unwrap().to_owned();
+    let url = |id: u64| format!("{}/app/installations/{id}", emulator.api_base());
+    // Another App's installation and an unknown one are not this App's.
+    for id in [8, 999] {
+        let refused = call(reqwest::Method::DELETE, &url(id), Some(&jwt), None).await;
+        assert_eq!(refused.status, StatusCode::NOT_FOUND, "{id}");
+    }
+    let deleted = call(reqwest::Method::DELETE, &url(5), Some(&jwt), None).await;
+    assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        get(&emulator, "/app/installations/5", &jwt).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(&emulator, "/installation/repositories", &bearer(&token))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        create_token(&emulator, 5, json!({})).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let again = call(reqwest::Method::DELETE, &url(5), Some(&jwt), None).await;
+    assert_eq!(again.status, StatusCode::NOT_FOUND);
+    // installation.deleted, sent by the App's bot.
+    let deleted = emulator
+        .events()
+        .into_iter()
+        .find(|e| e.event == "installation" && e.action.as_deref() == Some("deleted"))
+        .unwrap();
+    assert_eq!(deleted.payload["sender"]["login"], "invite-bot[bot]");
+}
+
+#[tokio::test]
+async fn an_unsupported_api_version_is_a_400_on_the_api_only() {
+    let emulator = start().await;
+    let jwt = bearer(&jwt(PRIVATE_KEY, &claims(&emulator, json!(4))));
+    let client = Client::new();
+    let app = format!("{}/app", emulator.api_base());
+    for version in ["2022-11-28", "2026-03-10"] {
+        let ok = client
+            .get(&app)
+            .header("authorization", &jwt)
+            .header("x-github-api-version", version)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), StatusCode::OK, "{version}");
+    }
+    for version in ["2021-01-01", "latest"] {
+        let refused = client
+            .get(&app)
+            .header("x-github-api-version", version)
+            .send()
+            .await
+            .unwrap();
+        // Before the credential: none is sent.
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{version}");
+        let body: Value = serde_json::from_str(&refused.text().await.unwrap()).unwrap();
+        assert_eq!(
+            body["message"],
+            format!("Unsupported API version {version}")
+        );
+    }
+    // The web routes ignore it.
+    let web = client
+        .post(format!("{}/login/oauth/access_token", emulator.web_base()))
+        .header("x-github-api-version", "2021-01-01")
+        .header("accept", "application/json")
+        .form(&[("client_id", "Iv23.fixture"), ("code", "nope")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(web.status(), StatusCode::OK);
+    // Refuse-assumed mode refuses the guess.
+    let strict = Emulator::builder(seed())
+        .refuse_assumed()
+        .start()
+        .await
+        .unwrap();
+    let refused = client
+        .get(format!("{}/app", strict.api_base()))
+        .header("x-github-api-version", "2021-01-01")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::NOT_IMPLEMENTED);
+    let body: Value = serde_json::from_str(&refused.text().await.unwrap()).unwrap();
+    assert_eq!(body["behaviour"], "unsupported-api-version");
+}
+
+#[tokio::test]
 async fn permissions_and_repositories_narrow_and_never_widen() {
     let emulator = start().await;
     let app = app_client(&emulator);

@@ -80,6 +80,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "pagination",
     "pat-scopes",
     "permission-enforcement",
+    "outside-collaborator-policy",
     "permission-without-access",
     "pkce",
     "pkce-exchange-errors",
@@ -97,6 +98,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "request-id-header",
     "requires-authentication",
     "role-names",
+    "secondary-rate-limit",
     "suspended-installation",
     "suspended-installation-tokens",
     "suspended-installation-webhooks",
@@ -108,6 +110,7 @@ pub(crate) const BEHAVIOURS: &[&str] = &[
     "token-repositories-union",
     "token-revocation-immediate",
     "unknown-user-404",
+    "unsupported-api-version",
     "unsupported-grant-type",
     "user-installation-access",
     "user-installation-repository-selection",
@@ -223,6 +226,12 @@ pub(crate) fn github() -> Api {
             "/app/installations/{installation_id}",
             Auth::App,
             apps::get_installation,
+        )
+        .route(
+            Method::DELETE,
+            "/app/installations/{installation_id}",
+            Auth::App,
+            apps::delete_installation,
         )
         .route(
             Method::POST,

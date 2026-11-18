@@ -11,6 +11,25 @@ Not yet published; developed inside the ghinvite repository.
 
 ### Added
 
+- Fidelity suite support (GE-08, emulator half): `fidelity.toml` gains a
+  `[scenarios]` table mapping each `octoemu-conformance` scenario ID to the
+  entries it measures (`Manifest::scenarios`, `Manifest::scenarios_for`);
+  a `verified` entry must name a listed scenario; `octoemu --fidelity`
+  shows a `SCENARIOS` column and counts the covered entries.
+- `DELETE /app/installations/{installation_id}` (documented): the App
+  uninstalls itself; 204, `installation.deleted` sent by its bot, its tokens
+  stop working; 404 for an unknown installation or another App's.
+- `X-GitHub-Api-Version` check (`unsupported-api-version`, assumed): a value
+  other than `2022-11-28` or `2026-03-10` is a 400 `Unsupported API version
+  <value>` on every REST route, before the credential; refused in
+  refuse-assumed mode.
+- The outside-collaborator policy (`outside-collaborator-policy`, assumed):
+  an organization seeded `outside_collaborators_restricted`
+  (`Org::restrict_outside_collaborators`) answers an App's collaborator PUT
+  for a non-member with 403 `Inviting outside collaborators is restricted by
+  organization policy.`; refused in refuse-assumed mode.
+- `secondary-rate-limit` (assumed, a label): no secondary limit is modelled;
+  the fidelity suite's live run records GitHub's shape.
 - `GET /user/installations/{installation_id}/repositories` (documented): a
   GitHub App's user access token lists the installation's repositories the
   user has explicit access to, each with the user's `permissions`, paged,
@@ -172,6 +191,17 @@ compat`, `/__octoemu/compat/`) was never released and is gone (GE-09c).
 
 ### Changed
 
+- Response objects carry every field their OpenAPI schema requires, as the
+  fidelity suite's schema check found missing: users (`simple-user`'s nine
+  URL templates, on App bots too), organizations (`organization-simple`'s
+  `repos_url`, `events_url`, `hooks_url`, `issues_url`, `members_url`,
+  `public_members_url`), teams (`type: "organization"`) and repositories
+  (every `*_url` template on the minimal form; installation repository
+  lists, token `repositories` and `GET /repos/{owner}/{repo}` now use the
+  full `repository` form with clone URLs, `default_branch`, zeroed counts,
+  `has_*` flags, `license`, `mirror_url`, `topics`; the full form adds
+  `network_count` and `subscribers_count`). Webhook payloads carry the same
+  objects.
 - The server runs its own HTTP/1.1 accept loop (hyper) instead of
   `axum::serve`, so a fault rule can drop a connection; shutdown still
   waits for in-flight requests and releases held ones (GE-07).

@@ -114,6 +114,68 @@ pub(crate) fn team_role_name(role: TeamRole) -> &'static str {
     }
 }
 
+/// The URL templates of every repository, after its API URL
+/// (`minimal-repository`).
+const REPOSITORY_URLS: &[(&str, &str)] = &[
+    ("archive_url", "/{archive_format}{/ref}"),
+    ("assignees_url", "/assignees{/user}"),
+    ("blobs_url", "/git/blobs{/sha}"),
+    ("branches_url", "/branches{/branch}"),
+    ("collaborators_url", "/collaborators{/collaborator}"),
+    ("comments_url", "/comments{/number}"),
+    ("commits_url", "/commits{/sha}"),
+    ("compare_url", "/compare/{base}...{head}"),
+    ("contents_url", "/contents/{+path}"),
+    ("contributors_url", "/contributors"),
+    ("deployments_url", "/deployments"),
+    ("downloads_url", "/downloads"),
+    ("events_url", "/events"),
+    ("forks_url", "/forks"),
+    ("git_commits_url", "/git/commits{/sha}"),
+    ("git_refs_url", "/git/refs{/sha}"),
+    ("git_tags_url", "/git/tags{/sha}"),
+    ("hooks_url", "/hooks"),
+    ("issue_comment_url", "/issues/comments{/number}"),
+    ("issue_events_url", "/issues/events{/number}"),
+    ("issues_url", "/issues{/number}"),
+    ("keys_url", "/keys{/key_id}"),
+    ("labels_url", "/labels{/name}"),
+    ("languages_url", "/languages"),
+    ("merges_url", "/merges"),
+    ("milestones_url", "/milestones{/number}"),
+    (
+        "notifications_url",
+        "/notifications{?since,all,participating}",
+    ),
+    ("pulls_url", "/pulls{/number}"),
+    ("releases_url", "/releases{/id}"),
+    ("stargazers_url", "/stargazers"),
+    ("statuses_url", "/statuses/{sha}"),
+    ("subscribers_url", "/subscribers"),
+    ("subscription_url", "/subscription"),
+    ("tags_url", "/tags"),
+    ("teams_url", "/teams"),
+    ("trees_url", "/git/trees{/sha}"),
+];
+
+/// A `simple-user`'s URL templates.
+fn user_urls(body: &mut Value, origin: &str, login: &str) {
+    let base = format!("{origin}/users/{login}");
+    for (field, path) in [
+        ("followers_url", "/followers"),
+        ("following_url", "/following{/other_user}"),
+        ("gists_url", "/gists{/gist_id}"),
+        ("starred_url", "/starred{/owner}{/repo}"),
+        ("subscriptions_url", "/subscriptions"),
+        ("organizations_url", "/orgs"),
+        ("repos_url", "/repos"),
+        ("events_url", "/events{/privacy}"),
+        ("received_events_url", "/received_events"),
+    ] {
+        body[field] = format!("{base}{path}").into();
+    }
+}
+
 impl View<'_> {
     /// An organization as `GET /orgs/{org}` reports it (an
     /// `organization-full` subset). `plan` only with `plan` (the caller
@@ -239,6 +301,7 @@ impl View<'_> {
             "permission": "pull",
             "members_url": format!("{origin}/orgs/{org}/teams/{slug}/members{{/member}}"),
             "repositories_url": format!("{origin}/orgs/{org}/teams/{slug}/repos"),
+            "type": "organization",
         })
     }
 
@@ -354,7 +417,7 @@ impl View<'_> {
                 .find(|o| o.login.eq_ignore_ascii_case(login))?;
             (org.id, org.login.as_str(), "Organization")
         };
-        Some(json!({
+        let mut body = json!({
             "login": login,
             "id": id,
             "node_id": node_id(kind, id),
@@ -364,7 +427,9 @@ impl View<'_> {
             "html_url": format!("{origin}/{login}"),
             "type": kind,
             "site_admin": false,
-        }))
+        });
+        user_urls(&mut body, origin, login);
+        Some(body)
     }
 
     /// The account's numeric ID and type, for `target_id`/`target_type`.
@@ -374,12 +439,12 @@ impl View<'_> {
             .unwrap_or_default()
     }
 
-    /// A repository as a `minimal-repository` subset.
+    /// A repository as a `minimal-repository` (invitations carry it).
     pub(crate) fn repo(&self, repo: &Repo) -> Value {
         let origin = self.origin;
         let full_name = repo.full_name();
         let created = timestamp(repo.created_at.unwrap_or(self.start));
-        json!({
+        let mut body = json!({
             "id": repo.id,
             "node_id": node_id("Repository", repo.id),
             "name": repo.name,
@@ -395,7 +460,61 @@ impl View<'_> {
             "disabled": false,
             "created_at": created,
             "updated_at": created,
-        })
+        });
+        let url = format!("{origin}/repos/{full_name}");
+        for (field, path) in REPOSITORY_URLS {
+            body[*field] = format!("{url}{path}").into();
+        }
+        body
+    }
+
+    /// A repository as installation repository lists and token
+    /// `repositories` carry it (`repository`, without the counts GitHub
+    /// keeps: they are 0 here).
+    pub(crate) fn repository(&self, repo: &Repo) -> Value {
+        let mut body = self.repo(repo);
+        let origin = self.origin;
+        let full_name = repo.full_name();
+        // The host without the port, as git and SSH URLs name it.
+        let host = origin.split_once("://").map_or(origin, |(_, host)| host);
+        let host = host
+            .rsplit_once(':')
+            .filter(|(_, port)| port.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(host, |(host, _)| host)
+            .to_owned();
+        for (field, value) in [
+            ("clone_url", format!("{origin}/{full_name}.git").into()),
+            ("git_url", format!("git://{host}/{full_name}.git").into()),
+            ("ssh_url", format!("git@{host}:{full_name}.git").into()),
+            ("svn_url", format!("{origin}/{full_name}").into()),
+            ("mirror_url", Value::Null),
+            ("homepage", Value::Null),
+            ("language", Value::Null),
+            ("default_branch", "main".into()),
+            ("forks", 0.into()),
+            ("forks_count", 0.into()),
+            ("open_issues", 0.into()),
+            ("open_issues_count", 0.into()),
+            ("stargazers_count", 0.into()),
+            ("watchers", 0.into()),
+            ("watchers_count", 0.into()),
+            ("size", 0.into()),
+            ("license", Value::Null),
+            ("has_issues", true.into()),
+            ("has_projects", true.into()),
+            ("has_wiki", true.into()),
+            ("has_pages", false.into()),
+            ("has_downloads", true.into()),
+            ("has_discussions", false.into()),
+            ("is_template", false.into()),
+            ("topics", json!([])),
+            ("allow_forking", true.into()),
+            ("web_commit_signoff_required", false.into()),
+        ] {
+            body[field] = value;
+        }
+        body["pushed_at"] = body["created_at"].clone();
+        body
     }
 
     /// A repository as webhook lists carry it (`repositories_added`,
@@ -414,16 +533,9 @@ impl View<'_> {
     /// A repository as `GET /repos/{owner}/{repo}` reports it (a
     /// `full-repository` subset).
     pub(crate) fn full_repo(&self, repo: &Repo) -> Value {
-        let mut body = self.repo(repo);
-        let origin = self.origin;
-        let full_name = repo.full_name();
-        body["default_branch"] = "main".into();
-        body["homepage"] = Value::Null;
-        body["language"] = Value::Null;
-        body["is_template"] = false.into();
-        body["collaborators_url"] =
-            format!("{origin}/repos/{full_name}/collaborators{{/collaborator}}").into();
-        body["pushed_at"] = body["created_at"].clone();
+        let mut body = self.repository(repo);
+        body["network_count"] = 0.into();
+        body["subscribers_count"] = 0.into();
         if crate::access::org_owned(self.world, repo) {
             body["organization"] = self.account(&repo.owner).unwrap_or_default();
         }
@@ -490,7 +602,7 @@ impl View<'_> {
             .map_or_else(|| format!("app-{app_id}"), |a| a.slug.clone());
         let login = format!("{slug}[bot]");
         let id = BOT_ID_OFFSET + app_id;
-        json!({
+        let mut body = json!({
             "login": login,
             "id": id,
             "node_id": node_id("Bot", id),
@@ -500,7 +612,9 @@ impl View<'_> {
             "html_url": format!("{origin}/apps/{slug}"),
             "type": "Bot",
             "site_admin": false,
-        })
+        });
+        user_urls(&mut body, origin, &login);
+        body
     }
 
     /// A collaborator: the account plus `permissions` and `role_name`.
@@ -539,7 +653,8 @@ impl View<'_> {
         })
     }
 
-    /// An organization as webhook payloads carry it.
+    /// An organization as webhook payloads and memberships carry it
+    /// (`organization-simple`).
     pub(crate) fn organization(&self, login: &str) -> Option<Value> {
         let origin = self.origin;
         let org = self
@@ -547,11 +662,18 @@ impl View<'_> {
             .orgs
             .iter()
             .find(|o| o.login.eq_ignore_ascii_case(login))?;
+        let login = &org.login;
         Some(json!({
-            "login": org.login,
+            "login": login,
             "id": org.id,
             "node_id": node_id("Organization", org.id),
-            "url": format!("{origin}/orgs/{}", org.login),
+            "url": format!("{origin}/orgs/{login}"),
+            "repos_url": format!("{origin}/orgs/{login}/repos"),
+            "events_url": format!("{origin}/orgs/{login}/events"),
+            "hooks_url": format!("{origin}/orgs/{login}/hooks"),
+            "issues_url": format!("{origin}/orgs/{login}/issues"),
+            "members_url": format!("{origin}/orgs/{login}/members{{/member}}"),
+            "public_members_url": format!("{origin}/orgs/{login}/public_members{{/member}}"),
             "avatar_url": format!("{origin}/avatars/u/{}?v=4", org.id),
             "description": null,
         }))

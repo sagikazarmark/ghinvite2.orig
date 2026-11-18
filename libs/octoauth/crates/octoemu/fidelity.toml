@@ -14,6 +14,12 @@
 #
 # [behaviours.<id>]: exactly one entry per cross-cutting behaviour listed in
 # `api::BEHAVIOURS`, checked the same way.
+#
+# [scenarios]: each fidelity-suite scenario ID (crates/octoemu-conformance)
+# with the entries it measures: route keys ("GET /app") and behaviour IDs.
+# A live run that passes a scenario stamps those entries `verified` with its
+# ID; `octoemu --fidelity` shows the scenarios per entry. The conformance
+# crate's tests fail when its scenarios and this table disagree.
 
 # Every unbuilt API and web route answers 501
 # {"message": "octoemu: not implemented", "route": "<METHOD> <path>"}.
@@ -32,6 +38,13 @@ doc = "https://docs.github.com/en/rest/apps/apps#list-installations-for-the-auth
 label = "documented"
 doc = "https://docs.github.com/en/rest/apps/apps#get-an-installation-for-the-authenticated-app"
 # 404 for an unknown installation or another App's.
+
+[routes."DELETE /app/installations/{installation_id}"]
+label = "documented"
+doc = "https://docs.github.com/en/rest/apps/apps#delete-an-installation-for-the-authenticated-app"
+# 204; installation.deleted (sent by the App's bot); its tokens stop working
+# (token-revocation-immediate). 404 for an unknown installation or another
+# App's.
 
 [routes."POST /app/installations/{installation_id}/access_tokens"]
 label = "documented"
@@ -108,9 +121,17 @@ label = "documented"
 doc = "https://docs.github.com/en/rest/using-the-rest-api/troubleshooting-the-rest-api"
 # 422 "Validation Failed" adds errors[{resource, field, code}].
 
+[behaviours.unsupported-api-version]
+label = "assumed"
+reason = "An X-GitHub-Api-Version naming no supported version (2022-11-28, 2026-03-10) is a 400 {\"message\": \"Unsupported API version <value>\"} on every REST route, before the credential is checked; no header means the default version. The docs disagree (the API versions page says 400 for a version no longer supported, the breaking-changes page 410), and the message, the order against authentication and how a malformed value is treated are unmeasured. Scenario api-version-unsupported. Refused in refuse-assumed mode."
+
 [behaviours.rate-limit-headers]
 label = "assumed"
 reason = "The x-ratelimit-* header names are documented; the values are a fixed stub (5000 limit, 5000 remaining, core, reset in 1 h) until per-credential budgets are modelled. Omitted in refuse-assumed mode."
+
+[behaviours.secondary-rate-limit]
+label = "assumed"
+reason = "Not modelled: octoemu never applies a secondary rate limit of its own; a fault rule injects one, in whatever shape the test gives (ghinvite's suites use 403 with Retry-After). GitHub's shape (403 or 429, which headers, the message) is unmeasured; scenario secondary-limit-shape (live, destructive) records it. A label only: nothing is refused."
 
 [behaviours.request-id-header]
 label = "assumed"
@@ -402,6 +423,10 @@ doc = "https://docs.github.com/en/account-and-profile/setting-up-and-managing-yo
 # stay theirs, and the old login no longer names them (admin
 # POST /__octoemu/users/{login}/rename). Not modelled: GitHub's redirects for
 # a renamed owner's repositories (the emulator refuses to rename an owner).
+
+[behaviours.outside-collaborator-policy]
+label = "assumed"
+reason = "An organization seeded `outside_collaborators_restricted` (GitHub's 'Allow repository administrators to invite outside collaborators' switched off) refuses an App's PUT /repos/{owner}/{repo}/collaborators/{username} for a user who is not an active member: 403 'Inviting outside collaborators is restricted by organization policy.' (the text ghinvite-github classifies; community-reported). Members and existing collaborators are unaffected; a re-PUT on a pending invitation is refused like a new one. Whether the policy reaches an App at all, the status (403 or 422) and the text are unmeasured; scenario outside-collaborator-policy. Refused in refuse-assumed mode."
 
 [behaviours.out-of-scope-repository]
 label = "assumed"
@@ -967,3 +992,97 @@ reason = "An email invitation keeps login null; a user with a matching verified 
 [behaviours.user-token-org-membership-list]
 label = "assumed"
 reason = "A GitHub App's user access token may call GET /user/memberships/orgs without any App permission (the route is not in GitHub's permission table; PATs are documented). Refused in refuse-assumed mode for ghu_ callers."
+
+# --- Fidelity-suite scenarios (GE-08) -------------------------------------------
+
+[scenarios]
+jwt-error-matrix = [
+    "GET /app",
+    "app-jwt",
+    "jwt-error-messages",
+    "jwt-exp-after-iat",
+    "wrong-credential-kind",
+    "requires-authentication",
+]
+jwt-skew-tolerance = ["app-jwt", "jwt-iat-tolerance"]
+token-downscoping-errors = [
+    "POST /app/installations/{installation_id}/access_tokens",
+    "installation-token-scope",
+    "token-error-messages",
+    "token-repositories-union",
+    "token-implicit-metadata",
+]
+token-revocation-delete = [
+    "DELETE /installation/token",
+    "installation-token-format",
+    "token-revocation-immediate",
+    "bad-credentials",
+]
+token-revocation-uninstall = [
+    "DELETE /app/installations/{installation_id}",
+    "token-revocation-immediate",
+]
+suspended-installation = [
+    "PUT /app/installations/{installation_id}/suspended",
+    "DELETE /app/installations/{installation_id}/suspended",
+    "GET /app/installations/{installation_id}",
+    "suspended-installation",
+    "suspended-installation-tokens",
+]
+oauth-exchange-errors = [
+    "POST /login/oauth/access_token",
+    "oauth-token-errors",
+    "oauth-error-status",
+    "bad-refresh-token-text",
+    "unsupported-grant-type",
+]
+user-permissionless = ["GET /user", "GET /user/emails", "user-token-permissions"]
+reput-pending-invitation = [
+    "PUT /repos/{owner}/{repo}/collaborators/{username}",
+    "GET /repos/{owner}/{repo}/invitations",
+    "DELETE /repos/{owner}/{repo}/invitations/{invitation_id}",
+    "GET /user/repository_invitations",
+    "collaborator-put-outcomes",
+    "reput-pending-invitation",
+]
+expired-invitation = [
+    "invitation-expiry",
+    "expired-invitations-listed",
+    "accept-expired-invitation",
+    "reput-expired-invitation",
+]
+repo-invitation-limit = ["invitation-limit", "repo-error-messages"]
+outside-collaborator-policy = ["outside-collaborator-policy"]
+member-edited-changes = [
+    "PATCH /user/repository_invitations/{invitation_id}",
+    "DELETE /repos/{owner}/{repo}/collaborators/{username}",
+    "GET /app/hook/deliveries",
+    "GET /app/hook/deliveries/{delivery_id}",
+    "member-events",
+    "member-edited-changes",
+]
+org-membership-accept = [
+    "POST /orgs/{org}/invitations",
+    "GET /orgs/{org}/memberships/{username}",
+    "DELETE /orgs/{org}/memberships/{username}",
+    "GET /user/memberships/orgs/{org}",
+    "PATCH /user/memberships/orgs/{org}",
+    "org-membership-pending",
+]
+org-invitation-limit = [
+    "DELETE /orgs/{org}/invitations/{invitation_id}",
+    "org-invitation-limit",
+    "org-invitation-limit-response",
+]
+org-spammed = ["org-spammed"]
+org-no-seat = ["org-no-seat"]
+team-put-non-member = [
+    "PUT /orgs/{org}/teams/{team_slug}/memberships/{username}",
+    "GET /orgs/{org}/teams/{team_slug}/memberships/{username}",
+    "DELETE /orgs/{org}/teams/{team_slug}/memberships/{username}",
+    "GET /orgs/{org}/invitations",
+    "team-put-non-member",
+    "invited-team-membership-pending",
+]
+secondary-limit-shape = ["secondary-rate-limit"]
+api-version-unsupported = ["unsupported-api-version"]

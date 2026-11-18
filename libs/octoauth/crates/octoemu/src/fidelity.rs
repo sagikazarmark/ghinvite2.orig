@@ -14,6 +14,12 @@
 //! Every route the emulator registers must have an entry and every route
 //! entry must name a registered route; the crate's tests and
 //! [`crate::Emulator::start`] both check.
+//!
+//! `[scenarios]` maps each fidelity-suite scenario ID (the
+//! `octoemu-conformance` crate) to the entries it measures: route keys
+//! (`"GET /app"`) and behaviour IDs (`"jwt-error-messages"`). A live run
+//! that passes a scenario stamps those entries `verified` with its ID; a
+//! `verified` entry must name a listed scenario.
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
@@ -83,6 +89,10 @@ pub struct Manifest {
     /// Entries by behaviour ID.
     #[serde(default)]
     pub behaviours: BTreeMap<String, Fidelity>,
+    /// Fidelity-suite scenario IDs, each with the entries it measures
+    /// (route keys and behaviour IDs).
+    #[serde(default)]
+    pub scenarios: BTreeMap<String, Vec<String>>,
 }
 
 /// A manifest that does not parse or is malformed.
@@ -121,18 +131,41 @@ impl Manifest {
             }
         }
         for key in manifest.behaviours.keys() {
-            if key.is_empty()
-                || !key
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            {
+            if !is_kebab(key) {
                 problems.push(format!("behaviour {key:?} is not kebab-case"));
+            }
+        }
+        for (scenario, covers) in &manifest.scenarios {
+            if !is_kebab(scenario) {
+                problems.push(format!("scenario {scenario:?} is not kebab-case"));
+            }
+            if covers.is_empty() {
+                problems.push(format!("scenario {scenario:?} covers no entry"));
+            }
+            for key in covers {
+                let known = if key.contains(' ') {
+                    manifest.routes.contains_key(key)
+                } else {
+                    manifest.behaviours.contains_key(key)
+                };
+                if !known {
+                    problems.push(format!(
+                        "scenario {scenario:?} covers {key:?}, which has no entry"
+                    ));
+                }
             }
         }
         for (key, entry) in manifest.entries() {
             match entry {
                 Fidelity::Verified { scenario, .. } if scenario.trim().is_empty() => {
                     problems.push(format!("{key}: `scenario` is empty"));
+                }
+                Fidelity::Verified { scenario, .. }
+                    if !manifest.scenarios.contains_key(scenario) =>
+                {
+                    problems.push(format!(
+                        "{key}: scenario {scenario:?} is not listed in [scenarios]"
+                    ));
                 }
                 Fidelity::Documented { doc } if !doc.starts_with("https://") => {
                     problems.push(format!("{key}: `doc` must be an https URL"));
@@ -172,6 +205,16 @@ impl Manifest {
         self.behaviours.get(id)
     }
 
+    /// The scenarios measuring an entry: a route key (`"GET /app"`) or a
+    /// behaviour ID.
+    pub fn scenarios_for(&self, key: &str) -> Vec<&str> {
+        self.scenarios
+            .iter()
+            .filter(|(_, covers)| covers.iter().any(|covered| covered == key))
+            .map(|(scenario, _)| scenario.as_str())
+            .collect()
+    }
+
     /// Checks that `routes` and `behaviours` (what the code implements) match
     /// the manifest's entries exactly.
     pub fn check<'a>(
@@ -209,17 +252,36 @@ impl Manifest {
         }
     }
 
-    /// The table `octoemu --fidelity` prints.
+    /// The table `octoemu --fidelity` prints: every entry with its label,
+    /// the fidelity-suite scenarios measuring it (`-` for none) and its
+    /// detail (the verification date and scenario, the doc link or the
+    /// reason).
     pub fn table(&self) -> String {
-        let rows: Vec<(&str, String, &'static str, String)> = self
+        let scenarios = |key: &str| {
+            let ids = self.scenarios_for(key);
+            if ids.is_empty() {
+                "-".to_owned()
+            } else {
+                ids.join(",")
+            }
+        };
+        let rows: Vec<(&str, String, &'static str, String, String)> = self
             .routes
             .iter()
-            .map(|(key, entry)| ("route", key.clone(), entry.label(), entry.detail()))
-            .chain(
-                self.behaviours
-                    .iter()
-                    .map(|(key, entry)| ("behaviour", key.clone(), entry.label(), entry.detail())),
-            )
+            .map(|(key, entry)| {
+                let covered = scenarios(key);
+                ("route", key.clone(), entry.label(), covered, entry.detail())
+            })
+            .chain(self.behaviours.iter().map(|(key, entry)| {
+                let covered = scenarios(key);
+                (
+                    "behaviour",
+                    key.clone(),
+                    entry.label(),
+                    covered,
+                    entry.detail(),
+                )
+            }))
             .collect();
         let width = rows
             .iter()
@@ -227,24 +289,42 @@ impl Manifest {
             .chain(["ID".len()])
             .max()
             .unwrap_or(2);
+        let covered_width = rows
+            .iter()
+            .map(|row| row.3.len())
+            .chain(["SCENARIOS".len()])
+            .max()
+            .unwrap_or(9);
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "{:<9}  {:<width$}  {:<10}  DETAIL",
-            "KIND", "ID", "LABEL"
+            "{:<9}  {:<width$}  {:<10}  {:<covered_width$}  DETAIL",
+            "KIND", "ID", "LABEL", "SCENARIOS"
         );
-        for (kind, id, label, detail) in &rows {
-            let _ = writeln!(out, "{kind:<9}  {id:<width$}  {label:<10}  {detail}");
+        for (kind, id, label, covered, detail) in &rows {
+            let _ = writeln!(
+                out,
+                "{kind:<9}  {id:<width$}  {label:<10}  {covered:<covered_width$}  {detail}"
+            );
         }
         let _ = writeln!(out, "\n{}", Summary::of(self));
         out
     }
 }
 
+fn is_kebab(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Counts per label.
 struct Summary {
     routes: [usize; 3],
     behaviours: [usize; 3],
+    scenarios: usize,
+    covered: usize,
 }
 
 impl Summary {
@@ -260,9 +340,13 @@ impl Summary {
             }
             counts
         };
+        let covered: std::collections::BTreeSet<&String> =
+            manifest.scenarios.values().flatten().collect();
         Self {
             routes: count(&manifest.routes),
             behaviours: count(&manifest.behaviours),
+            scenarios: manifest.scenarios.len(),
+            covered: covered.len(),
         }
     }
 }
@@ -277,9 +361,12 @@ impl fmt::Display for Summary {
         };
         write!(
             f,
-            "{}; {}. Unimplemented routes answer 501.",
+            "{}; {}; {} fidelity-suite scenarios measuring {} entries. \
+             Unimplemented routes answer 501.",
             part("routes", self.routes),
-            part("behaviours", self.behaviours)
+            part("behaviours", self.behaviours),
+            self.scenarios,
+            self.covered
         )
     }
 }
@@ -304,7 +391,7 @@ mod tests {
             [routes."GET /app"]
             label = "verified"
             date = "2026-11-15"
-            scenario = "SP-01"
+            scenario = "sp-01"
 
             [behaviours.x-header]
             label = "assumed"
@@ -313,11 +400,17 @@ mod tests {
             [behaviours.y]
             label = "documented"
             doc = "https://docs.github.com/rest"
+
+            [scenarios]
+            sp-01 = ["GET /app", "x-header"]
             "#,
         )
         .unwrap();
         assert_eq!(ok.route("GET /app").unwrap().label(), "verified");
         assert!(ok.behaviour("x-header").unwrap().is_assumed());
+        assert_eq!(ok.scenarios_for("x-header"), ["sp-01"]);
+        assert!(ok.scenarios_for("y").is_empty());
+        assert!(ok.table().contains("sp-01"));
 
         for bad in [
             // A documented entry without its URL.
@@ -335,6 +428,13 @@ mod tests {
             "[routes.\"FETCH /app\"]\nlabel = \"assumed\"\nreason = \"r\"\n",
             // An unknown section.
             "[others.a]\nlabel = \"assumed\"\nreason = \"r\"\n",
+            // A verified entry naming no listed scenario.
+            "[behaviours.a]\nlabel = \"verified\"\ndate = \"2026-11-15\"\nscenario = \"s\"\n",
+            // A scenario covering an unknown entry, or nothing.
+            "[behaviours.a]\nlabel = \"assumed\"\nreason = \"r\"\n[scenarios]\ns = [\"b\"]\n",
+            "[behaviours.a]\nlabel = \"assumed\"\nreason = \"r\"\n[scenarios]\ns = [\"GET /b\"]\n",
+            "[behaviours.a]\nlabel = \"assumed\"\nreason = \"r\"\n[scenarios]\ns = []\n",
+            "[behaviours.a]\nlabel = \"assumed\"\nreason = \"r\"\n[scenarios]\nS_1 = [\"a\"]\n",
         ] {
             assert!(Manifest::parse(bad).is_err(), "accepted {bad:?}");
         }

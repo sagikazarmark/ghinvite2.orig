@@ -74,7 +74,7 @@ async fn unbuilt_routes_answer_501_never_404() {
     let cases = [
         (Method::GET, "/"),
         (Method::GET, "/repos/acme/widgets/branches"),
-        (Method::DELETE, "/app/installations/5"),
+        (Method::PATCH, "/app/installations/5"),
         (Method::DELETE, "/app/hook/deliveries/1"),
         (Method::PUT, "/orgs/acme/outside_collaborators/octocat"),
         (Method::PATCH, "/orgs/acme"),

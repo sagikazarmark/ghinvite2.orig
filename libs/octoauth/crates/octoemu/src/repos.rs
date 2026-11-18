@@ -58,6 +58,11 @@ fn scoped_repo<'a>(
 }
 
 /// The response for a failed operation.
+/// The 403 for an organization whose policy keeps outside collaborators
+/// to owners (behaviour `outside-collaborator-policy`).
+const OUTSIDE_RESTRICTED: &str =
+    "Inviting outside collaborators is restricted by organization policy.";
+
 fn failure(shared: &Shared, failure: Failure, docs: &str) -> Response {
     match failure {
         Failure::NotFound | Failure::Expired => auth::not_found(),
@@ -73,6 +78,11 @@ fn failure(shared: &Shared, failure: Failure, docs: &str) -> Response {
             "base",
             "custom",
             "You have exceeded the limit of 50 invitations to this repository in 24 hours",
+            docs,
+        ),
+        Failure::OutsideCollaboratorsRestricted => response::error(
+            StatusCode::FORBIDDEN,
+            &shared.message("outside-collaborator-policy", OUTSIDE_RESTRICTED),
             docs,
         ),
         Failure::Refused(behaviour) => shared.refuse(behaviour).unwrap_or_else(|| {

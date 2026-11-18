@@ -49,6 +49,9 @@ pub(crate) enum Failure {
     InvitationLimit,
     /// The invitation has expired (behaviour `accept-expired-invitation`).
     Expired,
+    /// The organization lets only owners invite outside collaborators
+    /// (behaviour `outside-collaborator-policy`).
+    OutsideCollaboratorsRestricted,
     /// It would rest on the `assumed` behaviour named, and refuse-assumed
     /// mode is on.
     Refused(&'static str),
@@ -180,6 +183,10 @@ pub(crate) fn put_collaborator(
         }
         return Ok(PutOutcome::NoContent);
     }
+    if org_owned && outside_restricted(state, &repo, &login) {
+        check(ctx, "outside-collaborator-policy")?;
+        return Err(Failure::OutsideCollaboratorsRestricted);
+    }
 
     let start = state.clock.start();
     if let Some(index) = state
@@ -220,6 +227,15 @@ pub(crate) fn put_collaborator(
     state.world.repository_invitations.push(invitation);
     state.invitations_sent.push((repo.id, now));
     Ok(PutOutcome::Invited(id))
+}
+
+/// Whether inviting `login` to `repo` would make an outside collaborator
+/// of an organization that lets only its owners do that. The caller of the
+/// collaborator routes is an App, never an owner.
+fn outside_restricted(state: &State, repo: &Repo, login: &str) -> bool {
+    state.world.orgs.iter().any(|org| {
+        org.login.eq_ignore_ascii_case(&repo.owner) && org.outside_collaborators_restricted
+    }) && !access::org_member(&state.world, &repo.owner, login)
 }
 
 /// The 50-invitations-per-24-hours limit (documented), on the virtual

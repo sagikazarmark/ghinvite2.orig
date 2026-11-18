@@ -188,6 +188,21 @@ pub(crate) async fn unsuspend(
     }))
 }
 
+/// `DELETE /app/installations/{installation_id}`: the App uninstalls
+/// itself (documented): 204, `installation.deleted` sent by its bot, and
+/// the installation's tokens stop working. 404 for an unknown installation
+/// or another App's.
+pub(crate) async fn delete_installation(
+    State(shared): State<SharedState>,
+    AppCaller(app_id): AppCaller,
+    Path(raw): Path<String>,
+) -> Response {
+    no_content_or_404(
+        installation_id(&raw)
+            .is_some_and(|id| uninstall_of(&shared, id, Some(app_id), Some(Actor::App { app_id }))),
+    )
+}
+
 fn no_content_or_404(found: bool) -> Response {
     if found {
         StatusCode::NO_CONTENT.into_response()
@@ -246,7 +261,7 @@ pub(crate) async fn repositories(
     let body = json!({
         "total_count": paged.total,
         "repository_selection": selection,
-        "repositories": paged.items.iter().map(|r| view.repo(r)).collect::<Vec<_>>(),
+        "repositories": paged.items.iter().map(|r| view.repository(r)).collect::<Vec<_>>(),
     });
     json_with_link(StatusCode::OK, &body, paged.link(&origin, &uri))
 }
@@ -314,7 +329,7 @@ pub(crate) async fn user_repositories(
         .items
         .iter()
         .map(|(repo, grant)| {
-            let mut body = view.repo(repo);
+            let mut body = view.repository(repo);
             body["permissions"] = access::permission_flags(world, repo, &grant.role);
             body
         })
@@ -538,7 +553,7 @@ pub(crate) fn issue(
         body["repositories"] = installation_repos(&state.world, installation)
             .into_iter()
             .filter(|repo| record.covers(repo.id))
-            .map(|repo| view.repo(repo))
+            .map(|repo| view.repository(repo))
             .collect();
     }
     json(StatusCode::CREATED, &body)
@@ -645,8 +660,17 @@ pub(crate) fn set_suspended(
 /// Removes installation `id` and revokes its tokens, announcing
 /// `installation.deleted`. `false` when there is no such installation.
 pub(crate) fn uninstall(shared: &SharedState, id: u64, actor: Option<Actor>) -> bool {
+    uninstall_of(shared, id, None, actor)
+}
+
+/// [`uninstall`], only when the installation belongs to `app_id` (when
+/// given).
+fn uninstall_of(shared: &SharedState, id: u64, app_id: Option<u64>, actor: Option<Actor>) -> bool {
     let mut state = shared.state();
-    let Some(installation) = find_installation(&state.world, id).cloned() else {
+    let Some(installation) = find_installation(&state.world, id)
+        .filter(|i| app_id.is_none_or(|app| app == i.app_id))
+        .cloned()
+    else {
         return false;
     };
     let actor =

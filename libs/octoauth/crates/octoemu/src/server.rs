@@ -72,6 +72,8 @@ pub(crate) async fn route_context(
     let mut identity = None;
     let mut response = if let Some(refusal) = shared.refuse_route(&route) {
         refusal
+    } else if let Some(refusal) = api_version(&shared, &request) {
+        refusal
     } else {
         match auth::authenticate(&shared, request.headers()).and_then(|caller| {
             auth::admit(&shared, auth, &caller)?;
@@ -90,6 +92,36 @@ pub(crate) async fn route_context(
         response.extensions_mut().insert(identity);
     }
     response
+}
+
+/// The REST API versions GitHub serves
+/// (docs.github.com/rest/about-the-rest-api/api-versions).
+pub(crate) const API_VERSIONS: &[&str] = &["2022-11-28", "2026-03-10"];
+
+/// An `X-GitHub-Api-Version` naming no supported version, on the REST API:
+/// a 400 (behaviour `unsupported-api-version`; withheld in refuse-assumed
+/// mode, where the call answers the refusal). Without the header the
+/// default version applies. Web and avatar routes ignore it.
+fn api_version(shared: &crate::state::Shared, request: &Request) -> Option<Response> {
+    if Surface::of(request.uri().path()) != Surface::Api {
+        return None;
+    }
+    let value = request.headers().get("x-github-api-version")?;
+    if value
+        .to_str()
+        .is_ok_and(|version| API_VERSIONS.contains(&version.trim()))
+    {
+        return None;
+    }
+    if let Some(refusal) = shared.refuse("unsupported-api-version") {
+        return Some(refusal);
+    }
+    let version = value.to_str().unwrap_or("").trim();
+    Some(response::error(
+        StatusCode::BAD_REQUEST,
+        &format!("Unsupported API version {version}"),
+        "https://docs.github.com/rest/about-the-rest-api/api-versions",
+    ))
 }
 
 /// The largest request body octoemu reads (GitHub's own limits are far

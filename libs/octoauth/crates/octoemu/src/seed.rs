@@ -325,6 +325,12 @@ pub struct Org {
     /// repositories.
     #[serde(default)]
     pub default_repository_permission: BasePermission,
+    /// Whether only owners may invite outside collaborators (GitHub's
+    /// "Allow repository administrators to invite outside collaborators"
+    /// switched off): an App's `PUT …/collaborators/{username}` for a
+    /// non-member is refused (behaviour `outside-collaborator-policy`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outside_collaborators_restricted: bool,
 }
 
 impl Org {
@@ -338,6 +344,7 @@ impl Org {
             created_at: None,
             two_factor_requirement_enabled: false,
             default_repository_permission: BasePermission::default(),
+            outside_collaborators_restricted: false,
         }
     }
 
@@ -373,6 +380,13 @@ impl Org {
     #[must_use]
     pub fn two_factor_required(mut self) -> Self {
         self.two_factor_requirement_enabled = true;
+        self
+    }
+
+    /// Lets only owners invite outside collaborators.
+    #[must_use]
+    pub fn restrict_outside_collaborators(mut self) -> Self {
+        self.outside_collaborators_restricted = true;
         self
     }
 }

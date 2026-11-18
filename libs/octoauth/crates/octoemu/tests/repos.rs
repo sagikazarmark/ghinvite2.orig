@@ -886,6 +886,40 @@ async fn fifty_invitations_per_repository_per_day() {
 }
 
 #[tokio::test]
+async fn an_organization_can_keep_outside_collaborators_to_its_owners() {
+    let mut restricted = seed();
+    restricted.orgs[0].outside_collaborators_restricted = true;
+    let world = World::with(Emulator::start(restricted.clone()).await.unwrap()).await;
+    let refused = world.invite("widgets", "u001", "pull").await;
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    assert_eq!(
+        refused.body["message"],
+        "Inviting outside collaborators is restricted by organization policy."
+    );
+    assert!(world.get("/repos/acme/widgets/invitations").await.body[0].is_null());
+    // A member and an existing collaborator are not outside collaborators.
+    assert_eq!(
+        world.invite("widgets", "orgdev", "push").await.status,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        world.invite("widgets", "monalisa", "admin").await.status,
+        StatusCode::NO_CONTENT
+    );
+    // Without the policy the same PUT invites.
+    let open = World::start().await;
+    assert_eq!(
+        open.invite("widgets", "u001", "pull").await.status,
+        StatusCode::CREATED
+    );
+    // Refuse-assumed mode refuses the guess.
+    let strict = World::with(Emulator::start(restricted.refuse_assumed()).await.unwrap()).await;
+    let guess = strict.invite("widgets", "u001", "pull").await;
+    assert_eq!(guess.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(guess.body["behaviour"], "outside-collaborator-policy");
+}
+
+#[tokio::test]
 async fn the_invitee_accepts_declines_and_leaves_through_the_admin_api() {
     let world = World::start().await;
     let accept = world.invite("widgets", "hubot", "maintain").await.body["id"]
