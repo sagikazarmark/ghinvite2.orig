@@ -8,7 +8,10 @@ import {fileURLToPath} from 'node:url';
 import {RuntimeOutput} from './runtime-output.mjs';
 import {schemaQuery,sha256} from '../../native-d1-bridge/bridge.mjs';
 const require=createRequire(new URL('../worker/package.json',import.meta.url));
-const {Miniflare,Log,LogLevel}=require('miniflare');
+const {Miniflare,Log,LogLevel,supportedCompatibilityDate}=require('miniflare');
+// The deployed bridge's date (native-d1-bridge/manifest.py), capped at the newest
+// date this workerd supports: miniflare used to fall back silently, now it refuses.
+const bridgeCompatibilityDate=['2026-10-01',supportedCompatibilityDate].sort()[0];
 const evidence=process.env.EVIDENCE_ROOT;assert.ok(evidence);mkdirSync(evidence,{recursive:true});
 const binary=process.argv[2];assert.ok(binary,'Pass built native_bridge test executable');
 const bridge=readFileSync(new URL('../../native-d1-bridge/bridge.mjs',import.meta.url),'utf8').replaceAll('export ','');
@@ -41,7 +44,7 @@ async function fresh(base) {
   }
   return createBridge(authority).fetch(request,env);
  }};`;
- const options={modules:true,script,compatibilityDate:'2026-10-01',d1Databases:{DB:id},bindings:{D1_BRIDGE_TOKEN:token,AUTHORITY:'{}'},log:new Log(LogLevel.NONE),handleRuntimeStdio:(o,e)=>output.capture(o,e)};mf=new Miniflare(options);
+ const options={modules:true,script,compatibilityDate:bridgeCompatibilityDate,d1Databases:{DB:id},bindings:{D1_BRIDGE_TOKEN:token,AUTHORITY:'{}'},log:new Log(LogLevel.NONE),handleRuntimeStdio:(o,e)=>output.capture(o,e)};mf=new Miniflare(options);
  const db=await mf.getD1Database('DB');
  for(const m of migrations)await db.exec(m.sql.replace(/^[ \t]*--.*$/gm,'').replaceAll('\n',' '));
  // Fixture provisioning only. The real bridge never creates/adopts this ledger.
